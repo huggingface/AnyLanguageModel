@@ -1,5 +1,5 @@
 {
-  "originHash" : "f7b86b800200fa069a2b288e06bafe53bc937a1851b6effeebba326a62be227e",
+  "originHash" : "29f2699893382ca66cfbbd685a48c6ce8aacb263744cf3874cc5aaff4c26a63e",
   "pins" : [
     {
       "identity" : "eventsource",
@@ -17,6 +17,15 @@
       "state" : {
         "revision" : "4c6f2467d5bc72b062c7a9b7e4cd77a09635ea8b",
         "version" : "1.3.1"
+      }
+    },
+    {
+      "identity" : "llama.swift",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/mattt/llama.swift",
+      "state" : {
+        "revision" : "0391e7847330f0bb3ff2ca3498beb5a4a511d6e0",
+        "version" : "2.7974.0"
       }
     },
     {
@@ -44,6 +53,15 @@
       "state" : {
         "revision" : "0687f71944021d616d34d922343dcef086855920",
         "version" : "600.0.1"
+      }
+    },
+    {
+      "identity" : "swift-xgrammar",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/mattt/swift-xgrammar",
+      "state" : {
+        "revision" : "e0f2de361aa4891dbca5113629bc90ab8e5c3888",
+        "version" : "0.1.0"
       }
     }
   ],

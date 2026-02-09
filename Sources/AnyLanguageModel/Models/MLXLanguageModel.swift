@@ -17,6 +17,7 @@ import Foundation
     import MLXVLM
     import Tokenizers
     import Hub
+    import XGrammar
 
     /// Wrapper to store ModelContext in NSCache (requires NSObject subclass).
     private final class CachedContext: NSObject, @unchecked Sendable {
@@ -782,12 +783,48 @@ import Foundation
         return "\(header):\n\(schemaJSON)"
     }
 
+    private func jsonSchemaString(for schema: GenerationSchema) throws -> String {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
+        let data = try encoder.encode(schema)
+        guard let jsonSchema = String(data: data, encoding: .utf8) else {
+            throw MLXLanguageModelError.schemaEncodingFailed
+        }
+        return jsonSchema
+    }
+
+    private func tokenizerInfo(
+        for tokenizer: any Tokenizer,
+        vocabSize: Int,
+        stopTokens: Set<Int>
+    ) throws -> TokenizerInfo {
+        guard vocabSize > 0 else {
+            throw MLXLanguageModelError.invalidVocabSize
+        }
+
+        var encodedVocab: [String] = []
+        encodedVocab.reserveCapacity(vocabSize)
+        for tokenId in 0 ..< vocabSize {
+            encodedVocab.append(tokenizer.convertIdToToken(tokenId) ?? "")
+        }
+
+        let stopTokenIDs = stopTokens.map { Int32($0) }
+        return try TokenizerInfo(
+            encodedVocab: encodedVocab,
+            encoding: .byteLevel,
+            stopTokenIDs: stopTokenIDs,
+            addPrefixSpace: false
+        )
+    }
+
     // MARK: - Structured JSON Generation
 
     /// Errors that can occur when using MLXLanguageModel.
     public enum MLXLanguageModelError: Error, LocalizedError {
         case invalidVocabSize
         case unsupportedJSONValueType
+        case schemaEncodingFailed
+        case grammarMismatch
 
         public var errorDescription: String? {
             switch self {
@@ -795,6 +832,10 @@ import Foundation
                 return "Invalid vocabulary size for model output"
             case .unsupportedJSONValueType:
                 return "Unsupported JSON value type for schema conversion"
+            case .schemaEncodingFailed:
+                return "Failed to encode the JSON schema for structured generation"
+            case .grammarMismatch:
+                return "Grammar constraints could not be satisfied during generation"
             }
         }
     }
@@ -827,13 +868,42 @@ import Foundation
             maximumTokens: maxTokens,
             endTokens: []
         )
+        let jsonSchema = try jsonSchemaString(for: schema)
+        let grammar = Grammar(jsonSchema: jsonSchema, formatting: .compact, strictMode: true)
+        let tokenizerInfo = try tokenizerInfo(
+            for: context.tokenizer,
+            vocabSize: backend.vocabSize,
+            stopTokens: backend.endTokens
+        )
+        let matcher = try await grammar.matcher(
+            for: tokenizerInfo,
+            stopTokens: backend.endTokens.map { Int32($0) },
+            terminatesWithoutStopToken: true
+        )
+        var bitmask = Grammar.Matcher.TokenBitmask(vocabSize: tokenizerInfo.vocabulary.size)
 
-        var generator = try ConstrainedJSONGenerator(backend: backend, schema: schema)
-        let json = try generator.generate()
+        var backendState = backend
+        var output = ""
+        while backendState.remainingTokens > 0 {
+            bitmask.reset()
+            let needsMask = matcher.fillNextTokenBitmask(&bitmask)
+            let token = try backendState.sample(using: bitmask, applyMask: needsMask)
+            if backendState.endTokens.contains(token) {
+                break
+            }
+            guard matcher.accept(Int32(token)) else {
+                throw MLXLanguageModelError.grammarMismatch
+            }
+            if let tokenText = backendState.tokenText(token) {
+                output += tokenText
+            }
+            try backendState.decode(token)
+            if matcher.isTerminated { break }
+        }
         // Ensure pending MLX operations complete before returning JSON.
         // This synchronization can be a performance cost if called frequently.
         Stream().synchronize()
-        return json
+        return output
     }
 
     /// Merges system prompts and schema instructions into a user message.
@@ -1036,6 +1106,33 @@ import Foundation
                 let tokenArray = MLXArray(Int32(token))
                 processor?.didSample(token: tokenArray)
             }
+        }
+
+        mutating func sample(using bitmask: Grammar.Matcher.TokenBitmask, applyMask: Bool) throws -> Int {
+            var logits = currentLogits[0..., -1, 0...]
+            logits = processor?.process(logits: logits) ?? logits
+            if logits.dtype == .bfloat16 {
+                logits = logits.asType(.float32)
+            }
+
+            if applyMask {
+                var allowedIndices: [UInt32] = []
+                allowedIndices.reserveCapacity(vocabSize)
+                for tokenId in 0 ..< vocabSize where bitmask.isTokenAllowed(tokenId) {
+                    allowedIndices.append(UInt32(tokenId))
+                }
+                guard !allowedIndices.isEmpty else {
+                    throw MLXLanguageModelError.grammarMismatch
+                }
+                let allowedArray = MLXArray(allowedIndices)
+                let maskedLogits = full(logits.shape, values: -Float.infinity)
+                maskedLogits[0..., allowedArray] = logits[0..., allowedArray]
+                let sampledToken = sampler.sample(logits: maskedLogits)
+                return sampledToken.item(Int.self)
+            }
+
+            let sampledToken = sampler.sample(logits: logits)
+            return sampledToken.item(Int.self)
         }
 
         mutating func sample(from allowedTokens: Set<Int>) throws -> Int {

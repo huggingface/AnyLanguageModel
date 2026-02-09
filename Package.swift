@@ -31,6 +31,7 @@ let package = Package(
         .package(url: "https://github.com/huggingface/swift-transformers", from: "1.0.0"),
         .package(url: "https://github.com/mattt/EventSource", from: "1.3.0"),
         .package(url: "https://github.com/mattt/JSONSchema", from: "1.3.0"),
+        .package(url: "https://github.com/mattt/swift-xgrammar", from: "0.1.0"),
         .package(url: "https://github.com/mattt/llama.swift", .upToNextMajor(from: "2.7484.0")),
         .package(url: "https://github.com/mattt/PartialJSONDecoder", from: "1.0.0"),
         // mlx-swift-lm must be >= 2.25.5 for ToolSpec/tool calls and UserInput(chat:processing:tools:).
@@ -45,6 +46,7 @@ let package = Package(
                 .product(name: "EventSource", package: "EventSource"),
                 .product(name: "JSONSchema", package: "JSONSchema"),
                 .product(name: "PartialJSONDecoder", package: "PartialJSONDecoder"),
+                .product(name: "XGrammar", package: "swift-xgrammar"),
                 .product(
                     name: "MLXLLM",
                     package: "mlx-swift-lm",
