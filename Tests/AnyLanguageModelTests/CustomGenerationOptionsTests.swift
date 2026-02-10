@@ -632,6 +632,40 @@ struct OpenResponsesCustomOptionsTests {
         #expect(fn.toolChoice != allowed.toolChoice)
     }
 
+    @Test func toolChoiceAllowedToolsCodable() throws {
+        typealias ToolChoice = OpenResponsesLanguageModel.CustomGenerationOptions.ToolChoice
+
+        // Round-trip: spec format (tools as {type,name} objects) with explicit mode
+        let withMode: ToolChoice = .allowedTools(tools: ["get_weather", "send_email"], mode: .required)
+        let encodedWithMode = try JSONEncoder().encode(withMode)
+        let decodedWithMode = try JSONDecoder().decode(ToolChoice.self, from: encodedWithMode)
+        #expect(decodedWithMode == withMode)
+
+        // Decode from spec-compliant JSON (tools array of objects)
+        let specJSON = """
+            {"type":"allowed_tools","tools":[{"type":"function","name":"a"},{"type":"function","name":"b"}],"mode":"none"}
+            """
+        let fromSpec = try JSONDecoder().decode(ToolChoice.self, from: Data(specJSON.utf8))
+        #expect(fromSpec == .allowedTools(tools: ["a", "b"], mode: .none))
+
+        // Decode from string array (backwards compatibility)
+        let stringsJSON = """
+            {"type":"allowed_tools","tools":["x","y"]}
+            """
+        let fromStrings = try JSONDecoder().decode(ToolChoice.self, from: Data(stringsJSON.utf8))
+        #expect(fromStrings == .allowedTools(tools: ["x", "y"], mode: .auto))
+
+        // Encode with mode .auto: "mode" must be omitted
+        let autoMode: ToolChoice = .allowedTools(tools: ["only"], mode: .auto)
+        let encodedAuto = try JSONEncoder().encode(autoMode)
+        let jsonAuto = String(data: encodedAuto, encoding: .utf8)!
+        #expect(!jsonAuto.contains("\"mode\""))
+
+        // Round-trip allowedTools with mode .auto
+        let decodedAuto = try JSONDecoder().decode(ToolChoice.self, from: encodedAuto)
+        #expect(decodedAuto == autoMode)
+    }
+
     @Test func integrationWithGenerationOptions() {
         var options = GenerationOptions(temperature: 0.8)
         options[custom: OpenResponsesLanguageModel.self] = .init(
