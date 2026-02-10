@@ -97,6 +97,78 @@ public struct OpenResponsesLanguageModel: LanguageModel {
             /// Restrict tool calls to the given tools with the specified mode.
             case allowedTools(tools: [String], mode: AllowedToolsMode = .auto)
 
+            private enum CodingKeys: String, CodingKey {
+                case type
+                case name
+                case tools
+                case mode
+            }
+
+            private enum ToolType: String {
+                case function
+                case allowedTools = "allowed_tools"
+            }
+
+            public init(from decoder: Decoder) throws {
+                if let singleValueContainer = try? decoder.singleValueContainer(),
+                    let stringValue = try? singleValueContainer.decode(String.self)
+                {
+                    switch stringValue {
+                    case "none": self = .none
+                    case "auto": self = .auto
+                    case "required": self = .required
+                    default:
+                        throw DecodingError.dataCorruptedError(
+                            in: singleValueContainer,
+                            debugDescription: "Invalid tool_choice string value: \(stringValue)"
+                        )
+                    }
+                    return
+                }
+                let container = try decoder.container(keyedBy: CodingKeys.self)
+                let typeString = try container.decode(String.self, forKey: .type)
+                switch ToolType(rawValue: typeString) {
+                case .function?:
+                    let name = try container.decode(String.self, forKey: .name)
+                    self = .function(name: name)
+                case .allowedTools?:
+                    let tools = try container.decode([String].self, forKey: .tools)
+                    let mode = try container.decodeIfPresent(AllowedToolsMode.self, forKey: .mode) ?? .auto
+                    self = .allowedTools(tools: tools, mode: mode)
+                case nil:
+                    throw DecodingError.dataCorruptedError(
+                        forKey: .type,
+                        in: container,
+                        debugDescription: "Unsupported tool_choice type: \(typeString)"
+                    )
+                }
+            }
+
+            public func encode(to encoder: Encoder) throws {
+                switch self {
+                case .none:
+                    var container = encoder.singleValueContainer()
+                    try container.encode("none")
+                case .auto:
+                    var container = encoder.singleValueContainer()
+                    try container.encode("auto")
+                case .required:
+                    var container = encoder.singleValueContainer()
+                    try container.encode("required")
+                case .function(let name):
+                    var container = encoder.container(keyedBy: CodingKeys.self)
+                    try container.encode(ToolType.function.rawValue, forKey: .type)
+                    try container.encode(name, forKey: .name)
+                case .allowedTools(let tools, let mode):
+                    var container = encoder.container(keyedBy: CodingKeys.self)
+                    try container.encode(ToolType.allowedTools.rawValue, forKey: .type)
+                    try container.encode(tools, forKey: .tools)
+                    if mode != .auto {
+                        try container.encode(mode, forKey: .mode)
+                    }
+                }
+            }
+
             /// How to select a tool from the allowed set.
             /// See [AllowedToolChoice](https://www.openresponses.org/reference#allowedtoolchoice) in the Open Responses reference.
             public enum AllowedToolsMode: String, Hashable, Codable, Sendable {
@@ -811,34 +883,70 @@ private struct OpenResponsesToolCall: Sendable {
     let arguments: String?
 }
 
+private func parseOpenResponsesToolCall(from obj: [String: JSONValue]) -> OpenResponsesToolCall? {
+    let idOpt = (obj["call_id"] ?? obj["id"]).flatMap {
+        if case .string(let s) = $0 { return s } else { return nil }
+    }
+    let nameOpt = obj["name"].flatMap {
+        if case .string(let s) = $0 { return s } else { return nil }
+    }
+    guard let id = idOpt, !id.isEmpty,
+        let name = nameOpt, !name.isEmpty
+    else { return nil }
+    let args: String?
+    if let a = obj["arguments"] {
+        switch a {
+        case .string(let s): args = s
+        case .object(let o):
+            args = (try? JSONEncoder().encode(JSONValue.object(o))).flatMap {
+                String(data: $0, encoding: .utf8)
+            }
+        default: args = nil
+        }
+    } else {
+        args = nil
+    }
+    return OpenResponsesToolCall(id: id, name: name, arguments: args)
+}
+
+private func collectOpenResponsesToolCalls(from value: JSONValue, into result: inout [OpenResponsesToolCall]) {
+    switch value {
+    case .object(let obj):
+        let typeStr: String? = obj["type"].flatMap {
+            if case .string(let s) = $0 { return s } else { return nil }
+        }
+        if let typeStr {
+            if typeStr == "function_call" || typeStr == "tool_call" || typeStr == "tool_use" {
+                if let call = parseOpenResponsesToolCall(from: obj) {
+                    result.append(call)
+                }
+            }
+            if typeStr == "message",
+                let content = obj["content"]
+            {
+                switch content {
+                case .array(let arr):
+                    for item in arr { collectOpenResponsesToolCalls(from: item, into: &result) }
+                default:
+                    collectOpenResponsesToolCalls(from: content, into: &result)
+                }
+            }
+        }
+        for (_, v) in obj {
+            collectOpenResponsesToolCalls(from: v, into: &result)
+        }
+    case .array(let arr):
+        for item in arr { collectOpenResponsesToolCalls(from: item, into: &result) }
+    default:
+        break
+    }
+}
+
 private func extractToolCallsFromOutput(_ output: [JSONValue]?) -> [OpenResponsesToolCall] {
     guard let output else { return [] }
     var result: [OpenResponsesToolCall] = []
     for item in output {
-        guard case .object(let obj) = item,
-            let typeStr = obj["type"].flatMap({ if case .string(let s) = $0 { return s } else { return nil } })
-        else { continue }
-        if typeStr == "function_call" {
-            let id =
-                (obj["call_id"] ?? obj["id"]).flatMap { if case .string(let s) = $0 { return s } else { return nil } }
-                ?? UUID().uuidString
-            let name = obj["name"].flatMap { if case .string(let s) = $0 { return s } else { return nil } } ?? ""
-            let args: String?
-            if let a = obj["arguments"] {
-                if case .string(let s) = a {
-                    args = s
-                } else if case .object(let o) = a {
-                    args = (try? JSONEncoder().encode(JSONValue.object(o))).flatMap {
-                        String(data: $0, encoding: .utf8)
-                    }
-                } else {
-                    args = nil
-                }
-            } else {
-                args = nil
-            }
-            result.append(OpenResponsesToolCall(id: id, name: name, arguments: args))
-        }
+        collectOpenResponsesToolCalls(from: item, into: &result)
     }
     return result
 }
