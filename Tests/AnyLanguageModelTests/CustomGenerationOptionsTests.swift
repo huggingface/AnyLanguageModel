@@ -533,6 +533,126 @@ struct OpenAICustomOptionsTests {
     }
 }
 
+@Suite("OpenResponses CustomGenerationOptions")
+struct OpenResponsesCustomOptionsTests {
+    @Test func initialization() {
+        let options = OpenResponsesLanguageModel.CustomGenerationOptions(
+            toolChoice: .function(name: "getWeather"),
+            allowedTools: ["getWeather", "sendEmail"],
+            topP: 0.9,
+            presencePenalty: 0.3,
+            frequencyPenalty: 0.5,
+            parallelToolCalls: false,
+            maxToolCalls: 10,
+            reasoningEffort: .high,
+            reasoning: .init(effort: .medium, summary: "concise"),
+            verbosity: .medium,
+            maxOutputTokens: 100,
+            store: true,
+            metadata: ["key": "value"],
+            safetyIdentifier: "user-123",
+            truncation: .auto,
+            extraBody: ["custom_param": .string("value")]
+        )
+        #expect(options.toolChoice != nil)
+        if case .function(name: let n) = options.toolChoice! {
+            #expect(n == "getWeather")
+        }
+        #expect(options.allowedTools?.count == 2)
+        #expect(options.topP == 0.9)
+        #expect(options.presencePenalty == 0.3)
+        #expect(options.frequencyPenalty == 0.5)
+        #expect(options.parallelToolCalls == false)
+        #expect(options.maxToolCalls == 10)
+        #expect(options.reasoningEffort == .high)
+        #expect(options.reasoning?.effort == .medium)
+        #expect(options.reasoning?.summary == "concise")
+        #expect(options.verbosity == .medium)
+        #expect(options.maxOutputTokens == 100)
+        #expect(options.store == true)
+        #expect(options.metadata?["key"] == "value")
+        #expect(options.safetyIdentifier == "user-123")
+        #expect(options.truncation == .auto)
+        #expect(options.extraBody?["custom_param"] == .string("value"))
+    }
+
+    @Test func equality() {
+        let options1 = OpenResponsesLanguageModel.CustomGenerationOptions(
+            toolChoice: .auto,
+            topP: 0.9
+        )
+        let options2 = OpenResponsesLanguageModel.CustomGenerationOptions(
+            toolChoice: .auto,
+            topP: 0.9
+        )
+        #expect(options1 == options2)
+    }
+
+    @Test func codable() throws {
+        let options = OpenResponsesLanguageModel.CustomGenerationOptions(
+            toolChoice: .required,
+            topP: 0.9,
+            truncation: .auto,
+            extraBody: ["k": .string("v")]
+        )
+        let data = try JSONEncoder().encode(options)
+        let decoded = try JSONDecoder().decode(
+            OpenResponsesLanguageModel.CustomGenerationOptions.self,
+            from: data
+        )
+        #expect(decoded == options)
+    }
+
+    @Test func codableUsesSnakeCase() throws {
+        typealias ToolChoice = OpenResponsesLanguageModel.CustomGenerationOptions.ToolChoice
+        let options = OpenResponsesLanguageModel.CustomGenerationOptions(
+            toolChoice: ToolChoice.none,
+            topP: 0.9,
+            parallelToolCalls: true
+        )
+        let data = try JSONEncoder().encode(options)
+        let json = String(data: data, encoding: .utf8)!
+        #expect(json.contains("\"top_p\""))
+        #expect(json.contains("\"parallel_tool_calls\""))
+        #expect(json.contains("\"tool_choice\""))
+    }
+
+    @Test func toolChoiceVariants() {
+        typealias ToolChoice = OpenResponsesLanguageModel.CustomGenerationOptions.ToolChoice
+        let none = OpenResponsesLanguageModel.CustomGenerationOptions(toolChoice: ToolChoice.none)
+        let auto = OpenResponsesLanguageModel.CustomGenerationOptions(toolChoice: .auto)
+        let required = OpenResponsesLanguageModel.CustomGenerationOptions(toolChoice: .required)
+        let fn = OpenResponsesLanguageModel.CustomGenerationOptions(toolChoice: .function(name: "x"))
+        let allowed = OpenResponsesLanguageModel.CustomGenerationOptions(
+            toolChoice: .allowedTools(tools: ["a"], mode: .auto)
+        )
+        #expect(none.toolChoice != auto.toolChoice)
+        #expect(auto.toolChoice != required.toolChoice)
+        #expect(required.toolChoice != fn.toolChoice)
+        #expect(fn.toolChoice != allowed.toolChoice)
+    }
+
+    @Test func integrationWithGenerationOptions() {
+        var options = GenerationOptions(temperature: 0.8)
+        options[custom: OpenResponsesLanguageModel.self] = .init(
+            toolChoice: .auto,
+            allowedTools: ["getWeather"],
+            topP: 0.9
+        )
+        let retrieved = options[custom: OpenResponsesLanguageModel.self]
+        #expect(retrieved?.toolChoice == .auto)
+        #expect(retrieved?.topP == 0.9)
+        #expect(retrieved?.allowedTools?.count == 1)
+    }
+
+    @Test func nilProperties() {
+        let options = OpenResponsesLanguageModel.CustomGenerationOptions()
+        #expect(options.toolChoice == nil)
+        #expect(options.allowedTools == nil)
+        #expect(options.extraBody == nil)
+    }
+}
+
 @Suite("Ollama CustomGenerationOptions")
 struct OllamaCustomOptionsTests {
     @Test func typealiasIsDictionary() {

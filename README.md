@@ -78,6 +78,7 @@ session.toolExecutionDelegate = ToolExecutionObserver()
 - [x] Google [Gemini API](https://ai.google.dev/api/generate-content)
 - [x] OpenAI [Chat Completions API](https://platform.openai.com/docs/api-reference/chat)
 - [x] OpenAI [Responses API](https://platform.openai.com/docs/api-reference/responses)
+- [x] [Open Responses](https://www.openresponses.org) (multi-provider Responses API–compatible endpoints)
 
 ## Requirements
 
@@ -509,6 +510,41 @@ options[custom: OpenAILanguageModel.self] = .init(
 )
 ```
 
+### Open Responses
+
+Connects to any API that conforms to the [Open Responses](https://www.openresponses.org) specification (e.g. OpenAI, OpenRouter, or other compatible providers). Base URL is required—use your provider’s endpoint:
+
+```swift
+// Example: OpenAI
+let model = OpenResponsesLanguageModel(
+    baseURL: URL(string: "https://api.openai.com/v1/")!,
+    apiKey: ProcessInfo.processInfo.environment["OPEN_RESPONSES_API_KEY"]!,
+    model: "gpt-4o-mini"
+)
+
+// Example: OpenRouter (https://openrouter.ai/api/v1/)
+let model = OpenResponsesLanguageModel(
+    baseURL: URL(string: "https://openrouter.ai/api/v1/")!,
+    apiKey: ProcessInfo.processInfo.environment["OPEN_RESPONSES_API_KEY"]!,
+    model: "openai/gpt-4o-mini"
+)
+
+let session = LanguageModelSession(model: model)
+let response = try await session.respond(to: "Say hello")
+```
+
+Custom options support Open Responses–specific fields such as `tool_choice` (including `allowed_tools`) and `extraBody`:
+
+```swift
+var options = GenerationOptions(temperature: 0.8)
+options[custom: OpenResponsesLanguageModel.self] = .init(
+    toolChoice: .auto,
+    allowedTools: ["getWeather"],
+    reasoningEffort: .high,
+    extraBody: ["custom_param": .string("value")]
+)
+```
+
 ### Anthropic
 
 Uses the [Messages API](https://docs.claude.com/en/api/messages) with Claude models:
@@ -691,14 +727,15 @@ swift test
 
 Tests for different language model backends have varying requirements:
 
-| Backend   | Traits   | Environment Variables |
-| --------- | -------- | --------------------- |
-| CoreML    | `CoreML` | `HF_TOKEN`            |
-| MLX       | `MLX`    | `HF_TOKEN`            |
-| Llama     | `Llama`  | `LLAMA_MODEL_PATH`    |
-| Anthropic | —        | `ANTHROPIC_API_KEY`   |
-| OpenAI    | —        | `OPENAI_API_KEY`      |
-| Ollama    | —        | —                     |
+| Backend        | Traits   | Environment Variables                               |
+| -------------- | -------- | --------------------------------------------------- |
+| CoreML         | `CoreML` | `HF_TOKEN`                                          |
+| MLX            | `MLX`    | `HF_TOKEN`                                          |
+| Llama          | `Llama`  | `LLAMA_MODEL_PATH`                                  |
+| Anthropic      | —        | `ANTHROPIC_API_KEY`                                 |
+| OpenAI         | —        | `OPENAI_API_KEY`                                    |
+| Open Responses | —        | `OPEN_RESPONSES_API_KEY`, `OPEN_RESPONSES_BASE_URL` |
+| Ollama         | —        | —                                                   |
 
 Example setup for running multiple tests at once:
 
@@ -707,6 +744,8 @@ export HF_TOKEN=your_huggingface_token
 export LLAMA_MODEL_PATH=/path/to/model.gguf
 export ANTHROPIC_API_KEY=your_anthropic_key
 export OPENAI_API_KEY=your_openai_key
+export OPEN_RESPONSES_API_KEY=your_open_responses_key
+export OPEN_RESPONSES_BASE_URL=https://api.openai.com/v1/
 
 swift test --traits CoreML,Llama
 ```
