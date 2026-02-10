@@ -31,96 +31,138 @@ public struct OpenResponsesLanguageModel: LanguageModel {
     /// ``ToolChoice/allowedTools(tools:mode:)``), ``allowedTools``, and
     /// reasoning/text options. Use ``extraBody`` for parameters not yet modeled.
     public struct CustomGenerationOptions: AnyLanguageModel.CustomGenerationOptions, Codable, Sendable {
-        /// Controls whether and how the model may invoke tools.
+        /// Controls which tool the model should use, if any.
         public var toolChoice: ToolChoice?
 
-        /// Limits which tools the model is permitted to invoke for this request.
+        /// The list of tools that are permitted for this request.
         /// When set, the model may only call tools in this list.
         public var allowedTools: [String]?
 
-        /// Top-p (nucleus) sampling. Range 0.0–1.0.
+        /// Nucleus sampling parameter, between 0 and 1.
+        /// The model considers only the tokens with the top cumulative probability.
         public var topP: Double?
 
-        /// Presence penalty. Range typically -2.0 to 2.0.
+        /// Penalizes new tokens based on whether they appear in the text so far.
         public var presencePenalty: Double?
 
-        /// Frequency penalty. Range typically -2.0 to 2.0.
+        /// Penalizes new tokens based on their frequency in the text so far.
         public var frequencyPenalty: Double?
 
         /// Whether the model may call multiple tools in parallel.
         public var parallelToolCalls: Bool?
 
-        /// Maximum number of tool calls in one response.
+        /// The maximum number of tool calls the model may make while generating the response.
         public var maxToolCalls: Int?
 
         /// Reasoning effort for reasoning-capable models.
         public var reasoningEffort: ReasoningEffort?
 
-        /// Reasoning configuration (effort and summary).
+        /// Configuration options for reasoning behavior.
         public var reasoning: ReasoningConfiguration?
 
-        /// Response verbosity.
+        /// Controls the level of detail in generated text output.
         public var verbosity: Verbosity?
 
-        /// Maximum output tokens.
+        /// The maximum number of tokens the model may generate for this response.
         public var maxOutputTokens: Int?
 
-        /// Whether to store the response for later retrieval.
+        /// Whether to store the response so it can be retrieved later.
         public var store: Bool?
 
-        /// Key-value metadata attached to the request.
+        /// Set of key-value pairs attached to the request.
+        /// Keys are strings with a maximum length of 64 characters;
+        /// values are strings with a maximum length of 512 characters.
         public var metadata: [String: String]?
 
-        /// Safety / abuse detection identifier.
+        /// A stable identifier used for safety monitoring and abuse detection.
         public var safetyIdentifier: String?
 
-        /// Truncation behavior when input exceeds context window.
+        /// Controls how the service truncates the input when it exceeds the model context window.
         public var truncation: Truncation?
 
         /// Additional parameters merged into the request body (applied last).
         public var extraBody: [String: JSONValue]?
 
-        /// Tool choice: none, auto, required, a specific function, or allowed_tools with mode.
+        /// Controls which tool the model should use, if any.
+        /// See [tool_choice](https://www.openresponses.org/reference#tool_choice) in the Open Responses reference.
         public enum ToolChoice: Hashable, Codable, Sendable {
+            /// Restrict the model from calling any tools.
             case none
+            /// Let the model choose the tools from among the provided set.
             case auto
+            /// Require the model to call a tool.
             case required
+            /// Require the model to call the named function.
             case function(name: String)
+            /// Restrict tool calls to the given tools with the specified mode.
             case allowedTools(tools: [String], mode: AllowedToolsMode = .auto)
 
+            /// How to select a tool from the allowed set.
+            /// See [AllowedToolChoice](https://www.openresponses.org/reference#allowedtoolchoice) in the Open Responses reference.
             public enum AllowedToolsMode: String, Hashable, Codable, Sendable {
+                /// Restrict the model from calling any tools.
                 case none
+                /// Let the model choose the tools from among the provided set.
                 case auto
+                /// Require the model to call a tool.
                 case required
             }
         }
 
+        /// Reasoning effort level for models that support extended reasoning.
+        /// See [ReasoningEffortEnum](https://www.openresponses.org/reference#reasoningeffortenum) in the Open Responses reference.
         public enum ReasoningEffort: String, Hashable, Codable, Sendable {
+            /// Restrict the model from performing any reasoning before emitting a final answer.
             case none
+            /// Use a lower reasoning effort for faster responses.
             case low
+            /// Use a balanced reasoning effort.
             case medium
+            /// Use a higher reasoning effort to improve answer quality.
             case high
+            /// Use the maximum reasoning effort available.
             case xhigh
         }
 
+        /// Configuration options for reasoning behavior.
+        /// See [ReasoningParam](https://www.openresponses.org/reference#reasoningparam) in the Open Responses reference.
         public struct ReasoningConfiguration: Hashable, Codable, Sendable {
+            /// The level of reasoning effort the model should apply.
+            /// Higher effort may increase latency and cost.
             public var effort: ReasoningEffort?
+            /// Controls whether the response includes a reasoning summary
+            /// (e.g. `concise`, `detailed`, or `auto`).
             public var summary: String?
 
+            /// Creates a reasoning configuration.
+            ///
+            /// - Parameters:
+            ///   - effort: The level of reasoning effort the model should apply.
+            ///   - summary: Optional reasoning summary preference for the model.
             public init(effort: ReasoningEffort? = nil, summary: String? = nil) {
                 self.effort = effort
                 self.summary = summary
             }
         }
 
+        /// Controls the level of detail in generated text output.
+        /// See [VerbosityEnum](https://www.openresponses.org/reference#verbosityenum) in the Open Responses reference.
         public enum Verbosity: String, Hashable, Codable, Sendable {
+            /// Instruct the model to emit less verbose final responses.
             case low
+            /// Use the model's default verbosity setting.
             case medium
+            /// Instruct the model to emit more verbose final responses.
             case high
         }
 
+        /// Controls how the service truncates the input when it exceeds the model context window.
+        /// See [TruncationEnum](https://www.openresponses.org/reference#truncationenum) in the Open Responses reference.
         public enum Truncation: String, Hashable, Codable, Sendable {
+            /// Let the service decide how to truncate.
             case auto
+            /// Disable service truncation.
+            /// Context over the model's context limit will result in a 400 error.
             case disabled
         }
 
@@ -143,6 +185,25 @@ public struct OpenResponsesLanguageModel: LanguageModel {
             case extraBody = "extra_body"
         }
 
+        /// Creates custom generation options with the given Open Responses–specific parameters.
+        ///
+        /// - Parameters:
+        ///   - toolChoice: Controls which tool the model should use, if any.
+        ///   - allowedTools: The list of tools that are permitted for this request.
+        ///   - topP: Nucleus sampling parameter, between 0 and 1.
+        ///   - presencePenalty: Penalizes new tokens based on whether they appear in the text so far.
+        ///   - frequencyPenalty: Penalizes new tokens based on their frequency in the text so far.
+        ///   - parallelToolCalls: Whether the model may call multiple tools in parallel.
+        ///   - maxToolCalls: The maximum number of tool calls the model may make while generating the response.
+        ///   - reasoningEffort: Reasoning effort for reasoning-capable models.
+        ///   - reasoning: Configuration options for reasoning behavior.
+        ///   - verbosity: Controls the level of detail in generated text output.
+        ///   - maxOutputTokens: The maximum number of tokens the model may generate for this response.
+        ///   - store: Whether to store the response so it can be retrieved later.
+        ///   - metadata: Key-value pairs (keys max 64 chars, values max 512 chars).
+        ///   - safetyIdentifier: A stable identifier used for safety monitoring and abuse detection.
+        ///   - truncation: Controls how the service truncates input when it exceeds the context window.
+        ///   - extraBody: Additional parameters merged into the request body.
         public init(
             toolChoice: ToolChoice? = nil,
             allowedTools: [String]? = nil,
@@ -305,6 +366,7 @@ public struct OpenResponsesLanguageModel: LanguageModel {
         return LanguageModelSession.ResponseStream(stream: stream)
     }
 
+    /// Sends a non-streaming request to the Open Responses API and returns the parsed response.
     private func respondWithOpenResponses<Content>(
         messages: [OpenResponsesMessage],
         tools: [OpenResponsesTool]?,
@@ -395,6 +457,7 @@ public struct OpenResponsesLanguageModel: LanguageModel {
         throw OpenResponsesLanguageModelError.noResponseGenerated
     }
 
+    /// Produces empty content and raw content for the given type (used when tool execution stops the response).
     private func emptyResponseContent<Content: Generable>(for type: Content.Type) throws -> (
         content: Content, rawContent: GeneratedContent
     ) {
@@ -913,8 +976,11 @@ private enum OpenResponsesStreamEvent: Decodable, Sendable {
 
 // MARK: - Errors
 
+/// Errors produced by ``OpenResponsesLanguageModel``.
 enum OpenResponsesLanguageModelError: LocalizedError, Sendable {
+    /// The API returned no parseable text or structured output.
     case noResponseGenerated
+    /// The stream reported a failure event.
     case streamFailed
 
     var errorDescription: String? {
