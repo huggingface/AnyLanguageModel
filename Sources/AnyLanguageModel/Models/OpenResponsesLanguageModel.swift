@@ -109,6 +109,46 @@ public struct OpenResponsesLanguageModel: LanguageModel {
                 case allowedTools = "allowed_tools"
             }
 
+            private static func decodeToolDescriptorArray(
+                container: KeyedDecodingContainer<CodingKeys>,
+                key: CodingKeys
+            ) throws -> [String] {
+                var arr = try container.nestedUnkeyedContainer(forKey: key)
+                var names: [String] = []
+                while !arr.isAtEnd {
+                    do {
+                        let nested = try arr.nestedContainer(keyedBy: ToolDescriptorCodingKeys.self)
+                        let typeStr = try nested.decode(String.self, forKey: .type)
+                        guard typeStr == "function" else {
+                            throw DecodingError.dataCorruptedError(
+                                forKey: key,
+                                in: container,
+                                debugDescription: "Unsupported tool descriptor type: \(typeStr)"
+                            )
+                        }
+                        names.append(try nested.decode(String.self, forKey: .name))
+                    } catch {
+                        let name = try arr.decode(String.self)
+                        names.append(name)
+                    }
+                }
+                return names
+            }
+
+            private enum ToolDescriptorCodingKeys: String, CodingKey {
+                case type
+                case name
+            }
+
+            private struct ToolDescriptorEncodable: Encodable {
+                let name: String
+                func encode(to encoder: Encoder) throws {
+                    var c = encoder.container(keyedBy: ToolDescriptorCodingKeys.self)
+                    try c.encode(ToolType.function.rawValue, forKey: .type)
+                    try c.encode(name, forKey: .name)
+                }
+            }
+
             public init(from decoder: Decoder) throws {
                 if let singleValueContainer = try? decoder.singleValueContainer(),
                     let stringValue = try? singleValueContainer.decode(String.self)
@@ -132,7 +172,7 @@ public struct OpenResponsesLanguageModel: LanguageModel {
                     let name = try container.decode(String.self, forKey: .name)
                     self = .function(name: name)
                 case .allowedTools?:
-                    let tools = try container.decode([String].self, forKey: .tools)
+                    let tools = try Self.decodeToolDescriptorArray(container: container, key: .tools)
                     let mode = try container.decodeIfPresent(AllowedToolsMode.self, forKey: .mode) ?? .auto
                     self = .allowedTools(tools: tools, mode: mode)
                 case nil:
@@ -162,7 +202,10 @@ public struct OpenResponsesLanguageModel: LanguageModel {
                 case .allowedTools(let tools, let mode):
                     var container = encoder.container(keyedBy: CodingKeys.self)
                     try container.encode(ToolType.allowedTools.rawValue, forKey: .type)
-                    try container.encode(tools, forKey: .tools)
+                    try container.encode(
+                        tools.map { ToolDescriptorEncodable(name: $0) },
+                        forKey: .tools
+                    )
                     if mode != .auto {
                         try container.encode(mode, forKey: .mode)
                     }
@@ -932,7 +975,10 @@ private func collectOpenResponsesToolCalls(from value: JSONValue, into result: i
                 }
             }
         }
-        for (_, v) in obj {
+        for (key, v) in obj {
+            if key == "content", let typeStr, typeStr == "message" {
+                continue
+            }
             collectOpenResponsesToolCalls(from: v, into: &result)
         }
     case .array(let arr):
