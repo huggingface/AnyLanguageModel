@@ -586,11 +586,12 @@ private enum OpenResponsesAPI {
             if let v = custom.frequencyPenalty { body["frequency_penalty"] = .double(v) }
             if let v = custom.parallelToolCalls { body["parallel_tool_calls"] = .bool(v) }
             if let v = custom.maxToolCalls { body["max_tool_calls"] = .int(v) }
-            if let v = custom.reasoningEffort { body["reasoning"] = .object(["effort": .string(v.rawValue)]) }
-            if let r = custom.reasoning {
+            do {
+                let effort = custom.reasoning?.effort ?? custom.reasoningEffort
+                let summary = custom.reasoning?.summary
                 var obj: [String: JSONValue] = [:]
-                if let e = r.effort { obj["effort"] = .string(e.rawValue) }
-                if let s = r.summary { obj["summary"] = .string(s) }
+                if let e = effort { obj["effort"] = .string(e.rawValue) }
+                if let s = summary { obj["summary"] = .string(s) }
                 if !obj.isEmpty { body["reasoning"] = .object(obj) }
             }
             if let v = custom.verbosity { body["verbosity"] = .string(v.rawValue) }
