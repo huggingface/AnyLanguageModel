@@ -449,11 +449,6 @@
         }
 
         private struct CoreMLTokenBackend: TokenBackend {
-            struct MaskCacheKey: Hashable, Sendable {
-                let vocabSize: Int
-                let tokens: Set<Int>
-            }
-
             let model: Models.LanguageModel
             let tokenizer: any Tokenizer
             let config: GenerationConfig
@@ -466,7 +461,6 @@
             var currentLogits: MLTensor
             var remainingTokens: Int
             let totalTokenBudget: Int
-            var maskCache: [MaskCacheKey: MLTensor] = [:]
 
             init(
                 model: Models.LanguageModel,
@@ -526,27 +520,19 @@
                     : currentLogits.cast(to: Float.self)
                 let vocabSize = floatScores.shape.last ?? self.vocabSize
 
-                // Build or reuse a mask tensor that keeps only the allowed tokens.
-                let cacheKey = MaskCacheKey(vocabSize: vocabSize, tokens: allowedTokens)
-                let maskTensor: MLTensor
-                if let cachedMask = maskCache[cacheKey] {
-                    maskTensor = cachedMask
-                } else {
-                    var maskValues = Array(repeating: -Float.infinity, count: vocabSize)
-                    var hasValidToken = false
-                    for token in allowedTokens {
-                        if token >= 0 && token < vocabSize {
-                            maskValues[token] = 0
-                            hasValidToken = true
-                        }
+                // Build a mask tensor that keeps only the allowed tokens.
+                var maskValues = Array(repeating: -Float.infinity, count: vocabSize)
+                var hasValidToken = false
+                for token in allowedTokens {
+                    if token >= 0 && token < vocabSize {
+                        maskValues[token] = 0
+                        hasValidToken = true
                     }
-                    guard hasValidToken else {
-                        throw ConstrainedGenerationError.tokenizationFailed
-                    }
-                    let builtMask = MLTensor(maskValues).reshaped(to: floatScores.shape)
-                    maskCache[cacheKey] = builtMask
-                    maskTensor = builtMask
                 }
+                guard hasValidToken else {
+                    throw ConstrainedGenerationError.tokenizationFailed
+                }
+                let maskTensor = MLTensor(maskValues).reshaped(to: floatScores.shape)
                 let maskedScores = floatScores + maskTensor
                 let processedScores = await logitsProcessorList(inputIds, maskedScores)
 
