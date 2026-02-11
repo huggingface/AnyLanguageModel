@@ -98,7 +98,7 @@ Add this package to your `Package.swift`:
 
 ```swift
 dependencies: [
-    .package(url: "https://github.com/mattt/AnyLanguageModel", from: "0.5.0")
+    .package(url: "https://github.com/mattt/AnyLanguageModel", from: "0.7.0")
 ]
 ```
 
@@ -126,7 +126,7 @@ To enable specific traits, specify them in your package's dependencies:
 dependencies: [
     .package(
         url: "https://github.com/mattt/AnyLanguageModel.git",
-        from: "0.5.0",
+        from: "0.7.0",
         traits: ["CoreML", "MLX"] // Enable CoreML and MLX support
     )
 ]
