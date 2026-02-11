@@ -187,8 +187,7 @@
 
                         await model.resetState()
 
-                        // Decode the rendered prompt once to strip it from streamed output
-                        let promptTextPrefix = tokenizer.decode(tokens: tokens)
+                        let promptTokenCount = tokens.count
                         var accumulatedText = ""
 
                         _ = await model.generate(
@@ -196,15 +195,13 @@
                             tokens: tokens,
                             model: model.callAsFunction
                         ) { tokenIds in
-                            // Decode full text and strip the prompt prefix
-                            let fullText = tokenizer.decode(tokens: tokenIds)
-                            let assistantText: String
-                            if fullText.hasPrefix(promptTextPrefix) {
-                                let startIdx = fullText.index(fullText.startIndex, offsetBy: promptTextPrefix.count)
-                                assistantText = String(fullText[startIdx...])
+                            let assistantTokenSlice: ArraySlice<Int>
+                            if tokenIds.count >= promptTokenCount {
+                                assistantTokenSlice = tokenIds.dropFirst(promptTokenCount)
                             } else {
-                                assistantText = fullText
+                                assistantTokenSlice = tokenIds[tokenIds.indices]
                             }
+                            let assistantText = tokenizer.decode(tokens: Array(assistantTokenSlice))
 
                             // Compute delta vs accumulated text and yield
                             if assistantText.count >= accumulatedText.count,
