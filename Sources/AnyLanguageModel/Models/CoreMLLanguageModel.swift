@@ -146,7 +146,13 @@
         ) -> sending LanguageModelSession.ResponseStream<Content> where Content: Generable {
             // For now, only String is supported
             guard type == String.self else {
-                fatalError("CoreMLLanguageModel only supports generating String content")
+                return LanguageModelSession.ResponseStream(
+                    stream: AsyncThrowingStream { continuation in
+                        continuation.finish(
+                            throwing: CoreMLLanguageModelError.structuredStreamingUnsupported
+                        )
+                    }
+                )
             }
 
             // Validate that no image segments are present
@@ -267,6 +273,8 @@
         case modelInvalid(URL, underlyingError: Error)
         /// Image segments are not supported in CoreMLLanguageModel
         case unsupportedFeature
+        /// Structured response streaming is not supported in CoreMLLanguageModel
+        case structuredStreamingUnsupported
 
         public var errorDescription: String? {
             switch self {
@@ -280,6 +288,8 @@
                     "Core ML model at \(url.path) is invalid or corrupted: \(underlyingError.localizedDescription). Please verify the model file is valid and compatible with the current Core ML version."
             case .unsupportedFeature:
                 return "This CoreMLLanguageModel does not support image segments"
+            case .structuredStreamingUnsupported:
+                return "This CoreMLLanguageModel does not support structured response streaming"
             }
         }
     }
