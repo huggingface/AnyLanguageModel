@@ -319,9 +319,6 @@ let response = try await session.respond(
 print(response.content)
 ```
 
-> [!NOTE]
-> Ollama does not currently support guided generation.
-
 ### Image Inputs
 
 Many providers support image inputs,
