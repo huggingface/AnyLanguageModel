@@ -414,6 +414,8 @@ actor ToolExecutionObserver: ToolExecutionDelegate {
 session.toolExecutionDelegate = ToolExecutionObserver()
 ```
 
+## Providers
+
 ### Apple Foundation Models
 
 Uses Apple's [system language model](https://developer.apple.com/documentation/FoundationModels)
@@ -430,7 +432,7 @@ let response = try await session.respond {
 
 ### Core ML
 
-Run [Core ML](https://developer.apple.com/documentation/coreml) models
+Runs [Core ML](https://developer.apple.com/documentation/coreml) models
 (requires `CoreML` trait):
 
 ```swift
@@ -454,7 +456,7 @@ Enable the trait in Package.swift:
 
 ### MLX
 
-Run [MLX](https://github.com/ml-explore/mlx-swift) models on Apple Silicon
+Runs [MLX](https://github.com/ml-explore/mlx-swift) models on Apple Silicon
 (requires `MLX` trait):
 
 ```swift
@@ -494,7 +496,7 @@ Enable the trait in Package.swift:
 
 ### llama.cpp (GGUF)
 
-Run GGUF quantized models via [llama.cpp](https://github.com/ggml-org/llama.cpp)
+Runs GGUF quantized models via [llama.cpp](https://github.com/ggml-org/llama.cpp)
 (requires `Llama` trait):
 
 ```swift
@@ -540,6 +542,56 @@ let response = try await session.respond(
     to: "Write a story",
     options: options
 )
+```
+
+### Ollama
+
+Run models locally via Ollama's
+[HTTP API](https://github.com/ollama/ollama/blob/main/docs/api.md):
+
+```swift
+// Default: connects to http://localhost:11434
+let model = OllamaLanguageModel(model: "qwen3") // `ollama pull qwen3:8b`
+
+// Custom endpoint
+let model = OllamaLanguageModel(
+    endpoint: URL(string: "http://remote-server:11434")!,
+    model: "llama3.2"
+)
+
+let session = LanguageModelSession(model: model)
+let response = try await session.respond {
+    Prompt("Tell me a joke")
+}
+```
+
+For local models, make sure you're using a vision‑capable model
+(for example, a `-vl` variant).
+You can combine multiple images:
+
+```swift
+let model = OllamaLanguageModel(model: "qwen3-vl") // `ollama pull qwen3-vl:8b`
+let session = LanguageModelSession(model: model)
+let response = try await session.respond(
+    to: "Compare these posters and summarize their differences",
+    images: [
+        .init(url: URL(string: "https://example.com/poster1.jpg")!),
+        .init(url: URL(fileURLWithPath: "/path/to/poster2.jpg"))
+    ]
+)
+print(response.content)
+```
+
+Pass any model-specific parameters using custom generation options:
+
+```swift
+var options = GenerationOptions(temperature: 0.8)
+options[custom: OllamaLanguageModel.self] = [
+    "seed": .int(42),
+    "repeat_penalty": .double(1.2),
+    "num_ctx": .int(4096),
+    "stop": .array([.string("###")])
+]
 ```
 
 ### OpenAI
@@ -599,16 +651,12 @@ options[custom: OpenAILanguageModel.self] = .init(
 
 ### Open Responses
 
-Connects to any API that conforms to the [Open Responses](https://www.openresponses.org) specification (e.g. OpenAI, OpenRouter, or other compatible providers). Base URL is required—use your provider’s endpoint:
+Connects to any API that conforms to the 
+[Open Responses](https://www.openresponses.org) specification 
+(e.g. OpenAI, OpenRouter, or other compatible providers). 
+Base URL is required—use your provider’s endpoint:
 
 ```swift
-// Example: OpenAI
-let model = OpenResponsesLanguageModel(
-    baseURL: URL(string: "https://api.openai.com/v1/")!,
-    apiKey: ProcessInfo.processInfo.environment["OPEN_RESPONSES_API_KEY"]!,
-    model: "gpt-4o-mini"
-)
-
 // Example: OpenRouter (https://openrouter.ai/api/v1/)
 let model = OpenResponsesLanguageModel(
     baseURL: URL(string: "https://openrouter.ai/api/v1/")!,
@@ -616,11 +664,19 @@ let model = OpenResponsesLanguageModel(
     model: "openai/gpt-4o-mini"
 )
 
+// Example: OpenAI
+let model = OpenResponsesLanguageModel(
+    baseURL: URL(string: "https://api.openai.com/v1/")!,
+    apiKey: ProcessInfo.processInfo.environment["OPEN_RESPONSES_API_KEY"]!,
+    model: "gpt-4o-mini"
+)
+
 let session = LanguageModelSession(model: model)
 let response = try await session.respond(to: "Say hello")
 ```
 
-Custom options support Open Responses–specific fields such as `tool_choice` (including `allowed_tools`) and `extraBody`:
+Custom options support Open Responses–specific fields,
+such as `tool_choice` (including `allowed_tools`) and `extraBody`:
 
 ```swift
 var options = GenerationOptions(temperature: 0.8)
@@ -753,56 +809,6 @@ let response = try await session.respond(
 
 > [!TIP]
 > Gemini server tools are not available as client tools (`Tool`) for other models.
-
-### Ollama
-
-Run models locally via Ollama's
-[HTTP API](https://github.com/ollama/ollama/blob/main/docs/api.md):
-
-```swift
-// Default: connects to http://localhost:11434
-let model = OllamaLanguageModel(model: "qwen3") // `ollama pull qwen3:8b`
-
-// Custom endpoint
-let model = OllamaLanguageModel(
-    endpoint: URL(string: "http://remote-server:11434")!,
-    model: "llama3.2"
-)
-
-let session = LanguageModelSession(model: model)
-let response = try await session.respond {
-    Prompt("Tell me a joke")
-}
-```
-
-For local models, make sure you're using a vision‑capable model
-(for example, a `-vl` variant).
-You can combine multiple images:
-
-```swift
-let model = OllamaLanguageModel(model: "qwen3-vl") // `ollama pull qwen3-vl:8b`
-let session = LanguageModelSession(model: model)
-let response = try await session.respond(
-    to: "Compare these posters and summarize their differences",
-    images: [
-        .init(url: URL(string: "https://example.com/poster1.jpg")!),
-        .init(url: URL(fileURLWithPath: "/path/to/poster2.jpg"))
-    ]
-)
-print(response.content)
-```
-
-Pass any model-specific parameters using custom generation options:
-
-```swift
-var options = GenerationOptions(temperature: 0.8)
-options[custom: OllamaLanguageModel.self] = [
-    "seed": .int(42),
-    "repeat_penalty": .double(1.2),
-    "num_ctx": .int(4096),
-    "stop": .array([.string("###")])
-]
-```
 
 ## Testing
 
