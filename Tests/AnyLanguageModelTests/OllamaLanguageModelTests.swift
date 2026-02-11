@@ -3,6 +3,12 @@ import Testing
 
 @testable import AnyLanguageModel
 
+@Generable
+private struct OllamaStructuredForecast {
+    var summary: String
+    var temperatureCelsius: Int
+}
+
 @Suite(
     "OllamaLanguageModel",
     .serialized,
@@ -59,6 +65,36 @@ struct OllamaLanguageModelTests {
 
         #expect(!snapshots.isEmpty)
         #expect(!snapshots.last!.rawContent.jsonString.isEmpty)
+    }
+
+    @Test func structuredResponse() async throws {
+        let session = LanguageModelSession(model: model)
+
+        let response = try await session.respond(
+            to: "Summarize the weather with a short summary and a celsius temperature.",
+            generating: OllamaStructuredForecast.self
+        )
+
+        #expect(!response.content.summary.isEmpty)
+        #expect(response.rawContent.jsonString.contains("summary"))
+    }
+
+    @Test func streamingStructured() async throws {
+        let session = LanguageModelSession(model: model)
+
+        let stream = session.streamResponse(
+            to: "Provide a short weather forecast summary and a celsius temperature.",
+            generating: OllamaStructuredForecast.self
+        )
+
+        var snapshots: [LanguageModelSession.ResponseStream<OllamaStructuredForecast>.Snapshot] = []
+        for try await snapshot in stream {
+            snapshots.append(snapshot)
+        }
+
+        #expect(!snapshots.isEmpty)
+        #expect(!snapshots.last!.rawContent.jsonString.isEmpty)
+        #expect(!(snapshots.last!.content.summary ?? "").isEmpty)
     }
 
     @Test func withGenerationOptions() async throws {
