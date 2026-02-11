@@ -167,82 +167,86 @@ public struct OllamaLanguageModel: LanguageModel {
             OllamaMessage(role: .user, content: ollamaText)
         ]
         let ollamaOptions = convertOptions(options)
-        let ollamaTools = try? session.tools.map { tool in
-            try convertToolToOllamaFormat(tool)
-        }
-        let ollamaFormat: JSONValue?
-        if type == String.self {
-            ollamaFormat = nil
-        } else if let schema = try? convertSchemaToOllamaFormat(type.generationSchema),
-            let schemaValue = try? JSONValue(schema)
-        {
-            ollamaFormat = schemaValue
-        } else {
-            ollamaFormat = nil
-        }
-
-        let params = try? createChatParams(
-            model: model,
-            messages: messages,
-            tools: (ollamaTools?.isEmpty == false) ? ollamaTools : nil,
-            options: ollamaOptions,
-            stream: true,
-            images: (ollamaImages.isEmpty ? nil : ollamaImages),
-            format: ollamaFormat
-        )
-
         let url = baseURL.appendingPathComponent("api/chat")
-        let body = (try? JSONEncoder().encode(params)) ?? Data()
 
         // Transform the newline-delimited JSON stream from Ollama into ResponseStream snapshots
         let stream: AsyncThrowingStream<LanguageModelSession.ResponseStream<Content>.Snapshot, any Error> =
             AsyncThrowingStream { continuation in
-                let task = Task {
-                    do {
+                do {
+                    let ollamaTools = try session.tools.map { tool in
+                        try convertToolToOllamaFormat(tool)
+                    }
+                    let ollamaFormat: JSONValue?
+                    if type == String.self {
+                        ollamaFormat = nil
+                    } else {
+                        let schema = try convertSchemaToOllamaFormat(type.generationSchema)
+                        ollamaFormat = try JSONValue(schema)
+                    }
+
+                    let params = try createChatParams(
+                        model: model,
+                        messages: messages,
+                        tools: ollamaTools.isEmpty ? nil : ollamaTools,
+                        options: ollamaOptions,
+                        stream: true,
+                        images: (ollamaImages.isEmpty ? nil : ollamaImages),
+                        format: ollamaFormat
+                    )
+                    let body = try JSONEncoder().encode(params)
+
+                    let task = Task {
                         // Reuse ChatResponse as each streamed line shares the same shape
-                        let chunks =
-                            urlSession.fetchStream(
-                                .post,
-                                url: url,
-                                body: body,
-                                dateDecodingStrategy: .iso8601WithFractionalSeconds
-                            ) as AsyncThrowingStream<ChatResponse, any Error>
+                        do {
+                            let chunks =
+                                urlSession.fetchStream(
+                                    .post,
+                                    url: url,
+                                    body: body,
+                                    dateDecodingStrategy: .iso8601WithFractionalSeconds
+                                ) as AsyncThrowingStream<ChatResponse, any Error>
 
-                        var partialText = ""
+                            var partialText = ""
 
-                        for try await chunk in chunks {
-                            if let piece = chunk.message.content {
-                                partialText += piece
-                                if type == String.self {
-                                    let snapshot = LanguageModelSession.ResponseStream<Content>.Snapshot(
-                                        content: (partialText as! Content).asPartiallyGenerated(),
-                                        rawContent: GeneratedContent(partialText)
-                                    )
-                                    continuation.yield(snapshot)
-                                } else if let raw = try? GeneratedContent(json: partialText),
-                                    let parsed = try? type.init(raw)
-                                {
-                                    let snapshot = LanguageModelSession.ResponseStream<Content>.Snapshot(
-                                        content: parsed.asPartiallyGenerated(),
-                                        rawContent: raw
-                                    )
-                                    continuation.yield(snapshot)
+                            for try await chunk in chunks {
+                                if let piece = chunk.message.content {
+                                    partialText += piece
+                                    if type == String.self {
+                                        let snapshot = LanguageModelSession.ResponseStream<Content>.Snapshot(
+                                            content: (partialText as! Content).asPartiallyGenerated(),
+                                            rawContent: GeneratedContent(partialText)
+                                        )
+                                        continuation.yield(snapshot)
+                                    } else if let raw = try? GeneratedContent(json: partialText),
+                                        let parsed = try? type.init(raw)
+                                    {
+                                        let snapshot = LanguageModelSession.ResponseStream<Content>.Snapshot(
+                                            content: parsed.asPartiallyGenerated(),
+                                            rawContent: raw
+                                        )
+                                        continuation.yield(snapshot)
+                                    } else {
+                                        // Structured responses can stream as incomplete JSON fragments.
+                                        // Skip snapshots until the accumulated JSON parses cleanly.
+                                    }
+                                }
+
+                                if chunk.done {
+                                    break
                                 }
                             }
 
-                            if chunk.done {
-                                break
-                            }
+                            continuation.finish()
+                        } catch {
+                            continuation.finish(throwing: error)
                         }
-
-                        continuation.finish()
-                    } catch {
-                        continuation.finish(throwing: error)
                     }
-                }
 
-                continuation.onTermination = { _ in
-                    task.cancel()
+                    continuation.onTermination = { _ in
+                        task.cancel()
+                    }
+                } catch {
+                    continuation.finish(throwing: error)
                 }
             }
 
