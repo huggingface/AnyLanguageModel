@@ -487,10 +487,7 @@
                 self.endTokens = endTokens
                 self.eosToken = config.eosTokenId ?? tokenizer.eosTokenId ?? 0
                 self.vocabSize = initialLogits.shape.last ?? 0
-                self.logitsProcessorList = CoreMLLanguageModel.makeLogitsProcessorList(
-                    config: config,
-                    includeSamplingFilters: false
-                )
+                self.logitsProcessorList = CoreMLLanguageModel.makeLogitsProcessorList(config: config)
             }
 
             func tokenize(_ text: String) throws -> [Int] {
@@ -527,36 +524,37 @@
                     currentLogits.scalarType == Float.self
                     ? currentLogits
                     : currentLogits.cast(to: Float.self)
-                let processedScores = await logitsProcessorList(inputIds, floatScores)
-
-                // Limit candidates to allowed token ids within the current vocab
-                let vocabSize = processedScores.shape.last ?? self.vocabSize
-                let candidateTokens = allowedTokens.filter { $0 >= 0 && $0 < vocabSize }.sorted()
-                guard !candidateTokens.isEmpty else {
-                    throw ConstrainedGenerationError.tokenizationFailed
-                }
+                let vocabSize = floatScores.shape.last ?? self.vocabSize
 
                 // Build or reuse a mask tensor that keeps only the allowed tokens.
-                let cacheKey = MaskCacheKey(vocabSize: vocabSize, tokens: Set(candidateTokens))
+                let cacheKey = MaskCacheKey(vocabSize: vocabSize, tokens: allowedTokens)
                 let maskTensor: MLTensor
                 if let cachedMask = maskCache[cacheKey] {
                     maskTensor = cachedMask
                 } else {
                     var maskValues = Array(repeating: -Float.infinity, count: vocabSize)
-                    for token in candidateTokens {
-                        maskValues[token] = 0
+                    var hasValidToken = false
+                    for token in allowedTokens {
+                        if token >= 0 && token < vocabSize {
+                            maskValues[token] = 0
+                            hasValidToken = true
+                        }
                     }
-                    let builtMask = MLTensor(maskValues).reshaped(to: processedScores.shape)
+                    guard hasValidToken else {
+                        throw ConstrainedGenerationError.tokenizationFailed
+                    }
+                    let builtMask = MLTensor(maskValues).reshaped(to: floatScores.shape)
                     maskCache[cacheKey] = builtMask
                     maskTensor = builtMask
                 }
-                let maskedScores = processedScores + maskTensor
+                let maskedScores = floatScores + maskTensor
+                let processedScores = await logitsProcessorList(inputIds, maskedScores)
 
                 let tokenTensor: MLTensor
                 if config.doSample {
                     // Multinomial sample from candidate probabilities
-                    let probs = maskedScores.softmax(alongAxis: -1)
-                    let prefixShape = Array(maskedScores.shape.dropLast())
+                    let probs = processedScores.softmax(alongAxis: -1)
+                    let prefixShape = Array(processedScores.shape.dropLast())
                     let randomShape = prefixShape + [1]
                     let rndTensor = MLTensor(randomUniform: randomShape, in: 0 ..< 1, scalarType: Float.self)
                     let cumulativeProbs = probs.cumulativeSum(alongAxis: -1)
@@ -572,7 +570,7 @@
                         sampledIndex.scalarType == Int32.self ? sampledIndex : sampledIndex.cast(to: Int32.self)
                 } else {
                     // Greedy select the best-scoring candidate
-                    let selectedIndex = maskedScores.argmax(alongAxis: -1)
+                    let selectedIndex = processedScores.argmax(alongAxis: -1)
                     tokenTensor =
                         selectedIndex.scalarType == Int32.self ? selectedIndex : selectedIndex.cast(to: Int32.self)
                 }
@@ -587,10 +585,7 @@
             }
         }
 
-        fileprivate static func makeLogitsProcessorList(
-            config: GenerationConfig,
-            includeSamplingFilters: Bool = true
-        ) -> LogitsProcessorList {
+        fileprivate static func makeLogitsProcessorList(config: GenerationConfig) -> LogitsProcessorList {
             var processors: [any LogitsProcessor] = []
 
             if config.repetitionPenalty != 1.0 {
@@ -605,23 +600,21 @@
                 }
             }
 
-            if includeSamplingFilters {
-                if config.topK > 0 && config.topK < Int.max {
-                    if let processor = try? TopKLogitsWarper(topK: config.topK) {
-                        processors.append(processor)
-                    }
+            if config.topK > 0 && config.topK < Int.max {
+                if let processor = try? TopKLogitsWarper(topK: config.topK) {
+                    processors.append(processor)
                 }
+            }
 
-                if config.topP < 1.0 {
-                    if let processor = try? TopPLogitsWarper(topP: Float(config.topP)) {
-                        processors.append(processor)
-                    }
+            if config.topP < 1.0 {
+                if let processor = try? TopPLogitsWarper(topP: Float(config.topP)) {
+                    processors.append(processor)
                 }
+            }
 
-                if let minP = config.minP {
-                    if let processor = try? MinPLogitsWarper(minP: Float(minP)) {
-                        processors.append(processor)
-                    }
+            if let minP = config.minP {
+                if let processor = try? MinPLogitsWarper(minP: Float(minP)) {
+                    processors.append(processor)
                 }
             }
 
