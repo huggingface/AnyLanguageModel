@@ -76,11 +76,6 @@ public struct OllamaLanguageModel: LanguageModel {
         includeSchemaInPrompt: Bool,
         options: GenerationOptions
     ) async throws -> LanguageModelSession.Response<Content> where Content: Generable {
-        // For now, only String is supported
-        guard type == String.self else {
-            fatalError("OllamaLanguageModel only supports generating String content")
-        }
-
         let userSegments = extractPromptSegments(from: session, fallbackText: prompt.description)
         let (ollamaText, ollamaImages) = convertSegmentsToOllama(userSegments)
         let messages = [
@@ -90,6 +85,13 @@ public struct OllamaLanguageModel: LanguageModel {
         let ollamaTools = try session.tools.map { tool in
             try convertToolToOllamaFormat(tool)
         }
+        let ollamaFormat: JSONValue?
+        if type == String.self {
+            ollamaFormat = nil
+        } else {
+            let schema = try convertSchemaToOllamaFormat(type.generationSchema)
+            ollamaFormat = try JSONValue(schema)
+        }
 
         let params = try createChatParams(
             model: model,
@@ -97,7 +99,8 @@ public struct OllamaLanguageModel: LanguageModel {
             tools: ollamaTools.isEmpty ? nil : ollamaTools,
             options: ollamaOptions,
             stream: false,
-            images: ollamaImages.isEmpty ? nil : ollamaImages
+            images: ollamaImages.isEmpty ? nil : ollamaImages,
+            format: ollamaFormat
         )
 
         let url = baseURL.appendingPathComponent("api/chat")
@@ -134,9 +137,19 @@ public struct OllamaLanguageModel: LanguageModel {
         }
 
         let text = chatResponse.message.content ?? ""
+        if type == String.self {
+            return LanguageModelSession.Response(
+                content: text as! Content,
+                rawContent: GeneratedContent(text),
+                transcriptEntries: ArraySlice(entries)
+            )
+        }
+
+        let generatedContent = try GeneratedContent(json: text)
+        let content = try type.init(generatedContent)
         return LanguageModelSession.Response(
-            content: text as! Content,
-            rawContent: GeneratedContent(text),
+            content: content,
+            rawContent: generatedContent,
             transcriptEntries: ArraySlice(entries)
         )
     }
@@ -148,11 +161,6 @@ public struct OllamaLanguageModel: LanguageModel {
         includeSchemaInPrompt: Bool,
         options: GenerationOptions
     ) -> sending LanguageModelSession.ResponseStream<Content> where Content: Generable {
-        // For now, only String is supported
-        guard type == String.self else {
-            fatalError("OllamaLanguageModel only supports generating String content")
-        }
-
         let userSegments = extractPromptSegments(from: session, fallbackText: prompt.description)
         let (ollamaText, ollamaImages) = convertSegmentsToOllama(userSegments)
         let messages = [
@@ -162,6 +170,16 @@ public struct OllamaLanguageModel: LanguageModel {
         let ollamaTools = try? session.tools.map { tool in
             try convertToolToOllamaFormat(tool)
         }
+        let ollamaFormat: JSONValue?
+        if type == String.self {
+            ollamaFormat = nil
+        } else if let schema = try? convertSchemaToOllamaFormat(type.generationSchema),
+            let schemaValue = try? JSONValue(schema)
+        {
+            ollamaFormat = schemaValue
+        } else {
+            ollamaFormat = nil
+        }
 
         let params = try? createChatParams(
             model: model,
@@ -169,7 +187,8 @@ public struct OllamaLanguageModel: LanguageModel {
             tools: (ollamaTools?.isEmpty == false) ? ollamaTools : nil,
             options: ollamaOptions,
             stream: true,
-            images: (ollamaImages.isEmpty ? nil : ollamaImages)
+            images: (ollamaImages.isEmpty ? nil : ollamaImages),
+            format: ollamaFormat
         )
 
         let url = baseURL.appendingPathComponent("api/chat")
@@ -194,11 +213,21 @@ public struct OllamaLanguageModel: LanguageModel {
                         for try await chunk in chunks {
                             if let piece = chunk.message.content {
                                 partialText += piece
-                                let snapshot = LanguageModelSession.ResponseStream<Content>.Snapshot(
-                                    content: (partialText as! Content).asPartiallyGenerated(),
-                                    rawContent: GeneratedContent(partialText)
-                                )
-                                continuation.yield(snapshot)
+                                if type == String.self {
+                                    let snapshot = LanguageModelSession.ResponseStream<Content>.Snapshot(
+                                        content: (partialText as! Content).asPartiallyGenerated(),
+                                        rawContent: GeneratedContent(partialText)
+                                    )
+                                    continuation.yield(snapshot)
+                                } else if let raw = try? GeneratedContent(json: partialText),
+                                    let parsed = try? type.init(raw)
+                                {
+                                    let snapshot = LanguageModelSession.ResponseStream<Content>.Snapshot(
+                                        content: parsed.asPartiallyGenerated(),
+                                        rawContent: raw
+                                    )
+                                    continuation.yield(snapshot)
+                                }
                             }
 
                             if chunk.done {
@@ -402,6 +431,12 @@ private func convertToolToOllamaFormat(_ tool: any Tool) throws -> [String: JSON
     ]
 }
 
+private func convertSchemaToOllamaFormat(_ schema: GenerationSchema) throws -> JSONSchema {
+    let resolvedSchema = schema.withResolvedRoot() ?? schema
+    let data = try JSONEncoder().encode(resolvedSchema)
+    return try JSONDecoder().decode(JSONSchema.self, from: data)
+}
+
 private func toGeneratedContent(_ value: JSONValue?) throws -> GeneratedContent {
     guard let value else { return GeneratedContent(properties: [:]) }
     let data = try JSONEncoder().encode(value)
@@ -415,7 +450,8 @@ private func createChatParams(
     tools: [[String: JSONValue]]?,
     options: [String: JSONValue]?,
     stream: Bool,
-    images: [String]?
+    images: [String]?,
+    format: JSONValue?
 ) throws -> [String: JSONValue] {
     var params: [String: JSONValue] = [
         "model": .string(model),
@@ -433,6 +469,10 @@ private func createChatParams(
 
     if let images, !images.isEmpty {
         params["images"] = .array(images.map { .string($0) })
+    }
+
+    if let format {
+        params["format"] = format
     }
 
     return params
