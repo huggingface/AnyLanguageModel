@@ -364,7 +364,7 @@
 
             let tokenTensor = MLTensor(promptTokens.map(Int32.init)).expandingShape(at: 0)
             let initialLogits = await model.predictNextTokenScores(tokenTensor, config: generationConfig)
-            let endTokens = buildEndTokens(tokenizer: tokenizer)
+            let endTokens: Set<Int> = []
 
             let backend = try CoreMLTokenBackend(
                 model: model,
@@ -489,7 +489,10 @@
                 self.endTokens = endTokens
                 self.eosToken = config.eosTokenId ?? tokenizer.eosTokenId ?? 0
                 self.vocabSize = initialLogits.shape.last ?? 0
-                self.logitsProcessorList = CoreMLLanguageModel.makeLogitsProcessorList(config: config)
+                self.logitsProcessorList = CoreMLLanguageModel.makeLogitsProcessorList(
+                    config: config,
+                    includeSamplingFilters: false
+                )
             }
 
             func tokenize(_ text: String) throws -> [Int] {
@@ -586,7 +589,10 @@
             }
         }
 
-        fileprivate static func makeLogitsProcessorList(config: GenerationConfig) -> LogitsProcessorList {
+        fileprivate static func makeLogitsProcessorList(
+            config: GenerationConfig,
+            includeSamplingFilters: Bool = true
+        ) -> LogitsProcessorList {
             var processors: [any LogitsProcessor] = []
 
             if config.repetitionPenalty != 1.0 {
@@ -601,21 +607,23 @@
                 }
             }
 
-            if config.topK > 0 && config.topK < Int.max {
-                if let processor = try? TopKLogitsWarper(topK: config.topK) {
-                    processors.append(processor)
+            if includeSamplingFilters {
+                if config.topK > 0 && config.topK < Int.max {
+                    if let processor = try? TopKLogitsWarper(topK: config.topK) {
+                        processors.append(processor)
+                    }
                 }
-            }
 
-            if config.topP < 1.0 {
-                if let processor = try? TopPLogitsWarper(topP: Float(config.topP)) {
-                    processors.append(processor)
+                if config.topP < 1.0 {
+                    if let processor = try? TopPLogitsWarper(topP: Float(config.topP)) {
+                        processors.append(processor)
+                    }
                 }
-            }
 
-            if let minP = config.minP {
-                if let processor = try? MinPLogitsWarper(minP: Float(minP)) {
-                    processors.append(processor)
+                if let minP = config.minP {
+                    if let processor = try? MinPLogitsWarper(minP: Float(minP)) {
+                        processors.append(processor)
+                    }
                 }
             }
 

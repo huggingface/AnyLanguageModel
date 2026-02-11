@@ -341,12 +341,17 @@ struct ConstrainedJSONGenerator<Backend: TokenBackend> {
 
     private mutating func generateNumber(_ node: GenerationSchema.NumberNode) async throws -> String {
         let allowedTokens = node.integerOnly ? integerTerminators : doubleTerminators
+        let numericTokens = allowedTokens.subtracting(basicTerminators)
         var result = ""
         let maxTokens = maxNumberTokens(for: node)
         var generatedTokens = 0
 
         while backend.remainingTokens > 0, generatedTokens < maxTokens {
-            let token = try await backend.sample(from: allowedTokens)
+            let candidates = result.isEmpty ? numericTokens : allowedTokens
+            guard !candidates.isEmpty else {
+                throw ConstrainedGenerationError.tokenizationFailed
+            }
+            let token = try await backend.sample(from: candidates)
             if backend.endTokens.contains(token) {
                 throw ConstrainedGenerationError.earlyTermination(emittedText)
             }

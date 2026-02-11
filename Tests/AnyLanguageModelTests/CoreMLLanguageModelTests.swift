@@ -240,5 +240,82 @@ import Testing
                 }
             }
         }
+
+        @Test @available(macOS 15.0, iOS 18.0, tvOS 18.0, visionOS 2.0, watchOS 11.0, *)
+        func structuredGenerationSimpleDouble() async throws {
+            let model = try await getModel()
+            let session = LanguageModelSession(
+                model: model,
+                instructions: "You are a helpful assistant that generates structured data."
+            )
+            let response = try await session.respond(
+                to: "Generate a temperature value of 72.5 degrees",
+                generating: SimpleDouble.self
+            )
+            #expect(!response.content.temperature.isNaN)
+            #expect(response.content.temperature.isFinite)
+        }
+
+        @Test @available(macOS 15.0, iOS 18.0, tvOS 18.0, visionOS 2.0, watchOS 11.0, *)
+        func structuredGenerationOptionalFields() async throws {
+            let model = try await getModel()
+            let session = LanguageModelSession(
+                model: model,
+                instructions: "You are a helpful assistant that generates structured data."
+            )
+            let response = try await session.respond(
+                to: "Generate a person named Alex with nickname 'Lex'. Nickname may be omitted if unsure.",
+                generating: OptionalFields.self
+            )
+            #expect(!response.content.name.isEmpty)
+            if let nickname = response.content.nickname {
+                #expect(!nickname.isEmpty)
+            }
+        }
+
+        @Test @available(macOS 15.0, iOS 18.0, tvOS 18.0, visionOS 2.0, watchOS 11.0, *)
+        func structuredGenerationEnum() async throws {
+            let model = try await getModel()
+            let session = LanguageModelSession(
+                model: model,
+                instructions: "You are a helpful assistant that generates structured data."
+            )
+            let response = try await session.respond(
+                to: "Generate a high priority value",
+                generating: Priority.self
+            )
+            #expect([Priority.low, Priority.medium, Priority.high].contains(response.content))
+        }
+
+        @Test @available(macOS 15.0, iOS 18.0, tvOS 18.0, visionOS 2.0, watchOS 11.0, *)
+        func structuredGenerationSimpleArray() async throws {
+            let model = try await getModel()
+            let session = LanguageModelSession(
+                model: model,
+                instructions: "You are a helpful assistant that generates structured data."
+            )
+            let response = try await session.respond(
+                to: "Generate a list of 3 color names: red, green, blue",
+                generating: SimpleArray.self
+            )
+            #expect(!response.content.colors.isEmpty)
+        }
+
+        @Test @available(macOS 15.0, iOS 18.0, tvOS 18.0, visionOS 2.0, watchOS 11.0, *)
+        func structuredGenerationNestedStruct() async throws {
+            let model = try await getModel()
+            let session = LanguageModelSession(
+                model: model,
+                instructions: "You are a helpful assistant that generates structured data."
+            )
+            let response = try await session.respond(
+                to: "Generate a person named John, age 25, living at 123 Main St, Springfield, 12345",
+                generating: StructuredPerson.self
+            )
+            #expect(!response.content.name.isEmpty)
+            #expect(response.content.age >= 0)
+            #expect(!response.content.address.street.isEmpty)
+            #expect(!response.content.address.city.isEmpty)
+        }
     }
 #endif  // CoreML
