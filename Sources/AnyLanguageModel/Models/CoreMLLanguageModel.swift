@@ -448,17 +448,6 @@
             return "\(header):\n\(schemaJSON)"
         }
 
-        private func buildEndTokens(tokenizer: any Tokenizer) -> Set<Int> {
-            var tokens: Set<Int> = []
-            if let eosTokenId = tokenizer.eosTokenId {
-                tokens.insert(eosTokenId)
-            }
-            if let eosToken = tokenizer.eosToken, let eosTokenId = tokenizer.convertTokenToId(eosToken) {
-                tokens.insert(eosTokenId)
-            }
-            return tokens
-        }
-
         private struct CoreMLTokenBackend: TokenBackend {
             struct MaskCacheKey: Hashable, Sendable {
                 let vocabSize: Int
