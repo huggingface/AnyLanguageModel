@@ -118,15 +118,17 @@
                 model: model.callAsFunction
             )
 
-            let promptTextPrefix = tokenizer.decode(tokens: tokens)
-            let fullText = tokenizer.decode(tokens: outputTokens)
-            let assistantText: String
-            if fullText.hasPrefix(promptTextPrefix) {
-                let startIdx = fullText.index(fullText.startIndex, offsetBy: promptTextPrefix.count)
-                assistantText = String(fullText[startIdx...])
+            // Strip the prompt at the token level to avoid issues with
+            // normalization or whitespace differences in decoded strings
+            let assistantTokenSlice: ArraySlice<Int>
+            if outputTokens.count >= tokens.count {
+                assistantTokenSlice = outputTokens.dropFirst(tokens.count)
             } else {
-                assistantText = fullText
+                // Fallback: if the model did not echo the full prompt,
+                // treat the entire output as assistant tokens
+                assistantTokenSlice = outputTokens[outputTokens.indices]
             }
+            let assistantText = tokenizer.decode(tokens: Array(assistantTokenSlice))
 
             return LanguageModelSession.Response(
                 content: assistantText as! Content,
