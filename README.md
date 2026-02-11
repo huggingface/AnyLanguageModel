@@ -287,26 +287,14 @@ see OWASP's
 
 ## Usage
 
-### Apple Foundation Models
+### Guided Generation
 
-Uses Apple's [system language model](https://developer.apple.com/documentation/FoundationModels)
-(requires macOS 26 / iOS 26 / visionOS 26 or later).
-
-```swift
-let model = SystemLanguageModel.default
-let session = LanguageModelSession(model: model)
-
-let response = try await session.respond {
-    Prompt("Explain quantum computing in one sentence")
-}
-```
-
-> [!NOTE]
-> Image inputs are not yet supported by Apple Foundation Models.
-
-`SystemLanguageModel` supports guided generation,
+All on-device models — Apple Foundation Models, Core ML, MLX, and llama.cpp —
+support guided generation,
 letting you request strongly typed outputs using `@Generable` and `@Guide`
 instead of parsing raw strings.
+Cloud providers (OpenAI, Open Responses, Anthropic, and Gemini)
+also support guided generation.
 For more details, see
 [Generating Swift data structures with guided generation](https://developer.apple.com/documentation/foundationmodels/generating-swift-data-structures-with-guided-generation).
 
@@ -323,12 +311,121 @@ struct CatProfile {
     var profile: String
 }
 
-let session = LanguageModelSession(model: .default)
+let session = LanguageModelSession(model: model)
 let response = try await session.respond(
     to: "Generate a cute rescue cat",
     generating: CatProfile.self
 )
 print(response.content)
+```
+
+> [!NOTE]
+> Ollama does not currently support guided generation.
+
+### Image Inputs
+
+Many providers support image inputs,
+letting you include images alongside text prompts.
+Pass images using the `images:` or `image:` parameter on `respond`:
+
+```swift
+let response = try await session.respond(
+    to: "Describe what you see",
+    images: [
+        .init(url: URL(string: "https://example.com/photo.jpg")!),
+        .init(url: URL(fileURLWithPath: "/path/to/local.png"))
+    ]
+)
+```
+
+Image support varies by provider:
+
+| Provider                | Image Inputs    |
+| ----------------------- | :-------------: |
+| Apple Foundation Models | —               |
+| Core ML                 | —               |
+| MLX                     | model-dependent |
+| llama.cpp               | —               |
+| Ollama                  | model-dependent |
+| OpenAI                  | yes             |
+| Open Responses          | yes             |
+| Anthropic               | yes             |
+| Google Gemini           | yes             |
+
+For MLX and Ollama,
+use a vision-capable model 
+(for example, a VLM or `-vl` variant).
+
+### Tool Calling
+
+Tool calling is supported by all providers except llama.cpp.
+Define tools using the `Tool` protocol and pass them when creating a session:
+
+```swift
+struct WeatherTool: Tool {
+    let name = "getWeather"
+    let description = "Retrieve the latest weather information for a city"
+
+    @Generable
+    struct Arguments {
+        @Guide(description: "The city to fetch the weather for")
+        var city: String
+    }
+
+    func call(arguments: Arguments) async throws -> String {
+        "The weather in \(arguments.city) is sunny and 72°F / 23°C"
+    }
+}
+
+let session = LanguageModelSession(model: model, tools: [WeatherTool()])
+
+let response = try await session.respond {
+    Prompt("How's the weather in Cupertino?")
+}
+print(response.content)
+```
+
+To observe or control tool execution, assign a delegate on the session:
+
+```swift
+actor ToolExecutionObserver: ToolExecutionDelegate {
+    func didGenerateToolCalls(_ toolCalls: [Transcript.ToolCall], in session: LanguageModelSession) async {
+        print("Generated tool calls: \(toolCalls)")
+    }
+
+    func toolCallDecision(
+        for toolCall: Transcript.ToolCall,
+        in session: LanguageModelSession
+    ) async -> ToolExecutionDecision {
+        // Return .stop to halt after tool calls, or .provideOutput(...) to bypass execution.
+        // This is a good place to ask the user for confirmation (for example, in a modal dialog).
+        .execute
+    }
+
+    func didExecuteToolCall(
+        _ toolCall: Transcript.ToolCall,
+        output: Transcript.ToolOutput,
+        in session: LanguageModelSession
+    ) async {
+        print("Executed tool call: \(toolCall)")
+    }
+}
+
+session.toolExecutionDelegate = ToolExecutionObserver()
+```
+
+### Apple Foundation Models
+
+Uses Apple's [system language model](https://developer.apple.com/documentation/FoundationModels)
+(requires macOS 26 / iOS 26 / visionOS 26 or later).
+
+```swift
+let model = SystemLanguageModel.default
+let session = LanguageModelSession(model: model)
+
+let response = try await session.respond {
+    Prompt("Explain quantum computing in one sentence")
+}
 ```
 
 ### Core ML
@@ -354,9 +451,6 @@ Enable the trait in Package.swift:
     traits: ["CoreML"]
 )
 ```
-
-> [!NOTE]
-> Image inputs are not currently supported with `CoreMLLanguageModel`.
 
 ### MLX
 
@@ -397,9 +491,6 @@ Enable the trait in Package.swift:
     traits: ["MLX"]
 )
 ```
-
-> [!NOTE]
-> MLX supports guided generation (structured output via `@Generable`).
 
 ### llama.cpp (GGUF)
 
@@ -450,10 +541,6 @@ let response = try await session.respond(
     options: options
 )
 ```
-
-> [!NOTE]
-> Image inputs are not currently supported with `LlamaLanguageModel`.
-> Guided generation (structured output via `@Generable`) is supported.
 
 ### OpenAI
 
