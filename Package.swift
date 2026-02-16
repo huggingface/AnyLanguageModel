@@ -36,6 +36,7 @@ let package = Package(
         // mlx-swift-lm must be >= 2.25.5 for ToolSpec/tool calls and UserInput(chat:processing:tools:).
         .package(url: "https://github.com/ml-explore/mlx-swift-lm", from: "2.25.5"),
         .package(url: "https://github.com/swiftlang/swift-syntax", from: "600.0.0"),
+        .package(url: "https://github.com/swift-server/async-http-client.git", from: "1.31.0")
     ],
     targets: [
         .target(
