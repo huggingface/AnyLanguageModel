@@ -1,3 +1,4 @@
+import AsyncHTTPClient
 import EventSource
 import Foundation
 import JSONSchema
@@ -278,7 +279,7 @@ public struct AnthropicLanguageModel: LanguageModel {
     /// The model identifier to use for generation.
     public let model: String
 
-    private let urlSession: URLSession
+    private let httpClient: HTTPClient
 
     /// Creates an Anthropic language model.
     ///
@@ -288,14 +289,14 @@ public struct AnthropicLanguageModel: LanguageModel {
     ///   - apiVersion: The API version to use for requests. Defaults to `2023-06-01`.
     ///   - betas: Optional beta version(s) of the API to use.
     ///   - model: The model identifier (for example, "claude-3-5-sonnet-20241022").
-    ///   - session: The URL session to use for network requests.
+    ///   - session: The HTTP client to use for network requests. If nil, uses HTTPClient.shared.
     public init(
         baseURL: URL = defaultBaseURL,
         apiKey tokenProvider: @escaping @autoclosure @Sendable () -> String,
         apiVersion: String = defaultAPIVersion,
         betas: [String]? = nil,
         model: String,
-        session: URLSession = URLSession(configuration: .default)
+        session: HTTPClient? = nil
     ) {
         var baseURL = baseURL
         if !baseURL.path.hasSuffix("/") {
@@ -307,7 +308,7 @@ public struct AnthropicLanguageModel: LanguageModel {
         self.apiVersion = apiVersion
         self.betas = betas
         self.model = model
-        self.urlSession = session
+        self.httpClient = session ?? HTTPClient.shared
     }
 
     public func respond<Content>(
@@ -337,7 +338,7 @@ public struct AnthropicLanguageModel: LanguageModel {
 
         let body = try JSONEncoder().encode(params)
 
-        let message: AnthropicMessageResponse = try await urlSession.fetch(
+        let message: AnthropicMessageResponse = try await httpClient.fetch(
             .post,
             url: url,
             headers: headers,
@@ -435,7 +436,7 @@ public struct AnthropicLanguageModel: LanguageModel {
 
                     // Stream server-sent events from Anthropic API
                     let events: AsyncThrowingStream<AnthropicStreamEvent, any Error> =
-                        urlSession
+                        httpClient
                         .fetchEventStream(
                             .post,
                             url: url,

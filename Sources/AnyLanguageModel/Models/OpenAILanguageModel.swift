@@ -1,3 +1,4 @@
+import AsyncHTTPClient
 import Foundation
 import JSONSchema
 
@@ -393,7 +394,7 @@ public struct OpenAILanguageModel: LanguageModel {
     /// The API variant to use.
     public let apiVariant: APIVariant
 
-    private let urlSession: URLSession
+    private let httpClient: HTTPClient
 
     /// Creates an OpenAI language model.
     ///
@@ -402,13 +403,13 @@ public struct OpenAILanguageModel: LanguageModel {
     ///   - apiKey: Your OpenAI API key or a closure that returns it.
     ///   - model: The model identifier (for example, "gpt-4" or "gpt-3.5-turbo").
     ///   - apiVariant: The API variant to use. Defaults to `.chatCompletions`.
-    ///   - session: The URL session to use for network requests.
+    ///   - session: The HTTP client to use for network requests. If nil, uses HTTPClient.shared.
     public init(
         baseURL: URL = defaultBaseURL,
         apiKey tokenProvider: @escaping @autoclosure @Sendable () -> String,
         model: String,
         apiVariant: APIVariant = .chatCompletions,
-        session: URLSession = URLSession(configuration: .default)
+        session: HTTPClient? = nil
     ) {
         var baseURL = baseURL
         if !baseURL.path.hasSuffix("/") {
@@ -419,7 +420,7 @@ public struct OpenAILanguageModel: LanguageModel {
         self.tokenProvider = tokenProvider
         self.model = model
         self.apiVariant = apiVariant
-        self.urlSession = session
+        self.httpClient = session ?? HTTPClient.shared
     }
 
     public func respond<Content>(
@@ -485,7 +486,7 @@ public struct OpenAILanguageModel: LanguageModel {
 
             let url = baseURL.appendingPathComponent("chat/completions")
             let body = try JSONEncoder().encode(params)
-            let resp: ChatCompletions.Response = try await urlSession.fetch(
+            let resp: ChatCompletions.Response = try await httpClient.fetch(
                 .post,
                 url: url,
                 headers: [
@@ -593,7 +594,7 @@ public struct OpenAILanguageModel: LanguageModel {
 
             let encoder = JSONEncoder()
             let body = try encoder.encode(params)
-            let resp: Responses.Response = try await urlSession.fetch(
+            let resp: Responses.Response = try await httpClient.fetch(
                 .post,
                 url: url,
                 headers: [
@@ -704,7 +705,7 @@ public struct OpenAILanguageModel: LanguageModel {
                             let body = try JSONEncoder().encode(params)
 
                             let events: AsyncThrowingStream<OpenAIResponsesServerEvent, any Error> =
-                                urlSession.fetchEventStream(
+                                httpClient.fetchEventStream(
                                     .post,
                                     url: url,
                                     headers: [
@@ -788,7 +789,7 @@ public struct OpenAILanguageModel: LanguageModel {
                             let body = try JSONEncoder().encode(params)
 
                             let events: AsyncThrowingStream<OpenAIChatCompletionsChunk, any Error> =
-                                urlSession.fetchEventStream(
+                                httpClient.fetchEventStream(
                                     .post,
                                     url: url,
                                     headers: [

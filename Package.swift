@@ -43,6 +43,7 @@ let package = Package(
             name: "AnyLanguageModel",
             dependencies: [
                 .target(name: "AnyLanguageModelMacros"),
+                .product(name: "AsyncHTTPClient", package: "async-http-client"),
                 .product(name: "EventSource", package: "EventSource"),
                 .product(name: "JSONSchema", package: "JSONSchema"),
                 .product(name: "PartialJSONDecoder", package: "PartialJSONDecoder"),

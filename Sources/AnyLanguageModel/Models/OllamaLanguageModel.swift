@@ -1,3 +1,4 @@
+import AsyncHTTPClient
 import Foundation
 import JSONSchema
 import OrderedCollections
@@ -46,18 +47,18 @@ public struct OllamaLanguageModel: LanguageModel {
     /// The model identifier to use for generation.
     public let model: String
 
-    private let urlSession: URLSession
+    private let httpClient: HTTPClient
 
     /// Creates an Ollama language model.
     ///
     /// - Parameters:
     ///   - baseURL: The base URL for the Ollama server. Defaults to `http://localhost:11434`.
     ///   - model: The model identifier (for example, "qwen2.5" or "llama3.3").
-    ///   - session: The URL session to use for network requests.
+    ///   - session: The HTTP client to use for network requests. If nil, uses HTTPClient.shared.
     public init(
         baseURL: URL = defaultBaseURL,
         model: String,
-        session: URLSession = URLSession(configuration: .default)
+        session: HTTPClient? = nil
     ) {
         var baseURL = baseURL
         if !baseURL.path.hasSuffix("/") {
@@ -66,7 +67,7 @@ public struct OllamaLanguageModel: LanguageModel {
 
         self.baseURL = baseURL
         self.model = model
-        self.urlSession = session
+        self.httpClient = session ?? HTTPClient.shared
     }
 
     public func respond<Content>(
@@ -105,7 +106,7 @@ public struct OllamaLanguageModel: LanguageModel {
 
         let url = baseURL.appendingPathComponent("api/chat")
         let body = try JSONEncoder().encode(params)
-        let chatResponse: ChatResponse = try await urlSession.fetch(
+        let chatResponse: ChatResponse = try await httpClient.fetch(
             .post,
             url: url,
             body: body,
@@ -199,7 +200,7 @@ public struct OllamaLanguageModel: LanguageModel {
                         // Reuse ChatResponse as each streamed line shares the same shape
                         do {
                             let chunks =
-                                urlSession.fetchStream(
+                                httpClient.fetchStream(
                                     .post,
                                     url: url,
                                     body: body,
