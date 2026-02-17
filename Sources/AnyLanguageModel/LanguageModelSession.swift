@@ -5,12 +5,12 @@ import Observation
 public final class LanguageModelSession: @unchecked Sendable {
     public var isResponding: Bool {
         access(keyPath: \.isResponding)
-        return state.access { $0.isResponding }
+        return state.withLock { $0.isResponding }
     }
 
     public var transcript: Transcript {
         access(keyPath: \.transcript)
-        return state.access { $0.transcript }
+        return state.withLock { $0.transcript }
     }
 
     @ObservationIgnored private let state: Locked<State>
@@ -103,13 +103,13 @@ public final class LanguageModelSession: @unchecked Sendable {
 
     nonisolated private func beginResponding() {
         withMutation(keyPath: \.isResponding) {
-            state.access { $0.beginResponding() }
+            state.withLock { $0.beginResponding() }
         }
     }
 
     nonisolated private func endResponding() {
         withMutation(keyPath: \.isResponding) {
-            state.access { $0.endResponding() }
+            state.withLock { $0.endResponding() }
         }
     }
 
@@ -159,7 +159,7 @@ public final class LanguageModelSession: @unchecked Sendable {
                             )
                         )
                         session.withMutation(keyPath: \.transcript) {
-                            session.state.access { $0.transcript.append(responseEntry) }
+                            session.state.withLock { $0.transcript.append(responseEntry) }
                         }
                     }
                 } catch {
@@ -209,7 +209,7 @@ public final class LanguageModelSession: @unchecked Sendable {
                 )
             )
             withMutation(keyPath: \.transcript) {
-                state.access { $0.transcript.append(promptEntry) }
+                state.withLock { $0.transcript.append(promptEntry) }
             }
 
             let response = try await model.respond(
@@ -237,7 +237,7 @@ public final class LanguageModelSession: @unchecked Sendable {
 
             // Add tool entries and response to transcript
             withMutation(keyPath: \.transcript) {
-                state.access { state in
+                state.withLock { state in
                     state.transcript.append(contentsOf: response.transcriptEntries)
                     state.transcript.append(responseEntry)
                 }
@@ -262,7 +262,7 @@ public final class LanguageModelSession: @unchecked Sendable {
             )
         )
         withMutation(keyPath: \.transcript) {
-            state.access { $0.transcript.append(promptEntry) }
+            state.withLock { $0.transcript.append(promptEntry) }
         }
 
         return wrapStream(
@@ -558,7 +558,7 @@ extension LanguageModelSession {
                 )
             )
             withMutation(keyPath: \.transcript) {
-                state.access { $0.transcript.append(promptEntry) }
+                state.withLock { $0.transcript.append(promptEntry) }
             }
 
             // Extract text content for the Prompt parameter
@@ -589,7 +589,7 @@ extension LanguageModelSession {
 
             // Add tool entries and response to transcript
             withMutation(keyPath: \.transcript) {
-                state.access { state in
+                state.withLock { state in
                     state.transcript.append(contentsOf: response.transcriptEntries)
                     state.transcript.append(responseEntry)
                 }
@@ -664,7 +664,7 @@ extension LanguageModelSession {
             )
         )
         withMutation(keyPath: \.transcript) {
-            state.access { $0.transcript.append(promptEntry) }
+            state.withLock { $0.transcript.append(promptEntry) }
         }
 
         // Extract text content for the Prompt parameter

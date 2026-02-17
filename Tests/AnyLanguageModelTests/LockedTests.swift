@@ -3,32 +3,32 @@ import Testing
 
 @testable import AnyLanguageModel
 
-@Suite("Locked")
+@Suite("Locked Tests")
 struct LockedTests {
     @Test("Read access returns the initial value")
     func readAccess() {
         let locked = Locked(42)
-        let value = locked.access { $0 }
+        let value = locked.withLock { $0 }
         #expect(value == 42)
     }
 
     @Test("Write access mutates the state")
     func writeAccess() {
         let locked = Locked(0)
-        locked.access { $0 = 99 }
-        let value = locked.access { $0 }
+        locked.withLock { $0 = 99 }
+        let value = locked.withLock { $0 }
         #expect(value == 99)
     }
 
     @Test("Access returns the value from the closure")
     func returnValue() {
         let locked = Locked("hello")
-        let result = locked.access { state -> Int in
+        let result = locked.withLock { state -> Int in
             state += " world"
             return state.count
         }
         #expect(result == 11)
-        #expect(locked.access { $0 } == "hello world")
+        #expect(locked.withLock { $0 } == "hello world")
     }
 
     @Test("Access propagates thrown errors")
@@ -37,7 +37,7 @@ struct LockedTests {
 
         let locked = Locked(0)
         #expect(throws: TestError.self) {
-            try locked.access { _ in throw TestError() }
+            try locked.withLock { _ in throw TestError() }
         }
     }
 
@@ -50,14 +50,14 @@ struct LockedTests {
         }
 
         let locked = Locked(State(name: "initial", count: 0, tags: []))
-        locked.access { state in
+        locked.withLock { state in
             state.name = "updated"
             state.count = 5
             state.tags.append("a")
             state.tags.append("b")
         }
 
-        let snapshot = locked.access { $0 }
+        let snapshot = locked.withLock { $0 }
         #expect(snapshot.name == "updated")
         #expect(snapshot.count == 5)
         #expect(snapshot.tags == ["a", "b"])
@@ -70,11 +70,11 @@ struct LockedTests {
 
         await withTaskGroup(of: Void.self) { group in
             for _ in 0 ..< iterations {
-                group.addTask { locked.access { $0 += 1 } }
+                group.addTask { locked.withLock { $0 += 1 } }
             }
         }
 
-        let finalValue = locked.access { $0 }
+        let finalValue = locked.withLock { $0 }
         #expect(finalValue == iterations)
     }
 
@@ -87,12 +87,12 @@ struct LockedTests {
             for i in 0 ..< iterations {
                 let priority: TaskPriority = i.isMultiple(of: 2) ? .high : .background
                 group.addTask(priority: priority) {
-                    locked.access { $0 += 1 }
+                    locked.withLock { $0 += 1 }
                 }
             }
         }
 
-        let finalValue = locked.access { $0 }
+        let finalValue = locked.withLock { $0 }
         #expect(finalValue == iterations)
     }
 
@@ -103,11 +103,11 @@ struct LockedTests {
 
         await withTaskGroup(of: Void.self) { group in
             for i in 0 ..< iterations {
-                group.addTask { locked.access { $0.append(i) } }
+                group.addTask { locked.withLock { $0.append(i) } }
             }
         }
 
-        let finalArray = locked.access { $0 }
+        let finalArray = locked.withLock { $0 }
         #expect(finalArray.count == iterations)
     }
 
@@ -119,13 +119,13 @@ struct LockedTests {
 
         await withTaskGroup(of: Void.self) { group in
             for _ in 0 ..< iterations {
-                group.addTask { lockedA.access { $0 += 1 } }
-                group.addTask { lockedB.access { $0 += 1 } }
+                group.addTask { lockedA.withLock { $0 += 1 } }
+                group.addTask { lockedB.withLock { $0 += 1 } }
             }
         }
 
-        #expect(lockedA.access { $0 } == iterations)
-        #expect(lockedB.access { $0 } == iterations)
+        #expect(lockedA.withLock { $0 } == iterations)
+        #expect(lockedB.withLock { $0 } == iterations)
     }
 
     @Test("Can wrap a non-Sendable type")
@@ -136,8 +136,8 @@ struct LockedTests {
         }
 
         let locked = Locked(Box(10))
-        locked.access { $0.value += 5 }
-        let result = locked.access { $0.value }
+        locked.withLock { $0.value += 5 }
+        let result = locked.withLock { $0.value }
         #expect(result == 15)
     }
 
@@ -145,8 +145,8 @@ struct LockedTests {
     func copySharesStorage() {
         let original = Locked(0)
         let copy = original
-        original.access { $0 = 42 }
-        let value = copy.access { $0 }
+        original.withLock { $0 = 42 }
+        let value = copy.withLock { $0 }
         #expect(value == 42)
     }
 }

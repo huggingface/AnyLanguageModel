@@ -13,11 +13,11 @@ struct ObservationTests {
         withObservationTracking {
             _ = session.transcript
         } onChange: {
-            changed.access { $0 = true }
+            changed.withLock { $0 = true }
         }
 
         try await session.respond(to: "Hi")
-        #expect(changed.access { $0 } == true)
+        #expect(changed.withLock { $0 } == true)
     }
 
     @Test("Tracking transcript fires onChange when streamResponse mutates it")
@@ -28,14 +28,14 @@ struct ObservationTests {
         withObservationTracking {
             _ = session.transcript
         } onChange: {
-            changed.access { $0 = true }
+            changed.withLock { $0 = true }
         }
 
         let stream = session.streamResponse(to: "Hi")
         for try await _ in stream {}
         try await Task.sleep(for: .milliseconds(10))
 
-        #expect(changed.access { $0 } == true)
+        #expect(changed.withLock { $0 } == true)
     }
 
     @Test("Tracking isResponding fires onChange when respond mutates it")
@@ -46,11 +46,11 @@ struct ObservationTests {
         withObservationTracking {
             _ = session.isResponding
         } onChange: {
-            changed.access { $0 = true }
+            changed.withLock { $0 = true }
         }
 
         try await session.respond(to: "Hi")
-        #expect(changed.access { $0 } == true)
+        #expect(changed.withLock { $0 } == true)
     }
 
     @Test("No onChange fires when no properties are tracked")
@@ -61,11 +61,11 @@ struct ObservationTests {
         withObservationTracking {
             // Intentionally do not read any session properties
         } onChange: {
-            changed.access { $0 = true }
+            changed.withLock { $0 = true }
         }
 
         try await session.respond(to: "Hi")
-        #expect(changed.access { $0 } == false)
+        #expect(changed.withLock { $0 } == false)
     }
 
     @Test("Re-registering observation tracks subsequent changes")
@@ -76,20 +76,20 @@ struct ObservationTests {
         withObservationTracking {
             _ = session.transcript
         } onChange: {
-            changeCount.access { $0 += 1 }
+            changeCount.withLock { $0 += 1 }
         }
 
         try await session.respond(to: "First")
-        #expect(changeCount.access { $0 } == 1)
+        #expect(changeCount.withLock { $0 } == 1)
 
         // Re-register after the first change fires
         withObservationTracking {
             _ = session.transcript
         } onChange: {
-            changeCount.access { $0 += 1 }
+            changeCount.withLock { $0 += 1 }
         }
 
         try await session.respond(to: "Second")
-        #expect(changeCount.access { $0 } == 2)
+        #expect(changeCount.withLock { $0 } == 2)
     }
 }
