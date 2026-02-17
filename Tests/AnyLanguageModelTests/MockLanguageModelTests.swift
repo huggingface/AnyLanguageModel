@@ -2,6 +2,22 @@ import Testing
 
 @testable import AnyLanguageModel
 
+private struct ToolSchemaOptOutTool: Tool {
+    let name = "schemaOptOutTool"
+    let description = "A tool that opts out of schema injection."
+    let includesSchemaInInstructions = false
+
+    @Generable
+    struct Arguments {
+        @Guide(description: "A value to echo")
+        var value: String
+    }
+
+    func call(arguments: Arguments) async throws -> String {
+        arguments.value
+    }
+}
+
 @Suite("MockLanguageModel")
 struct MockLanguageModelTests {
     @Test func fixedResponse() async throws {
@@ -67,6 +83,92 @@ struct MockLanguageModelTests {
             // Verify transcript has instructions, prompt, and response
             #expect(session.transcript.count == 3)
         }
+    }
+
+    @Test func instructionsOnlyIncludeToolsThatOptInToSchemaInjection() {
+        let model = MockLanguageModel.fixed("ok")
+        let tools: [any Tool] = [WeatherTool(), ToolSchemaOptOutTool()]
+        let session = LanguageModelSession(
+            model: model,
+            tools: tools,
+            instructions: "Use tools when appropriate."
+        )
+
+        #expect(session.transcript.count == 1)
+        guard case let .instructions(instructionsEntry) = session.transcript[0] else {
+            Issue.record("First entry should be instructions")
+            return
+        }
+
+        #expect(instructionsEntry.toolDefinitions.count == 1)
+        #expect(instructionsEntry.toolDefinitions.first?.name == "getWeather")
+    }
+
+    @Test func transcriptAndInstructionsInitHaveEquivalentToolDefinitionBehavior() {
+        let model = MockLanguageModel.fixed("ok")
+        let tools: [any Tool] = [WeatherTool(), ToolSchemaOptOutTool()]
+        let expectedToolDefinitions =
+            tools
+            .filter(\.includesSchemaInInstructions)
+            .map { Transcript.ToolDefinition(tool: $0) }
+
+        let instructionsSession = LanguageModelSession(
+            model: model,
+            tools: tools,
+            instructions: "Use tools when appropriate."
+        )
+
+        let explicitTranscript = Transcript(entries: [
+            .instructions(
+                Transcript.Instructions(
+                    segments: [.text(.init(content: "Use tools when appropriate."))],
+                    toolDefinitions: expectedToolDefinitions
+                )
+            )
+        ])
+        let transcriptSession = LanguageModelSession(
+            model: model,
+            tools: tools,
+            transcript: explicitTranscript
+        )
+
+        guard case let .instructions(instructionsEntry) = instructionsSession.transcript[0] else {
+            Issue.record("First instructions-based entry should be instructions")
+            return
+        }
+        guard case let .instructions(transcriptEntry) = transcriptSession.transcript[0] else {
+            Issue.record("First transcript-based entry should be instructions")
+            return
+        }
+
+        #expect(instructionsEntry.toolDefinitions == transcriptEntry.toolDefinitions)
+    }
+
+    @Test func explicitTranscriptInstructionsArePreservedWhenToolsOptOut() {
+        let model = MockLanguageModel.fixed("ok")
+        let tools: [any Tool] = [WeatherTool(), ToolSchemaOptOutTool()]
+        let explicitToolDefinitions = tools.map { Transcript.ToolDefinition(tool: $0) }
+        let transcript = Transcript(entries: [
+            .instructions(
+                Transcript.Instructions(
+                    segments: [.text(.init(content: "Custom instructions."))],
+                    toolDefinitions: explicitToolDefinitions
+                )
+            )
+        ])
+
+        let session = LanguageModelSession(
+            model: model,
+            tools: tools,
+            transcript: transcript
+        )
+
+        guard case let .instructions(entry) = session.transcript[0] else {
+            Issue.record("First entry should be instructions")
+            return
+        }
+
+        #expect(entry.toolDefinitions == explicitToolDefinitions)
     }
 
     @Test func unavailable() async throws {
