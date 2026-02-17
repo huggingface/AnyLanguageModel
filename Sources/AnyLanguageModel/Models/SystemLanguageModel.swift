@@ -78,7 +78,12 @@
             let fmSession = FoundationModels.LanguageModelSession(
                 model: systemModel,
                 tools: session.tools.toFoundationModels(),
-                transcript: session.transcript.toFoundationModels(instructions: session.instructions)
+                transcript: session.transcript.toFoundationModels(
+                    instructions: session.instructions,
+                    toolDefinitions: session.tools
+                        .filter(\.includesSchemaInInstructions)
+                        .map { Transcript.ToolDefinition(tool: $0) }
+                )
             )
 
             if type == String.self {
@@ -154,7 +159,12 @@
             let fmSession = FoundationModels.LanguageModelSession(
                 model: systemModel,
                 tools: session.tools.toFoundationModels(),
-                transcript: session.transcript.toFoundationModels(instructions: session.instructions)
+                transcript: session.transcript.toFoundationModels(
+                    instructions: session.instructions,
+                    toolDefinitions: session.tools
+                        .filter(\.includesSchemaInInstructions)
+                        .map { Transcript.ToolDefinition(tool: $0) }
+                )
             )
 
             let stream: AsyncThrowingStream<LanguageModelSession.ResponseStream<Content>.Snapshot, Error> =

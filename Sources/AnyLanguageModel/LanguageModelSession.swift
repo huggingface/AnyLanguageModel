@@ -77,7 +77,10 @@ public final class LanguageModelSession: @unchecked Sendable {
                 let instructionsEntry = Transcript.Entry.instructions(
                     Transcript.Instructions(
                         segments: [.text(.init(content: instructions.description))],
-                        toolDefinitions: tools.map { Transcript.ToolDefinition(tool: $0) }
+                        toolDefinitions:
+                            tools
+                            .filter(\.includesSchemaInInstructions)
+                            .map { Transcript.ToolDefinition(tool: $0) }
                     )
                 )
                 finalTranscript.append(instructionsEntry)
