@@ -58,6 +58,8 @@ private struct ThrowingTool: Tool {
 
 private enum ThrowingToolError: Error, Equatable { case testError }
 
+private struct DefaultToolExecutionDelegate: ToolExecutionDelegate {}
+
 private struct ToolCallingTestModel: LanguageModel {
     typealias UnavailableReason = Never
 
@@ -194,6 +196,66 @@ private struct ToolCallingTestModel: LanguageModel {
 
 @Suite("ToolExecutionDelegate")
 struct ToolExecutionDelegateTests {
+    @Test func defaultDelegateUsesExecuteDecisionAndNoOpCallbacks() async throws {
+        let arguments = try GeneratedContent(json: #"{"city":"Cupertino"}"#)
+        let toolCall = Transcript.ToolCall(id: "call-default", toolName: WeatherTool().name, arguments: arguments)
+        let toolSpy = spy(on: WeatherTool())
+        let session = LanguageModelSession(
+            model: ToolCallingTestModel(toolCalls: [toolCall]),
+            tools: [toolSpy]
+        )
+        session.toolExecutionDelegate = DefaultToolExecutionDelegate()
+
+        let response = try await session.respond(to: "Hi")
+        let calls = await toolSpy.calls
+
+        #expect(calls.count == 1)
+        #expect(
+            response.transcriptEntries.contains { entry in
+                if case .toolOutput = entry { return true }
+                return false
+            }
+        )
+    }
+
+    @Test func defaultDelegateNoOpFailureCallbackDoesNotInterfereWithErrorPropagation() async throws {
+        let arguments = try GeneratedContent(json: #"{"message":"fail"}"#)
+        let toolCall = Transcript.ToolCall(id: "call-default-fail", toolName: ThrowingTool().name, arguments: arguments)
+        let session = LanguageModelSession(
+            model: ToolCallingTestModel(toolCalls: [toolCall]),
+            tools: [ThrowingTool()]
+        )
+        session.toolExecutionDelegate = DefaultToolExecutionDelegate()
+
+        await #expect(throws: LanguageModelSession.ToolCallError.self) {
+            _ = try await session.respond(to: "Hi")
+        }
+    }
+
+    @Test func toolExecutionDecisionCasesCanBeConstructed() {
+        let execute = ToolExecutionDecision.execute
+        let stop = ToolExecutionDecision.stop
+        let provide = ToolExecutionDecision.provideOutput([.text(.init(content: "stub"))])
+
+        if case .execute = execute {
+            #expect(Bool(true))
+        } else {
+            Issue.record("Expected .execute")
+        }
+
+        if case .stop = stop {
+            #expect(Bool(true))
+        } else {
+            Issue.record("Expected .stop")
+        }
+
+        if case .provideOutput(let segments) = provide {
+            #expect(segments.count == 1)
+        } else {
+            Issue.record("Expected .provideOutput")
+        }
+    }
+
     @Test func stopAfterToolCalls() async throws {
         let arguments = try GeneratedContent(json: #"{"city":"Cupertino"}"#)
         let toolCall = Transcript.ToolCall(id: "call-1", toolName: WeatherTool().name, arguments: arguments)
