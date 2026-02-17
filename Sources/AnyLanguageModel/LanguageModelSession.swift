@@ -237,9 +237,9 @@ public final class LanguageModelSession: @unchecked Sendable {
 
             // Add tool entries and response to transcript
             withMutation(keyPath: \.transcript) {
-                state.withLock { state in
-                    state.transcript.append(contentsOf: response.transcriptEntries)
-                    state.transcript.append(responseEntry)
+                state.withLock { lockedState in
+                    lockedState.transcript.append(contentsOf: response.transcriptEntries)
+                    lockedState.transcript.append(responseEntry)
                 }
             }
 
@@ -589,9 +589,9 @@ extension LanguageModelSession {
 
             // Add tool entries and response to transcript
             withMutation(keyPath: \.transcript) {
-                state.withLock { state in
-                    state.transcript.append(contentsOf: response.transcriptEntries)
-                    state.transcript.append(responseEntry)
+                state.withLock { lockedState in
+                    lockedState.transcript.append(contentsOf: response.transcriptEntries)
+                    lockedState.transcript.append(responseEntry)
                 }
             }
 
