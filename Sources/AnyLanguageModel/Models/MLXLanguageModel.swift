@@ -101,17 +101,17 @@ import Foundation
         }
 
         private func removeInFlight(for key: String) -> Task<CachedContext, Error>? {
-            inFlight.withLock { inFlight in
-                let task = inFlight[key]
-                inFlight[key] = nil
+            inFlight.withLock {
+                let task = $0[key]
+                $0[key] = nil
                 return task
             }
         }
 
         private func removeAllInFlight() -> [Task<CachedContext, Error>] {
-            inFlight.withLock { inFlight in
-                let tasks = Array(inFlight.values)
-                inFlight.removeAll()
+            inFlight.withLock {
+                let tasks = Array($0.values)
+                $0.removeAll()
                 return tasks
             }
         }
