@@ -27,8 +27,7 @@ import Foundation
     /// Coordinates a bounded in-memory cache with structured, coalesced loading.
     private final class ModelContextCache {
         private let cache: NSCache<NSString, CachedContext>
-        private let lock = NSLock()
-        private var inFlight: [String: Task<CachedContext, Error>] = [:]
+        private let inFlight = Locked<[String: Task<CachedContext, Error>]>([:])
 
         /// Creates a cache with a count-based eviction limit.
         init(countLimit: Int) {
@@ -90,37 +89,31 @@ import Foundation
         }
 
         private func inFlightTask(for key: String) -> Task<CachedContext, Error>? {
-            lock.lock()
-            defer { lock.unlock() }
-            return inFlight[key]
+            inFlight.withLock { $0[key] }
         }
 
         private func setInFlight(_ task: Task<CachedContext, Error>, for key: String) {
-            lock.lock()
-            inFlight[key] = task
-            lock.unlock()
+            inFlight.withLock { $0[key] = task }
         }
 
         private func clearInFlight(for key: String) {
-            lock.lock()
-            inFlight[key] = nil
-            lock.unlock()
+            inFlight.withLock { $0[key] = nil }
         }
 
         private func removeInFlight(for key: String) -> Task<CachedContext, Error>? {
-            lock.lock()
-            defer { lock.unlock() }
-            let task = inFlight[key]
-            inFlight[key] = nil
-            return task
+            inFlight.withLock { inFlight in
+                let task = inFlight[key]
+                inFlight[key] = nil
+                return task
+            }
         }
 
         private func removeAllInFlight() -> [Task<CachedContext, Error>] {
-            lock.lock()
-            defer { lock.unlock() }
-            let tasks = Array(inFlight.values)
-            inFlight.removeAll()
-            return tasks
+            inFlight.withLock { inFlight in
+                let tasks = Array(inFlight.values)
+                inFlight.removeAll()
+                return tasks
+            }
         }
     }
 
