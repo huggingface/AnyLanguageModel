@@ -652,8 +652,10 @@
 
     @available(macOS 26.0, iOS 26.0, watchOS 26.0, tvOS 26.0, visionOS 26.0, *)
     extension Transcript {
-        fileprivate func toFoundationModels(instructions: AnyLanguageModel.Instructions?) -> FoundationModels.Transcript
-        {
+        fileprivate func toFoundationModels(
+            instructions: AnyLanguageModel.Instructions?,
+            toolDefinitions: [Transcript.ToolDefinition]
+        ) -> FoundationModels.Transcript {
             var fmEntries: [FoundationModels.Transcript.Entry] = []
 
             // Add instructions entry if provided and not already in transcript
@@ -666,7 +668,7 @@
                 if !hasInstructions {
                     let fmInstructions = FoundationModels.Transcript.Instructions(
                         segments: [.text(.init(content: instructions.description))],
-                        toolDefinitions: []
+                        toolDefinitions: toolDefinitions.toFoundationModels()
                     )
                     fmEntries.append(.instructions(fmInstructions))
                 }
