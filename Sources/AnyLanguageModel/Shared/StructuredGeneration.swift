@@ -45,19 +45,14 @@ private final class StringTokenCache: @unchecked Sendable {
         let sampleTexts: [String]
     }
 
-    private var cache: [Key: Set<Int>] = [:]
-    private let lock = NSLock()
+    private let tokensByKey = Locked<[Key: Set<Int>]>([:])
 
     func tokens(for key: Key) -> Set<Int>? {
-        lock.lock()
-        defer { lock.unlock() }
-        return cache[key]
+        tokensByKey.withLock { $0[key] }
     }
 
     func store(_ tokens: Set<Int>, for key: Key) {
-        lock.lock()
-        cache[key] = tokens
-        lock.unlock()
+        tokensByKey.withLock { $0[key] = tokens }
     }
 }
 
