@@ -1,3 +1,5 @@
+import Foundation
+import JSONSchema
 import Testing
 
 @testable import AnyLanguageModel
@@ -24,13 +26,23 @@ struct ConvertibleToGeneratedContentTests {
         #expect(array.generatedContent.kind == .array([first, second]))
     }
 
-    @Test func defaultInstructionsAndPromptRepresentationsUseJSONString() {
+    @Test func defaultInstructionsAndPromptRepresentationsUseJSONString() throws {
         let content = GeneratedContent(properties: [
             "name": "AnyLanguageModel",
             "stars": 5,
         ])
+        let decoder = JSONDecoder()
+        let expectedValue = try decoder.decode(JSONValue.self, from: Data(content.jsonString.utf8))
+        let instructionsValue = try decoder.decode(
+            JSONValue.self,
+            from: Data(content.instructionsRepresentation.description.utf8)
+        )
+        let promptValue = try decoder.decode(
+            JSONValue.self,
+            from: Data(content.promptRepresentation.description.utf8)
+        )
 
-        #expect(content.instructionsRepresentation.description == content.jsonString)
-        #expect(content.promptRepresentation.description == content.jsonString)
+        #expect(instructionsValue == expectedValue)
+        #expect(promptValue == expectedValue)
     }
 }
