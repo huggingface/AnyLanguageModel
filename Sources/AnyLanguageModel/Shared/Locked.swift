@@ -1,9 +1,11 @@
 import Foundation
 
+/// Protects shared mutable state behind an `NSLock`.
 final class Locked<State> {
     private let lock = NSLock()
     private var state: State
 
+    /// Creates a locked container with the given initial state.
     init(_ state: State) {
         self.state = state
     }
