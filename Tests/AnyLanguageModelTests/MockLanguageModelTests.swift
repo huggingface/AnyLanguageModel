@@ -18,6 +18,21 @@ private struct ToolSchemaOptOutTool: Tool {
     }
 }
 
+private func waitUntil(
+    timeout: Duration = .milliseconds(500),
+    pollInterval: Duration = .milliseconds(5),
+    _ condition: @autoclosure () -> Bool
+) async throws -> Bool {
+    let deadline = ContinuousClock.now + timeout
+    while !condition() {
+        if ContinuousClock.now >= deadline {
+            return false
+        }
+        try await Task.sleep(for: pollInterval)
+    }
+    return true
+}
+
 @Suite("MockLanguageModel")
 struct MockLanguageModelTests {
     @Test func fixedResponse() async throws {
@@ -193,8 +208,7 @@ struct MockLanguageModelTests {
             try await asyncSession.respond(to: "Async test")
         }
 
-        try await Task.sleep(for: .milliseconds(50))
-        #expect(asyncSession.isResponding == true)
+        #expect(try await waitUntil(asyncSession.isResponding == true))
 
         _ = try await asyncTask.value
         try await Task.sleep(for: .milliseconds(10))
@@ -214,8 +228,7 @@ struct MockLanguageModelTests {
             for try await _ in stream {}
         }
 
-        try await Task.sleep(for: .milliseconds(50))
-        #expect(streamSession.isResponding == true)
+        #expect(try await waitUntil(streamSession.isResponding == true))
 
         _ = try await streamTask.value
         try await Task.sleep(for: .milliseconds(10))
