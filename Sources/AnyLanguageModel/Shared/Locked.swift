@@ -15,7 +15,7 @@ final class Locked<State> {
     /// - Parameter body: A closure that reads or mutates the protected state.
     /// - Returns: The value returned by `body`.
     /// - Throws: Rethrows any error from `body`.
-    /// - Important: Do not call async code or suspend inside `body`.
+    /// - Note: Keep critical sections small and synchronous.
     func withLock<T>(_ body: (inout State) throws -> T) rethrows -> T {
         try lock.withLock { try body(&self.state) }
     }
