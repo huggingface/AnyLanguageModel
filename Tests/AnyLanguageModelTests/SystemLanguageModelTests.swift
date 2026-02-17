@@ -195,21 +195,8 @@ import Testing
 
             let numbers = (0 ..< 3).map { _ in Int.random(in: 1 ... 100) }
             let payload = numbers.map(String.init).joined(separator: ", ")
-            let firstResponse = try await session.respond(
-                to: "Remember these numbers: \(payload). Reply with just the numbers."
-            )
-            #expect(!firstResponse.content.isEmpty)
-
-            let secondResponse = try await session.respond(
-                to: "What numbers did I ask you to remember? Reply with just the numbers."
-            )
-            let repliedNumbers = secondResponse.content
-                .split { !$0.isNumber }
-                .compactMap { Int($0) }
-            if Set(repliedNumbers) != Set(numbers) {
-                // Guardrails can refuse to repeat exact values
-                // Verify the prompt was stored instead.
-                let promptText = session.transcript.compactMap { entry -> String? in
+            let promptText: () -> String = {
+                session.transcript.compactMap { entry -> String? in
                     guard case let .prompt(prompt) = entry else {
                         return nil
                     }
@@ -222,9 +209,51 @@ import Testing
                     .joined(separator: " ")
                 }
                 .joined(separator: " ")
+            }
+            let isGuardrailViolation: (any Error) -> Bool = { error in
+                guard let generationError = error as? LanguageModelSession.GenerationError else {
+                    return false
+                }
+                if case .guardrailViolation = generationError {
+                    return true
+                }
+                return false
+            }
 
+            let firstResponse: LanguageModelSession.Response<String>
+            do {
+                firstResponse = try await session.respond(
+                    to: "Remember these numbers: \(payload). Reply with just the numbers."
+                )
+            } catch {
+                if isGuardrailViolation(error) {
+                    #expect(promptText().contains(payload))
+                    return
+                }
+                throw error
+            }
+            #expect(!firstResponse.content.isEmpty)
+
+            let secondResponse: LanguageModelSession.Response<String>
+            do {
+                secondResponse = try await session.respond(
+                    to: "What numbers did I ask you to remember? Reply with just the numbers."
+                )
+            } catch {
+                if isGuardrailViolation(error) {
+                    #expect(promptText().contains(payload))
+                    return
+                }
+                throw error
+            }
+            let repliedNumbers = secondResponse.content
+                .split { !$0.isNumber }
+                .compactMap { Int($0) }
+            if Set(repliedNumbers) != Set(numbers) {
+                // Guardrails can refuse to repeat exact values
+                // Verify the prompt was stored instead.
                 #expect(session.transcript.count >= 4)
-                #expect(promptText.contains(payload))
+                #expect(promptText().contains(payload))
             }
         }
 
