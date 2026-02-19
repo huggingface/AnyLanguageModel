@@ -132,6 +132,29 @@ dependencies: [
 ]
 ```
 
+> [!IMPORTANT]
+> Due to a [Swift Package Manager bug](https://github.com/swiftlang/swift-package-manager/issues/9286),
+> dependency resolution may fail when you enable traits,
+> producing the error "exhausted attempts to resolve the dependencies graph."
+> To work around this issue,
+> add the underlying dependencies for each trait directly to your package:
+>
+> ```swift
+> dependencies: [
+>     .package(
+>         url: "https://github.com/mattt/AnyLanguageModel.git",
+>         from: "0.7.0",
+>         traits: ["CoreML", "MLX", "Llama"]
+>     ),
+>     .package(url: "https://github.com/huggingface/swift-transformers", from: "1.0.0"), // CoreML
+>     .package(url: "https://github.com/ml-explore/mlx-swift-lm", from: "2.25.5"),       // MLX
+>     .package(url: "https://github.com/mattt/llama.swift", from: "2.0.0"),              // Llama
+> ]
+> ```
+>
+> Include only the dependencies that correspond to the traits you enable.
+> For more information, see [issue #135](https://github.com/mattt/AnyLanguageModel/issues/135).
+
 ### Using Traits in Xcode Projects
 
 Xcode doesn't yet provide a built-in way to declare package dependencies with traits.
