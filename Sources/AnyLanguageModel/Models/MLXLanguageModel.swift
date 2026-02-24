@@ -18,25 +18,28 @@ import Foundation
     import Tokenizers
     import Hub
 
-    /// Wrapper to store ModelContext in NSCache (requires NSObject subclass).
-    private final class CachedContext: NSObject, @unchecked Sendable {
-        let context: ModelContext
-        init(_ context: ModelContext) { self.context = context }
+    /// Wrapper to store model availability state in NSCache.
+    private final class CachedModelState: NSObject, @unchecked Sendable {
+        enum Value {
+            case loaded(ModelContext)
+            case failed(String)
+        }
+
+        let value: Value
+
+        init(_ value: Value) {
+            self.value = value
+        }
     }
 
     /// Coordinates a bounded in-memory cache with structured, coalesced loading.
     private final class ModelContextCache {
-        private struct LoadFailure: Sendable {
-            let description: String
-        }
-
-        private let cache: NSCache<NSString, CachedContext>
-        private let inFlight = Locked<[String: Task<CachedContext, Error>]>([:])
-        private let failures = Locked<[String: LoadFailure]>([:])
+        private let cache: NSCache<NSString, CachedModelState>
+        private let inFlight = Locked<[String: Task<CachedModelState, Error>]>([:])
 
         /// Creates a cache with a count-based eviction limit.
         init(countLimit: Int) {
-            let cache = NSCache<NSString, CachedContext>()
+            let cache = NSCache<NSString, CachedModelState>()
             cache.countLimit = countLimit
             self.cache = cache
         }
@@ -47,25 +50,45 @@ import Foundation
             loader: @escaping @Sendable () async throws -> ModelContext
         ) async throws -> ModelContext {
             let cacheKey = key as NSString
-            if let cached = cache.object(forKey: cacheKey) {
-                return cached.context
+            if let cached = cache.object(forKey: cacheKey),
+                case .loaded(let context) = cached.value
+            {
+                return context
             }
 
             if let task = inFlightTask(for: key) {
-                return try await task.value.context
+                let cached = try await task.value
+                if case .loaded(let context) = cached.value {
+                    return context
+                }
+                throw CancellationError()
             }
 
-            let task = Task { try await CachedContext(loader()) }
+            let task = Task {
+                let context = try await loader()
+                return CachedModelState(.loaded(context))
+            }
             setInFlight(task, for: key)
 
             do {
                 let cached = try await task.value
                 cache.setObject(cached, forKey: cacheKey)
-                clearFailure(for: key)
                 clearInFlight(for: key)
-                return cached.context
+                if case .loaded(let context) = cached.value {
+                    return context
+                }
+                throw CancellationError()
             } catch {
-                setFailure(for: key, error: error)
+                // Don't treat cancellations as load failures.
+                if error is CancellationError || Task.isCancelled {
+                    cache.removeObject(forKey: cacheKey)
+                    clearInFlight(for: key)
+                    throw error
+                }
+                cache.setObject(
+                    CachedModelState(.failed(String(reflecting: error))),
+                    forKey: cacheKey
+                )
                 clearInFlight(for: key)
                 throw error
             }
@@ -74,23 +97,33 @@ import Foundation
         /// Removes a cached context for the key.
         func remove(for key: String) {
             cache.removeObject(forKey: key as NSString)
-            clearFailure(for: key)
         }
 
         /// Clears all cached contexts.
         func removeAll() {
             cache.removeAllObjects()
-            clearAllFailures()
         }
 
         /// Returns whether a cached context exists for the key.
         func contains(_ key: String) -> Bool {
-            cache.object(forKey: key as NSString) != nil
+            guard let cached = cache.object(forKey: key as NSString) else {
+                return false
+            }
+            if case .loaded = cached.value {
+                return true
+            }
+            return false
         }
 
         /// Returns a description of the most recent load failure for the key.
         func failureDescription(for key: String) -> String? {
-            failures.withLock { $0[key]?.description }
+            guard let cached = cache.object(forKey: key as NSString) else {
+                return nil
+            }
+            if case .failed(let description) = cached.value {
+                return description
+            }
+            return nil
         }
 
         /// Cancels in-flight work and removes cached data for the key.
@@ -98,7 +131,6 @@ import Foundation
             let task = removeInFlight(for: key)
             task?.cancel()
             cache.removeObject(forKey: key as NSString)
-            clearFailure(for: key)
         }
 
         /// Cancels all in-flight work and clears cached data.
@@ -106,14 +138,13 @@ import Foundation
             let tasks = removeAllInFlight()
             tasks.forEach { $0.cancel() }
             cache.removeAllObjects()
-            clearAllFailures()
         }
 
-        private func inFlightTask(for key: String) -> Task<CachedContext, Error>? {
+        private func inFlightTask(for key: String) -> Task<CachedModelState, Error>? {
             inFlight.withLock { $0[key] }
         }
 
-        private func setInFlight(_ task: Task<CachedContext, Error>, for key: String) {
+        private func setInFlight(_ task: Task<CachedModelState, Error>, for key: String) {
             inFlight.withLock { $0[key] = task }
         }
 
@@ -121,7 +152,7 @@ import Foundation
             inFlight.withLock { $0[key] = nil }
         }
 
-        private func removeInFlight(for key: String) -> Task<CachedContext, Error>? {
+        private func removeInFlight(for key: String) -> Task<CachedModelState, Error>? {
             inFlight.withLock {
                 let task = $0[key]
                 $0[key] = nil
@@ -129,25 +160,12 @@ import Foundation
             }
         }
 
-        private func removeAllInFlight() -> [Task<CachedContext, Error>] {
+        private func removeAllInFlight() -> [Task<CachedModelState, Error>] {
             inFlight.withLock {
                 let tasks = Array($0.values)
                 $0.removeAll()
                 return tasks
             }
-        }
-
-        private func setFailure(for key: String, error: any Error) {
-            let description = String(reflecting: error)
-            failures.withLock { $0[key] = LoadFailure(description: description) }
-        }
-
-        private func clearFailure(for key: String) {
-            failures.withLock { $0[key] = nil }
-        }
-
-        private func clearAllFailures() {
-            failures.withLock { $0.removeAll() }
         }
     }
 
