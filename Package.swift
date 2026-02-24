@@ -25,6 +25,7 @@ let package = Package(
         .trait(name: "CoreML"),
         .trait(name: "MLX"),
         .trait(name: "Llama"),
+        .trait(name: "AsyncHTTPClient"),
         .default(enabledTraits: []),
     ],
     dependencies: [
@@ -36,6 +37,7 @@ let package = Package(
         // mlx-swift-lm must be >= 2.25.5 for ToolSpec/tool calls and UserInput(chat:processing:tools:).
         .package(url: "https://github.com/ml-explore/mlx-swift-lm", from: "2.25.5"),
         .package(url: "https://github.com/swiftlang/swift-syntax", from: "600.0.0"),
+        .package(url: "https://github.com/swift-server/async-http-client.git", from: "1.24.0"),
     ],
     targets: [
         .target(
@@ -70,6 +72,11 @@ let package = Package(
                     package: "llama.swift",
                     condition: .when(traits: ["Llama"])
                 ),
+                .product(
+                    name: "AsyncHTTPClient",
+                    package: "async-http-client",
+                    condition: .when(traits: ["AsyncHTTPClient"])
+                ),
             ]
         ),
         .macro(
@@ -83,7 +90,14 @@ let package = Package(
         ),
         .testTarget(
             name: "AnyLanguageModelTests",
-            dependencies: ["AnyLanguageModel"]
+            dependencies: [
+                "AnyLanguageModel",
+                .product(
+                    name: "AsyncHTTPClient",
+                    package: "async-http-client",
+                    condition: .when(traits: ["AsyncHTTPClient"])
+                ),
+            ],
         ),
     ]
 )
