@@ -74,6 +74,11 @@ import Foundation
             cache.removeAllObjects()
         }
 
+        /// Returns whether a cached context exists for the key.
+        func contains(_ key: String) -> Bool {
+            cache.object(forKey: key as NSString) != nil
+        }
+
         /// Cancels in-flight work and removes cached data for the key.
         func removeAndCancel(for key: String) async {
             let task = removeInFlight(for: key)
@@ -132,8 +137,10 @@ import Foundation
     /// ```
     public struct MLXLanguageModel: LanguageModel {
         /// The reason the model is unavailable.
-        /// This model is always available.
-        public typealias UnavailableReason = Never
+        public enum UnavailableReason: Sendable, Equatable, Hashable {
+            /// The model has not been loaded into memory yet.
+            case notLoaded
+        }
 
         /// The model identifier.
         public let modelId: String
@@ -154,6 +161,12 @@ import Foundation
             self.modelId = modelId
             self.hub = hub
             self.directory = directory
+        }
+
+        /// The current availability of this model in memory.
+        public var availability: Availability<UnavailableReason> {
+            let key = directory?.absoluteString ?? modelId
+            return modelCache.contains(key) ? .available : .unavailable(.notLoaded)
         }
 
         /// Removes this model from the shared cache and cancels any in-flight load.
