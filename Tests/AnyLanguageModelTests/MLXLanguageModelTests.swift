@@ -35,6 +35,20 @@ import Testing
         let model = MLXLanguageModel(modelId: "mlx-community/Qwen3-0.6B-4bit")
         let visionModel = MLXLanguageModel(modelId: "mlx-community/Qwen2-VL-2B-Instruct-4bit")
 
+        @Test func availabilityBecomesAvailableAfterSuccessfulLoad() async throws {
+            await model.removeFromCache()
+
+            #expect(model.availability == .unavailable(.notLoaded))
+            #expect(model.isAvailable == false)
+
+            let session = LanguageModelSession(model: model)
+            let response = try await session.respond(to: "Say hello")
+            #expect(!response.content.isEmpty)
+
+            #expect(model.availability == .available)
+            #expect(model.isAvailable == true)
+        }
+
         @Test func basicResponse() async throws {
             let session = LanguageModelSession(model: model)
 
@@ -208,6 +222,7 @@ import Testing
 
         @Test func unavailableForNonexistentModel() async {
             let model = MLXLanguageModel(modelId: "mlx-community/does-not-exist-anylanguagemodel-test")
+            await model.removeFromCache()
             #expect(model.availability == .unavailable(.notLoaded))
             #expect(model.isAvailable == false)
 
@@ -223,21 +238,6 @@ import Testing
                 Issue.record("Expected model availability to report failedToLoad after failed request")
             }
             #expect(model.isAvailable == false)
-        }
-
-        @Test func availabilityBecomesAvailableAfterSuccessfulLoad() async throws {
-            await MLXLanguageModel.removeAllFromCache()
-
-            let model = MLXLanguageModel(modelId: "mlx-community/Granite-4.0-H-Tiny-4bit-DWQ")
-            #expect(model.availability == .unavailable(.notLoaded))
-            #expect(model.isAvailable == false)
-
-            let session = LanguageModelSession(model: model)
-            let response = try await session.respond(to: "Say hello")
-            #expect(!response.content.isEmpty)
-
-            #expect(model.availability == .available)
-            #expect(model.isAvailable == true)
         }
     }
 #endif  // MLX
