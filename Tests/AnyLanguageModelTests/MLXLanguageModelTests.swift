@@ -205,5 +205,39 @@ import Testing
             )
             #expect([Priority.low, Priority.medium, Priority.high].contains(response.content))
         }
+
+        @Test func unavailableForNonexistentModel() async {
+            let model = MLXLanguageModel(modelId: "mlx-community/does-not-exist-anylanguagemodel-test")
+            #expect(model.availability == .unavailable(.notLoaded))
+            #expect(model.isAvailable == false)
+
+            let session = LanguageModelSession(model: model)
+            await #expect(throws: Error.self) {
+                _ = try await session.respond(to: "Hello")
+            }
+
+            switch model.availability {
+            case .unavailable(.failedToLoad(let description)):
+                #expect(!description.isEmpty)
+            default:
+                Issue.record("Expected model availability to report failedToLoad after failed request")
+            }
+            #expect(model.isAvailable == false)
+        }
+
+        @Test func availabilityBecomesAvailableAfterSuccessfulLoad() async throws {
+            await MLXLanguageModel.removeAllFromCache()
+
+            let model = MLXLanguageModel(modelId: "mlx-community/Granite-4.0-H-Tiny-4bit-DWQ")
+            #expect(model.availability == .unavailable(.notLoaded))
+            #expect(model.isAvailable == false)
+
+            let session = LanguageModelSession(model: model)
+            let response = try await session.respond(to: "Say hello")
+            #expect(!response.content.isEmpty)
+
+            #expect(model.availability == .available)
+            #expect(model.isAvailable == true)
+        }
     }
 #endif  // MLX

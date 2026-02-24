@@ -26,8 +26,13 @@ import Foundation
 
     /// Coordinates a bounded in-memory cache with structured, coalesced loading.
     private final class ModelContextCache {
+        private struct LoadFailure: Sendable {
+            let description: String
+        }
+
         private let cache: NSCache<NSString, CachedContext>
         private let inFlight = Locked<[String: Task<CachedContext, Error>]>([:])
+        private let failures = Locked<[String: LoadFailure]>([:])
 
         /// Creates a cache with a count-based eviction limit.
         init(countLimit: Int) {
@@ -56,9 +61,11 @@ import Foundation
             do {
                 let cached = try await task.value
                 cache.setObject(cached, forKey: cacheKey)
+                clearFailure(for: key)
                 clearInFlight(for: key)
                 return cached.context
             } catch {
+                setFailure(for: key, error: error)
                 clearInFlight(for: key)
                 throw error
             }
@@ -67,11 +74,13 @@ import Foundation
         /// Removes a cached context for the key.
         func remove(for key: String) {
             cache.removeObject(forKey: key as NSString)
+            clearFailure(for: key)
         }
 
         /// Clears all cached contexts.
         func removeAll() {
             cache.removeAllObjects()
+            clearAllFailures()
         }
 
         /// Returns whether a cached context exists for the key.
@@ -79,11 +88,17 @@ import Foundation
             cache.object(forKey: key as NSString) != nil
         }
 
+        /// Returns a description of the most recent load failure for the key.
+        func failureDescription(for key: String) -> String? {
+            failures.withLock { $0[key]?.description }
+        }
+
         /// Cancels in-flight work and removes cached data for the key.
         func removeAndCancel(for key: String) async {
             let task = removeInFlight(for: key)
             task?.cancel()
             cache.removeObject(forKey: key as NSString)
+            clearFailure(for: key)
         }
 
         /// Cancels all in-flight work and clears cached data.
@@ -91,6 +106,7 @@ import Foundation
             let tasks = removeAllInFlight()
             tasks.forEach { $0.cancel() }
             cache.removeAllObjects()
+            clearAllFailures()
         }
 
         private func inFlightTask(for key: String) -> Task<CachedContext, Error>? {
@@ -120,6 +136,19 @@ import Foundation
                 return tasks
             }
         }
+
+        private func setFailure(for key: String, error: any Error) {
+            let description = String(reflecting: error)
+            failures.withLock { $0[key] = LoadFailure(description: description) }
+        }
+
+        private func clearFailure(for key: String) {
+            failures.withLock { $0[key] = nil }
+        }
+
+        private func clearAllFailures() {
+            failures.withLock { $0.removeAll() }
+        }
     }
 
     /// Shared cache across MLXLanguageModel instances.
@@ -140,6 +169,8 @@ import Foundation
         public enum UnavailableReason: Sendable, Equatable, Hashable {
             /// The model has not been loaded into memory yet.
             case notLoaded
+            /// The model failed to load and includes the underlying error details.
+            case failedToLoad(String)
         }
 
         /// The model identifier.
@@ -166,7 +197,15 @@ import Foundation
         /// The current availability of this model in memory.
         public var availability: Availability<UnavailableReason> {
             let key = directory?.absoluteString ?? modelId
-            return modelCache.contains(key) ? .available : .unavailable(.notLoaded)
+            if modelCache.contains(key) {
+                return .available
+            }
+
+            if let failureDescription = modelCache.failureDescription(for: key) {
+                return .unavailable(.failedToLoad(failureDescription))
+            }
+
+            return .unavailable(.notLoaded)
         }
 
         /// Removes this model from the shared cache and cancels any in-flight load.
