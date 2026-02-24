@@ -186,7 +186,7 @@ public struct GeminiLanguageModel: LanguageModel {
     /// Internal storage for the deprecated serverTools property.
     internal var _serverTools: [CustomGenerationOptions.ServerTool]
 
-    private let urlSession: URLSession
+    private let urlSession: SessionType
 
     /// Creates a new Gemini language model.
     ///
@@ -201,7 +201,7 @@ public struct GeminiLanguageModel: LanguageModel {
         apiKey tokenProvider: @escaping @autoclosure @Sendable () -> String,
         apiVersion: String = defaultAPIVersion,
         model: String,
-        session: URLSession = URLSession(configuration: .default)
+        session: SessionType = makeDefaultSession(),
     ) {
         var baseURL = baseURL
         if !baseURL.path.hasSuffix("/") {
@@ -243,7 +243,7 @@ public struct GeminiLanguageModel: LanguageModel {
         model: String,
         thinking: CustomGenerationOptions.Thinking = .disabled,
         serverTools: [CustomGenerationOptions.ServerTool] = [],
-        session: URLSession = URLSession(configuration: .default)
+        session: SessionType = makeDefaultSession(),
     ) {
         var baseURL = baseURL
         if !baseURL.path.hasSuffix("/") {

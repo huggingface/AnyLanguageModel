@@ -393,7 +393,7 @@ public struct OpenAILanguageModel: LanguageModel {
     /// The API variant to use.
     public let apiVariant: APIVariant
 
-    private let urlSession: URLSession
+    private let urlSession: SessionType
 
     /// Creates an OpenAI language model.
     ///
@@ -408,7 +408,7 @@ public struct OpenAILanguageModel: LanguageModel {
         apiKey tokenProvider: @escaping @autoclosure @Sendable () -> String,
         model: String,
         apiVariant: APIVariant = .chatCompletions,
-        session: URLSession = URLSession(configuration: .default)
+        session: SessionType  = makeDefaultSession(),
     ) {
         var baseURL = baseURL
         if !baseURL.path.hasSuffix("/") {
