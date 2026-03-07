@@ -34,7 +34,7 @@ extension HTTPClient {
             request.headers.add(name: "Content-Type", value: "application/json")
         }
 
-        let response = try await self.execute(request, timeout: .seconds(60))
+        let response = try await self.execute(request, timeout: .seconds(180))
 
         guard (200 ..< 300).contains(response.status.code) else {
             let bodyData = try await Data(buffer: response.body.collect(upTo: 1024 * 1024))
