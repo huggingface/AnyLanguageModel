@@ -74,6 +74,21 @@ struct OpenAILanguageModelTests {
             #expect(!snapshots.last!.rawContent.jsonString.isEmpty)
         }
 
+        @Test func streamingReportsUsage() async throws {
+            let session = LanguageModelSession(model: model)
+
+            let stream = session.streamResponse(to: "Reply with exactly: OK")
+
+            var snapshots: [LanguageModelSession.ResponseStream<String>.Snapshot] = []
+            for try await snapshot in stream {
+                snapshots.append(snapshot)
+            }
+
+            #expect(!snapshots.isEmpty)
+            #expect((snapshots.last?.usage?.inputTokens ?? 0) > 0)
+            #expect((snapshots.last?.usage?.totalTokens ?? 0) > 0)
+        }
+
         @Test func withGenerationOptions() async throws {
             let session = LanguageModelSession(model: model)
 
@@ -311,6 +326,16 @@ struct OpenAILanguageModelTests {
 
             let response = try await session.respond(to: "Say hello")
             #expect(!response.content.isEmpty)
+        }
+
+        @Test func reportsUsage() async throws {
+            let session = LanguageModelSession(model: model)
+
+            let response = try await session.respond(to: "Reply with exactly: OK")
+
+            #expect(!response.content.isEmpty)
+            #expect((response.usage?.inputTokens ?? 0) > 0)
+            #expect((response.usage?.totalTokens ?? 0) > 0)
         }
 
         @Test func withInstructions() async throws {

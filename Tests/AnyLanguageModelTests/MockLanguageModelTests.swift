@@ -33,6 +33,51 @@ private func waitUntil(
     return true
 }
 
+private struct UsageReportingModel: LanguageModel {
+    typealias UnavailableReason = Never
+
+    let usage: LanguageModelUsage
+
+    func respond<Content>(
+        within session: LanguageModelSession,
+        to prompt: Prompt,
+        generating type: Content.Type,
+        includeSchemaInPrompt: Bool,
+        options: GenerationOptions
+    ) async throws -> LanguageModelSession.Response<Content> where Content: Generable {
+        #expect(type == String.self)
+        return LanguageModelSession.Response(
+            content: "usage" as! Content,
+            rawContent: GeneratedContent("usage"),
+            usage: usage,
+            transcriptEntries: []
+        )
+    }
+
+    func streamResponse<Content>(
+        within session: LanguageModelSession,
+        to prompt: Prompt,
+        generating type: Content.Type,
+        includeSchemaInPrompt: Bool,
+        options: GenerationOptions
+    ) -> sending LanguageModelSession.ResponseStream<Content> where Content: Generable {
+        #expect(type == String.self)
+        let stream = AsyncThrowingStream<LanguageModelSession.ResponseStream<Content>.Snapshot, any Error> {
+            continuation in
+            continuation.yield(
+                .init(
+                    content: ("usage" as! Content).asPartiallyGenerated(),
+                    rawContent: GeneratedContent("usage"),
+                    usage: usage
+                )
+            )
+            continuation.finish()
+        }
+
+        return LanguageModelSession.ResponseStream(stream: stream)
+    }
+}
+
 @Suite("MockLanguageModel")
 struct MockLanguageModelTests {
     @Test func fixedResponse() async throws {
@@ -374,5 +419,46 @@ struct MockLanguageModelTests {
         } else {
             Issue.record("First entry should be prompt with images")
         }
+    }
+
+    @Test func responseUsageIsExposed() async throws {
+        let usage = LanguageModelUsage(
+            inputTokens: 12,
+            outputTokens: 7,
+            totalTokens: 19,
+            reasoningTokens: 3,
+            cachedInputTokens: 4
+        )
+        let session = LanguageModelSession(model: UsageReportingModel(usage: usage))
+
+        let response = try await session.respond(to: "Track usage")
+
+        #expect(response.usage == usage)
+    }
+
+    @Test func streamingUsageIsExposedAndCollected() async throws {
+        let usage = LanguageModelUsage(
+            inputTokens: 5,
+            outputTokens: 2,
+            totalTokens: 7
+        )
+        let session = LanguageModelSession(model: UsageReportingModel(usage: usage))
+
+        let stream = session.streamResponse(to: "Track streaming usage")
+
+        var snapshots: [LanguageModelSession.ResponseStream<String>.Snapshot] = []
+        for try await snapshot in stream {
+            snapshots.append(snapshot)
+        }
+
+        #expect(snapshots.count == 1)
+        #expect(snapshots.first?.usage == usage)
+
+        let collected = try await LanguageModelSession.ResponseStream<String>(
+            content: "usage",
+            rawContent: GeneratedContent("usage"),
+            usage: usage
+        ).collect()
+        #expect(collected.usage == usage)
     }
 }

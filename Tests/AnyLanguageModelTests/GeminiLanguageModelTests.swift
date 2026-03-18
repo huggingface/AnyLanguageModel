@@ -25,6 +25,22 @@ struct GeminiLanguageModelTests {
         #expect(!response.content.isEmpty)
     }
 
+    @Test func reportsUsage() async throws {
+        let session = LanguageModelSession(model: model)
+
+        var options = GenerationOptions(maximumResponseTokens: 64)
+        options[custom: GeminiLanguageModel.self] = .init(thinking: .disabled)
+
+        let response = try await session.respond(
+            to: "Reply with exactly: OK",
+            options: options
+        )
+
+        #expect(!response.content.isEmpty)
+        #expect((response.usage?.inputTokens ?? 0) > 0)
+        #expect((response.usage?.totalTokens ?? 0) > 0)
+    }
+
     @Test func withInstructions() async throws {
         let session = LanguageModelSession(
             model: model,
