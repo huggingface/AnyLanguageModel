@@ -46,7 +46,7 @@ public struct OllamaLanguageModel: LanguageModel {
     /// The model identifier to use for generation.
     public let model: String
 
-    private let urlSession: URLSession
+    private let urlSession: SessionType
 
     /// Creates an Ollama language model.
     ///
@@ -57,7 +57,7 @@ public struct OllamaLanguageModel: LanguageModel {
     public init(
         baseURL: URL = defaultBaseURL,
         model: String,
-        session: URLSession = URLSession(configuration: .default)
+        session: SessionType = makeDefaultSession(),
     ) {
         var baseURL = baseURL
         if !baseURL.path.hasSuffix("/") {

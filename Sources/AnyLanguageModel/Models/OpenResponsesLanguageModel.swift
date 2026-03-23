@@ -365,7 +365,7 @@ public struct OpenResponsesLanguageModel: LanguageModel {
     /// Model identifier to use for generation.
     public let model: String
 
-    private let urlSession: URLSession
+    private let urlSession: SessionType
 
     /// Creates an Open Responses language model.
     ///
@@ -378,7 +378,7 @@ public struct OpenResponsesLanguageModel: LanguageModel {
         baseURL: URL,
         apiKey tokenProvider: @escaping @autoclosure @Sendable () -> String,
         model: String,
-        session: URLSession = URLSession(configuration: .default)
+        session: SessionType = makeDefaultSession(),
     ) {
         var baseURL = baseURL
         if !baseURL.path.hasSuffix("/") {

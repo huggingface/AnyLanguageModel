@@ -278,7 +278,7 @@ public struct AnthropicLanguageModel: LanguageModel {
     /// The model identifier to use for generation.
     public let model: String
 
-    private let urlSession: URLSession
+    private let urlSession: SessionType
 
     /// Creates an Anthropic language model.
     ///
@@ -295,7 +295,7 @@ public struct AnthropicLanguageModel: LanguageModel {
         apiVersion: String = defaultAPIVersion,
         betas: [String]? = nil,
         model: String,
-        session: URLSession = URLSession(configuration: .default)
+        session: SessionType = makeDefaultSession(),
     ) {
         var baseURL = baseURL
         if !baseURL.path.hasSuffix("/") {
