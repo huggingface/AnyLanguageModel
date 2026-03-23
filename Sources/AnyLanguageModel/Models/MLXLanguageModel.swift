@@ -389,7 +389,7 @@ import Foundation
             func removeEntries(forModelKey modelKey: String) {
                 lock.withLock {
                     reapDeadSessionsLocked()
-                    for id in buckets.keys {
+                    for id in Array(buckets.keys) {
                         guard var bucket = buckets[id] else {
                             continue
                         }
@@ -410,7 +410,10 @@ import Foundation
             }
 
             private func reapDeadSessionsLocked() {
-                for (id, bucket) in buckets where bucket.sessionReference.session == nil {
+                let deadSessionIDs = buckets.compactMap { id, bucket in
+                    bucket.sessionReference.session == nil ? id : nil
+                }
+                for id in deadSessionIDs {
                     buckets[id] = nil
                 }
             }
@@ -442,7 +445,7 @@ import Foundation
             static let shared = GPUMemoryManager()
 
             private let lock = NSLock()
-            private var knownConfigs: Set<GPUMemoryConfiguration> = [.automatic]
+            private var knownConfigs: Set<GPUMemoryConfiguration> = []
             private var activeScopes: [UUID: GPUMemoryConfiguration] = [:]
 
             private init() {
@@ -500,7 +503,10 @@ import Foundation
             }
 
             private func shouldClearOnEviction() -> Bool {
-                knownConfigs.contains { $0.clearCacheOnEviction }
+                if knownConfigs.isEmpty {
+                    return GPUMemoryConfiguration.automatic.clearCacheOnEviction
+                }
+                return knownConfigs.contains { $0.clearCacheOnEviction }
             }
         }
 
@@ -851,17 +857,6 @@ import Foundation
                         break
                     }
                     previousToolCallSignature = signature
-
-                    if !assistantText.isEmpty {
-                        allEntries.append(
-                            .response(
-                                Transcript.Response(
-                                    assetIDs: [],
-                                    segments: [.text(.init(content: assistantText))]
-                                )
-                            )
-                        )
-                    }
 
                     let resolution = try await resolveToolCalls(collectedToolCalls, session: session)
                     switch resolution {

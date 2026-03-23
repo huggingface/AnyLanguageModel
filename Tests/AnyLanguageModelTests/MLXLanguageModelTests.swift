@@ -78,6 +78,32 @@ import Testing
             #expect(!second.content.isEmpty)
         }
 
+        @Test func rejectsConcurrentRequestsForSameSession() async throws {
+            let session = LanguageModelSession(model: model)
+            let stream = session.streamResponse(
+                to: "Count from 1 to 400 with one number per line.",
+                options: .init(maximumResponseTokens: 256)
+            )
+
+            do {
+                _ = try await session.respond(to: "This concurrent request should fail.")
+                Issue.record("Expected concurrent request to throw.")
+            } catch let error as LanguageModelSession.GenerationError {
+                switch error {
+                case .concurrentRequests:
+                    break
+                default:
+                    Issue.record("Expected .concurrentRequests, got \(error)")
+                }
+            } catch {
+                Issue.record("Expected GenerationError.concurrentRequests, got \(error)")
+            }
+
+            for try await _ in stream {
+                break
+            }
+        }
+
         @Test func withGenerationOptions() async throws {
             let session = LanguageModelSession(model: model)
 
