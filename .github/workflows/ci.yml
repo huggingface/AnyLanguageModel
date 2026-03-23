@@ -71,7 +71,7 @@ jobs:
           path: |
             ~/.cache/org.swift.swiftpm
             .build
-          key: ${{ runner.os }}-swift-${{ matrix.swift }}-spm-${{ hashFiles('**/Package.resolved') }}
+          key: ${{ runner.os }}-swift-${{ matrix.swift }}-spm-${{ hashFiles('Package.resolved') }}
           restore-keys: |
             ${{ runner.os }}-swift-${{ matrix.swift }}-spm-
 
