@@ -69,6 +69,15 @@ import Testing
             #expect(!chunks.isEmpty)
         }
 
+        @Test func multiTurnSameSession() async throws {
+            let session = LanguageModelSession(model: model)
+            let first = try await session.respond(to: "Say hello in one sentence.")
+            #expect(!first.content.isEmpty)
+
+            let second = try await session.respond(to: "Now answer with one more short sentence.")
+            #expect(!second.content.isEmpty)
+        }
+
         @Test func withGenerationOptions() async throws {
             let session = LanguageModelSession(model: model)
 
@@ -238,6 +247,13 @@ import Testing
                 Issue.record("Expected model availability to report failedToLoad after failed request")
             }
             #expect(model.isAvailable == false)
+        }
+
+        @Test func removeAllFromCacheThenRespond() async throws {
+            await MLXLanguageModel.removeAllFromCache()
+            let session = LanguageModelSession(model: model)
+            let response = try await session.respond(to: "Say hello after cache clear")
+            #expect(!response.content.isEmpty)
         }
     }
 #endif  // MLX

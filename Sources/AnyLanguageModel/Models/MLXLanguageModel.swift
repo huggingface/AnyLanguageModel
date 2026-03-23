@@ -191,6 +191,322 @@ import Foundation
             case failedToLoad(String)
         }
 
+        /// Configures MLX-specific generation behavior.
+        ///
+        /// Set these values through ``GenerationOptions`` using
+        /// `GenerationOptions[custom: MLXLanguageModel.self]`.
+        public struct CustomGenerationOptions: AnyLanguageModel.CustomGenerationOptions, Codable {
+            /// Limits how many tokens the KV cache retains.
+            ///
+            /// Set this to `nil` to use the backend default.
+            public var maxKVSize: Int?
+            /// Sets the KV-cache quantization bit width.
+            ///
+            /// Set this to `nil` to disable KV quantization.
+            public var kvBits: Int?
+            /// Sets the token group size used for KV quantization.
+            public var kvGroupSize: Int
+            /// Sets the token offset where quantized KV storage starts.
+            public var quantizedKVStart: Int
+
+            /// Creates MLX-specific generation options.
+            ///
+            /// - Parameters:
+            ///   - maxKVSize: The maximum number of tokens to retain in KV cache storage.
+            ///     Pass `nil` to use the backend default.
+            ///   - kvBits: The KV-cache quantization bit width.
+            ///     Pass `nil` to disable KV quantization.
+            ///   - kvGroupSize: The token group size used for KV quantization.
+            ///   - quantizedKVStart: The token index where quantized KV storage begins.
+            public init(
+                maxKVSize: Int? = nil,
+                kvBits: Int? = nil,
+                kvGroupSize: Int = 64,
+                quantizedKVStart: Int = 0
+            ) {
+                self.maxKVSize = maxKVSize
+                self.kvBits = kvBits
+                self.kvGroupSize = kvGroupSize
+                self.quantizedKVStart = quantizedKVStart
+            }
+        }
+
+        /// Controls GPU buffer-pool limits during active and idle phases.
+        public struct GPUMemoryConfiguration: Sendable, Hashable {
+            /// The cache limit applied while at least one generation is active.
+            public var activeCacheLimit: Int
+            /// The cache limit applied when no generations are active.
+            public var idleCacheLimit: Int
+            /// Indicates whether MLX clears cached GPU buffers on safe eviction.
+            public var clearCacheOnEviction: Bool
+
+            /// Creates a GPU-memory configuration for MLX generations.
+            ///
+            /// - Parameters:
+            ///   - activeCacheLimit: The GPU cache-limit value used during active generation.
+            ///   - idleCacheLimit: The GPU cache-limit value used while idle.
+            ///   - clearCacheOnEviction: A Boolean value that indicates whether to clear
+            ///     cached GPU buffers when eviction is safe.
+            public init(
+                activeCacheLimit: Int,
+                idleCacheLimit: Int,
+                clearCacheOnEviction: Bool = true
+            ) {
+                self.activeCacheLimit = activeCacheLimit
+                self.idleCacheLimit = idleCacheLimit
+                self.clearCacheOnEviction = clearCacheOnEviction
+            }
+
+            /// Returns a memory configuration using physical-memory heuristics.
+            ///
+            /// The active limit scales with device RAM,
+            /// and the idle limit stays conservative to reduce background memory pressure.
+            public static var automatic: GPUMemoryConfiguration {
+                let ramBytes = ProcessInfo.processInfo.physicalMemory
+                let ramGB = ramBytes / (1024 * 1024 * 1024)
+                let active: Int
+                switch ramGB {
+                case ..<4:
+                    active = 128_000_000
+                case ..<6:
+                    active = 256_000_000
+                case ..<8:
+                    active = 512_000_000
+                default:
+                    active = 768_000_000
+                }
+
+                return .init(
+                    activeCacheLimit: active,
+                    idleCacheLimit: 50_000_000,
+                    clearCacheOnEviction: true
+                )
+            }
+
+            /// Returns a memory configuration that leaves GPU cache effectively unconstrained.
+            ///
+            /// Use this when your application prefers maximum reuse over memory reclamation.
+            public static var unconstrained: GPUMemoryConfiguration {
+                .init(
+                    activeCacheLimit: Int.max,
+                    idleCacheLimit: Int.max,
+                    clearCacheOnEviction: false
+                )
+            }
+        }
+
+        private struct CacheConfigSignature: Equatable {
+            let maxKVSize: Int?
+            let kvBits: Int?
+            let kvGroupSize: Int
+            let quantizedKVStart: Int
+        }
+
+        private final class SessionCacheEntry: @unchecked Sendable {
+            let kvCache: [MLXLMCommon.KVCache]
+            let prefillTokenCount: Int
+            let prefixTokens: [Int32]
+            let cacheConfigSignature: CacheConfigSignature
+
+            init(
+                kvCache: [MLXLMCommon.KVCache],
+                prefillTokenCount: Int,
+                prefixTokens: [Int32],
+                cacheConfigSignature: CacheConfigSignature
+            ) {
+                self.kvCache = kvCache
+                self.prefillTokenCount = prefillTokenCount
+                self.prefixTokens = prefixTokens
+                self.cacheConfigSignature = cacheConfigSignature
+            }
+        }
+
+        private final class SessionKVStore: @unchecked Sendable {
+            private final class WeakSessionReference: @unchecked Sendable {
+                weak var session: LanguageModelSession?
+
+                init(_ session: LanguageModelSession) {
+                    self.session = session
+                }
+            }
+
+            private struct SessionBucket {
+                let sessionReference: WeakSessionReference
+                var modelEntries: [String: SessionCacheEntry]
+            }
+
+            private let lock = NSLock()
+            private var buckets: [ObjectIdentifier: SessionBucket] = [:]
+
+            func entry(
+                for session: LanguageModelSession,
+                modelKey: String
+            ) -> SessionCacheEntry? {
+                lock.withLock {
+                    reapDeadSessionsLocked()
+                    return buckets[ObjectIdentifier(session)]?.modelEntries[modelKey]
+                }
+            }
+
+            func set(
+                _ entry: SessionCacheEntry,
+                for session: LanguageModelSession,
+                modelKey: String
+            ) {
+                lock.withLock {
+                    reapDeadSessionsLocked()
+                    let id = ObjectIdentifier(session)
+                    var bucket =
+                        buckets[id]
+                        ?? SessionBucket(
+                            sessionReference: WeakSessionReference(session),
+                            modelEntries: [:]
+                        )
+                    bucket.modelEntries[modelKey] = entry
+                    buckets[id] = bucket
+                }
+            }
+
+            func removeEntry(
+                for session: LanguageModelSession,
+                modelKey: String
+            ) {
+                lock.withLock {
+                    reapDeadSessionsLocked()
+                    let id = ObjectIdentifier(session)
+                    guard var bucket = buckets[id] else {
+                        return
+                    }
+                    bucket.modelEntries[modelKey] = nil
+                    if bucket.modelEntries.isEmpty {
+                        buckets[id] = nil
+                    } else {
+                        buckets[id] = bucket
+                    }
+                }
+            }
+
+            func removeEntries(forModelKey modelKey: String) {
+                lock.withLock {
+                    reapDeadSessionsLocked()
+                    for id in buckets.keys {
+                        guard var bucket = buckets[id] else {
+                            continue
+                        }
+                        bucket.modelEntries[modelKey] = nil
+                        if bucket.modelEntries.isEmpty {
+                            buckets[id] = nil
+                        } else {
+                            buckets[id] = bucket
+                        }
+                    }
+                }
+            }
+
+            func removeAll() {
+                lock.withLock {
+                    buckets.removeAll()
+                }
+            }
+
+            private func reapDeadSessionsLocked() {
+                for (id, bucket) in buckets where bucket.sessionReference.session == nil {
+                    buckets[id] = nil
+                }
+            }
+        }
+
+        private final class SessionGenerationGate: @unchecked Sendable {
+            private let lock = NSLock()
+            private var activeSessions: Set<ObjectIdentifier> = []
+
+            func acquire(session: LanguageModelSession) -> Bool {
+                lock.withLock {
+                    let id = ObjectIdentifier(session)
+                    guard !activeSessions.contains(id) else {
+                        return false
+                    }
+                    activeSessions.insert(id)
+                    return true
+                }
+            }
+
+            func release(session: LanguageModelSession) {
+                _ = lock.withLock {
+                    activeSessions.remove(ObjectIdentifier(session))
+                }
+            }
+        }
+
+        private final class GPUMemoryManager: @unchecked Sendable {
+            static let shared = GPUMemoryManager()
+
+            private let lock = NSLock()
+            private var knownConfigs: Set<GPUMemoryConfiguration> = [.automatic]
+            private var activeScopes: [UUID: GPUMemoryConfiguration] = [:]
+
+            private init() {
+                GPU.set(cacheLimit: GPUMemoryConfiguration.automatic.idleCacheLimit)
+            }
+
+            func register(_ configuration: GPUMemoryConfiguration) {
+                lock.withLock {
+                    knownConfigs.insert(configuration)
+                    if activeScopes.isEmpty {
+                        GPU.set(cacheLimit: effectiveIdleLimit())
+                    }
+                }
+            }
+
+            func markActive(_ configuration: GPUMemoryConfiguration) -> UUID {
+                lock.withLock {
+                    let id = UUID()
+                    knownConfigs.insert(configuration)
+                    activeScopes[id] = configuration
+                    GPU.set(cacheLimit: effectiveActiveLimit())
+                    return id
+                }
+            }
+
+            func markIdle(scope id: UUID) {
+                lock.withLock {
+                    activeScopes.removeValue(forKey: id)
+                    if activeScopes.isEmpty {
+                        GPU.set(cacheLimit: effectiveIdleLimit())
+                    } else {
+                        GPU.set(cacheLimit: effectiveActiveLimit())
+                    }
+                }
+            }
+
+            func evictIfSafe() {
+                lock.withLock {
+                    guard activeScopes.isEmpty else { return }
+                    GPU.set(cacheLimit: effectiveIdleLimit())
+                    if shouldClearOnEviction() {
+                        GPU.clearCache()
+                    }
+                }
+            }
+
+            private func effectiveActiveLimit() -> Int {
+                let limits = activeScopes.values.map(\.activeCacheLimit)
+                return limits.max() ?? effectiveIdleLimit()
+            }
+
+            private func effectiveIdleLimit() -> Int {
+                let limits = knownConfigs.map(\.idleCacheLimit)
+                return limits.min() ?? GPUMemoryConfiguration.automatic.idleCacheLimit
+            }
+
+            private func shouldClearOnEviction() -> Bool {
+                knownConfigs.contains { $0.clearCacheOnEviction }
+            }
+        }
+
+        private static let sessionKVCache = SessionKVStore()
+        private static let sessionGenerationGate = SessionGenerationGate()
+
         /// The model identifier.
         public let modelId: String
 
@@ -200,16 +516,27 @@ import Foundation
         /// The local directory containing the model files.
         public let directory: URL?
 
+        /// GPU memory behavior used for this model's generation scopes.
+        public let gpuMemory: GPUMemoryConfiguration
+
         /// Creates an MLX language model.
         ///
         /// - Parameters:
         ///   - modelId: The model identifier (for example, "mlx-community/Llama-3.2-3B-Instruct-4bit").
         ///   - hub: An optional Hub API instance for downloading models. If not provided, the default Hub API is used.
         ///   - directory: An optional local directory URL containing the model files. If provided, the model is loaded from this directory instead of downloading.
-        public init(modelId: String, hub: HubApi? = nil, directory: URL? = nil) {
+        ///   - gpuMemory: The GPU-memory behavior used for this model's active and idle phases.
+        public init(
+            modelId: String,
+            hub: HubApi? = nil,
+            directory: URL? = nil,
+            gpuMemory: GPUMemoryConfiguration = .automatic
+        ) {
             self.modelId = modelId
             self.hub = hub
             self.directory = directory
+            self.gpuMemory = gpuMemory
+            GPUMemoryManager.shared.register(gpuMemory)
         }
 
         /// The current availability of this model in memory.
@@ -233,11 +560,15 @@ import Foundation
         public func removeFromCache() async {
             let key = directory?.absoluteString ?? modelId
             await modelCache.removeAndCancel(for: key)
+            Self.removeSessionCaches(forModelKey: modelSessionCacheKey())
+            GPUMemoryManager.shared.evictIfSafe()
         }
 
         /// Removes all MLX models from the shared cache and cancels in-flight loads.
         public static func removeAllFromCache() async {
             await modelCache.removeAllAndCancel()
+            sessionKVCache.removeAll()
+            GPUMemoryManager.shared.evictIfSafe()
         }
 
         /// Get or load model context with caching
@@ -253,6 +584,157 @@ import Foundation
             }
         }
 
+        private static func sessionKey(model: MLXLanguageModel) -> String {
+            let directoryKey = model.directory?.absoluteString ?? ""
+            return "\(model.modelId)|\(directoryKey)"
+        }
+
+        private func modelSessionCacheKey() -> String {
+            Self.sessionKey(model: self)
+        }
+
+        private func getSessionCache(for session: LanguageModelSession) -> SessionCacheEntry? {
+            Self.sessionKVCache.entry(for: session, modelKey: modelSessionCacheKey())
+        }
+
+        private func setSessionCache(_ entry: SessionCacheEntry, for session: LanguageModelSession) {
+            Self.sessionKVCache.set(entry, for: session, modelKey: modelSessionCacheKey())
+        }
+
+        private func removeSessionCache(for session: LanguageModelSession) {
+            Self.sessionKVCache.removeEntry(for: session, modelKey: modelSessionCacheKey())
+        }
+
+        private static func removeSessionCaches(forModelKey modelKey: String) {
+            sessionKVCache.removeEntries(forModelKey: modelKey)
+        }
+
+        private static func concurrentSessionError() -> LanguageModelSession.GenerationError {
+            .concurrentRequests(
+                .init(
+                    debugDescription:
+                        "Concurrent requests on the same LanguageModelSession are not supported while MLX KV cache reuse is enabled."
+                )
+            )
+        }
+
+        private static func acquireGenerationSlot(for session: LanguageModelSession) -> Bool {
+            sessionGenerationGate.acquire(session: session)
+        }
+
+        private static func releaseGenerationSlot(for session: LanguageModelSession) {
+            sessionGenerationGate.release(session: session)
+        }
+
+        private func cacheSignature(from parameters: MLXLMCommon.GenerateParameters) -> CacheConfigSignature {
+            CacheConfigSignature(
+                maxKVSize: parameters.maxKVSize,
+                kvBits: parameters.kvBits,
+                kvGroupSize: parameters.kvGroupSize,
+                quantizedKVStart: parameters.quantizedKVStart
+            )
+        }
+
+        private func tokens(from input: MLXLMCommon.LMInput) -> [Int32] {
+            input.text.tokens.asArray(Int32.self)
+        }
+
+        private func isCacheHit(
+            entry: SessionCacheEntry,
+            currentTokens: [Int32],
+            signature: CacheConfigSignature,
+            lmInput: MLXLMCommon.LMInput
+        ) -> Bool {
+            guard lmInput.image == nil, lmInput.video == nil else {
+                return false
+            }
+            guard entry.cacheConfigSignature == signature else {
+                return false
+            }
+            guard entry.prefillTokenCount > 0, currentTokens.count > entry.prefillTokenCount else {
+                return false
+            }
+            guard entry.prefixTokens.count == entry.prefillTokenCount else {
+                return false
+            }
+            return Array(currentTokens.prefix(entry.prefillTokenCount)) == entry.prefixTokens
+        }
+
+        private func resolveCache(
+            session: LanguageModelSession,
+            lmInput: MLXLMCommon.LMInput,
+            generateParameters: MLXLMCommon.GenerateParameters,
+            context: ModelContext
+        ) -> (cache: [MLXLMCommon.KVCache], input: MLXLMCommon.LMInput, fullTokens: [Int32]) {
+            let signature = cacheSignature(from: generateParameters)
+            let fullTokens = tokens(from: lmInput)
+            let existingEntry = getSessionCache(for: session)
+
+            if let existingEntry,
+                isCacheHit(entry: existingEntry, currentTokens: fullTokens, signature: signature, lmInput: lmInput)
+            {
+                let cachedCount = existingEntry.prefillTokenCount
+                let newTokens = lmInput.text.tokens[cachedCount...]
+                let newMask = lmInput.text.mask?[cachedCount...]
+                let partialText = MLXLMCommon.LMInput.Text(tokens: newTokens, mask: newMask)
+                return (existingEntry.kvCache, MLXLMCommon.LMInput(text: partialText), fullTokens)
+            }
+
+            if existingEntry != nil {
+                removeSessionCache(for: session)
+            }
+
+            let newCache = context.model.newCache(parameters: generateParameters)
+            return (newCache, lmInput, fullTokens)
+        }
+
+        private func storeSessionCache(
+            cache: [MLXLMCommon.KVCache],
+            fullTokens: [Int32],
+            generateParameters: MLXLMCommon.GenerateParameters,
+            session: LanguageModelSession
+        ) {
+            let offset = cache.first?.offset ?? 0
+            guard offset > 0, fullTokens.count >= offset else {
+                removeSessionCache(for: session)
+                return
+            }
+
+            let prefixTokens = Array(fullTokens.prefix(offset))
+            let entry = SessionCacheEntry(
+                kvCache: cache,
+                prefillTokenCount: offset,
+                prefixTokens: prefixTokens,
+                cacheConfigSignature: cacheSignature(from: generateParameters)
+            )
+            setSessionCache(entry, for: session)
+        }
+
+        private func beginGenerationScope() -> UUID {
+            GPUMemoryManager.shared.markActive(gpuMemory)
+        }
+
+        private func endGenerationScope(_ id: UUID) {
+            GPUMemoryManager.shared.markIdle(scope: id)
+        }
+
+        private func mlxToolSpecs(for session: LanguageModelSession) -> [ToolSpec]? {
+            session.tools.isEmpty ? nil : session.tools.map { convertToolToMLXSpec($0) }
+        }
+
+        private func makeUserInput(
+            session: LanguageModelSession,
+            fallbackPrompt: String,
+            tools: [ToolSpec]?
+        ) -> MLXLMCommon.UserInput {
+            let chat = convertTranscriptToMLXChat(session: session, fallbackPrompt: fallbackPrompt)
+            return MLXLMCommon.UserInput(
+                chat: chat,
+                processing: .init(resize: .init(width: 512, height: 512)),
+                tools: tools
+            )
+        }
+
         public func respond<Content>(
             within session: LanguageModelSession,
             to prompt: Prompt,
@@ -260,8 +742,15 @@ import Foundation
             includeSchemaInPrompt: Bool,
             options: GenerationOptions
         ) async throws -> LanguageModelSession.Response<Content> where Content: Generable {
+            guard Self.acquireGenerationSlot(for: session) else {
+                throw Self.concurrentSessionError()
+            }
+            defer { Self.releaseGenerationSlot(for: session) }
+
             // Get cached or load fresh ModelContext
             let context = try await loadContext(modelId: modelId, hub: hub, directory: directory)
+            let generationScope = beginGenerationScope()
+            defer { endGenerationScope(generationScope) }
 
             if type != String.self {
                 let jsonString = try await generateStructuredJSON(
@@ -281,13 +770,7 @@ import Foundation
                 )
             }
 
-            // Convert session tools to MLX ToolSpec format
-            let toolSpecs: [ToolSpec]? =
-                session.tools.isEmpty
-                ? nil
-                : session.tools.map { tool in
-                    convertToolToMLXSpec(tool)
-                }
+            let toolSpecs = mlxToolSpecs(for: session)
 
             // Map AnyLanguageModel GenerationOptions to MLX GenerateParameters
             let generateParameters = toGenerateParameters(options)
@@ -297,6 +780,9 @@ import Foundation
 
             var allTextChunks: [String] = []
             var allEntries: [Transcript.Entry] = []
+            let maxToolIterations = 8
+            var toolIteration = 0
+            var previousToolCallSignature: String?
 
             // Loop until no more tool calls
             while true {
@@ -304,13 +790,20 @@ import Foundation
                 let userInput = MLXLMCommon.UserInput(
                     chat: chat,
                     processing: .init(resize: .init(width: 512, height: 512)),
-                    tools: toolSpecs,
+                    tools: toolSpecs
                 )
                 let lmInput = try await context.processor.prepare(input: userInput)
+                let resolved = resolveCache(
+                    session: session,
+                    lmInput: lmInput,
+                    generateParameters: generateParameters,
+                    context: context
+                )
 
                 // Generate
                 let stream = try MLXLMCommon.generate(
-                    input: lmInput,
+                    input: resolved.input,
+                    cache: resolved.cache,
                     parameters: generateParameters,
                     context: context
                 )
@@ -328,6 +821,12 @@ import Foundation
                         collectedToolCalls.append(call)
                     }
                 }
+                storeSessionCache(
+                    cache: resolved.cache,
+                    fullTokens: resolved.fullTokens,
+                    generateParameters: generateParameters,
+                    session: session
+                )
 
                 let assistantText = chunks.joined()
                 allTextChunks.append(assistantText)
@@ -339,6 +838,31 @@ import Foundation
 
                 // If there are tool calls, execute them and continue
                 if !collectedToolCalls.isEmpty {
+                    toolIteration += 1
+                    if toolIteration > maxToolIterations {
+                        break
+                    }
+
+                    let signature =
+                        collectedToolCalls
+                        .map { "\($0.function.name):\($0.function.arguments)" }
+                        .joined(separator: "|")
+                    if signature == previousToolCallSignature {
+                        break
+                    }
+                    previousToolCallSignature = signature
+
+                    if !assistantText.isEmpty {
+                        allEntries.append(
+                            .response(
+                                Transcript.Response(
+                                    assetIDs: [],
+                                    segments: [.text(.init(content: assistantText))]
+                                )
+                            )
+                        )
+                    }
+
                     let resolution = try await resolveToolCalls(collectedToolCalls, session: session)
                     switch resolution {
                     case .stop(let calls):
@@ -391,31 +915,67 @@ import Foundation
             guard type == String.self else {
                 fatalError("MLXLanguageModel streaming only supports String content")
             }
+            guard Self.acquireGenerationSlot(for: session) else {
+                let error = Self.concurrentSessionError()
+                let stream: AsyncThrowingStream<LanguageModelSession.ResponseStream<Content>.Snapshot, any Error> =
+                    .init { continuation in
+                        continuation.finish(throwing: error)
+                    }
+                return LanguageModelSession.ResponseStream(stream: stream)
+            }
 
             let modelId = self.modelId
             let hub = self.hub
             let directory = self.directory
+            let gpuMemory = self.gpuMemory
 
             let stream: AsyncThrowingStream<LanguageModelSession.ResponseStream<Content>.Snapshot, any Error> = .init {
                 continuation in
+                let didEndScope = Locked(false)
+                let didReleaseGenerationSlot = Locked(false)
+                let generationScope = GPUMemoryManager.shared.markActive(gpuMemory)
+
                 let task = Task { @Sendable in
+                    func finishScope() {
+                        didEndScope.withLock { done in
+                            if !done {
+                                GPUMemoryManager.shared.markIdle(scope: generationScope)
+                                done = true
+                            }
+                        }
+                    }
+
+                    func finishGenerationSlot() {
+                        didReleaseGenerationSlot.withLock { done in
+                            if !done {
+                                Self.releaseGenerationSlot(for: session)
+                                done = true
+                            }
+                        }
+                    }
+
                     do {
                         // Get cached or load fresh ModelContext
                         let context = try await loadContext(modelId: modelId, hub: hub, directory: directory)
 
                         // Build chat inside task to avoid Sendable issues
                         let generateParameters = toGenerateParameters(options)
-                        let chat = convertTranscriptToMLXChat(session: session, fallbackPrompt: prompt.description)
-
-                        let userInput = MLXLMCommon.UserInput(
-                            chat: chat,
-                            processing: .init(resize: .init(width: 512, height: 512)),
+                        let userInput = makeUserInput(
+                            session: session,
+                            fallbackPrompt: prompt.description,
                             tools: nil
                         )
                         let lmInput = try await context.processor.prepare(input: userInput)
+                        let resolved = resolveCache(
+                            session: session,
+                            lmInput: lmInput,
+                            generateParameters: generateParameters,
+                            context: context
+                        )
 
                         let mlxStream = try MLXLMCommon.generate(
-                            input: lmInput,
+                            input: resolved.input,
+                            cache: resolved.cache,
                             parameters: generateParameters,
                             context: context
                         )
@@ -436,12 +996,36 @@ import Foundation
                             }
                         }
 
+                        storeSessionCache(
+                            cache: resolved.cache,
+                            fullTokens: resolved.fullTokens,
+                            generateParameters: generateParameters,
+                            session: session
+                        )
+                        finishScope()
+                        finishGenerationSlot()
                         continuation.finish()
                     } catch {
+                        finishScope()
+                        finishGenerationSlot()
                         continuation.finish(throwing: error)
                     }
                 }
-                continuation.onTermination = { _ in task.cancel() }
+                continuation.onTermination = { _ in
+                    didEndScope.withLock { done in
+                        if !done {
+                            GPUMemoryManager.shared.markIdle(scope: generationScope)
+                            done = true
+                        }
+                    }
+                    didReleaseGenerationSlot.withLock { done in
+                        if !done {
+                            Self.releaseGenerationSlot(for: session)
+                            done = true
+                        }
+                    }
+                    task.cancel()
+                }
             }
 
             return LanguageModelSession.ResponseStream(stream: stream)
@@ -457,8 +1041,37 @@ import Foundation
             let directory = self.directory
 
             Task {
+                guard Self.acquireGenerationSlot(for: session) else {
+                    return
+                }
+                defer { Self.releaseGenerationSlot(for: session) }
+
+                let generationScope = beginGenerationScope()
+                defer { endGenerationScope(generationScope) }
+
                 do {
-                    _ = try await loadContext(modelId: modelId, hub: hub, directory: directory)
+                    let context = try await loadContext(modelId: modelId, hub: hub, directory: directory)
+                    guard let instructions = session.instructions?.description, !instructions.isEmpty else {
+                        return
+                    }
+
+                    let toolSpecs = mlxToolSpecs(for: session)
+
+                    let params = toGenerateParameters(.init())
+                    let newCache = context.model.newCache(parameters: params)
+                    let userInput = MLXLMCommon.UserInput(
+                        chat: [.init(role: .system, content: instructions)],
+                        processing: .init(resize: .init(width: 512, height: 512)),
+                        tools: toolSpecs
+                    )
+                    let lmInput = try await context.processor.prepare(input: userInput)
+                    _ = try context.model.prepare(lmInput, cache: newCache, windowSize: params.prefillStepSize)
+                    storeSessionCache(
+                        cache: newCache,
+                        fullTokens: tokens(from: lmInput),
+                        generateParameters: params,
+                        session: session
+                    )
                 } catch {
                     // Ignore errors during prewarm
                 }
@@ -469,12 +1082,13 @@ import Foundation
     // MARK: - Options Mapping
 
     private func toGenerateParameters(_ options: GenerationOptions) -> MLXLMCommon.GenerateParameters {
-        MLXLMCommon.GenerateParameters(
+        let custom = options[custom: MLXLanguageModel.self]
+        return MLXLMCommon.GenerateParameters(
             maxTokens: options.maximumResponseTokens,
-            maxKVSize: nil,
-            kvBits: nil,
-            kvGroupSize: 64,
-            quantizedKVStart: 0,
+            maxKVSize: custom?.maxKVSize,
+            kvBits: custom?.kvBits,
+            kvGroupSize: custom?.kvGroupSize ?? 64,
+            quantizedKVStart: custom?.quantizedKVStart ?? 0,
             temperature: Float(options.temperature ?? 0.6),
             topP: 1.0,
             repetitionPenalty: nil,
@@ -484,12 +1098,13 @@ import Foundation
 
     /// Builds MLX parameters tuned for structured generation.
     private func toStructuredGenerateParameters(_ options: GenerationOptions) -> MLXLMCommon.GenerateParameters {
-        MLXLMCommon.GenerateParameters(
+        let custom = options[custom: MLXLanguageModel.self]
+        return MLXLMCommon.GenerateParameters(
             maxTokens: options.maximumResponseTokens,
-            maxKVSize: nil,
-            kvBits: nil,
-            kvGroupSize: 64,
-            quantizedKVStart: 0,
+            maxKVSize: custom?.maxKVSize,
+            kvBits: custom?.kvBits,
+            kvGroupSize: custom?.kvGroupSize ?? 64,
+            quantizedKVStart: custom?.quantizedKVStart ?? 0,
             temperature: Float(options.temperature ?? 0.2),
             topP: 0.95,
             repetitionPenalty: 1.1,

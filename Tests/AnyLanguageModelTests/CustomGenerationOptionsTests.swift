@@ -862,6 +862,51 @@ struct GeminiCustomOptionsTests {
     }
 }
 
+#if MLX
+    @Suite("MLX CustomGenerationOptions")
+    struct MLXCustomOptionsTests {
+        @Test func initialization() {
+            let options = MLXLanguageModel.CustomGenerationOptions(
+                maxKVSize: 4096,
+                kvBits: 4,
+                kvGroupSize: 64,
+                quantizedKVStart: 128
+            )
+            #expect(options.maxKVSize == 4096)
+            #expect(options.kvBits == 4)
+            #expect(options.kvGroupSize == 64)
+            #expect(options.quantizedKVStart == 128)
+        }
+
+        @Test func integrationWithGenerationOptions() {
+            var options = GenerationOptions(temperature: 0.7)
+            options[custom: MLXLanguageModel.self] = .init(
+                maxKVSize: 2048,
+                kvBits: 8,
+                kvGroupSize: 32,
+                quantizedKVStart: 256
+            )
+            let retrieved = options[custom: MLXLanguageModel.self]
+            #expect(retrieved?.maxKVSize == 2048)
+            #expect(retrieved?.kvBits == 8)
+            #expect(retrieved?.kvGroupSize == 32)
+            #expect(retrieved?.quantizedKVStart == 256)
+        }
+
+        @Test func codable() throws {
+            let options = MLXLanguageModel.CustomGenerationOptions(
+                maxKVSize: 8192,
+                kvBits: 4,
+                kvGroupSize: 64,
+                quantizedKVStart: 0
+            )
+            let data = try JSONEncoder().encode(options)
+            let decoded = try JSONDecoder().decode(MLXLanguageModel.CustomGenerationOptions.self, from: data)
+            #expect(decoded == options)
+        }
+    }
+#endif
+
 #if Llama
     @Suite("Llama CustomGenerationOptions")
     struct LlamaCustomOptionsTests {

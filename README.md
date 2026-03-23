@@ -488,6 +488,32 @@ let response = try await session.respond {
 }
 ```
 
+You can tune MLX KV-cache behavior per request with model-specific options:
+
+```swift
+var options = GenerationOptions(temperature: 0.7)
+options[custom: MLXLanguageModel.self] = .init(
+    maxKVSize: 4096,
+    kvBits: 4,
+    kvGroupSize: 64,
+    quantizedKVStart: 128
+)
+
+let response = try await session.respond(
+    to: "Summarize this transcript",
+    options: options
+)
+```
+
+GPU cache behavior can be configured when creating the model:
+
+```swift
+let model = MLXLanguageModel(
+    modelId: "mlx-community/Qwen3-0.6B-4bit",
+    gpuMemory: .automatic
+)
+```
+
 Vision support depends on the specific MLX model you load.
 Use a vision‑capable model for multimodal prompts
 (for example, a VLM variant).
