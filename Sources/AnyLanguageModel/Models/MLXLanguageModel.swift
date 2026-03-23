@@ -453,42 +453,54 @@ import Foundation
             }
 
             func register(_ configuration: GPUMemoryConfiguration) {
+                var cacheLimitToSet: Int?
                 lock.withLock {
                     knownConfigs.insert(configuration)
                     if activeScopes.isEmpty {
-                        GPU.set(cacheLimit: effectiveIdleLimit())
+                        cacheLimitToSet = effectiveIdleLimit()
                     }
+                }
+                if let cacheLimitToSet {
+                    GPU.set(cacheLimit: cacheLimitToSet)
                 }
             }
 
             func markActive(_ configuration: GPUMemoryConfiguration) -> UUID {
-                lock.withLock {
-                    let id = UUID()
+                let id = UUID()
+                let cacheLimitToSet = lock.withLock {
                     knownConfigs.insert(configuration)
                     activeScopes[id] = configuration
-                    GPU.set(cacheLimit: effectiveActiveLimit())
-                    return id
+                    return effectiveActiveLimit()
                 }
+                GPU.set(cacheLimit: cacheLimitToSet)
+                return id
             }
 
             func markIdle(scope id: UUID) {
-                lock.withLock {
+                let cacheLimitToSet = lock.withLock {
                     activeScopes.removeValue(forKey: id)
                     if activeScopes.isEmpty {
-                        GPU.set(cacheLimit: effectiveIdleLimit())
-                    } else {
-                        GPU.set(cacheLimit: effectiveActiveLimit())
+                        return effectiveIdleLimit()
                     }
+                    return effectiveActiveLimit()
                 }
+                GPU.set(cacheLimit: cacheLimitToSet)
             }
 
             func evictIfSafe() {
+                var shouldUpdateCacheLimit = false
+                var cacheLimitToSet = 0
+                var shouldClearCache = false
                 lock.withLock {
                     guard activeScopes.isEmpty else { return }
-                    GPU.set(cacheLimit: effectiveIdleLimit())
-                    if shouldClearOnEviction() {
-                        GPU.clearCache()
-                    }
+                    shouldUpdateCacheLimit = true
+                    cacheLimitToSet = effectiveIdleLimit()
+                    shouldClearCache = shouldClearOnEviction()
+                }
+                guard shouldUpdateCacheLimit else { return }
+                GPU.set(cacheLimit: cacheLimitToSet)
+                if shouldClearCache {
+                    GPU.clearCache()
                 }
             }
 
@@ -720,15 +732,16 @@ import Foundation
             session: LanguageModelSession
         ) {
             let offset = cache.first?.offset ?? 0
-            guard offset > 0, fullTokens.count >= offset else {
+            let prefillCount = max(0, min(offset, fullTokens.count))
+            guard prefillCount > 0 else {
                 removeSessionCache(for: session)
                 return
             }
 
-            let prefixTokens = Array(fullTokens.prefix(offset))
+            let prefixTokens = Array(fullTokens.prefix(prefillCount))
             let entry = SessionCacheEntry(
                 kvCache: cache,
-                prefillTokenCount: offset,
+                prefillTokenCount: prefillCount,
                 prefixTokens: prefixTokens,
                 cacheConfigSignature: cacheSignature(from: generateParameters)
             )
