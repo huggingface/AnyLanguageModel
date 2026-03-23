@@ -30,10 +30,14 @@ let package = Package(
     ],
     dependencies: [
         .package(url: "https://github.com/huggingface/swift-transformers", from: "1.0.0"),
-        .package(url: "https://github.com/mattt/EventSource", from: "1.3.0", traits: [
-            .defaults,
-                .trait(name: "AsyncHTTPClient", condition: .when(traits: ["AsyncHTTPClient"]))
-            ]),
+        .package(
+            url: "https://github.com/mattt/EventSource",
+            from: "1.3.0",
+            traits: [
+                .defaults,
+                .trait(name: "AsyncHTTPClient", condition: .when(traits: ["AsyncHTTPClient"])),
+            ]
+        ),
         .package(url: "https://github.com/mattt/JSONSchema", from: "1.3.0"),
         .package(url: "https://github.com/mattt/llama.swift", .upToNextMajor(from: "2.7484.0")),
         .package(url: "https://github.com/mattt/PartialJSONDecoder", from: "1.0.0"),
