@@ -12,7 +12,7 @@ permissions:
 
 jobs:
   test-macos:
-    name: Swift ${{ matrix.swift }} on macOS ${{ matrix.macos }} with Xcode ${{ matrix.xcode }}
+    name: Swift ${{ matrix.swift }} on macOS ${{ matrix.macos }} with Xcode ${{ matrix.xcode }}${{ matrix.traits != '' && format(' and --traits {0}', matrix.traits) || '' }}
     runs-on: macos-${{ matrix.macos }}
     env:
       DEVELOPER_DIR: "/Applications/Xcode_${{ matrix.xcode }}.app/Contents/Developer"
@@ -23,9 +23,19 @@ jobs:
           - macos: "15"
             swift: "6.1"
             xcode: "16.3"
+            traits: ""
+          - macos: "15"
+            swift: "6.1"
+            xcode: "16.3"
+            traits: "AsyncHTTPClient"
           - macos: "26"
             swift: "6.2"
             xcode: "26.0"
+            traits: ""
+          - macos: "26"
+            swift: "6.2"
+            xcode: "26.0"
+            traits: "AsyncHTTPClient"
     timeout-minutes: 10
     steps:
       - name: Checkout code
@@ -37,29 +47,35 @@ jobs:
           path: |
             ~/.cache/org.swift.swiftpm
             .build
-          key: ${{ runner.os }}-swift-${{ matrix.swift }}-spm-${{ hashFiles('**/Package.resolved') }}
+          key: ${{ runner.os }}-swift-${{ matrix.swift }}-${{ matrix.traits == '' && 'ahc-off' || 'ahc-on' }}-spm-${{ hashFiles('Package.swift', 'Package.resolved') }}
           restore-keys: |
-            ${{ runner.os }}-swift-${{ matrix.swift }}-spm-
+            ${{ runner.os }}-swift-${{ matrix.swift }}-${{ matrix.traits == '' && 'ahc-off' || 'ahc-on' }}-spm-
 
       - name: Lint
         run: swift format lint --strict --recursive .
 
       - name: Build
-        run: swift build --build-tests --traits MLX,Llama,CoreML
+        run: swift build --build-tests --traits MLX,Llama,CoreML${{ matrix.traits != '' && format(',{0}', matrix.traits) || '' }}
 
       - name: Test
-        run: swift test --skip-build
+        run: swift test --skip-build --traits MLX,Llama,CoreML${{ matrix.traits != '' && format(',{0}', matrix.traits) || '' }}
 
   test-linux:
-    name: Swift ${{ matrix.swift }} on Linux
+    name: Swift ${{ matrix.swift }} on Linux${{ matrix.traits != '' && format(' and --traits {0}', matrix.traits) || '' }}
     runs-on: ubuntu-latest
     container: swift:${{ matrix.swift }}
     strategy:
       fail-fast: false
       matrix:
-        swift:
-          - "6.1.3"
-          - "6.2.4"
+        include:
+          - swift: "6.1.3"
+            traits: ""
+          - swift: "6.1.3"
+            traits: "AsyncHTTPClient"
+          - swift: "6.2.4"
+            traits: ""
+          - swift: "6.2.4"
+            traits: "AsyncHTTPClient"
     timeout-minutes: 10
     steps:
       - name: Checkout code
@@ -71,15 +87,15 @@ jobs:
           path: |
             ~/.cache/org.swift.swiftpm
             .build
-          key: ${{ runner.os }}-swift-${{ matrix.swift }}-spm-${{ hashFiles('Package.resolved') }}
+          key: ${{ runner.os }}-swift-${{ matrix.swift }}-${{ matrix.traits == '' && 'ahc-off' || 'ahc-on' }}-spm-${{ hashFiles('Package.swift', 'Package.resolved') }}
           restore-keys: |
-            ${{ runner.os }}-swift-${{ matrix.swift }}-spm-
+            ${{ runner.os }}-swift-${{ matrix.swift }}-${{ matrix.traits == '' && 'ahc-off' || 'ahc-on' }}-spm-
 
       - name: Lint
         run: swift format lint --strict --recursive .
 
       - name: Build
-        run: swift build
+        run: swift build${{ matrix.traits != '' && format(' --traits {0}', matrix.traits) || '' }}
 
       - name: Test
-        run: swift test
+        run: swift test${{ matrix.traits != '' && format(' --traits {0}', matrix.traits) || '' }}
