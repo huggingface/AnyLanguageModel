@@ -16,7 +16,7 @@ struct InstructionsTests {
     }
 
     @Test func builderCombinesLines() throws {
-        let instructions = try Instructions {
+        let instructions = Instructions {
             "First line"
             "Second line"
         }
@@ -28,7 +28,7 @@ struct InstructionsTests {
         let includeConditional = true
         let includeOptional = false
 
-        let instructions = try Instructions {
+        let instructions = Instructions {
             "Always"
             if includeConditional {
                 "Conditional"
