@@ -70,8 +70,11 @@ jobs:
         include:
           - swift: "6.1.3"
             traits: ""
-          - swift: "6.1.3"
-            traits: "AsyncHTTPClient"
+          # Temporary workaround: Skip AsyncHTTPClient on Linux Swift 6.1
+          # due to toolchain linker failure in libswiftObservation.so (undefined swift::threading::fatal).
+          # Keep AsyncHTTPClient coverage on Linux Swift 6.2 and re-enable here once fixed upstream.
+          # - swift: "6.1.3"
+          #   traits: "AsyncHTTPClient"
           - swift: "6.2.4"
             traits: ""
           - swift: "6.2.4"
