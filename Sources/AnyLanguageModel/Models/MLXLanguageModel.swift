@@ -497,16 +497,17 @@ import Foundation
                 return limits.max() ?? effectiveIdleLimit()
             }
 
+            private func idlePolicyConfiguration() -> GPUMemoryConfiguration {
+                knownConfigs.max(by: { $0.idleCacheLimit < $1.idleCacheLimit })
+                    ?? GPUMemoryConfiguration.automatic
+            }
+
             private func effectiveIdleLimit() -> Int {
-                let limits = knownConfigs.map(\.idleCacheLimit)
-                return limits.min() ?? GPUMemoryConfiguration.automatic.idleCacheLimit
+                idlePolicyConfiguration().idleCacheLimit
             }
 
             private func shouldClearOnEviction() -> Bool {
-                if knownConfigs.isEmpty {
-                    return GPUMemoryConfiguration.automatic.clearCacheOnEviction
-                }
-                return knownConfigs.contains { $0.clearCacheOnEviction }
+                idlePolicyConfiguration().clearCacheOnEviction
             }
         }
 
@@ -619,7 +620,25 @@ import Foundation
             .concurrentRequests(
                 .init(
                     debugDescription:
-                        "Concurrent requests on the same LanguageModelSession are not supported while MLX KV cache reuse is enabled."
+                        "Concurrent requests on the same LanguageModelSession are not supported for MLX due to cache and memory management constraints."
+                )
+            )
+        }
+
+        private static func maxToolIterationsExceededError(limit: Int) -> LanguageModelSession.GenerationError {
+            .decodingFailure(
+                .init(
+                    debugDescription:
+                        "Exceeded maximum tool iterations (\(limit)) while processing MLX tool calls."
+                )
+            )
+        }
+
+        private static func repeatedToolCallLoopError() -> LanguageModelSession.GenerationError {
+            .decodingFailure(
+                .init(
+                    debugDescription:
+                        "Detected repeated MLX tool-call signature and aborted to avoid an infinite tool loop."
                 )
             )
         }
@@ -663,7 +682,7 @@ import Foundation
             guard entry.prefixTokens.count == entry.prefillTokenCount else {
                 return false
             }
-            return Array(currentTokens.prefix(entry.prefillTokenCount)) == entry.prefixTokens
+            return currentTokens.starts(with: entry.prefixTokens)
         }
 
         private func resolveCache(
@@ -846,7 +865,9 @@ import Foundation
                 if !collectedToolCalls.isEmpty {
                     toolIteration += 1
                     if toolIteration > maxToolIterations {
-                        break
+                        let unresolvedCalls = try makeTranscriptToolCalls(from: collectedToolCalls)
+                        allEntries.append(Transcript.Entry.toolCalls(Transcript.ToolCalls(unresolvedCalls)))
+                        throw Self.maxToolIterationsExceededError(limit: maxToolIterations)
                     }
 
                     let signature =
@@ -854,7 +875,9 @@ import Foundation
                         .map { "\($0.function.name):\($0.function.arguments)" }
                         .joined(separator: "|")
                     if signature == previousToolCallSignature {
-                        break
+                        let unresolvedCalls = try makeTranscriptToolCalls(from: collectedToolCalls)
+                        allEntries.append(Transcript.Entry.toolCalls(Transcript.ToolCalls(unresolvedCalls)))
+                        throw Self.repeatedToolCallLoopError()
                     }
                     previousToolCallSignature = signature
 
@@ -1294,19 +1317,9 @@ import Foundation
         case invocations([ToolInvocationResult])
     }
 
-    private func resolveToolCalls(
-        _ toolCalls: [MLXLMCommon.ToolCall],
-        session: LanguageModelSession
-    ) async throws -> ToolResolutionOutcome {
-        if toolCalls.isEmpty { return .invocations([]) }
-
-        var toolsByName: [String: any Tool] = [:]
-        for tool in session.tools {
-            if toolsByName[tool.name] == nil {
-                toolsByName[tool.name] = tool
-            }
-        }
-
+    private func makeTranscriptToolCalls(
+        from toolCalls: [MLXLMCommon.ToolCall]
+    ) throws -> [Transcript.ToolCall] {
         var transcriptCalls: [Transcript.ToolCall] = []
         transcriptCalls.reserveCapacity(toolCalls.count)
         for call in toolCalls {
@@ -1320,6 +1333,23 @@ import Foundation
                 )
             )
         }
+        return transcriptCalls
+    }
+
+    private func resolveToolCalls(
+        _ toolCalls: [MLXLMCommon.ToolCall],
+        session: LanguageModelSession
+    ) async throws -> ToolResolutionOutcome {
+        if toolCalls.isEmpty { return .invocations([]) }
+
+        var toolsByName: [String: any Tool] = [:]
+        for tool in session.tools {
+            if toolsByName[tool.name] == nil {
+                toolsByName[tool.name] = tool
+            }
+        }
+
+        let transcriptCalls = try makeTranscriptToolCalls(from: toolCalls)
 
         if let delegate = session.toolExecutionDelegate {
             await delegate.didGenerateToolCalls(transcriptCalls, in: session)
