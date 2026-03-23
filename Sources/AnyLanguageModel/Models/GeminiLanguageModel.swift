@@ -186,7 +186,7 @@ public struct GeminiLanguageModel: LanguageModel {
     /// Internal storage for the deprecated serverTools property.
     internal var _serverTools: [CustomGenerationOptions.ServerTool]
 
-    private let urlSession: SessionType
+    private let httpSession: HTTPSession
 
     /// Creates a new Gemini language model.
     ///
@@ -195,13 +195,13 @@ public struct GeminiLanguageModel: LanguageModel {
     ///   - tokenProvider: A closure that provides the API key.
     ///   - apiVersion: The API version to use.
     ///   - model: The model identifier.
-    ///   - session: The URL session for network requests.
+    ///   - session: The HTTP session or client used for network requests.
     public init(
         baseURL: URL = defaultBaseURL,
         apiKey tokenProvider: @escaping @autoclosure @Sendable () -> String,
         apiVersion: String = defaultAPIVersion,
         model: String,
-        session: SessionType = makeDefaultSession(),
+        session: HTTPSession = makeDefaultSession(),
     ) {
         var baseURL = baseURL
         if !baseURL.path.hasSuffix("/") {
@@ -214,7 +214,7 @@ public struct GeminiLanguageModel: LanguageModel {
         self.model = model
         self._thinking = .disabled
         self._serverTools = []
-        self.urlSession = session
+        self.httpSession = session
     }
 
     /// Creates a new Gemini language model with thinking and server tools configuration.
@@ -226,7 +226,7 @@ public struct GeminiLanguageModel: LanguageModel {
     ///   - model: The model identifier.
     ///   - thinking: The thinking mode configuration.
     ///   - serverTools: Server-side tools to enable.
-    ///   - session: The URL session for network requests.
+    ///   - session: The HTTP session or client used for network requests.
     ///
     /// - Important: This initializer is deprecated. Use the initializer without
     ///   `thinking` and `serverTools` parameters, and pass these options through
@@ -243,7 +243,7 @@ public struct GeminiLanguageModel: LanguageModel {
         model: String,
         thinking: CustomGenerationOptions.Thinking = .disabled,
         serverTools: [CustomGenerationOptions.ServerTool] = [],
-        session: SessionType = makeDefaultSession(),
+        session: HTTPSession = makeDefaultSession(),
     ) {
         var baseURL = baseURL
         if !baseURL.path.hasSuffix("/") {
@@ -256,7 +256,7 @@ public struct GeminiLanguageModel: LanguageModel {
         self.model = model
         self._thinking = thinking
         self._serverTools = serverTools
-        self.urlSession = session
+        self.httpSession = session
     }
 
     public func respond<Content>(
@@ -295,7 +295,7 @@ public struct GeminiLanguageModel: LanguageModel {
 
             let body = try JSONEncoder().encode(params)
 
-            let response: GeminiGenerateContentResponse = try await urlSession.fetch(
+            let response: GeminiGenerateContentResponse = try await httpSession.fetch(
                 .post,
                 url: url,
                 headers: headers,
@@ -407,7 +407,7 @@ public struct GeminiLanguageModel: LanguageModel {
                     let body = try JSONEncoder().encode(params)
 
                     let stream: AsyncThrowingStream<GeminiGenerateContentResponse, any Error> =
-                        urlSession
+                        httpSession
                         .fetchEventStream(
                             .post,
                             url: url,

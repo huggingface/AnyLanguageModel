@@ -1,9 +1,9 @@
 #if canImport(AsyncHTTPClient)
     import AsyncHTTPClient
 
-    public typealias SessionType = HTTPClient
+    public typealias HTTPSession = HTTPClient
 
-    public func makeDefaultSession() -> SessionType {
+    public func makeDefaultSession() -> HTTPSession {
         return HTTPClient.shared
     }
 #else
@@ -12,9 +12,9 @@
         import FoundationNetworking
     #endif
 
-    public typealias SessionType = URLSession
+    public typealias HTTPSession = URLSession
 
-    public func makeDefaultSession() -> SessionType {
+    public func makeDefaultSession() -> HTTPSession {
         return URLSession(configuration: .default)
     }
 #endif

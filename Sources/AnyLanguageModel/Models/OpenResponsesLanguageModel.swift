@@ -365,7 +365,7 @@ public struct OpenResponsesLanguageModel: LanguageModel {
     /// Model identifier to use for generation.
     public let model: String
 
-    private let urlSession: SessionType
+    private let httpSession: HTTPSession
 
     /// Creates an Open Responses language model.
     ///
@@ -373,12 +373,12 @@ public struct OpenResponsesLanguageModel: LanguageModel {
     ///   - baseURL: Base URL for the API (e.g. `https://api.openai.com/v1/` or `https://openrouter.ai/api/v1/`). Must end with `/`.
     ///   - apiKey: API key or closure that returns it.
     ///   - model: Model identifier (e.g. `gpt-4o-mini` or provider-specific id).
-    ///   - session: URL session for network requests.
+    ///   - session: The HTTP session or client used for network requests.
     public init(
         baseURL: URL,
         apiKey tokenProvider: @escaping @autoclosure @Sendable () -> String,
         model: String,
-        session: SessionType = makeDefaultSession(),
+        session: HTTPSession = makeDefaultSession(),
     ) {
         var baseURL = baseURL
         if !baseURL.path.hasSuffix("/") {
@@ -387,7 +387,7 @@ public struct OpenResponsesLanguageModel: LanguageModel {
         self.baseURL = baseURL
         self.tokenProvider = tokenProvider
         self.model = model
-        self.urlSession = session
+        self.httpSession = session
     }
 
     public func respond<Content>(
@@ -433,7 +433,7 @@ public struct OpenResponsesLanguageModel: LanguageModel {
                     do {
                         let body = try JSONEncoder().encode(params)
                         let events: AsyncThrowingStream<OpenResponsesStreamEvent, any Error> =
-                            urlSession.fetchEventStream(
+                            httpSession.fetchEventStream(
                                 .post,
                                 url: url,
                                 headers: ["Authorization": "Bearer \(tokenProvider())"],
@@ -505,7 +505,7 @@ public struct OpenResponsesLanguageModel: LanguageModel {
                 stream: false
             )
             let body = try JSONEncoder().encode(params)
-            let resp: OpenResponsesAPI.Response = try await urlSession.fetch(
+            let resp: OpenResponsesAPI.Response = try await httpSession.fetch(
                 .post,
                 url: url,
                 headers: ["Authorization": "Bearer \(tokenProvider())"],
