@@ -90,7 +90,7 @@ session.toolExecutionDelegate = ToolExecutionObserver()
 > when targeting macOS 15 / iOS 18 or earlier
 > (e.g. `Conformance of 'String' to 'Generable' is only available in macOS 26.0 or newer`).
 > As a workaround, build your project with Xcode 16.
-> For more information, see [issue #15](https://github.com/mattt/AnyLanguageModel/issues/15).
+> For more information, see [issue #15](https://github.com/huggingface/AnyLanguageModel/issues/15).
 
 ## Installation
 
@@ -98,7 +98,7 @@ Add this package to your `Package.swift`:
 
 ```swift
 dependencies: [
-    .package(url: "https://github.com/mattt/AnyLanguageModel", from: "0.8.0")
+    .package(url: "https://github.com/huggingface/AnyLanguageModel", from: "0.8.0")
 ]
 ```
 
@@ -125,7 +125,7 @@ To enable specific traits, specify them in your package's dependencies:
 // In your Package.swift
 dependencies: [
     .package(
-        url: "https://github.com/mattt/AnyLanguageModel.git",
+        url: "https://github.com/huggingface/AnyLanguageModel.git",
         from: "0.8.0",
         traits: ["CoreML", "MLX"] // Enable CoreML and MLX support
     )
@@ -142,7 +142,7 @@ dependencies: [
 > ```swift
 > dependencies: [
 >     .package(
->         url: "https://github.com/mattt/AnyLanguageModel.git",
+>         url: "https://github.com/huggingface/AnyLanguageModel.git",
 >         from: "0.8.0",
 >         traits: ["CoreML", "MLX", "Llama"]
 >     ),
@@ -153,7 +153,7 @@ dependencies: [
 > ```
 >
 > Include only the dependencies that correspond to the traits you enable.
-> For more information, see [issue #135](https://github.com/mattt/AnyLanguageModel/issues/135).
+> For more information, see [issue #135](https://github.com/huggingface/AnyLanguageModel/issues/135).
 
 ### Using Traits in Xcode Projects
 
@@ -197,7 +197,7 @@ let package = Package(
     ],
     dependencies: [
         .package(
-            url: "https://github.com/mattt/AnyLanguageModel",
+            url: "https://github.com/huggingface/AnyLanguageModel",
             from: "0.4.0",
             traits: ["MLX"]
         )
@@ -468,7 +468,7 @@ Enable the trait in Package.swift:
 
 ```swift
 .package(
-    url: "https://github.com/mattt/AnyLanguageModel.git",
+    url: "https://github.com/huggingface/AnyLanguageModel.git",
     branch: "main",
     traits: ["CoreML"]
 )
@@ -554,7 +554,7 @@ Enable the trait in Package.swift:
 
 ```swift
 .package(
-    url: "https://github.com/mattt/AnyLanguageModel.git",
+    url: "https://github.com/huggingface/AnyLanguageModel.git",
     branch: "main",
     traits: ["MLX"]
 )
@@ -578,7 +578,7 @@ Enable the trait in Package.swift:
 
 ```swift
 .package(
-    url: "https://github.com/mattt/AnyLanguageModel.git",
+    url: "https://github.com/huggingface/AnyLanguageModel.git",
     branch: "main",
     traits: ["Llama"]
 )
@@ -934,7 +934,18 @@ swift test --traits CoreML,Llama
 >   -only-testing:AnyLanguageModelTests/MLXLanguageModelTests
 > ```
 
+## Contributing
+
+This is a community project and we welcome contributions.
+Please check out
+[Issues tagged with `good first issue`][good-first-issues]
+if you are looking for a place to start!
+
+Please ensure your code passes the build and test suite
+before submitting a pull request.
+
+[good-first-issues]: https://github.com/huggingface/AnyLanguageModel/issues?q=is%3Aissue%20state%3Aopen%20label%3A%22good%20first%20issue%22
+
 ## License
 
-This project is available under the MIT license.
-See the LICENSE file for more info.
+[Apache 2](LICENSE).
