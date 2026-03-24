@@ -201,6 +201,24 @@ import Testing
             _ = convertToDynamicSchema(schema)
         }
 
+        @available(macOS 26.0, iOS 26.0, watchOS 26.0, tvOS 26.0, visionOS 26.0, *)
+        @Test func convertNamedStringEnumDependencySchema() throws {
+            let outputVersion: JSONSchema = .string(enum: ["v0", "v1"])
+            let enumDependency = convertToDynamicSchema(outputVersion, name: "OutputVersion")
+
+            let root = FoundationModels.DynamicGenerationSchema(
+                name: "Root",
+                properties: [
+                    .init(
+                        name: "version",
+                        schema: .init(referenceTo: "OutputVersion")
+                    )
+                ]
+            )
+
+            _ = try FoundationModels.GenerationSchema(root: root, dependencies: [enumDependency])
+        }
+
         // MARK: - Fallback Types
 
         @available(macOS 26.0, iOS 26.0, watchOS 26.0, tvOS 26.0, visionOS 26.0, *)

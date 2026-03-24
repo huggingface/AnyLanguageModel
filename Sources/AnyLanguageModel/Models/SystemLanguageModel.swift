@@ -552,6 +552,12 @@
             return .init(name: name ?? "", description: jsonSchema.description, properties: schemaProperties)
 
         case .string(_, _, _, _, _, _, _, _, pattern: let pattern, _):
+            if let values = jsonSchema.enum?.compactMap(\.stringValue), !values.isEmpty {
+                if let name {
+                    return .init(name: name, description: jsonSchema.description, anyOf: values)
+                }
+            }
+
             var guides: [FoundationModels.GenerationGuide<String>] = []
             if let values = jsonSchema.enum?.compactMap(\.stringValue), !values.isEmpty {
                 guides.append(.anyOf(values))
