@@ -262,13 +262,13 @@ import Testing
                 temperature: 0.7,
                 maximumResponseTokens: 32
             )
-            options[custom: MLXLanguageModel.self] = .init(
-                additionalContext: [
-                    "user_name": .string("Alice"),
-                    "turn_count": .int(3),
-                    "verbose": .bool(true),
-                ]
-            )
+            var custom = MLXLanguageModel.CustomGenerationOptions.default
+            custom.additionalContext = [
+                "user_name": .string("Alice"),
+                "turn_count": .int(3),
+                "verbose": .bool(true),
+            ]
+            options[custom: MLXLanguageModel.self] = custom
 
             let response = try await session.respond(
                 to: "Say hello",

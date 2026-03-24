@@ -493,14 +493,16 @@ including KV-cache settings and optional media preprocessing:
 
 ```swift
 var options = GenerationOptions(temperature: 0.7)
-options[custom: MLXLanguageModel.self] = .init(
-    maxKVSize: 4096,
-    kvBits: 4,
-    kvGroupSize: 64,
-    quantizedKVStart: 128,
-    // Apply a deterministic preprocessing step for image inputs.
-    userInputProcessing: .init(resize: .init(width: 512, height: 512))
+var mlxOptions = MLXLanguageModel.CustomGenerationOptions.default
+mlxOptions.kvCache = .init(
+    maxSize: 4096,
+    bits: 4,
+    groupSize: 64,
+    quantizedStart: 128
 )
+// Apply a deterministic preprocessing step for image inputs.
+mlxOptions.userInputProcessing = .init(resize: .init(width: 512, height: 512))
+options[custom: MLXLanguageModel.self] = mlxOptions
 
 let response = try await session.respond(
     to: "Summarize this transcript",

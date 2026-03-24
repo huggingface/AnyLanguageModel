@@ -867,38 +867,50 @@ struct GeminiCustomOptionsTests {
     struct MLXCustomOptionsTests {
         @Test func initialization() {
             let options = MLXLanguageModel.CustomGenerationOptions(
-                maxKVSize: 4096,
-                kvBits: 4,
-                kvGroupSize: 64,
-                quantizedKVStart: 128
+                kvCache: .init(
+                    maxSize: 4096,
+                    bits: 4,
+                    groupSize: 64,
+                    quantizedStart: 128
+                ),
+                userInputProcessing: nil,
+                additionalContext: nil
             )
-            #expect(options.maxKVSize == 4096)
-            #expect(options.kvBits == 4)
-            #expect(options.kvGroupSize == 64)
-            #expect(options.quantizedKVStart == 128)
+            #expect(options.kvCache.maxSize == 4096)
+            #expect(options.kvCache.bits == 4)
+            #expect(options.kvCache.groupSize == 64)
+            #expect(options.kvCache.quantizedStart == 128)
         }
 
         @Test func integrationWithGenerationOptions() {
             var options = GenerationOptions(temperature: 0.7)
             options[custom: MLXLanguageModel.self] = .init(
-                maxKVSize: 2048,
-                kvBits: 8,
-                kvGroupSize: 32,
-                quantizedKVStart: 256
+                kvCache: .init(
+                    maxSize: 2048,
+                    bits: 8,
+                    groupSize: 32,
+                    quantizedStart: 256
+                ),
+                userInputProcessing: nil,
+                additionalContext: nil
             )
             let retrieved = options[custom: MLXLanguageModel.self]
-            #expect(retrieved?.maxKVSize == 2048)
-            #expect(retrieved?.kvBits == 8)
-            #expect(retrieved?.kvGroupSize == 32)
-            #expect(retrieved?.quantizedKVStart == 256)
+            #expect(retrieved?.kvCache.maxSize == 2048)
+            #expect(retrieved?.kvCache.bits == 8)
+            #expect(retrieved?.kvCache.groupSize == 32)
+            #expect(retrieved?.kvCache.quantizedStart == 256)
         }
 
         @Test func codable() throws {
             let options = MLXLanguageModel.CustomGenerationOptions(
-                maxKVSize: 8192,
-                kvBits: 4,
-                kvGroupSize: 64,
-                quantizedKVStart: 0
+                kvCache: .init(
+                    maxSize: 8192,
+                    bits: 4,
+                    groupSize: 64,
+                    quantizedStart: 0
+                ),
+                userInputProcessing: nil,
+                additionalContext: nil
             )
             let data = try JSONEncoder().encode(options)
             let decoded = try JSONDecoder().decode(MLXLanguageModel.CustomGenerationOptions.self, from: data)

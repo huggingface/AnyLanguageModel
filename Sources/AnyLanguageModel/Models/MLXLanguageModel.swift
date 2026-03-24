@@ -196,6 +196,59 @@ import Foundation
         /// Set these values through ``GenerationOptions`` using
         /// `GenerationOptions[custom: MLXLanguageModel.self]`.
         public struct CustomGenerationOptions: AnyLanguageModel.CustomGenerationOptions, Codable {
+            /// Configures KV-cache behavior for MLX generation.
+            public struct KVCache: Codable, Equatable, Sendable {
+                /// Limits how many tokens the KV cache retains.
+                ///
+                /// Set this to `nil` to use the backend default.
+                public var maxSize: Int?
+
+                /// Sets the KV-cache quantization bit width.
+                ///
+                /// Set this to `nil` to disable KV quantization.
+                public var bits: Int?
+
+                /// Sets the token group size used for KV quantization.
+                public var groupSize: Int
+
+                /// Sets the token offset where quantized KV storage starts.
+                public var quantizedStart: Int
+
+                /// Default KV-cache options used when none are provided at runtime.
+                /// By default, the token group size is 64 and the quantized start is 0.
+                public static var `default`: Self {
+                    .init(
+                        maxSize: nil,
+                        bits: nil,
+                        groupSize: 64,
+                        quantizedStart: 0
+                    )
+                }
+
+                /// Creates KV-cache configuration for MLX generation.
+                ///
+                /// - Parameters:
+                ///   - maxSize: The maximum number of tokens to retain in KV cache storage.
+                ///     Pass `nil` to use the backend default.
+                ///   - bits: The KV-cache quantization bit width.
+                ///     Pass `nil` to disable KV quantization.
+                ///   - groupSize: The token group size used for KV quantization.
+                ///   - quantizedStart: The token index where quantized KV storage begins.
+                public init(
+                    maxSize: Int?,
+                    bits: Int?,
+                    groupSize: Int,
+                    quantizedStart: Int
+                ) {
+                    self.maxSize = maxSize
+                    self.bits = bits
+                    self.groupSize = groupSize
+                    self.quantizedStart = quantizedStart
+                }
+            }
+            /// KV-cache configuration used for generation.
+            public var kvCache: KVCache
+
             /// Configures media preprocessing applied before model input.
             public struct UserInputProcessing: Codable, Equatable, Sendable {
                 /// Optional resize target applied to media before tokenization.
@@ -204,7 +257,7 @@ import Foundation
                 /// Creates user-input processing configuration.
                 ///
                 /// - Parameter resize: Optional target size for media resizing.
-                public init(resize: CGSize? = nil) {
+                public init(resize: CGSize?) {
                     self.resize = resize
                 }
 
@@ -220,19 +273,6 @@ import Foundation
                     ?? .init(resize: nil)
             }
 
-            /// Limits how many tokens the KV cache retains.
-            ///
-            /// Set this to `nil` to use the backend default.
-            public var maxKVSize: Int?
-            /// Sets the KV-cache quantization bit width.
-            ///
-            /// Set this to `nil` to disable KV quantization.
-            public var kvBits: Int?
-            /// Sets the token group size used for KV quantization.
-            public var kvGroupSize: Int
-            /// Sets the token offset where quantized KV storage starts.
-            public var quantizedKVStart: Int
-
             /// Additional key-value pairs injected into the chat template rendering context.
             public var additionalContext: [String: JSONValue]?
 
@@ -243,30 +283,28 @@ import Foundation
             /// Creates MLX-specific generation options.
             ///
             /// - Parameters:
-            ///   - maxKVSize: The maximum number of tokens to retain in KV cache storage.
-            ///     Pass `nil` to use the backend default.
-            ///   - kvBits: The KV-cache quantization bit width.
-            ///     Pass `nil` to disable KV quantization.
-            ///   - kvGroupSize: The token group size used for KV quantization.
-            ///   - quantizedKVStart: The token index where quantized KV storage begins.
+            ///   - kvCache: KV-cache configuration used for generation.
             ///   - additionalContext: Additional key-value pairs injected into the chat
             ///     template rendering context.
             ///   - userInputProcessing: Processing to apply to user media before input preparation.
             ///     Defaults to `nil`, which lets MLX use its default media handling.
             public init(
-                maxKVSize: Int? = nil,
-                kvBits: Int? = nil,
-                kvGroupSize: Int = 64,
-                quantizedKVStart: Int = 0,
-                userInputProcessing: UserInputProcessing? = nil,
-                additionalContext: [String: JSONValue]? = nil
+                kvCache: KVCache,
+                userInputProcessing: UserInputProcessing?,
+                additionalContext: [String: JSONValue]?
             ) {
-                self.maxKVSize = maxKVSize
-                self.kvBits = kvBits
-                self.kvGroupSize = kvGroupSize
-                self.quantizedKVStart = quantizedKVStart
+                self.kvCache = kvCache
                 self.additionalContext = additionalContext
                 self.userInputProcessing = userInputProcessing
+            }
+
+            /// Default MLX generation options used when none are provided at runtime.
+            public static var `default`: Self {
+                .init(
+                    kvCache: .default,
+                    userInputProcessing: nil,
+                    additionalContext: nil
+                )
             }
         }
 
@@ -1173,10 +1211,10 @@ import Foundation
         let custom = options[custom: MLXLanguageModel.self]
         return MLXLMCommon.GenerateParameters(
             maxTokens: options.maximumResponseTokens,
-            maxKVSize: custom?.maxKVSize,
-            kvBits: custom?.kvBits,
-            kvGroupSize: custom?.kvGroupSize ?? 64,
-            quantizedKVStart: custom?.quantizedKVStart ?? 0,
+            maxKVSize: custom?.kvCache.maxSize,
+            kvBits: custom?.kvCache.bits,
+            kvGroupSize: custom?.kvCache.groupSize ?? 64,
+            quantizedKVStart: custom?.kvCache.quantizedStart ?? 0,
             temperature: Float(options.temperature ?? 0.6),
             topP: 1.0,
             repetitionPenalty: nil,
@@ -1189,10 +1227,10 @@ import Foundation
         let custom = options[custom: MLXLanguageModel.self]
         return MLXLMCommon.GenerateParameters(
             maxTokens: options.maximumResponseTokens,
-            maxKVSize: custom?.maxKVSize,
-            kvBits: custom?.kvBits,
-            kvGroupSize: custom?.kvGroupSize ?? 64,
-            quantizedKVStart: custom?.quantizedKVStart ?? 0,
+            maxKVSize: custom?.kvCache.maxSize,
+            kvBits: custom?.kvCache.bits,
+            kvGroupSize: custom?.kvCache.groupSize ?? 64,
+            quantizedKVStart: custom?.kvCache.quantizedStart ?? 0,
             temperature: Float(options.temperature ?? 0.2),
             topP: 0.95,
             repetitionPenalty: 1.1,
