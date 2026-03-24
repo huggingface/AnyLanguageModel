@@ -469,7 +469,7 @@ Enable the trait in Package.swift:
 ```swift
 .package(
     url: "https://github.com/huggingface/AnyLanguageModel.git",
-    branch: "main",
+    from: "0.8.0",
     traits: ["CoreML"]
 )
 ```
@@ -555,7 +555,7 @@ Enable the trait in Package.swift:
 ```swift
 .package(
     url: "https://github.com/huggingface/AnyLanguageModel.git",
-    branch: "main",
+    from: "0.8.0",
     traits: ["MLX"]
 )
 ```
@@ -579,7 +579,7 @@ Enable the trait in Package.swift:
 ```swift
 .package(
     url: "https://github.com/huggingface/AnyLanguageModel.git",
-    branch: "main",
+    from: "0.8.0",
     traits: ["Llama"]
 )
 ```
