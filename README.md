@@ -488,7 +488,8 @@ let response = try await session.respond {
 }
 ```
 
-You can tune MLX KV-cache behavior per request with model-specific options:
+You can tune MLX request behavior per call with model-specific options,
+including KV-cache settings and optional media preprocessing:
 
 ```swift
 var options = GenerationOptions(temperature: 0.7)
@@ -496,7 +497,9 @@ options[custom: MLXLanguageModel.self] = .init(
     maxKVSize: 4096,
     kvBits: 4,
     kvGroupSize: 64,
-    quantizedKVStart: 128
+    quantizedKVStart: 128,
+    // Apply a deterministic preprocessing step for image inputs.
+    userInputProcessing: .init(resize: .init(width: 512, height: 512))
 )
 
 let response = try await session.respond(
@@ -504,6 +507,12 @@ let response = try await session.respond(
     options: options
 )
 ```
+
+You can specify `userInputProcessing` to enforce a consistent image
+preprocessing step 
+(for example, fixed dimensions for predictable latency, memory usage, and vision behavior).
+By default, images are passed through without an explicit resize override
+(`resize: nil`), so MLX applies its default media processing behavior.
 
 GPU cache behavior can be configured when creating the model:
 

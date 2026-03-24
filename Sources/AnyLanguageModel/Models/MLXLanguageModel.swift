@@ -196,6 +196,30 @@ import Foundation
         /// Set these values through ``GenerationOptions`` using
         /// `GenerationOptions[custom: MLXLanguageModel.self]`.
         public struct CustomGenerationOptions: AnyLanguageModel.CustomGenerationOptions, Codable {
+            /// Configures media preprocessing applied before model input.
+            public struct UserInputProcessing: Codable, Equatable, Sendable {
+                /// Optional resize target applied to media before tokenization.
+                public var resize: CGSize?
+
+                /// Creates user-input processing configuration.
+                ///
+                /// - Parameter resize: Optional target size for media resizing.
+                public init(resize: CGSize? = nil) {
+                    self.resize = resize
+                }
+
+                var mlxValue: MLXLMCommon.UserInput.Processing {
+                    .init(resize: resize)
+                }
+            }
+            /// Processing to apply to user media before input preparation.
+            public var userInputProcessing: UserInputProcessing?
+
+            var processingForUserInput: MLXLMCommon.UserInput.Processing {
+                userInputProcessing?.mlxValue
+                    ?? .init(resize: nil)
+            }
+
             /// Limits how many tokens the KV cache retains.
             ///
             /// Set this to `nil` to use the backend default.
@@ -208,6 +232,7 @@ import Foundation
             public var kvGroupSize: Int
             /// Sets the token offset where quantized KV storage starts.
             public var quantizedKVStart: Int
+
             /// Additional key-value pairs injected into the chat template rendering context.
             public var additionalContext: [String: JSONValue]?
 
@@ -226,11 +251,14 @@ import Foundation
             ///   - quantizedKVStart: The token index where quantized KV storage begins.
             ///   - additionalContext: Additional key-value pairs injected into the chat
             ///     template rendering context.
+            ///   - userInputProcessing: Processing to apply to user media before input preparation.
+            ///     Defaults to `nil`, which lets MLX use its default media handling.
             public init(
                 maxKVSize: Int? = nil,
                 kvBits: Int? = nil,
                 kvGroupSize: Int = 64,
                 quantizedKVStart: Int = 0,
+                userInputProcessing: UserInputProcessing? = nil,
                 additionalContext: [String: JSONValue]? = nil
             ) {
                 self.maxKVSize = maxKVSize
@@ -238,6 +266,7 @@ import Foundation
                 self.kvGroupSize = kvGroupSize
                 self.quantizedKVStart = quantizedKVStart
                 self.additionalContext = additionalContext
+                self.userInputProcessing = userInputProcessing
             }
         }
 
@@ -771,23 +800,14 @@ import Foundation
         }
 
         private func makeUserInput(
-            session: LanguageModelSession,
-            fallbackPrompt: String,
-            tools: [ToolSpec]?,
-            additionalContext: [String: any Sendable]? = nil
-        ) -> MLXLMCommon.UserInput {
-            let chat = convertTranscriptToMLXChat(session: session, fallbackPrompt: fallbackPrompt)
-            return makeUserInput(chat: chat, tools: tools, additionalContext: additionalContext)
-        }
-
-        private func makeUserInput(
             chat: [MLXLMCommon.Chat.Message],
             tools: [ToolSpec]?,
+            processing: MLXLMCommon.UserInput.Processing = .init(resize: nil),
             additionalContext: [String: any Sendable]? = nil
         ) -> MLXLMCommon.UserInput {
             return MLXLMCommon.UserInput(
                 chat: chat,
-                processing: .init(resize: .init(width: 512, height: 512)),
+                processing: processing,
                 tools: tools,
                 additionalContext: additionalContext,
             )
@@ -835,6 +855,9 @@ import Foundation
 
             // Extract additional context from custom options
             let additionalContext = options[custom: MLXLanguageModel.self]?.additionalContextForUserInput
+            let userInputProcessing =
+                options[custom: MLXLanguageModel.self]?.processingForUserInput
+                ?? .init(resize: nil)
 
             // Build chat history from full transcript
             var chat = convertTranscriptToMLXChat(session: session, fallbackPrompt: prompt.description)
@@ -851,6 +874,7 @@ import Foundation
                 let userInput = makeUserInput(
                     chat: chat,
                     tools: toolSpecs,
+                    processing: userInputProcessing,
                     additionalContext: additionalContext
                 )
                 let lmInput = try await context.processor.prepare(input: userInput)
@@ -1015,11 +1039,18 @@ import Foundation
                         // Build chat inside task to avoid Sendable issues
                         let generateParameters = toGenerateParameters(options)
                         let additionalContext = options[custom: MLXLanguageModel.self]?.additionalContextForUserInput
+                        let userInputProcessing =
+                            options[custom: MLXLanguageModel.self]?.processingForUserInput
+                            ?? .init(resize: nil)
+                        let chat = convertTranscriptToMLXChat(
+                            session: session,
+                            fallbackPrompt: prompt.description
+                        )
 
                         let userInput = makeUserInput(
-                            session: session,
-                            fallbackPrompt: prompt.description,
+                            chat: chat,
                             tools: nil,
+                            processing: userInputProcessing,
                             additionalContext: additionalContext
                         )
                         let lmInput = try await context.processor.prepare(input: userInput)
@@ -1118,7 +1149,7 @@ import Foundation
                     let newCache = context.model.newCache(parameters: params)
                     let userInput = MLXLMCommon.UserInput(
                         chat: [.init(role: .system, content: instructions)],
-                        processing: .init(resize: .init(width: 512, height: 512)),
+                        processing: .init(resize: nil),
                         tools: toolSpecs
                     )
                     let lmInput = try await context.processor.prepare(input: userInput)
@@ -1557,10 +1588,14 @@ import Foundation
         let chat = normalizeChatForStructuredGeneration(baseChat, schemaPrompt: schemaPrompt)
 
         let additionalContext = options[custom: MLXLanguageModel.self]?.additionalContextForUserInput
+        let userInputProcessing =
+            options[custom: MLXLanguageModel.self]?.processingForUserInput
+            ?? .init(resize: nil)
 
         let userInput = makeUserInput(
             chat: chat,
             tools: nil,
+            processing: userInputProcessing,
             additionalContext: additionalContext
         )
         let lmInput = try await context.processor.prepare(input: userInput)
