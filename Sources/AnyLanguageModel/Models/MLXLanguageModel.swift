@@ -257,8 +257,15 @@ import Foundation
                 /// Creates user-input processing configuration.
                 ///
                 /// - Parameter resize: Optional target size for media resizing.
-                public init(resize: CGSize?) {
+                init(resize: CGSize?) {
                     self.resize = resize
+                }
+
+                /// Creates processing that resizes media to a fixed size.
+                ///
+                /// - Parameter size: Target size used for resizing media inputs.
+                public static func resize(to size: CGSize) -> Self {
+                    .init(resize: size)
                 }
 
                 var mlxValue: MLXLMCommon.UserInput.Processing {

@@ -501,7 +501,7 @@ mlxOptions.kvCache = .init(
     quantizedStart: 128
 )
 // Apply a deterministic preprocessing step for image inputs.
-mlxOptions.userInputProcessing = .init(resize: .init(width: 512, height: 512))
+mlxOptions.userInputProcessing = .resize(to: CGSize(width: 512, height: 512))
 options[custom: MLXLanguageModel.self] = mlxOptions
 
 let response = try await session.respond(
