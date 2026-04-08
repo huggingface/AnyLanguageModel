@@ -278,6 +278,18 @@ public final class LanguageModelSession: @unchecked Sendable {
     }
 }
 
+// MARK: - Transcript Manipulation
+
+extension LanguageModelSession {
+    /// Allows manual injection of Transcript entries to resume dropped sessions 
+    /// without busting the MLX ObjectIdentifier KV-cache.
+    public func appendTranscriptEntry(_ entry: Transcript.Entry) {
+        withMutation(keyPath: \.transcript) {
+            state.withLock { $0.transcript.append(entry) }
+        }
+    }
+}
+
 // MARK: - String Response Convenience Methods
 
 extension LanguageModelSession {
