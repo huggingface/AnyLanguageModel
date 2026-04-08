@@ -1010,8 +1010,12 @@ import Foundation
                                 chat.append(.tool(toolResultJSON))
                             }
 
-                            // Continue loop to generate with tool results
-                            continue
+                            // Return response with appended tool outputs rather than looping to regenerate
+                            return LanguageModelSession.Response(
+                                content: assistantText as! Content,
+                                rawContent: GeneratedContent(assistantText),
+                                transcriptEntries: ArraySlice(allEntries)
+                            )
                         }
                     }
                 }
