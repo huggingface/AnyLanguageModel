@@ -55,6 +55,24 @@ struct TranscriptTests {
         #expect(Transcript.Segment.image(image).id == "image-id")
     }
 
+    @Test func sessionRestoresInstructionsFromTranscript() throws {
+        let instructions = "First\n\nSecond trailing spaces   "
+        let transcript = Transcript(entries: [
+            .instructions(.init(
+                id: "instructions-id",
+                segments: [.text(.init(content: instructions))],
+                toolDefinitions: []
+            )),
+            .prompt(.init(segments: [.text(.init(content: "Hello"))]))
+        ])
+
+        let session = LanguageModelSession(model: MockLanguageModel(), transcript: transcript)
+
+        #expect(session.instructions?.description == instructions)
+        #expect(session.transcript.count == transcript.count)
+        #expect(session.transcript.first?.id == "instructions-id")
+    }
+
     @Test func imageSourceRoundTripsForDataAndURL() throws {
         let encoder = JSONEncoder()
         let decoder = JSONDecoder()

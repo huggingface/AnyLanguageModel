@@ -69,11 +69,12 @@ public final class LanguageModelSession: @unchecked Sendable {
     ) {
         self.model = model
         self.tools = tools
-        self.instructions = instructions
+        let resolvedInstructions = instructions ?? Self.instructions(from: transcript)
+        self.instructions = resolvedInstructions
 
         // Build transcript with instructions if provided and not already in transcript
         var finalTranscript = transcript
-        if let instructions = instructions {
+        if let instructions = resolvedInstructions {
             // Only add instructions if transcript doesn't already start with instructions
             let hasInstructions =
                 finalTranscript.first.map { entry in
@@ -95,6 +96,16 @@ public final class LanguageModelSession: @unchecked Sendable {
         }
 
         self.state = .init(.init(finalTranscript))
+    }
+
+    private static func instructions(from transcript: Transcript) -> Instructions? {
+        guard case .instructions(let instructions)? = transcript.first else { return nil }
+        guard instructions.segments.count == 1,
+            case .text(let text) = instructions.segments[0]
+        else {
+            return nil
+        }
+        return Instructions(content: text.content)
     }
 
     public func prewarm(promptPrefix: Prompt? = nil) {
