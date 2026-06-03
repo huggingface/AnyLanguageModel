@@ -14,9 +14,16 @@ import Foundation
     import JSONSchema
     import MLXLMCommon
     import MLX
+    // MLXLLM and MLXVLM are imported for their `TrampolineModelFactory` registration, which
+    // `ModelFactoryRegistry` resolves by name when loading LLM/VLM architectures.
+    import MLXLLM
     import MLXVLM
+    // MLXHuggingFace provides the `#hubDownloader()` / `#huggingFaceTokenizerLoader()` macros; their
+    // expansions reference `HuggingFace.HubClient` and `Tokenizers.AutoTokenizer`, so both modules
+    // must be in scope at the call site.
+    import MLXHuggingFace
+    import HuggingFace
     import Tokenizers
-    import Hub
 
     /// Wrapper to store model availability state in NSCache.
     private final class CachedModelState: NSObject, @unchecked Sendable {
@@ -613,8 +620,8 @@ import Foundation
         /// The model identifier.
         public let modelId: String
 
-        /// The Hub API instance for downloading models.
-        public let hub: HubApi?
+        /// The Hugging Face Hub client used for downloading models.
+        public let hub: HubClient?
 
         /// The local directory containing the model files.
         public let directory: URL?
@@ -626,12 +633,12 @@ import Foundation
         ///
         /// - Parameters:
         ///   - modelId: The model identifier (for example, "mlx-community/Llama-3.2-3B-Instruct-4bit").
-        ///   - hub: An optional Hub API instance for downloading models. If not provided, the default Hub API is used.
+        ///   - hub: An optional Hugging Face Hub client for downloading models. If not provided, the default client is used.
         ///   - directory: An optional local directory URL containing the model files. If provided, the model is loaded from this directory instead of downloading.
         ///   - gpuMemory: The GPU-memory behavior used for this model's active and idle phases.
         public init(
             modelId: String,
-            hub: HubApi? = nil,
+            hub: HubClient? = nil,
             directory: URL? = nil,
             gpuMemory: GPUMemoryConfiguration = .automatic
         ) {
@@ -675,15 +682,30 @@ import Foundation
         }
 
         /// Get or load model context with caching
-        private func loadContext(modelId: String, hub: HubApi?, directory: URL?) async throws -> ModelContext {
+        private func loadContext(modelId: String, hub: HubClient?, directory: URL?) async throws -> ModelContext {
             let key = directory?.absoluteString ?? modelId
 
             return try await modelCache.context(for: key) {
+                // mlx-swift-lm 3.x requires an explicit downloader and tokenizer loader. The
+                // MLXHuggingFace macros expand to a HubClient-backed downloader and an
+                // AutoTokenizer-backed loader, matching the prior HuggingFace Hub behavior.
                 if let directory {
-                    return try await loadModel(directory: directory)
+                    return try await loadModel(from: directory, using: #huggingFaceTokenizerLoader())
                 }
 
-                return try await loadModel(hub: hub ?? HubApi(), id: modelId)
+                if let hub {
+                    return try await loadModel(
+                        from: #hubDownloader(hub),
+                        using: #huggingFaceTokenizerLoader(),
+                        id: modelId
+                    )
+                }
+
+                return try await loadModel(
+                    from: #hubDownloader(),
+                    using: #huggingFaceTokenizerLoader(),
+                    id: modelId
+                )
             }
         }
 
@@ -1714,7 +1736,7 @@ import Foundation
 
     private struct MLXTokenBackend: TokenBackend {
         let model: any MLXLMCommon.LanguageModel
-        let tokenizer: any Tokenizer
+        let tokenizer: any MLXLMCommon.Tokenizer
         var state: MLXLMCommon.LMOutput.State?
         var cache: [MLXLMCommon.KVCache]
         var processor: MLXLMCommon.LogitProcessor?
@@ -1795,7 +1817,7 @@ import Foundation
 
         private static func buildEndTokens(
             eosTokenId: Int,
-            tokenizer: any Tokenizer,
+            tokenizer: any MLXLMCommon.Tokenizer,
             configuration: ModelConfiguration
         ) -> Set<Int> {
             var tokens: Set<Int> = [eosTokenId]
@@ -1816,13 +1838,13 @@ import Foundation
 
         func isSpecialToken(_ token: Int) -> Bool {
             // Use swift-transformers' own special token registry (skipSpecialTokens) instead of guessing.
-            let raw = tokenizer.decode(tokens: [token], skipSpecialTokens: false)
+            let raw = tokenizer.decode(tokenIds: [token], skipSpecialTokens: false)
             guard !raw.isEmpty else { return false }
-            let filtered = tokenizer.decode(tokens: [token], skipSpecialTokens: true)
+            let filtered = tokenizer.decode(tokenIds: [token], skipSpecialTokens: true)
             return filtered.isEmpty
         }
 
-        private static func buildTokensExcludedFromRepetitionPenalty(tokenizer: any Tokenizer) -> Set<Int> {
+        private static func buildTokensExcludedFromRepetitionPenalty(tokenizer: any MLXLMCommon.Tokenizer) -> Set<Int> {
             let excludedTexts = ["{", "}", "[", "]", ",", ":", "\""]
             var excluded = Set<Int>()
             excluded.reserveCapacity(excludedTexts.count * 2)
@@ -1842,7 +1864,7 @@ import Foundation
         }
 
         func tokenText(_ token: Int) -> String? {
-            let decoded = tokenizer.decode(tokens: [token], skipSpecialTokens: false)
+            let decoded = tokenizer.decode(tokenIds: [token], skipSpecialTokens: false)
             return decoded.isEmpty ? nil : decoded
         }
 
