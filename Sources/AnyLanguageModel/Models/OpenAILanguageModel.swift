@@ -472,6 +472,7 @@ public struct OpenAILanguageModel: LanguageModel {
         var text = ""
         var messages = messages
         var usage = LanguageModelUsage()
+        var reasoningParts: [String] = []
 
         // Loop until no more tool calls
         while true {
@@ -498,6 +499,10 @@ public struct OpenAILanguageModel: LanguageModel {
 
             guard let choice = resp.choices.first else {
                 throw OpenAILanguageModelError.noResponseGenerated
+            }
+
+            if let reasoning = choice.message.reasoningText, !reasoning.isEmpty {
+                reasoningParts.append(reasoning)
             }
 
             if let refusalMessage = choice.message.refusal {
@@ -528,6 +533,7 @@ public struct OpenAILanguageModel: LanguageModel {
                         content: empty.content,
                         rawContent: empty.rawContent,
                         usage: usage.normalized,
+                        reasoning: Self.joinedReasoning(reasoningParts),
                         transcriptEntries: ArraySlice(entries)
                     )
                 case .invocations(let invocations):
@@ -557,6 +563,7 @@ public struct OpenAILanguageModel: LanguageModel {
                 content: text as! Content,
                 rawContent: GeneratedContent(text),
                 usage: usage.normalized,
+                reasoning: Self.joinedReasoning(reasoningParts),
                 transcriptEntries: ArraySlice(entries)
             )
         }
@@ -567,8 +574,13 @@ public struct OpenAILanguageModel: LanguageModel {
             content: content,
             rawContent: generatedContent,
             usage: usage.normalized,
+            reasoning: Self.joinedReasoning(reasoningParts),
             transcriptEntries: ArraySlice(entries)
         )
+    }
+
+    private static func joinedReasoning(_ parts: [String]) -> String? {
+        parts.isEmpty ? nil : parts.joined(separator: "\n\n")
     }
 
     private func respondWithResponses<Content>(
@@ -583,6 +595,7 @@ public struct OpenAILanguageModel: LanguageModel {
         var lastOutput: [JSONValue]?
         var messages = messages
         var usage = LanguageModelUsage()
+        var reasoningParts: [String] = []
 
         let url = baseURL.appendingPathComponent("responses")
 
@@ -608,6 +621,7 @@ public struct OpenAILanguageModel: LanguageModel {
                 body: body
             )
             usage.add(resp.usage?.languageModelUsage)
+            reasoningParts.append(contentsOf: extractReasoningFromOutput(resp.output))
 
             let toolCalls = extractToolCallsFromOutput(resp.output)
             lastOutput = resp.output
@@ -628,6 +642,7 @@ public struct OpenAILanguageModel: LanguageModel {
                         content: empty.content,
                         rawContent: empty.rawContent,
                         usage: usage.normalized,
+                        reasoning: Self.joinedReasoning(reasoningParts),
                         transcriptEntries: ArraySlice(entries)
                     )
                 case .invocations(let invocations):
@@ -659,6 +674,7 @@ public struct OpenAILanguageModel: LanguageModel {
                 content: text as! Content,
                 rawContent: GeneratedContent(text),
                 usage: usage.normalized,
+                reasoning: Self.joinedReasoning(reasoningParts),
                 transcriptEntries: ArraySlice(entries)
             )
         }
@@ -670,6 +686,7 @@ public struct OpenAILanguageModel: LanguageModel {
                 content: content,
                 rawContent: generatedContent,
                 usage: usage.normalized,
+                reasoning: Self.joinedReasoning(reasoningParts),
                 transcriptEntries: ArraySlice(entries)
             )
         }
@@ -1062,12 +1079,30 @@ private enum ChatCompletions {
             let content: String?
             let refusal: String?
             let toolCalls: [OpenAIToolCall]?
+            /// vLLM-style reasoning trace field.
+            let reasoningContent: String?
+            /// OpenRouter-style reasoning trace field.
+            let reasoning: String?
+
+            var reasoningText: String? { reasoningContent ?? reasoning }
 
             private enum CodingKeys: String, CodingKey {
                 case role
                 case content
                 case refusal
                 case toolCalls = "tool_calls"
+                case reasoningContent = "reasoning_content"
+                case reasoning
+            }
+
+            // Reasoning fields are decode-only: tool-call messages are re-encoded back into
+            // the conversation, and the reasoning trace must not be sent upstream again.
+            func encode(to encoder: Encoder) throws {
+                var container = encoder.container(keyedBy: CodingKeys.self)
+                try container.encode(role, forKey: .role)
+                try container.encodeIfPresent(content, forKey: .content)
+                try container.encodeIfPresent(refusal, forKey: .refusal)
+                try container.encodeIfPresent(toolCalls, forKey: .toolCalls)
             }
         }
     }
@@ -1918,6 +1953,35 @@ private func extractTextFromOutput(_ output: [JSONValue]?) -> String? {
     }
 
     return textParts.isEmpty ? nil : textParts.joined()
+}
+
+/// Collects reasoning text from Responses API `reasoning` output items. Reads both
+/// `content` parts (`reasoning_text`, emitted by vLLM) and `summary` parts
+/// (`summary_text`, emitted by OpenAI).
+private func extractReasoningFromOutput(_ output: [JSONValue]?) -> [String] {
+    guard let output else { return [] }
+
+    var parts: [String] = []
+    for block in output {
+        guard case let .object(obj) = block,
+            case let .string(type)? = obj["type"],
+            type == "reasoning"
+        else { continue }
+
+        for key in ["content", "summary"] {
+            guard case let .array(contentBlocks)? = obj[key] else { continue }
+            for contentBlock in contentBlocks {
+                if case let .object(contentObj) = contentBlock,
+                    case let .string(text)? = contentObj["text"],
+                    !text.isEmpty
+                {
+                    parts.append(text)
+                }
+            }
+        }
+    }
+
+    return parts
 }
 
 private func extractJSONFromOutput(_ output: [JSONValue]?) -> String? {

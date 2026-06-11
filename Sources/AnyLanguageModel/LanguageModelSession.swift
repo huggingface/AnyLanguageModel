@@ -175,6 +175,8 @@ public final class LanguageModelSession: @unchecked Sendable {
         public let content: Content
         public let rawContent: GeneratedContent
         public let usage: LanguageModelUsage?
+        /// Provider-reported reasoning trace (e.g. vLLM `reasoning_content`), when available.
+        public let reasoning: String?
         public let transcriptEntries: ArraySlice<Transcript.Entry>
 
         /// Creates a response value from generated content and transcript entries.
@@ -186,11 +188,13 @@ public final class LanguageModelSession: @unchecked Sendable {
             content: Content,
             rawContent: GeneratedContent,
             usage: LanguageModelUsage? = nil,
+            reasoning: String? = nil,
             transcriptEntries: ArraySlice<Transcript.Entry>
         ) {
             self.content = content
             self.rawContent = rawContent
             self.usage = usage
+            self.reasoning = reasoning
             self.transcriptEntries = transcriptEntries
         }
     }
