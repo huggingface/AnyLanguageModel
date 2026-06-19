@@ -42,9 +42,6 @@ let package = Package(
         .package(url: "https://github.com/mattt/JSONSchema", from: "1.3.0"),
         .package(url: "https://github.com/mattt/llama.swift", .upToNextMajor(from: "2.7484.0")),
         .package(url: "https://github.com/mattt/PartialJSONDecoder", from: "1.0.0"),
-        // mlx-swift-lm 3.x decouples from the HuggingFace Hub and swift-transformers tokenizer; the
-        // MLXHuggingFace product + macros (with swift-huggingface and swift-transformers' Tokenizers)
-        // restore Hub-based loading. See the MLX trait products below and `MLXLanguageModel.swift`.
         .package(url: "https://github.com/ml-explore/mlx-swift-lm", from: "3.0.0"),
         .package(url: "https://github.com/swiftlang/swift-syntax", from: "600.0.0"),
         .package(url: "https://github.com/swift-server/async-http-client.git", from: "1.24.0"),

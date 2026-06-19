@@ -14,13 +14,8 @@ import Foundation
     import JSONSchema
     import MLXLMCommon
     import MLX
-    // MLXLLM and MLXVLM are imported for their `TrampolineModelFactory` registration, which
-    // `ModelFactoryRegistry` resolves by name when loading LLM/VLM architectures.
     import MLXLLM
     import MLXVLM
-    // MLXHuggingFace provides the `#hubDownloader()` / `#huggingFaceTokenizerLoader()` macros; their
-    // expansions reference `HuggingFace.HubClient` and `Tokenizers.AutoTokenizer`, so both modules
-    // must be in scope at the call site.
     import MLXHuggingFace
     import HuggingFace
     import Tokenizers
@@ -686,9 +681,8 @@ import Foundation
             let key = directory?.absoluteString ?? modelId
 
             return try await modelCache.context(for: key) {
-                // mlx-swift-lm 3.x requires an explicit downloader and tokenizer loader. The
-                // MLXHuggingFace macros expand to a HubClient-backed downloader and an
-                // AutoTokenizer-backed loader, matching the prior HuggingFace Hub behavior.
+                // mlx-swift-lm 3 requires explicit downloader and tokenizer loaders,
+                // macros resolve them to be backed by HubClient, AutoTokenizer.
                 if let directory {
                     return try await loadModel(from: directory, using: #huggingFaceTokenizerLoader())
                 }
