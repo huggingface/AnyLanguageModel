@@ -13,7 +13,6 @@
     import Foundation
     import NIOCore
     import NIOHTTP1
-    import NIOFoundationCompat
 
     extension HTTPClient {
         func fetch<T: Decodable>(
@@ -32,21 +31,21 @@
             }
 
             if let body {
-                request.body = .bytes(ByteBuffer(data: body))
+                request.body = .bytes(ByteBuffer(bytes: body))
                 request.headers.add(name: "Content-Type", value: "application/json")
             }
 
             let response = try await self.execute(request, timeout: .seconds(180))
 
             guard (200 ..< 300).contains(response.status.code) else {
-                let bodyData = try await Data(buffer: response.body.collect(upTo: 1024 * 1024))
+                let bodyData = try await Data(response.body.collect(upTo: 1024 * 1024).readableBytesView)
                 if let errorString = String(data: bodyData, encoding: .utf8) {
                     throw HTTPClientError.httpError(statusCode: Int(response.status.code), detail: errorString)
                 }
                 throw HTTPClientError.httpError(statusCode: Int(response.status.code), detail: "Invalid response")
             }
 
-            let bodyData = try await Data(buffer: response.body.collect(upTo: 1024 * 1024))
+            let bodyData = try await Data(response.body.collect(upTo: 1024 * 1024).readableBytesView)
 
             let decoder = JSONDecoder()
             decoder.dateDecodingStrategy = dateDecodingStrategy
@@ -80,14 +79,14 @@
                         }
 
                         if let body {
-                            request.body = .bytes(ByteBuffer(data: body))
+                            request.body = .bytes(ByteBuffer(bytes: body))
                             request.headers.add(name: "Content-Type", value: "application/json")
                         }
 
                         let response = try await self.execute(request, timeout: .seconds(60))
 
                         guard (200 ..< 300).contains(response.status.code) else {
-                            let bodyData = try await Data(buffer: response.body.collect(upTo: 1024 * 1024))
+                            let bodyData = try await Data(response.body.collect(upTo: 1024 * 1024).readableBytesView)
                             if let errorString = String(data: bodyData, encoding: .utf8) {
                                 throw HTTPClientError.httpError(
                                     statusCode: Int(response.status.code),
@@ -149,14 +148,14 @@
                         }
 
                         if let body {
-                            request.body = .bytes(ByteBuffer(data: body))
+                            request.body = .bytes(ByteBuffer(bytes: body))
                             request.headers.add(name: "Content-Type", value: "application/json")
                         }
 
                         let response = try await self.execute(request, timeout: .seconds(60))
 
                         guard (200 ..< 300).contains(response.status.code) else {
-                            let bodyData = try await Data(buffer: response.body.collect(upTo: 1024 * 1024))
+                            let bodyData = try await Data(response.body.collect(upTo: 1024 * 1024).readableBytesView)
                             if let errorString = String(data: bodyData, encoding: .utf8) {
                                 throw HTTPClientError.httpError(
                                     statusCode: Int(response.status.code),
