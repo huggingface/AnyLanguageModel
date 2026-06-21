@@ -20,16 +20,14 @@ jobs:
       fail-fast: false
       matrix:
         include:
-# Temporarily remove Swift 6.1 because mlx-swift-lm 3 uses Swift 6 mode and there's 
-# a strict concurrency error on a non-sendable CIContext.
-#          - macos: "15"
-#            swift: "6.1"
-#            xcode: "16.3"
-#            traits: ""
-#          - macos: "15"
-#            swift: "6.1"
-#            xcode: "16.3"
-#            traits: "AsyncHTTPClient"
+          - macos: "15"
+            swift: "6.1"
+            xcode: "16.3"
+            traits: ""
+          - macos: "15"
+            swift: "6.1"
+            xcode: "16.3"
+            traits: "AsyncHTTPClient"
           - macos: "26"
             swift: "6.2"
             xcode: "26.0"
