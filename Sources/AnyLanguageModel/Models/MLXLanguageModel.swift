@@ -287,6 +287,31 @@ import Foundation
                 additionalContext?.mapValues { $0.toSendable() }
             }
 
+            /// Top-p (nucleus) sampling threshold.
+            ///
+            /// Set this to `nil` to use the backend default (`1.0`, i.e. disabled).
+            public var topP: Float?
+
+            /// Top-k sampling: restricts sampling to the `k` most likely tokens.
+            ///
+            /// Set this to `nil` or `0` to disable top-k sampling.
+            public var topK: Int?
+
+            /// Min-p sampling threshold, relative to the most likely token's probability.
+            ///
+            /// Set this to `nil` or `0` to disable min-p sampling.
+            public var minP: Float?
+
+            /// Penalty factor applied to recently generated tokens to reduce repetition.
+            ///
+            /// Set this to `nil` to disable the repetition penalty.
+            public var repetitionPenalty: Float?
+
+            /// Number of recent tokens considered by the repetition penalty.
+            ///
+            /// Set this to `nil` to use the backend default.
+            public var repetitionContextSize: Int?
+
             /// Creates MLX-specific generation options.
             ///
             /// - Parameters:
@@ -295,14 +320,30 @@ import Foundation
             ///     template rendering context.
             ///   - userInputProcessing: Processing to apply to user media before input preparation.
             ///     Defaults to `nil`, which lets MLX use its default media handling.
+            ///   - topP: Top-p (nucleus) sampling threshold. Defaults to `nil` (backend default).
+            ///   - topK: Top-k sampling count. Defaults to `nil` (disabled).
+            ///   - minP: Min-p sampling threshold. Defaults to `nil` (disabled).
+            ///   - repetitionPenalty: Repetition penalty factor. Defaults to `nil` (disabled).
+            ///   - repetitionContextSize: Repetition-penalty token window. Defaults to `nil`
+            ///     (backend default).
             public init(
                 kvCache: KVCache,
                 userInputProcessing: UserInputProcessing?,
-                additionalContext: [String: AnyLanguageModel.JSONValue]?
+                additionalContext: [String: AnyLanguageModel.JSONValue]?,
+                topP: Float? = nil,
+                topK: Int? = nil,
+                minP: Float? = nil,
+                repetitionPenalty: Float? = nil,
+                repetitionContextSize: Int? = nil
             ) {
                 self.kvCache = kvCache
                 self.additionalContext = additionalContext
                 self.userInputProcessing = userInputProcessing
+                self.topP = topP
+                self.topK = topK
+                self.minP = minP
+                self.repetitionPenalty = repetitionPenalty
+                self.repetitionContextSize = repetitionContextSize
             }
 
             /// Default MLX generation options used when none are provided at runtime.
@@ -1223,9 +1264,11 @@ import Foundation
             kvGroupSize: custom?.kvCache.groupSize ?? 64,
             quantizedKVStart: custom?.kvCache.quantizedStart ?? 0,
             temperature: Float(options.temperature ?? 0.6),
-            topP: 1.0,
-            repetitionPenalty: nil,
-            repetitionContextSize: 20
+            topP: custom?.topP ?? 1.0,
+            topK: custom?.topK ?? 0,
+            minP: custom?.minP ?? 0.0,
+            repetitionPenalty: custom?.repetitionPenalty,
+            repetitionContextSize: custom?.repetitionContextSize ?? 20
         )
     }
 
@@ -1239,9 +1282,11 @@ import Foundation
             kvGroupSize: custom?.kvCache.groupSize ?? 64,
             quantizedKVStart: custom?.kvCache.quantizedStart ?? 0,
             temperature: Float(options.temperature ?? 0.2),
-            topP: 0.95,
-            repetitionPenalty: 1.1,
-            repetitionContextSize: 64
+            topP: custom?.topP ?? 0.95,
+            topK: custom?.topK ?? 0,
+            minP: custom?.minP ?? 0.0,
+            repetitionPenalty: custom?.repetitionPenalty ?? 1.1,
+            repetitionContextSize: custom?.repetitionContextSize ?? 64
         )
     }
 
