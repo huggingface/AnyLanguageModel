@@ -1255,17 +1255,41 @@ import Foundation
 
     // MARK: - Options Mapping
 
-    private func toGenerateParameters(_ options: GenerationOptions) -> MLXLMCommon.GenerateParameters {
+    /// Derives MLX sampler parameters from the core ``GenerationOptions/sampling`` (`SamplingMode`),
+    /// so `.sampling` acts as a unified sampling surface across backends (the same one Apple
+    /// FoundationModels consumes). Returns `nil` for any field the sampling mode doesn't express.
+    ///
+    /// Precedence at the call sites is custom-block → this (sampling) → existing default, so an
+    /// explicit `CustomGenerationOptions` value always wins. The `SamplingMode` seed is not
+    /// forwarded: `MLXLMCommon.GenerateParameters` has no per-call seed field.
+    func samplingDerivedParameters(
+        from options: GenerationOptions
+    ) -> (topP: Float?, topK: Int?, greedyTemperature: Float?) {
+        switch options.sampling?.mode {
+        case .greedy:
+            // Greedy = argmax; MLX realizes this with temperature 0.
+            return (topP: nil, topK: nil, greedyTemperature: 0)
+        case .topK(let k, _):
+            return (topP: nil, topK: k, greedyTemperature: nil)
+        case .nucleus(let threshold, _):
+            return (topP: Float(threshold), topK: nil, greedyTemperature: nil)
+        case nil:
+            return (topP: nil, topK: nil, greedyTemperature: nil)
+        }
+    }
+
+    func toGenerateParameters(_ options: GenerationOptions) -> MLXLMCommon.GenerateParameters {
         let custom = options[custom: MLXLanguageModel.self]
+        let derived = samplingDerivedParameters(from: options)
         return MLXLMCommon.GenerateParameters(
             maxTokens: options.maximumResponseTokens,
             maxKVSize: custom?.kvCache.maxSize,
             kvBits: custom?.kvCache.bits,
             kvGroupSize: custom?.kvCache.groupSize ?? 64,
             quantizedKVStart: custom?.kvCache.quantizedStart ?? 0,
-            temperature: Float(options.temperature ?? 0.6),
-            topP: custom?.topP ?? 1.0,
-            topK: custom?.topK ?? 0,
+            temperature: Float(options.temperature ?? derived.greedyTemperature.map(Double.init) ?? 0.6),
+            topP: custom?.topP ?? derived.topP ?? 1.0,
+            topK: custom?.topK ?? derived.topK ?? 0,
             minP: custom?.minP ?? 0.0,
             repetitionPenalty: custom?.repetitionPenalty,
             repetitionContextSize: custom?.repetitionContextSize ?? 20
@@ -1273,17 +1297,18 @@ import Foundation
     }
 
     /// Builds MLX parameters tuned for structured generation.
-    private func toStructuredGenerateParameters(_ options: GenerationOptions) -> MLXLMCommon.GenerateParameters {
+    func toStructuredGenerateParameters(_ options: GenerationOptions) -> MLXLMCommon.GenerateParameters {
         let custom = options[custom: MLXLanguageModel.self]
+        let derived = samplingDerivedParameters(from: options)
         return MLXLMCommon.GenerateParameters(
             maxTokens: options.maximumResponseTokens,
             maxKVSize: custom?.kvCache.maxSize,
             kvBits: custom?.kvCache.bits,
             kvGroupSize: custom?.kvCache.groupSize ?? 64,
             quantizedKVStart: custom?.kvCache.quantizedStart ?? 0,
-            temperature: Float(options.temperature ?? 0.2),
-            topP: custom?.topP ?? 0.95,
-            topK: custom?.topK ?? 0,
+            temperature: Float(options.temperature ?? derived.greedyTemperature.map(Double.init) ?? 0.2),
+            topP: custom?.topP ?? derived.topP ?? 0.95,
+            topK: custom?.topK ?? derived.topK ?? 0,
             minP: custom?.minP ?? 0.0,
             repetitionPenalty: custom?.repetitionPenalty ?? 1.1,
             repetitionContextSize: custom?.repetitionContextSize ?? 64
