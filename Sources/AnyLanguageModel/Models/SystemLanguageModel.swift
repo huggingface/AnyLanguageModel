@@ -384,6 +384,22 @@
     @available(macOS 26.0, iOS 26.0, watchOS 26.0, tvOS 26.0, visionOS 26.0, *)
     extension GenerationOptions {
         fileprivate func toFoundationModels() -> FoundationModels.GenerationOptions {
+            // OS 27 support: `#if compiler(>=6.4)` compiles the 27 path only on the Xcode 27
+            // (beta) toolchain — Xcode 26 skips it entirely and never sees the 27-only symbol.
+            // `#available` then gates it to OS 27 at runtime; deployment floor stays 26 via the
+            // fall-through below. Self-contained (no FM-parity mapping required on this branch).
+            // KNOBS to confirm on the first Xcode 27 build: the compiler gate version, and the
+            // initializer's parameter labels if Apple changed them.
+            #if compiler(>=6.4)
+            if #available(macOS 27.0, iOS 27.0, visionOS 27.0, *) {
+                return FoundationModels.GenerationOptions(
+                    temperature: temperature,
+                    maximumResponseTokens: maximumResponseTokens,
+                    toolCallingMode: nil
+                )
+            }
+            #endif
+
             var options = FoundationModels.GenerationOptions()
 
             if let temperature = self.temperature {
