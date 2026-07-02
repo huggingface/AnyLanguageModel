@@ -903,7 +903,7 @@ private enum AnthropicContent: Codable, Sendable {
 private struct AnthropicThinking: Codable, Sendable {
     let type: String
     let thinking: String
-    
+
     init(thinking: String) {
         self.type = "thinking"
         self.thinking = thinking
