@@ -30,6 +30,19 @@ struct AnthropicLanguageModelTests {
         #expect(!response.content.isEmpty)
     }
 
+    @Test func fableThinkingContentBlocksAreIgnored() async throws {
+        let model = AnthropicLanguageModel(
+            apiKey: anthropicAPIKey!,
+            model: "claude-fable-5"
+        )
+        let session = LanguageModelSession(model: model)
+        let response = try await session.respond(
+            to: "Reply with exactly: OK",
+            options: GenerationOptions(maximumResponseTokens: 128)
+        )
+        #expect(response.content.contains("OK"))
+    }
+
     @Test func withInstructions() async throws {
         let session = LanguageModelSession(
             model: model,

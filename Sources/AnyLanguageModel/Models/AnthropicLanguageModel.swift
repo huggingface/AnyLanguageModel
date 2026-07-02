@@ -886,6 +886,7 @@ private enum AnthropicContent: Codable, Sendable {
     case image(AnthropicImage)
     case toolUse(AnthropicToolUse)
     case toolResult(AnthropicToolResult)
+    case ignored(AnthropicIgnoredContent)
 
     enum CodingKeys: String, CodingKey { case type }
 
@@ -895,8 +896,8 @@ private enum AnthropicContent: Codable, Sendable {
 
     init(from decoder: any Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
-        let type = try container.decode(ContentType.self, forKey: .type)
-        switch type {
+        let type = try container.decode(String.self, forKey: .type)
+        switch ContentType(rawValue: type) {
         case .text:
             self = .text(try AnthropicText(from: decoder))
         case .image:
@@ -905,6 +906,8 @@ private enum AnthropicContent: Codable, Sendable {
             self = .toolUse(try AnthropicToolUse(from: decoder))
         case .toolResult:
             self = .toolResult(try AnthropicToolResult(from: decoder))
+        case nil:
+            self = .ignored(AnthropicIgnoredContent(type: type))
         }
     }
 
@@ -914,8 +917,13 @@ private enum AnthropicContent: Codable, Sendable {
         case .image(let i): try i.encode(to: encoder)
         case .toolUse(let u): try u.encode(to: encoder)
         case .toolResult(let r): try r.encode(to: encoder)
+        case .ignored(let c): try c.encode(to: encoder)
         }
     }
+}
+
+private struct AnthropicIgnoredContent: Codable, Sendable {
+    let type: String
 }
 
 private struct AnthropicText: Codable, Sendable {
