@@ -98,6 +98,8 @@ public struct AnthropicLanguageModel: LanguageModel {
         /// These parameters are merged into the top-level request JSON,
         /// allowing you to pass additional options not explicitly modeled.
         public var extraBody: [String: JSONValue]?
+        
+        public var effort: Effort?
 
         // MARK: - Nested Types
 
@@ -178,22 +180,51 @@ public struct AnthropicLanguageModel: LanguageModel {
             }
         }
 
+        /// How much effort the model should put into a task.
+        ///
+        /// Docs: https://platform.claude.com/docs/en/build-with-claude/effort
+        public enum Effort: String, Hashable, Codable, Sendable {
+            /// Absolute maximum capability with no constraints on token spending.
+            ///
+            /// Use Case: Tasks requiring the deepest possible reasoning and most thorough analysis
+            /// Availability: Claude Fable 5, Claude Mythos 5, Claude Opus 4.8, Claude Mythos Preview, Claude Opus 4.7, Claude Opus 4.6, Claude Sonnet 5, and Claude Sonnet 4.6.
+            case max
+            /// Extended capability for long-horizon work.
+            /// Use Case: Long-running agentic and coding tasks (over 30 minutes) with token budgets in the millions
+            /// Availability: Claude Fable 5, Claude Mythos 5, Claude Opus 4.8, Claude Opus 4.7, and Claude Sonnet 5.
+            case extraHigh = "xHigh"
+            /// High capability. Equivalent to not setting the parameter.
+            /// Use Case: Complex reasoning, difficult coding problems, agentic tasks
+            /// Availability: All Models
+            case high
+            /// Balanced approach with moderate token savings.
+            /// Use Case: Agentic tasks that require a balance of speed, cost, and performance
+            /// Availability: All Models
+            case medium
+            /// Most efficient. Significant token savings with some capability reduction.
+            /// Use Case: Simpler tasks that need the best speed and lowest costs, like subagents
+            /// Availability: All Models
+            case low
+        }
+        
         /// Configuration for extended thinking.
         public struct Thinking: Hashable, Codable, Sendable {
             /// The type of thinking to use.
             public var type: ThinkingType
 
-            /// The maximum number of tokens to use for thinking.
+            /// The maximum number of tokens to use for thinking. Nil when `type` = `.adaptive`.
             ///
             /// This budget is the maximum number of tokens the model can use for its
             /// internal reasoning process. Larger budgets can improve response quality
             /// for complex tasks but increase latency and cost.
-            public var budgetTokens: Int
+            public var budgetTokens: Int?
 
             /// The type of thinking mode.
             public enum ThinkingType: String, Hashable, Codable, Sendable {
                 /// Enables extended thinking.
                 case enabled
+                /// Enables adaptive thinking.
+                case adaptive
             }
 
             enum CodingKeys: String, CodingKey {
@@ -202,11 +233,23 @@ public struct AnthropicLanguageModel: LanguageModel {
             }
 
             /// Creates a thinking configuration.
-            ///
-            /// - Parameter budgetTokens: The maximum number of tokens to use for thinking.
-            public init(budgetTokens: Int) {
-                self.type = .enabled
+            /// 
+            /// - Parameters:
+            ///   - type: The type of thinking to perform.
+            ///   - budgetTokens: The maximum number of tokens to use for thinking.
+            public init(type: ThinkingType, budgetTokens: Int?) {
+                self.type = type
                 self.budgetTokens = budgetTokens
+            }
+            
+            /// Convenience function for enabling adaptive thinking on supported models.
+            public static func adaptive() -> Thinking {
+                return Thinking.init(type: .adaptive, budgetTokens: nil)
+            }
+            
+            /// Convenience function for enabling thinking with a token budget on supported models.
+            public static func enabled(budgetTokens: Int) -> Thinking {
+                return Thinking.init(type: .enabled, budgetTokens: budgetTokens)
             }
         }
 
@@ -241,7 +284,8 @@ public struct AnthropicLanguageModel: LanguageModel {
             toolChoice: ToolChoice? = nil,
             thinking: Thinking? = nil,
             serviceTier: ServiceTier? = nil,
-            extraBody: [String: JSONValue]? = nil
+            extraBody: [String: JSONValue]? = nil,
+            effort: Effort? = nil
         ) {
             self.topP = topP
             self.topK = topK
@@ -251,6 +295,7 @@ public struct AnthropicLanguageModel: LanguageModel {
             self.thinking = thinking
             self.serviceTier = serviceTier
             self.extraBody = extraBody
+            self.effort = effort
         }
     }
     /// The reason the model is unavailable.
@@ -577,11 +622,28 @@ private func createMessageParams(
                 params["tool_choice"] = .object(["type": .string("none")])
             }
         }
+        if let effort = customOptions.effort {
+            // If output_config was previously set during the response schema options, we need to append insert into that dictionary instead of replacing it.
+            if let output_config = params["output_config"], var object = output_config.objectValue {
+                object["effort"] = .string(effort.rawValue)
+                params["output_config"] = .object(object)
+            } else {
+                params["output_config"] = .object(
+                    [
+                        "effort": .string(effort.rawValue)
+                    ]
+                )
+            }
+        }
         if let thinking = customOptions.thinking {
-            params["thinking"] = .object([
-                "type": .string(thinking.type.rawValue),
-                "budget_tokens": .int(thinking.budgetTokens),
-            ])
+            var thinkingObject: [String: JSONValue] = [
+                "type": .string(thinking.type.rawValue)
+            ]
+            if let budget = thinking.budgetTokens {
+                thinkingObject["budget_tokens"] = .int(budget)
+            }
+            
+            params["thinking"] = .object(thinkingObject)
         }
         if let serviceTier = customOptions.serviceTier {
             params["service_tier"] = .string(serviceTier.rawValue)
