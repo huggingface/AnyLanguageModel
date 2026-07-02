@@ -864,11 +864,12 @@ private enum AnthropicContent: Codable, Sendable {
     case image(AnthropicImage)
     case toolUse(AnthropicToolUse)
     case toolResult(AnthropicToolResult)
+    case thinking(AnthropicThinking)
 
     enum CodingKeys: String, CodingKey { case type }
 
     enum ContentType: String, Codable {
-        case text = "text", image = "image", toolUse = "tool_use", toolResult = "tool_result"
+        case text = "text", image = "image", toolUse = "tool_use", toolResult = "tool_result", thinking = "thinking"
     }
 
     init(from decoder: any Decoder) throws {
@@ -883,6 +884,8 @@ private enum AnthropicContent: Codable, Sendable {
             self = .toolUse(try AnthropicToolUse(from: decoder))
         case .toolResult:
             self = .toolResult(try AnthropicToolResult(from: decoder))
+        case .thinking:
+            self = .thinking(try AnthropicThinking(from: decoder))
         }
     }
 
@@ -892,9 +895,21 @@ private enum AnthropicContent: Codable, Sendable {
         case .image(let i): try i.encode(to: encoder)
         case .toolUse(let u): try u.encode(to: encoder)
         case .toolResult(let r): try r.encode(to: encoder)
+        case .thinking(let h): try h.encode(to: encoder)
         }
     }
 }
+
+private struct AnthropicThinking: Codable, Sendable {
+    let type: String
+    let thinking: String
+    
+    init(thinking: String) {
+        self.type = "thinking"
+        self.thinking = thinking
+    }
+}
+
 
 private struct AnthropicText: Codable, Sendable {
     let type: String
