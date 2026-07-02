@@ -1194,6 +1194,8 @@ private enum AnthropicStreamEvent: Codable, Sendable {
         enum Delta: Codable, Sendable {
             case textDelta(TextDelta)
             case inputJsonDelta(InputJsonDelta)
+            case thinkingDelta(ThinkingDelta)
+            case signatureDelta(SignatureDelta)
             case ignored
 
             enum CodingKeys: String, CodingKey { case type }
@@ -1207,6 +1209,10 @@ private enum AnthropicStreamEvent: Codable, Sendable {
                     self = .textDelta(try TextDelta(from: decoder))
                 case "input_json_delta":
                     self = .inputJsonDelta(try InputJsonDelta(from: decoder))
+                case "thinking_delta":
+                    self = .thinkingDelta(try ThinkingDelta(from: decoder))
+                case "signature_delta":
+                    self = .signatureDelta(try SignatureDelta(from: decoder))
                 default:
                     self = .ignored
                 }
@@ -1216,6 +1222,8 @@ private enum AnthropicStreamEvent: Codable, Sendable {
                 switch self {
                 case .textDelta(let delta): try delta.encode(to: encoder)
                 case .inputJsonDelta(let delta): try delta.encode(to: encoder)
+                case .thinkingDelta(let delta): try delta.encode(to: encoder)
+                case .signatureDelta(let delta): try delta.encode(to: encoder)
                 case .ignored:
                     var container = encoder.container(keyedBy: CodingKeys.self)
                     try container.encode("ignored", forKey: .type)
@@ -1235,6 +1243,20 @@ private enum AnthropicStreamEvent: Codable, Sendable {
                     case type
                     case partialJson = "partial_json"
                 }
+            }
+            
+            struct ThinkingDelta: Codable, SendableMetatype {
+                let type: String
+                let thinking: String
+            }
+            
+            /// Cryptographic signature for a completed thinking block.
+            /// 
+            /// Emitted at the end of a thinking block, even when ``CustomGenerationOptions/Thinking/display`` is set to `omitted`.
+            /// The signature must be preserved verbatim for thought to be recovered in the transcript. Otherwise the Claude API will throw out any text provided in thinking blocks.
+            struct SignatureDelta: Codable, Sendable {
+                let type: String
+                let signature: String
             }
         }
     }
