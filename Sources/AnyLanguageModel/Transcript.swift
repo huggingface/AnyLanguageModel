@@ -21,6 +21,34 @@ public struct Transcript: Sendable, Equatable, Codable {
     mutating func append<S>(contentsOf newEntries: S) where S: Sequence, S.Element == Entry {
         entries.append(contentsOf: newEntries)
     }
+    
+    mutating private func replace(index: Int, with entry: Entry) {
+        entries[index] = entry
+    }
+    
+    
+    /// Updates a transcript with temporary text that is being streamed from a model.
+    /// Appends the assistant response to the end of entries, if the last entry is a response then that response is updated with the newest streamed text.
+    ///
+    /// - Parameter text: The text to update the transcript with.
+    mutating func appendStreamingResponse(_ text: String) {
+        let textSegment = Transcript.Segment.text(Transcript.TextSegment(content: text))
+        // Make sure the last entry in the transcript is a response. If it is not, create a new response and append it to the end of the transcript.
+        guard case .response(var response) = entries.last else {
+            append(Entry.response(Response(assetIDs: [], segments: [textSegment])))
+            return
+        }
+        
+        // If the last segment in the last response is text, replace it with the new content.
+        if case .text(let last)? = response.segments.last {
+            response.segments[response.segments.count - 1] = textSegment
+        } else {
+            response.segments.append(textSegment)
+        }
+        
+        // Replace the latest entry with the one we just updated.
+        replace(index: entries.count - 1, with: .response(response))
+    }
 
     /// An entry in a transcript.
     public enum Entry: Sendable, Identifiable, Equatable, Codable {
