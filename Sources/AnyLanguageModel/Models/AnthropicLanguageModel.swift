@@ -345,6 +345,7 @@ public struct AnthropicLanguageModel: LanguageModel {
         )
 
         var entries: [Transcript.Entry] = []
+        let usage = message.usage?.languageModelUsage
 
         // Handle tool calls, if present
         let toolUses: [AnthropicToolUse] = message.content.compactMap { block in
@@ -363,6 +364,7 @@ public struct AnthropicLanguageModel: LanguageModel {
                 return LanguageModelSession.Response(
                     content: empty.content,
                     rawContent: empty.rawContent,
+                    usage: usage,
                     transcriptEntries: ArraySlice(entries)
                 )
             case .invocations(let invocations):
@@ -386,6 +388,7 @@ public struct AnthropicLanguageModel: LanguageModel {
             return LanguageModelSession.Response(
                 content: text as! Content,
                 rawContent: GeneratedContent(text),
+                usage: usage,
                 transcriptEntries: ArraySlice(entries)
             )
         }
@@ -395,6 +398,7 @@ public struct AnthropicLanguageModel: LanguageModel {
         return LanguageModelSession.Response(
             content: content,
             rawContent: rawContent,
+            usage: usage,
             transcriptEntries: ArraySlice(entries)
         )
     }
@@ -445,30 +449,48 @@ public struct AnthropicLanguageModel: LanguageModel {
 
                     var accumulatedText = ""
                     let expectsStructuredResponse = type != String.self
+                    var latestUsage = LanguageModelUsage()
+                    var lastSnapshot: LanguageModelSession.ResponseStream<Content>.Snapshot?
 
                     for try await event in events {
                         switch event {
+                        case .messageStart(let start):
+                            latestUsage.merge(start.message.usage?.languageModelUsage)
                         case .contentBlockDelta(let delta):
                             if case .textDelta(let textDelta) = delta.delta {
                                 accumulatedText += textDelta.text
 
                                 if expectsStructuredResponse {
-                                    if let snapshot: LanguageModelSession.ResponseStream<Content>.Snapshot =
+                                    if var snapshot: LanguageModelSession.ResponseStream<Content>.Snapshot =
                                         try? partialSnapshot(from: accumulatedText)
                                     {
+                                        snapshot.usage = latestUsage.normalized
+                                        lastSnapshot = snapshot
                                         continuation.yield(snapshot)
                                     }
                                 } else {
                                     let raw = GeneratedContent(accumulatedText)
                                     let content: Content.PartiallyGenerated = (accumulatedText as! Content)
                                         .asPartiallyGenerated()
-                                    continuation.yield(.init(content: content, rawContent: raw))
+                                    let snapshot = LanguageModelSession.ResponseStream<Content>.Snapshot(
+                                        content: content,
+                                        rawContent: raw,
+                                        usage: latestUsage.normalized
+                                    )
+                                    lastSnapshot = snapshot
+                                    continuation.yield(snapshot)
                                 }
                             }
+                        case .messageDelta(let delta):
+                            latestUsage.merge(delta.usage?.languageModelUsage)
                         case .messageStop:
+                            if var lastSnapshot, lastSnapshot.usage != latestUsage.normalized {
+                                lastSnapshot.usage = latestUsage.normalized
+                                continuation.yield(lastSnapshot)
+                            }
                             continuation.finish()
                             return
-                        case .messageStart, .contentBlockStart, .contentBlockStop, .messageDelta, .ping, .ignored:
+                        case .contentBlockStart, .contentBlockStop, .ping, .ignored:
                             break
                         }
                     }
@@ -864,6 +886,7 @@ private enum AnthropicContent: Codable, Sendable {
     case image(AnthropicImage)
     case toolUse(AnthropicToolUse)
     case toolResult(AnthropicToolResult)
+    case ignored(AnthropicIgnoredContent)
 
     enum CodingKeys: String, CodingKey { case type }
 
@@ -873,8 +896,8 @@ private enum AnthropicContent: Codable, Sendable {
 
     init(from decoder: any Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
-        let type = try container.decode(ContentType.self, forKey: .type)
-        switch type {
+        let type = try container.decode(String.self, forKey: .type)
+        switch ContentType(rawValue: type) {
         case .text:
             self = .text(try AnthropicText(from: decoder))
         case .image:
@@ -883,6 +906,8 @@ private enum AnthropicContent: Codable, Sendable {
             self = .toolUse(try AnthropicToolUse(from: decoder))
         case .toolResult:
             self = .toolResult(try AnthropicToolResult(from: decoder))
+        case nil:
+            self = .ignored(AnthropicIgnoredContent(type: type))
         }
     }
 
@@ -892,8 +917,13 @@ private enum AnthropicContent: Codable, Sendable {
         case .image(let i): try i.encode(to: encoder)
         case .toolUse(let u): try u.encode(to: encoder)
         case .toolResult(let r): try r.encode(to: encoder)
+        case .ignored(let c): try c.encode(to: encoder)
         }
     }
+}
+
+private struct AnthropicIgnoredContent: Codable, Sendable {
+    let type: String
 }
 
 private struct AnthropicText: Codable, Sendable {
@@ -995,9 +1025,10 @@ private struct AnthropicMessageResponse: Codable, Sendable {
     let content: [AnthropicContent]
     let model: String
     let stopReason: StopReason?
+    let usage: AnthropicUsage?
 
     enum CodingKeys: String, CodingKey {
-        case id, type, role, content, model
+        case id, type, role, content, model, usage
         case stopReason = "stop_reason"
     }
 
@@ -1009,6 +1040,20 @@ private struct AnthropicMessageResponse: Codable, Sendable {
         case pauseTurn = "pause_turn"
         case refusal = "refusal"
         case modelContextWindowExceeded = "model_context_window_exceeded"
+    }
+}
+
+private struct AnthropicUsage: Codable, Sendable {
+    let inputTokens: Int?
+    let outputTokens: Int?
+    let cacheCreationInputTokens: Int?
+    let cacheReadInputTokens: Int?
+
+    enum CodingKeys: String, CodingKey {
+        case inputTokens = "input_tokens"
+        case outputTokens = "output_tokens"
+        case cacheCreationInputTokens = "cache_creation_input_tokens"
+        case cacheReadInputTokens = "cache_read_input_tokens"
     }
 }
 
@@ -1157,6 +1202,7 @@ private enum AnthropicStreamEvent: Codable, Sendable {
     struct MessageDeltaEvent: Codable, Sendable {
         let type: String
         let delta: Delta
+        let usage: AnthropicUsage?
 
         struct Delta: Codable, Sendable {
             let stopReason: String?
@@ -1167,5 +1213,16 @@ private enum AnthropicStreamEvent: Codable, Sendable {
                 case stopSequence = "stop_sequence"
             }
         }
+    }
+}
+
+private extension AnthropicUsage {
+    var languageModelUsage: LanguageModelUsage? {
+        LanguageModelUsage(
+            inputTokens: inputTokens,
+            outputTokens: outputTokens,
+            cachedInputTokens: cacheReadInputTokens,
+            cacheCreationInputTokens: cacheCreationInputTokens
+        ).normalized
     }
 }

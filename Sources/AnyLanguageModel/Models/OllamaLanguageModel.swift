@@ -124,6 +124,7 @@ public struct OllamaLanguageModel: LanguageModel {
                 return LanguageModelSession.Response(
                     content: "" as! Content,
                     rawContent: GeneratedContent(""),
+                    usage: chatResponse.usage,
                     transcriptEntries: ArraySlice(entries)
                 )
             case .invocations(let invocations):
@@ -141,6 +142,7 @@ public struct OllamaLanguageModel: LanguageModel {
             return LanguageModelSession.Response(
                 content: text as! Content,
                 rawContent: GeneratedContent(text),
+                usage: chatResponse.usage,
                 transcriptEntries: ArraySlice(entries)
             )
         }
@@ -150,6 +152,7 @@ public struct OllamaLanguageModel: LanguageModel {
         return LanguageModelSession.Response(
             content: content,
             rawContent: generatedContent,
+            usage: chatResponse.usage,
             transcriptEntries: ArraySlice(entries)
         )
     }
@@ -207,28 +210,44 @@ public struct OllamaLanguageModel: LanguageModel {
                                 ) as AsyncThrowingStream<ChatResponse, any Error>
 
                             var partialText = ""
+                            var latestUsage = LanguageModelUsage()
+                            var lastSnapshot: LanguageModelSession.ResponseStream<Content>.Snapshot?
 
                             for try await chunk in chunks {
+                                let previousUsage = latestUsage.normalized
+                                latestUsage.merge(chunk.usage)
                                 if let piece = chunk.message.content {
                                     partialText += piece
                                     if type == String.self {
                                         let snapshot = LanguageModelSession.ResponseStream<Content>.Snapshot(
                                             content: (partialText as! Content).asPartiallyGenerated(),
-                                            rawContent: GeneratedContent(partialText)
+                                            rawContent: GeneratedContent(partialText),
+                                            usage: latestUsage.normalized
                                         )
+                                        lastSnapshot = snapshot
                                         continuation.yield(snapshot)
                                     } else if let raw = try? GeneratedContent(json: partialText),
                                         let parsed = try? type.init(raw)
                                     {
                                         let snapshot = LanguageModelSession.ResponseStream<Content>.Snapshot(
                                             content: parsed.asPartiallyGenerated(),
-                                            rawContent: raw
+                                            rawContent: raw,
+                                            usage: latestUsage.normalized
                                         )
+                                        lastSnapshot = snapshot
                                         continuation.yield(snapshot)
                                     } else {
                                         // Structured responses can stream as incomplete JSON fragments.
                                         // Skip snapshots until the accumulated JSON parses cleanly.
                                     }
+                                }
+
+                                if chunk.message.content == nil,
+                                    previousUsage != latestUsage.normalized,
+                                    var lastSnapshot
+                                {
+                                    lastSnapshot.usage = latestUsage.normalized
+                                    continuation.yield(lastSnapshot)
                                 }
 
                                 if chunk.done {
@@ -532,12 +551,37 @@ private struct ChatResponse: Decodable, Sendable {
     let createdAt: Date
     let message: ChatMessageResponse
     let done: Bool
+    let promptEvalCount: Int?
+    let evalCount: Int?
 
     private enum CodingKeys: String, CodingKey {
         case model
         case createdAt = "created_at"
         case message
         case done
+        case promptEvalCount = "prompt_eval_count"
+        case evalCount = "eval_count"
+    }
+}
+
+private extension ChatResponse {
+    var usage: LanguageModelUsage? {
+        LanguageModelUsage(
+            inputTokens: promptEvalCount,
+            outputTokens: evalCount,
+            totalTokens: {
+                switch (promptEvalCount, evalCount) {
+                case (.some(let promptEvalCount), .some(let evalCount)):
+                    promptEvalCount + evalCount
+                case (.some(let promptEvalCount), .none):
+                    promptEvalCount
+                case (.none, .some(let evalCount)):
+                    evalCount
+                case (.none, .none):
+                    nil
+                }
+            }()
+        ).normalized
     }
 }
 

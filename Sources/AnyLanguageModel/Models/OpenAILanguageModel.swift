@@ -471,6 +471,8 @@ public struct OpenAILanguageModel: LanguageModel {
         var entries: [Transcript.Entry] = []
         var text = ""
         var messages = messages
+        var usage = LanguageModelUsage()
+        var reasoningParts: [String] = []
 
         // Loop until no more tool calls
         while true {
@@ -493,9 +495,14 @@ public struct OpenAILanguageModel: LanguageModel {
                 ],
                 body: body
             )
+            usage.add(resp.usage?.languageModelUsage)
 
             guard let choice = resp.choices.first else {
                 throw OpenAILanguageModelError.noResponseGenerated
+            }
+
+            if let reasoning = choice.message.reasoningText, !reasoning.isEmpty {
+                reasoningParts.append(reasoning)
             }
 
             if let refusalMessage = choice.message.refusal {
@@ -525,6 +532,8 @@ public struct OpenAILanguageModel: LanguageModel {
                     return LanguageModelSession.Response(
                         content: empty.content,
                         rawContent: empty.rawContent,
+                        usage: usage.normalized,
+                        reasoning: Self.joinedReasoning(reasoningParts),
                         transcriptEntries: ArraySlice(entries)
                     )
                 case .invocations(let invocations):
@@ -553,6 +562,8 @@ public struct OpenAILanguageModel: LanguageModel {
             return LanguageModelSession.Response(
                 content: text as! Content,
                 rawContent: GeneratedContent(text),
+                usage: usage.normalized,
+                reasoning: Self.joinedReasoning(reasoningParts),
                 transcriptEntries: ArraySlice(entries)
             )
         }
@@ -562,8 +573,14 @@ public struct OpenAILanguageModel: LanguageModel {
         return LanguageModelSession.Response(
             content: content,
             rawContent: generatedContent,
+            usage: usage.normalized,
+            reasoning: Self.joinedReasoning(reasoningParts),
             transcriptEntries: ArraySlice(entries)
         )
+    }
+
+    private static func joinedReasoning(_ parts: [String]) -> String? {
+        parts.isEmpty ? nil : parts.joined(separator: "\n\n")
     }
 
     private func respondWithResponses<Content>(
@@ -577,6 +594,8 @@ public struct OpenAILanguageModel: LanguageModel {
         var text = ""
         var lastOutput: [JSONValue]?
         var messages = messages
+        var usage = LanguageModelUsage()
+        var reasoningParts: [String] = []
 
         let url = baseURL.appendingPathComponent("responses")
 
@@ -601,6 +620,8 @@ public struct OpenAILanguageModel: LanguageModel {
                 ],
                 body: body
             )
+            usage.add(resp.usage?.languageModelUsage)
+            reasoningParts.append(contentsOf: extractReasoningFromOutput(resp.output))
 
             let toolCalls = extractToolCallsFromOutput(resp.output)
             lastOutput = resp.output
@@ -620,6 +641,8 @@ public struct OpenAILanguageModel: LanguageModel {
                     return LanguageModelSession.Response(
                         content: empty.content,
                         rawContent: empty.rawContent,
+                        usage: usage.normalized,
+                        reasoning: Self.joinedReasoning(reasoningParts),
                         transcriptEntries: ArraySlice(entries)
                     )
                 case .invocations(let invocations):
@@ -650,6 +673,8 @@ public struct OpenAILanguageModel: LanguageModel {
             return LanguageModelSession.Response(
                 content: text as! Content,
                 rawContent: GeneratedContent(text),
+                usage: usage.normalized,
+                reasoning: Self.joinedReasoning(reasoningParts),
                 transcriptEntries: ArraySlice(entries)
             )
         }
@@ -660,6 +685,8 @@ public struct OpenAILanguageModel: LanguageModel {
             return LanguageModelSession.Response(
                 content: content,
                 rawContent: generatedContent,
+                usage: usage.normalized,
+                reasoning: Self.joinedReasoning(reasoningParts),
                 transcriptEntries: ArraySlice(entries)
             )
         }
@@ -714,6 +741,8 @@ public struct OpenAILanguageModel: LanguageModel {
                                 )
 
                             var accumulatedText = ""
+                            var latestUsage: LanguageModelUsage?
+                            var lastSnapshot: LanguageModelSession.ResponseStream<Content>.Snapshot?
 
                             for try await event in events {
                                 switch event {
@@ -739,7 +768,13 @@ public struct OpenAILanguageModel: LanguageModel {
                                     }
 
                                     if let content {
-                                        continuation.yield(.init(content: content, rawContent: raw))
+                                        let snapshot = LanguageModelSession.ResponseStream<Content>.Snapshot(
+                                            content: content,
+                                            rawContent: raw,
+                                            usage: latestUsage
+                                        )
+                                        lastSnapshot = snapshot
+                                        continuation.yield(snapshot)
                                     }
 
                                 case .toolCallCreated(_):
@@ -748,7 +783,12 @@ public struct OpenAILanguageModel: LanguageModel {
                                 case .toolCallDelta(_):
                                     // Minimal streaming implementation ignores tool call deltas
                                     break
-                                case .completed(_):
+                                case .completed(let usage):
+                                    latestUsage = usage ?? latestUsage
+                                    if var lastSnapshot, lastSnapshot.usage != latestUsage {
+                                        lastSnapshot.usage = latestUsage
+                                        continuation.yield(lastSnapshot)
+                                    }
                                     continuation.finish()
                                 case .ignored:
                                     break
@@ -798,8 +838,18 @@ public struct OpenAILanguageModel: LanguageModel {
                                 )
 
                             var accumulatedText = ""
+                            var latestUsage: LanguageModelUsage?
+                            var lastSnapshot: LanguageModelSession.ResponseStream<Content>.Snapshot?
 
                             for try await chunk in events {
+                                if let usage = chunk.usage?.languageModelUsage {
+                                    latestUsage = usage
+                                    if chunk.choices.isEmpty, var lastSnapshot, lastSnapshot.usage != latestUsage {
+                                        lastSnapshot.usage = latestUsage
+                                        continuation.yield(lastSnapshot)
+                                    }
+                                }
+
                                 if let choice = chunk.choices.first {
                                     if let piece = choice.delta.content, !piece.isEmpty {
                                         accumulatedText += piece
@@ -823,13 +873,16 @@ public struct OpenAILanguageModel: LanguageModel {
                                         }
 
                                         if let content {
-                                            continuation.yield(.init(content: content, rawContent: raw))
+                                            let snapshot = LanguageModelSession.ResponseStream<Content>.Snapshot(
+                                                content: content,
+                                                rawContent: raw,
+                                                usage: latestUsage
+                                            )
+                                            lastSnapshot = snapshot
+                                            continuation.yield(snapshot)
                                         }
                                     }
 
-                                    if choice.finishReason != nil {
-                                        continuation.finish()
-                                    }
                                 }
                             }
 
@@ -865,6 +918,10 @@ private enum ChatCompletions {
             "messages": .array(messages.map { $0.jsonValue(for: .chatCompletions) }),
             "stream": .bool(stream),
         ]
+
+        if stream {
+            body["stream_options"] = .object(["include_usage": .bool(true)])
+        }
 
         if let tools {
             body["tools"] = .array(tools.map { $0.jsonValue(for: .chatCompletions) })
@@ -973,6 +1030,39 @@ private enum ChatCompletions {
     struct Response: Decodable, Sendable {
         let id: String
         let choices: [Choice]
+        let usage: Usage?
+
+        struct Usage: Codable, Sendable {
+            let promptTokens: Int?
+            let completionTokens: Int?
+            let totalTokens: Int?
+            let promptTokensDetails: PromptTokensDetails?
+            let completionTokensDetails: CompletionTokensDetails?
+
+            enum CodingKeys: String, CodingKey {
+                case promptTokens = "prompt_tokens"
+                case completionTokens = "completion_tokens"
+                case totalTokens = "total_tokens"
+                case promptTokensDetails = "prompt_tokens_details"
+                case completionTokensDetails = "completion_tokens_details"
+            }
+
+            struct PromptTokensDetails: Codable, Sendable {
+                let cachedTokens: Int?
+
+                enum CodingKeys: String, CodingKey {
+                    case cachedTokens = "cached_tokens"
+                }
+            }
+
+            struct CompletionTokensDetails: Codable, Sendable {
+                let reasoningTokens: Int?
+
+                enum CodingKeys: String, CodingKey {
+                    case reasoningTokens = "reasoning_tokens"
+                }
+            }
+        }
 
         struct Choice: Codable, Sendable {
             let message: Message
@@ -989,12 +1079,30 @@ private enum ChatCompletions {
             let content: String?
             let refusal: String?
             let toolCalls: [OpenAIToolCall]?
+            /// vLLM-style reasoning trace field.
+            let reasoningContent: String?
+            /// OpenRouter-style reasoning trace field.
+            let reasoning: String?
+
+            var reasoningText: String? { reasoningContent ?? reasoning }
 
             private enum CodingKeys: String, CodingKey {
                 case role
                 case content
                 case refusal
                 case toolCalls = "tool_calls"
+                case reasoningContent = "reasoning_content"
+                case reasoning
+            }
+
+            // Reasoning fields are decode-only: tool-call messages are re-encoded back into
+            // the conversation, and the reasoning trace must not be sent upstream again.
+            func encode(to encoder: Encoder) throws {
+                var container = encoder.container(keyedBy: CodingKeys.self)
+                try container.encode(role, forKey: .role)
+                try container.encodeIfPresent(content, forKey: .content)
+                try container.encodeIfPresent(refusal, forKey: .refusal)
+                try container.encodeIfPresent(toolCalls, forKey: .toolCalls)
             }
         }
     }
@@ -1225,6 +1333,39 @@ private enum Responses {
         let error: [JSONValue]?
         let outputText: String?
         let finishReason: String?
+        let usage: Usage?
+
+        struct Usage: Decodable, Sendable {
+            let inputTokens: Int?
+            let outputTokens: Int?
+            let totalTokens: Int?
+            let inputTokensDetails: InputTokensDetails?
+            let outputTokensDetails: OutputTokensDetails?
+
+            enum CodingKeys: String, CodingKey {
+                case inputTokens = "input_tokens"
+                case outputTokens = "output_tokens"
+                case totalTokens = "total_tokens"
+                case inputTokensDetails = "input_tokens_details"
+                case outputTokensDetails = "output_tokens_details"
+            }
+
+            struct InputTokensDetails: Decodable, Sendable {
+                let cachedTokens: Int?
+
+                enum CodingKeys: String, CodingKey {
+                    case cachedTokens = "cached_tokens"
+                }
+            }
+
+            struct OutputTokensDetails: Decodable, Sendable {
+                let reasoningTokens: Int?
+
+                enum CodingKeys: String, CodingKey {
+                    case reasoningTokens = "reasoning_tokens"
+                }
+            }
+        }
 
         private enum CodingKeys: String, CodingKey {
             case id
@@ -1232,6 +1373,7 @@ private enum Responses {
             case outputText = "output_text"
             case finishReason = "finish_reason"
             case error = "error"
+            case usage
         }
     }
 }
@@ -1554,7 +1696,7 @@ private enum OpenAIResponsesServerEvent: Decodable, Sendable {
     case outputTextDelta(String)
     case toolCallCreated(OpenAIToolCall)
     case toolCallDelta(OpenAIToolCall)
-    case completed(String)
+    case completed(LanguageModelUsage?)
     case ignored
 
     init(from decoder: any Decoder) throws {
@@ -1568,7 +1710,10 @@ private enum OpenAIResponsesServerEvent: Decodable, Sendable {
         case "response.tool_call.delta":
             self = .toolCallDelta(try container.decode(OpenAIToolCall.self, forKey: .toolCall))
         case "response.completed":
-            self = .completed((try? container.decode(String.self, forKey: .finishReason)) ?? "stop")
+            let usage =
+                (try? container.decode(Responses.Response.self, forKey: .response))?.usage?.languageModelUsage
+                ?? (try? container.decode(Responses.Response.Usage.self, forKey: .usage))?.languageModelUsage
+            self = .completed(usage)
         default:
             self = .ignored
         }
@@ -1579,6 +1724,8 @@ private enum OpenAIResponsesServerEvent: Decodable, Sendable {
         case delta
         case toolCall = "tool_call"
         case finishReason = "finish_reason"
+        case response
+        case usage
     }
 }
 
@@ -1599,6 +1746,31 @@ private struct OpenAIChatCompletionsChunk: Decodable, Sendable {
 
     let id: String
     let choices: [Choice]
+    let usage: ChatCompletions.Response.Usage?
+}
+
+private extension ChatCompletions.Response.Usage {
+    var languageModelUsage: LanguageModelUsage? {
+        LanguageModelUsage(
+            inputTokens: promptTokens,
+            outputTokens: completionTokens,
+            totalTokens: totalTokens,
+            reasoningTokens: completionTokensDetails?.reasoningTokens,
+            cachedInputTokens: promptTokensDetails?.cachedTokens
+        ).normalized
+    }
+}
+
+private extension Responses.Response.Usage {
+    var languageModelUsage: LanguageModelUsage? {
+        LanguageModelUsage(
+            inputTokens: inputTokens,
+            outputTokens: outputTokens,
+            totalTokens: totalTokens,
+            reasoningTokens: outputTokensDetails?.reasoningTokens,
+            cachedInputTokens: inputTokensDetails?.cachedTokens
+        ).normalized
+    }
 }
 
 private struct OpenAIToolInvocationResult {
@@ -1781,6 +1953,35 @@ private func extractTextFromOutput(_ output: [JSONValue]?) -> String? {
     }
 
     return textParts.isEmpty ? nil : textParts.joined()
+}
+
+/// Collects reasoning text from Responses API `reasoning` output items. Reads both
+/// `content` parts (`reasoning_text`, emitted by vLLM) and `summary` parts
+/// (`summary_text`, emitted by OpenAI).
+private func extractReasoningFromOutput(_ output: [JSONValue]?) -> [String] {
+    guard let output else { return [] }
+
+    var parts: [String] = []
+    for block in output {
+        guard case let .object(obj) = block,
+            case let .string(type)? = obj["type"],
+            type == "reasoning"
+        else { continue }
+
+        for key in ["content", "summary"] {
+            guard case let .array(contentBlocks)? = obj[key] else { continue }
+            for contentBlock in contentBlocks {
+                if case let .object(contentObj) = contentBlock,
+                    case let .string(text)? = contentObj["text"],
+                    !text.isEmpty
+                {
+                    parts.append(text)
+                }
+            }
+        }
+    }
+
+    return parts
 }
 
 private func extractJSONFromOutput(_ output: [JSONValue]?) -> String? {

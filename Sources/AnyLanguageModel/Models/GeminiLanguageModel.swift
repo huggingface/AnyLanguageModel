@@ -281,6 +281,7 @@ public struct GeminiLanguageModel: LanguageModel {
         let geminiTools = try buildTools(from: session.tools, serverTools: effectiveServerTools)
 
         var transcript = session.transcript
+        var usage = LanguageModelUsage()
 
         // Multi-turn conversation loop for tool calling
         while true {
@@ -301,6 +302,7 @@ public struct GeminiLanguageModel: LanguageModel {
                 headers: headers,
                 body: body
             )
+            usage.add(response.usageMetadata?.languageModelUsage)
 
             guard let firstCandidate = response.candidates.first else {
                 throw GeminiError.noCandidate
@@ -324,6 +326,7 @@ public struct GeminiLanguageModel: LanguageModel {
                     return LanguageModelSession.Response(
                         content: empty.content,
                         rawContent: empty.rawContent,
+                        usage: usage.normalized,
                         transcriptEntries: ArraySlice(transcript)
                     )
                 case .invocations(let invocations):
@@ -352,6 +355,7 @@ public struct GeminiLanguageModel: LanguageModel {
                     return LanguageModelSession.Response(
                         content: text as! Content,
                         rawContent: GeneratedContent(text),
+                        usage: usage.normalized,
                         transcriptEntries: ArraySlice(transcript)
                     )
                 }
@@ -361,6 +365,7 @@ public struct GeminiLanguageModel: LanguageModel {
                 return LanguageModelSession.Response(
                     content: content,
                     rawContent: generatedContent,
+                    usage: usage.normalized,
                     transcriptEntries: ArraySlice(transcript)
                 )
             }
@@ -416,11 +421,15 @@ public struct GeminiLanguageModel: LanguageModel {
                         )
 
                     var accumulatedText = ""
+                    var latestUsage = LanguageModelUsage()
+                    var lastSnapshot: LanguageModelSession.ResponseStream<Content>.Snapshot?
 
                     for try await chunk in stream {
-                        guard let candidate = chunk.candidates.first else { continue }
+                        let previousUsage = latestUsage.normalized
+                        latestUsage.merge(chunk.usageMetadata?.languageModelUsage)
+                        var yieldedSnapshot = false
 
-                        if let parts = candidate.content.parts {
+                        if let candidate = chunk.candidates.first, let parts = candidate.content.parts {
                             for part in parts {
                                 if case .text(let textPart) = part {
                                     accumulatedText += textPart.text
@@ -444,10 +453,22 @@ public struct GeminiLanguageModel: LanguageModel {
                                     }
 
                                     if let content {
-                                        continuation.yield(.init(content: content, rawContent: raw))
+                                        let snapshot = LanguageModelSession.ResponseStream<Content>.Snapshot(
+                                            content: content,
+                                            rawContent: raw,
+                                            usage: latestUsage.normalized
+                                        )
+                                        lastSnapshot = snapshot
+                                        continuation.yield(snapshot)
+                                        yieldedSnapshot = true
                                     }
                                 }
                             }
+                        }
+
+                        if !yieldedSnapshot, previousUsage != latestUsage.normalized, var lastSnapshot {
+                            lastSnapshot.usage = latestUsage.normalized
+                            continuation.yield(lastSnapshot)
                         }
                     }
 
@@ -1019,6 +1040,17 @@ private struct GeminiUsageMetadata: Codable, Sendable {
         case candidatesTokenCount
         case totalTokenCount
         case thoughtsTokenCount
+    }
+}
+
+private extension GeminiUsageMetadata {
+    var languageModelUsage: LanguageModelUsage? {
+        LanguageModelUsage(
+            inputTokens: promptTokenCount,
+            outputTokens: candidatesTokenCount,
+            totalTokens: totalTokenCount,
+            reasoningTokens: thoughtsTokenCount
+        ).normalized
     }
 }
 

@@ -440,6 +440,8 @@ public struct OpenResponsesLanguageModel: LanguageModel {
                                 body: body
                             )
                         var accumulatedText = ""
+                        var latestUsage: LanguageModelUsage?
+                        var lastSnapshot: LanguageModelSession.ResponseStream<Content>.Snapshot?
                         for try await event in events {
                             switch event {
                             case .outputTextDelta(let delta):
@@ -456,9 +458,20 @@ public struct OpenResponsesLanguageModel: LanguageModel {
                                     content = (try? type.init(raw))?.asPartiallyGenerated()
                                 }
                                 if let content {
-                                    continuation.yield(.init(content: content, rawContent: raw))
+                                    let snapshot = LanguageModelSession.ResponseStream<Content>.Snapshot(
+                                        content: content,
+                                        rawContent: raw,
+                                        usage: latestUsage
+                                    )
+                                    lastSnapshot = snapshot
+                                    continuation.yield(snapshot)
                                 }
-                            case .completed:
+                            case .completed(let usage):
+                                latestUsage = usage ?? latestUsage
+                                if var lastSnapshot, lastSnapshot.usage != latestUsage {
+                                    lastSnapshot.usage = latestUsage
+                                    continuation.yield(lastSnapshot)
+                                }
                                 continuation.finish()
                                 return
                             case .failed:
@@ -493,6 +506,7 @@ public struct OpenResponsesLanguageModel: LanguageModel {
         var text = ""
         var lastOutput: [JSONValue]?
         var messages = messages
+        var usage = LanguageModelUsage()
         let url = baseURL.appendingPathComponent("responses")
 
         while true {
@@ -511,6 +525,7 @@ public struct OpenResponsesLanguageModel: LanguageModel {
                 headers: ["Authorization": "Bearer \(tokenProvider())"],
                 body: body
             )
+            usage.add(resp.usage?.languageModelUsage)
 
             let toolCalls = extractToolCallsFromOutput(resp.output)
             lastOutput = resp.output
@@ -530,6 +545,7 @@ public struct OpenResponsesLanguageModel: LanguageModel {
                     return LanguageModelSession.Response(
                         content: empty.content,
                         rawContent: empty.rawContent,
+                        usage: usage.normalized,
                         transcriptEntries: ArraySlice(entries)
                     )
                 case .invocations(let invocations):
@@ -557,6 +573,7 @@ public struct OpenResponsesLanguageModel: LanguageModel {
             return LanguageModelSession.Response(
                 content: text as! Content,
                 rawContent: GeneratedContent(text),
+                usage: usage.normalized,
                 transcriptEntries: ArraySlice(entries)
             )
         }
@@ -566,6 +583,7 @@ public struct OpenResponsesLanguageModel: LanguageModel {
             return LanguageModelSession.Response(
                 content: content,
                 rawContent: generatedContent,
+                usage: usage.normalized,
                 transcriptEntries: ArraySlice(entries)
             )
         }
@@ -731,12 +749,46 @@ private enum OpenResponsesAPI {
         let output: [JSONValue]?
         let outputText: String?
         let error: OpenResponsesError?
+        let usage: Usage?
+
+        struct Usage: Decodable, Sendable {
+            let inputTokens: Int?
+            let outputTokens: Int?
+            let totalTokens: Int?
+            let inputTokensDetails: InputTokensDetails?
+            let outputTokensDetails: OutputTokensDetails?
+
+            enum CodingKeys: String, CodingKey {
+                case inputTokens = "input_tokens"
+                case outputTokens = "output_tokens"
+                case totalTokens = "total_tokens"
+                case inputTokensDetails = "input_tokens_details"
+                case outputTokensDetails = "output_tokens_details"
+            }
+
+            struct InputTokensDetails: Decodable, Sendable {
+                let cachedTokens: Int?
+
+                enum CodingKeys: String, CodingKey {
+                    case cachedTokens = "cached_tokens"
+                }
+            }
+
+            struct OutputTokensDetails: Decodable, Sendable {
+                let reasoningTokens: Int?
+
+                enum CodingKeys: String, CodingKey {
+                    case reasoningTokens = "reasoning_tokens"
+                }
+            }
+        }
 
         private enum CodingKeys: String, CodingKey {
             case id
             case output
             case outputText = "output_text"
             case error
+            case usage
         }
     }
 
@@ -1108,7 +1160,7 @@ private func resolveToolCalls(
 
 private enum OpenResponsesStreamEvent: Decodable, Sendable {
     case outputTextDelta(String)
-    case completed
+    case completed(LanguageModelUsage?)
     case failed
     case ignored
 
@@ -1119,14 +1171,29 @@ private enum OpenResponsesStreamEvent: Decodable, Sendable {
         case "response.output_text.delta":
             self = .outputTextDelta(try c.decode(String.self, forKey: .delta))
         case "response.completed":
-            self = .completed
+            let usage =
+                (try? c.decode(OpenResponsesAPI.Response.self, forKey: .response))?.usage?.languageModelUsage
+                ?? (try? c.decode(OpenResponsesAPI.Response.Usage.self, forKey: .usage))?.languageModelUsage
+            self = .completed(usage)
         case "response.failed":
             self = .failed
         default:
             self = .ignored
         }
     }
-    private enum CodingKeys: String, CodingKey { case type, delta }
+    private enum CodingKeys: String, CodingKey { case type, delta, response, usage }
+}
+
+private extension OpenResponsesAPI.Response.Usage {
+    var languageModelUsage: LanguageModelUsage? {
+        LanguageModelUsage(
+            inputTokens: inputTokens,
+            outputTokens: outputTokens,
+            totalTokens: totalTokens,
+            reasoningTokens: outputTokensDetails?.reasoningTokens,
+            cachedInputTokens: inputTokensDetails?.cachedTokens
+        ).normalized
+    }
 }
 
 // MARK: - Errors

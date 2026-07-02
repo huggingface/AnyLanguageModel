@@ -174,6 +174,9 @@ public final class LanguageModelSession: @unchecked Sendable {
     public struct Response<Content>: Sendable where Content: Generable, Content: Sendable {
         public let content: Content
         public let rawContent: GeneratedContent
+        public let usage: LanguageModelUsage?
+        /// Provider-reported reasoning trace (e.g. vLLM `reasoning_content`), when available.
+        public let reasoning: String?
         public let transcriptEntries: ArraySlice<Transcript.Entry>
 
         /// Creates a response value from generated content and transcript entries.
@@ -184,10 +187,14 @@ public final class LanguageModelSession: @unchecked Sendable {
         public init(
             content: Content,
             rawContent: GeneratedContent,
+            usage: LanguageModelUsage? = nil,
+            reasoning: String? = nil,
             transcriptEntries: ArraySlice<Transcript.Entry>
         ) {
             self.content = content
             self.rawContent = rawContent
+            self.usage = usage
+            self.reasoning = reasoning
             self.transcriptEntries = transcriptEntries
         }
     }
@@ -801,8 +808,12 @@ extension LanguageModelSession {
         /// - Parameters:
         ///   - content: The complete response content.
         ///   - rawContent: The raw content produced by the model.
-        public init(content: Content, rawContent: GeneratedContent) {
-            self.fallbackSnapshot = Snapshot(content: content.asPartiallyGenerated(), rawContent: rawContent)
+        public init(content: Content, rawContent: GeneratedContent, usage: LanguageModelUsage? = nil) {
+            self.fallbackSnapshot = Snapshot(
+                content: content.asPartiallyGenerated(),
+                rawContent: rawContent,
+                usage: usage
+            )
             self.streaming = nil
         }
 
@@ -817,14 +828,20 @@ extension LanguageModelSession {
         public struct Snapshot: Sendable where Content.PartiallyGenerated: Sendable {
             public var content: Content.PartiallyGenerated
             public var rawContent: GeneratedContent
+            public var usage: LanguageModelUsage?
 
             /// Creates a snapshot from partially generated content and raw content.
             /// - Parameters:
             ///   - content: The partially generated content.
             ///   - rawContent: The raw content produced by the model.
-            public init(content: Content.PartiallyGenerated, rawContent: GeneratedContent) {
+            public init(
+                content: Content.PartiallyGenerated,
+                rawContent: GeneratedContent,
+                usage: LanguageModelUsage? = nil
+            ) {
                 self.content = content
                 self.rawContent = rawContent
+                self.usage = usage
             }
         }
     }
@@ -887,6 +904,7 @@ extension LanguageModelSession.ResponseStream: AsyncSequence {
                 return LanguageModelSession.Response(
                     content: finalContent,
                     rawContent: last.rawContent,
+                    usage: last.usage,
                     transcriptEntries: []
                 )
             }
@@ -902,6 +920,7 @@ extension LanguageModelSession.ResponseStream: AsyncSequence {
             return LanguageModelSession.Response(
                 content: finalContent,
                 rawContent: fallbackSnapshot.rawContent,
+                usage: fallbackSnapshot.usage,
                 transcriptEntries: []
             )
         }
