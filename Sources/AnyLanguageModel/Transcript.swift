@@ -31,18 +31,20 @@ public struct Transcript: Sendable, Equatable, Codable {
     ///
     /// - Parameter text: The text to update the transcript with.
     mutating func appendStreamingResponse(_ text: String) {
-        let textSegment = Transcript.Segment.text(Transcript.TextSegment(content: text))
         // Make sure the last entry in the transcript is a response. If it is not, create a new response and append it to the end of the transcript.
         guard case .response(var response) = entries.last else {
-            append(Entry.response(Response(assetIDs: [], segments: [textSegment])))
+            append(Entry.response(Response(assetIDs: [], segments: [
+                Transcript.Segment.text(Transcript.TextSegment(content: text))
+            ])))
             return
         }
         
         // If the last segment in the last response is text, replace it with the new content.
         if case .text(let last)? = response.segments.last {
-            response.segments[response.segments.count - 1] = textSegment
+            // Keep the same ID as the last segment.
+            response.segments[response.segments.count - 1] = Transcript.Segment.text(Transcript.TextSegment(id: last.id, content: text))
         } else {
-            response.segments.append(textSegment)
+            response.segments.append(Transcript.Segment.text(Transcript.TextSegment(content: text)))
         }
         
         // Replace the latest entry with the one we just updated.
@@ -56,15 +58,27 @@ public struct Transcript: Sendable, Equatable, Codable {
     ///   - text: The text to replace the final response with.
     ///   - assetIDs: The assetIDs for the response.
     mutating func finalizeStreamedTranscript(_ text: String, assetIDs: [String]) {
-        let textSegment = Transcript.Segment.text(Transcript.TextSegment(content: text))
         // Make sure the last entry in the transcript is a response. If it is not, create a new response and append it to the end of the transcript.
         guard case .response(var response) = entries.last else {
-            append(Entry.response(Response(assetIDs: assetIDs, segments: [textSegment])))
+            append(Entry.response(Response(assetIDs: assetIDs, segments: [
+                Transcript.Segment.text(Transcript.TextSegment(content: text))
+            ])))
             return
         }
-                
-        // Replace the latest entry with the one we just updated.
-        replace(index: entries.count - 1, with: .response(Response(id: response.id, assetIDs: assetIDs, segments: [textSegment])))
+               
+        // If the last segment is text we want to carry its ID over to the new text segment. Otherwise generate a new ID for it.
+        let id = switch response.segments.last {
+        case .text(let last):
+            last.id
+        default:
+            UUID().uuidString
+        }
+        
+        let newResponse: Entry = Entry.response(Response(id: response.id, assetIDs: assetIDs, segments: [
+            Transcript.Segment.text(Transcript.TextSegment(id: id, content: text))
+        ]))
+        
+        replace(index: entries.count - 1, with: newResponse)
     }
 
 
