@@ -1,5 +1,5 @@
 {
-  "originHash" : "8c8059604845311c40f47c771a21887b94c4a9dffc50f0ffdeceef9ef2f3c866",
+  "originHash" : "6173d2b219d89622a95aae2fcb7d8bde21639f4c400f469b7ec9877bfc9f2987",
   "pins" : [
     {
       "identity" : "eventsource",
@@ -44,6 +44,15 @@
       "state" : {
         "revision" : "a0cb0954ecb21e4e31b0070e6ed5674e8556685a",
         "version" : "1.6.0"
+      }
+    },
+    {
+      "identity" : "swift-litert-lm",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/john-rocky/swift-litert-lm",
+      "state" : {
+        "revision" : "50c524e925c24e2651aaad1ae6baee82a15ab6b3",
+        "version" : "0.1.1"
       }
     },
     {
