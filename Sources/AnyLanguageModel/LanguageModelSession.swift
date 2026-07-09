@@ -123,7 +123,19 @@ public final class LanguageModelSession: @unchecked Sendable {
             state.withLock { $0.endResponding() }
         }
     }
-
+    
+    nonisolated func growStreamingTranscript(text: String) {
+        withMutation(keyPath: \.transcript) {
+            state.withLock { $0.transcript.appendStreamingResponse(text) }
+        }
+    }
+    
+    nonisolated func appendTranscriptEntry(_ entry: Transcript.Entry) {
+        withMutation(keyPath: \.transcript) {
+            state.withLock { $0.transcript.append(entry) }
+        }
+    }
+    
     nonisolated private func wrapRespond<T>(_ operation: () async throws -> T) async throws -> T {
         beginResponding()
         do {
@@ -163,14 +175,8 @@ public final class LanguageModelSession: @unchecked Sendable {
                             textContent = lastSnapshot.rawContent.jsonString
                         }
 
-                        let responseEntry = Transcript.Entry.response(
-                            Transcript.Response(
-                                assetIDs: [],
-                                segments: [.text(.init(content: textContent))]
-                            )
-                        )
                         session.withMutation(keyPath: \.transcript) {
-                            session.state.withLock { $0.transcript.append(responseEntry) }
+                            session.state.withLock { $0.transcript.finalizeStreamedTranscript(textContent, assetIDs: []) }
                         }
                     }
                 } catch {
