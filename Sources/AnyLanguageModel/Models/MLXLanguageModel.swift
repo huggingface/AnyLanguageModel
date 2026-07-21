@@ -1377,7 +1377,11 @@ import Foundation
             let encoder = JSONEncoder()
             let data = try encoder.encode(resolvedSchema)
             if let json = try JSONSerialization.jsonObject(with: data) as? [String: Any] {
-                parametersDict = try convertToSendableJSONObject(json)
+                // Inline nested `$ref`s (so nested objects keep their real type)
+                // before coercing any residual typeless/array types the chat
+                // template cannot render.
+                let inlined = resolveToolSchemaRefs(json)
+                parametersDict = try convertToSendableJSONObject(normalizeToolSchemaTypes(inlined))
             } else {
                 parametersDict = makeEmptyJSONSchemaObject()
             }
