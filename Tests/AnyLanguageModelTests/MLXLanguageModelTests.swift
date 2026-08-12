@@ -144,6 +144,45 @@ import Testing
             }
         }
 
+        @Test func streamingWithTools() async throws {
+            let weatherTool = spy(on: WeatherTool())
+            let session = LanguageModelSession(
+                model: model,
+                tools: [weatherTool],
+                instructions: "You are a helpful assistant. Use available tools when needed."
+            )
+
+            let stream = session.streamResponse(to: "How's the weather in San Francisco?")
+
+            // Iterate the stream, keeping the last snapshot as the final state.
+            var snapshotCount = 0
+            var lastSnapshot: LanguageModelSession.ResponseStream<String>.Snapshot?
+            for try await snapshot in stream {
+                snapshotCount += 1
+                lastSnapshot = snapshot
+            }
+
+            // The stream yielded incremental snapshots and produced text.
+            #expect(snapshotCount >= 1)
+            #expect(!(lastSnapshot?.content.isEmpty ?? true))
+
+            // The tool actually executed.
+            let calls = await weatherTool.calls
+            #expect(calls.count >= 1)
+            if let first = calls.first {
+                #expect(first.arguments.city.contains("San Francisco"))
+            }
+
+            // Tool activity surfaces through the stream's transcript entries.
+            var foundToolOutput = false
+            for case let .toolOutput(toolOutput) in lastSnapshot?.transcriptEntries ?? [] {
+                #expect(!toolOutput.id.isEmpty)
+                #expect(toolOutput.toolName == weatherTool.name)
+                foundToolOutput = true
+            }
+            #expect(foundToolOutput)
+        }
+
         @Test func multimodalWithImageURL() async throws {
             let transcript = Transcript(entries: [
                 .prompt(

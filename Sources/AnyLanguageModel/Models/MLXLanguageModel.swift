@@ -1103,54 +1103,125 @@ import Foundation
                         let userInputProcessing =
                             options[custom: MLXLanguageModel.self]?.processingForUserInput
                             ?? .init(resize: nil)
-                        let chat = convertTranscriptToMLXChat(
+                        let toolSpecs = mlxToolSpecs(for: session)
+                        var chat = convertTranscriptToMLXChat(
                             session: session,
                             fallbackPrompt: prompt.description
                         )
 
-                        let userInput = makeUserInput(
-                            chat: chat,
-                            tools: nil,
-                            processing: userInputProcessing,
-                            additionalContext: additionalContext
-                        )
-                        let lmInput = try await context.processor.prepare(input: userInput)
-                        let resolved = resolveCache(
-                            session: session,
-                            lmInput: lmInput,
-                            generateParameters: generateParameters,
-                            context: context
-                        )
-
-                        let mlxStream = try MLXLMCommon.generate(
-                            input: resolved.input,
-                            cache: resolved.cache,
-                            parameters: generateParameters,
-                            context: context
-                        )
-
+                        // Accumulators live outside the tool loop so streamed snapshots stay
+                        // monotonic across rounds: text never shrinks, entries only grow.
                         var accumulatedText = ""
-                        for await item in mlxStream {
-                            if Task.isCancelled { break }
+                        var accumulatedEntries: [Transcript.Entry] = []
+                        let maxToolIterations = 8
+                        var toolIteration = 0
+                        var previousToolCallSignature: String?
 
-                            switch item {
-                            case .chunk(let text):
-                                accumulatedText += text
-                                let raw = GeneratedContent(accumulatedText)
-                                let content: Content.PartiallyGenerated = (accumulatedText as! Content)
-                                    .asPartiallyGenerated()
-                                continuation.yield(.init(content: content, rawContent: raw))
-                            case .info, .toolCall:
-                                break
+                        // Yields a snapshot carrying the cumulative text and tool entries so far.
+                        func yieldSnapshot() {
+                            let raw = GeneratedContent(accumulatedText)
+                            let content: Content.PartiallyGenerated = (accumulatedText as! Content)
+                                .asPartiallyGenerated()
+                            continuation.yield(
+                                .init(
+                                    content: content,
+                                    rawContent: raw,
+                                    transcriptEntries: ArraySlice(accumulatedEntries)
+                                )
+                            )
+                        }
+
+                        // Loop until the model stops without pending tool calls (mirrors `respond()`).
+                        toolLoop: while true {
+                            let userInput = makeUserInput(
+                                chat: chat,
+                                tools: toolSpecs,
+                                processing: userInputProcessing,
+                                additionalContext: additionalContext
+                            )
+                            let lmInput = try await context.processor.prepare(input: userInput)
+                            let resolved = resolveCache(
+                                session: session,
+                                lmInput: lmInput,
+                                generateParameters: generateParameters,
+                                context: context
+                            )
+
+                            let mlxStream = try MLXLMCommon.generate(
+                                input: resolved.input,
+                                cache: resolved.cache,
+                                parameters: generateParameters,
+                                context: context
+                            )
+
+                            let roundStartTextCount = accumulatedText.count
+                            var collectedToolCalls: [MLXLMCommon.ToolCall] = []
+
+                            for await item in mlxStream {
+                                if Task.isCancelled { break toolLoop }
+
+                                switch item {
+                                case .chunk(let text):
+                                    accumulatedText += text
+                                    yieldSnapshot()
+                                case .toolCall(let call):
+                                    collectedToolCalls.append(call)
+                                case .info:
+                                    break
+                                }
+                            }
+
+                            storeSessionCache(
+                                cache: resolved.cache,
+                                fullTokens: resolved.fullTokens,
+                                generateParameters: generateParameters,
+                                session: session
+                            )
+
+                            // Feed this round's assistant text back into the chat history.
+                            let roundText = String(accumulatedText.dropFirst(roundStartTextCount))
+                            if !roundText.isEmpty {
+                                chat.append(.assistant(roundText))
+                            }
+
+                            guard !collectedToolCalls.isEmpty else { break }
+
+                            toolIteration += 1
+                            if toolIteration > maxToolIterations {
+                                throw Self.maxToolIterationsExceededError(limit: maxToolIterations)
+                            }
+
+                            let signature =
+                                collectedToolCalls
+                                .map { "\($0.function.name):\($0.function.arguments)" }
+                                .joined(separator: "|")
+                            if signature == previousToolCallSignature {
+                                throw Self.repeatedToolCallLoopError()
+                            }
+                            previousToolCallSignature = signature
+
+                            let resolution = try await resolveToolCalls(collectedToolCalls, session: session)
+                            switch resolution {
+                            case .stop(let calls):
+                                if !calls.isEmpty {
+                                    accumulatedEntries.append(.toolCalls(Transcript.ToolCalls(calls)))
+                                    yieldSnapshot()
+                                }
+                                break toolLoop
+                            case .invocations(let invocations):
+                                if invocations.isEmpty { break toolLoop }
+
+                                accumulatedEntries.append(
+                                    .toolCalls(Transcript.ToolCalls(invocations.map(\.call)))
+                                )
+                                for invocation in invocations {
+                                    accumulatedEntries.append(.toolOutput(invocation.output))
+                                    chat.append(.tool(toolOutputToJSON(invocation.output)))
+                                }
+                                yieldSnapshot()
                             }
                         }
 
-                        storeSessionCache(
-                            cache: resolved.cache,
-                            fullTokens: resolved.fullTokens,
-                            generateParameters: generateParameters,
-                            session: session
-                        )
                         finishScope()
                         finishGenerationSlot()
                         continuation.finish()

@@ -170,7 +170,10 @@ public final class LanguageModelSession: @unchecked Sendable {
                             )
                         )
                         session.withMutation(keyPath: \.transcript) {
-                            session.state.withLock { $0.transcript.append(responseEntry) }
+                            session.state.withLock {
+                                $0.transcript.append(contentsOf: lastSnapshot.transcriptEntries)
+                                $0.transcript.append(responseEntry)
+                            }
                         }
                     }
                 } catch {
@@ -834,13 +837,23 @@ extension LanguageModelSession {
             public var content: Content.PartiallyGenerated
             public var rawContent: GeneratedContent
 
+            /// Transcript entries (tool calls and outputs) produced so far while streaming.
+            /// Cumulative across tool rounds; empty for providers that don't stream tool activity.
+            public var transcriptEntries: ArraySlice<Transcript.Entry>
+
             /// Creates a snapshot from partially generated content and raw content.
             /// - Parameters:
             ///   - content: The partially generated content.
             ///   - rawContent: The raw content produced by the model.
-            public init(content: Content.PartiallyGenerated, rawContent: GeneratedContent) {
+            ///   - transcriptEntries: Transcript entries accumulated so far (tool calls/outputs).
+            public init(
+                content: Content.PartiallyGenerated,
+                rawContent: GeneratedContent,
+                transcriptEntries: ArraySlice<Transcript.Entry> = []
+            ) {
                 self.content = content
                 self.rawContent = rawContent
+                self.transcriptEntries = transcriptEntries
             }
         }
     }
@@ -903,7 +916,7 @@ extension LanguageModelSession.ResponseStream: AsyncSequence {
                 return LanguageModelSession.Response(
                     content: finalContent,
                     rawContent: last.rawContent,
-                    transcriptEntries: []
+                    transcriptEntries: last.transcriptEntries
                 )
             }
         }
@@ -918,7 +931,7 @@ extension LanguageModelSession.ResponseStream: AsyncSequence {
             return LanguageModelSession.Response(
                 content: finalContent,
                 rawContent: fallbackSnapshot.rawContent,
-                transcriptEntries: []
+                transcriptEntries: fallbackSnapshot.transcriptEntries
             )
         }
 
