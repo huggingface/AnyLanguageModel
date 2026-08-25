@@ -208,6 +208,11 @@ import Foundation
         /// A negative value offloads all layers, and `0` runs entirely on the CPU.
         public let gpuLayers: Int32
 
+        /// The path to the multimodal projector GGUF file, when the model has one.
+        ///
+        /// Prompts may include image segments only when a projector is loaded.
+        public let mmprojPath: String?
+
         /// The default GPU layer count for the current platform.
         ///
         /// All layers are offloaded by default: the prebuilt llama.cpp binaries
@@ -453,6 +458,18 @@ import Foundation
         /// The model's vocabulary
         private var vocab: OpaquePointer?
 
+        /// The multimodal projector context, when a projector file was provided
+        private var mtmdContext: OpaquePointer?
+        /// `mtmd_helper_eval_chunks` is not thread-safe and every multimodal generation
+        /// shares the one projector context, so bitmap init through eval runs under this lock.
+        private let projectorLock = NSLock()
+
+        private func projectorLocked<T>(_ body: () throws -> T) rethrows -> T {
+            projectorLock.lock()
+            defer { projectorLock.unlock() }
+            return try body()
+        }
+
         /// Whether the model is currently loaded
         private var isModelLoaded: Bool = false
 
@@ -462,9 +479,18 @@ import Foundation
         ///   - modelPath: The path to the GGUF model file.
         ///   - gpuLayers: The number of model layers to offload to the GPU.
         ///     Defaults to ``defaultGPULayerCount``.
-        public init(modelPath: String, gpuLayers: Int32 = LlamaLanguageModel.defaultGPULayerCount) {
+        ///   - mmprojPath: The path to a multimodal projector GGUF file matching
+        ///     the model. When provided, prompts may include image segments,
+        ///     which are encoded through the projector. Defaults to `nil`
+        ///     (text only).
+        public init(
+            modelPath: String,
+            gpuLayers: Int32 = LlamaLanguageModel.defaultGPULayerCount,
+            mmprojPath: String? = nil
+        ) {
             self.modelPath = modelPath
             self.gpuLayers = gpuLayers
+            self.mmprojPath = mmprojPath
             self.legacyDefaults = ResolvedGenerationOptions()
         }
 
@@ -505,6 +531,9 @@ import Foundation
         }
 
         deinit {
+            if let mtmdContext = mtmdContext {
+                mtmd_free(mtmdContext)
+            }
             if let model = model {
                 llama_model_free(model)
             }
@@ -517,8 +546,9 @@ import Foundation
             includeSchemaInPrompt: Bool,
             options: GenerationOptions
         ) async throws -> LanguageModelSession.Response<Content> where Content: Generable {
-            // Validate that no image segments are present
-            try validateNoImageSegments(in: session)
+            if mmprojPath == nil {
+                try validateNoImageSegments(in: session)
+            }
             try await ensureModelLoaded()
 
             let runtimeOptions = resolvedOptions(from: options)
@@ -542,26 +572,52 @@ import Foundation
             llama_set_causal_attn(context, true)
             llama_set_n_threads(context, runtimeOptions.threads, runtimeOptions.threads)
 
+            var promptImages: [Data] = []
+            let imageMarker = mtmdContext != nil ? String(cString: mtmd_default_marker()) : nil
+
             let fullPrompt: String
             if includeSchemaInPrompt, type != String.self {
                 fullPrompt = try formatPrompt(
                     for: session,
                     extraSystemMessage: schemaPrompt(for: type.generationSchema),
-                    assistantPrefill: runtimeOptions.assistantPrefill
+                    assistantPrefill: runtimeOptions.assistantPrefill,
+                    imageMarker: imageMarker,
+                    images: &promptImages
                 )
             } else {
-                fullPrompt = try formatPrompt(for: session, assistantPrefill: runtimeOptions.assistantPrefill)
+                fullPrompt = try formatPrompt(
+                    for: session,
+                    extraSystemMessage: nil,
+                    assistantPrefill: runtimeOptions.assistantPrefill,
+                    imageMarker: imageMarker,
+                    images: &promptImages
+                )
             }
 
             if type == String.self {
                 let maxTokens = runtimeOptions.maximumResponseTokens ?? 100
-                let text = try await generateText(
-                    context: context,
-                    model: model!,
-                    prompt: fullPrompt,
-                    maxTokens: maxTokens,
-                    options: runtimeOptions
-                )
+                let text: String
+                if promptImages.isEmpty {
+                    text = try await generateText(
+                        context: context,
+                        model: model!,
+                        prompt: fullPrompt,
+                        maxTokens: maxTokens,
+                        options: runtimeOptions
+                    )
+                } else {
+                    var accumulated = ""
+                    try performMultimodalGeneration(
+                        context: context,
+                        prompt: fullPrompt,
+                        images: promptImages,
+                        maxTokens: maxTokens,
+                        options: runtimeOptions
+                    ) { tokenText in
+                        accumulated += tokenText
+                    }
+                    text = accumulated
+                }
 
                 return LanguageModelSession.Response(
                     content: text as! Content,
@@ -569,6 +625,11 @@ import Foundation
                     transcriptEntries: ArraySlice([])
                 )
             } else {
+                // Structured output does not go through the projector yet; refuse rather
+                // than answer about an image the model never saw.
+                guard promptImages.isEmpty else {
+                    throw LlamaLanguageModelError.unsupportedFeature
+                }
                 let maxTokens = structuredOptions.maximumResponseTokens ?? 512
                 let jsonString = try await generateStructuredJSON(
                     context: context,
@@ -599,15 +660,16 @@ import Foundation
                 fatalError("LlamaLanguageModel only supports generating String content")
             }
 
-            // Validate that no image segments are present
-            do {
-                try validateNoImageSegments(in: session)
-            } catch {
-                return LanguageModelSession.ResponseStream(
-                    stream: AsyncThrowingStream { continuation in
-                        continuation.finish(throwing: error)
-                    }
-                )
+            if mmprojPath == nil {
+                do {
+                    try validateNoImageSegments(in: session)
+                } catch {
+                    return LanguageModelSession.ResponseStream(
+                        stream: AsyncThrowingStream { continuation in
+                            continuation.finish(throwing: error)
+                        }
+                    )
+                }
             }
 
             let stream: AsyncThrowingStream<LanguageModelSession.ResponseStream<Content>.Snapshot, any Error> =
@@ -637,18 +699,18 @@ import Foundation
                             llama_set_n_threads(context, runtimeOptions.threads, runtimeOptions.threads)
 
                             var accumulatedText = ""
+                            var promptImages: [Data] = []
+                            let imageMarker =
+                                self.mtmdContext != nil ? String(cString: mtmd_default_marker()) : nil
                             let fullPrompt = try self.formatPrompt(
                                 for: session,
-                                assistantPrefill: runtimeOptions.assistantPrefill
+                                extraSystemMessage: nil,
+                                assistantPrefill: runtimeOptions.assistantPrefill,
+                                imageMarker: imageMarker,
+                                images: &promptImages
                             )
 
-                            try self.performTextGeneration(
-                                context: context,
-                                model: model!,
-                                prompt: fullPrompt,
-                                maxTokens: maxTokens,
-                                options: runtimeOptions
-                            ) { tokenText in
+                            let yieldToken: (String) -> Void = { tokenText in
                                 accumulatedText += tokenText
 
                                 let snapshot = LanguageModelSession.ResponseStream<Content>.Snapshot(
@@ -656,6 +718,26 @@ import Foundation
                                     rawContent: GeneratedContent(accumulatedText)
                                 )
                                 continuation.yield(snapshot)
+                            }
+
+                            if promptImages.isEmpty {
+                                try self.performTextGeneration(
+                                    context: context,
+                                    model: model!,
+                                    prompt: fullPrompt,
+                                    maxTokens: maxTokens,
+                                    options: runtimeOptions,
+                                    onToken: yieldToken
+                                )
+                            } else {
+                                try self.performMultimodalGeneration(
+                                    context: context,
+                                    prompt: fullPrompt,
+                                    images: promptImages,
+                                    maxTokens: maxTokens,
+                                    options: runtimeOptions,
+                                    onToken: yieldToken
+                                )
                             }
 
                             continuation.finish()
@@ -686,6 +768,10 @@ import Foundation
             llama_backend_init()
 
             // Free any existing model before loading a new one
+            if let existingContext = mtmdContext {
+                mtmd_free(existingContext)
+                self.mtmdContext = nil
+            }
             if let existingModel = model {
                 llama_model_free(existingModel)
                 self.model = nil
@@ -694,6 +780,22 @@ import Foundation
             let modelParams = createModelParams()
             guard let loadedModel = llama_model_load_from_file(modelPath, modelParams) else {
                 throw LlamaLanguageModelError.modelLoadFailed
+            }
+
+            if let mmprojPath {
+                guard FileManager.default.fileExists(atPath: mmprojPath) else {
+                    llama_model_free(loadedModel)
+                    throw LlamaLanguageModelError.invalidModelPath
+                }
+                var mtmdParams = mtmd_context_params_default()
+                mtmdParams.use_gpu = gpuLayers != 0
+                mtmdParams.print_timings = false
+                mtmdParams.n_threads = legacyDefaults.threads
+                guard let projector = mtmd_init_from_file(mmprojPath, loadedModel, mtmdParams) else {
+                    llama_model_free(loadedModel)
+                    throw LlamaLanguageModelError.modelLoadFailed
+                }
+                self.mtmdContext = projector
             }
 
             self.model = loadedModel
@@ -1285,6 +1387,148 @@ import Foundation
             }
         }
 
+        /// Evaluates a marker-annotated multimodal prompt through the projector,
+        /// then generates text tokens from the resulting state.
+        private func performMultimodalGeneration(
+            context: OpaquePointer,
+            prompt: String,
+            images: [Data],
+            maxTokens: Int,
+            options: ResolvedGenerationOptions,
+            onToken: (String) -> Void
+        ) throws {
+            guard let mtmdContext, let model = self.model,
+                let vocab = llama_model_get_vocab(model)
+            else {
+                throw LlamaLanguageModelError.contextInitializationFailed
+            }
+
+            var pastPosition: llama_pos = 0
+            try projectorLocked {
+                var bitmaps: [OpaquePointer?] = []
+                defer {
+                    for bitmap in bitmaps {
+                        if let bitmap {
+                            mtmd_bitmap_free(bitmap)
+                        }
+                    }
+                }
+                for imageData in images {
+                    // Pinned to the current llama.swift signature. llama.cpp master adds a
+                    // trailing options argument to this helper; update alongside the dependency.
+                    let wrapper = imageData.withUnsafeBytes { raw -> mtmd_helper_bitmap_wrapper in
+                        mtmd_helper_bitmap_init_from_buf(
+                            mtmdContext,
+                            raw.bindMemory(to: UInt8.self).baseAddress,
+                            imageData.count,
+                            false
+                        )
+                    }
+                    if let videoContext = wrapper.video_ctx {
+                        mtmd_helper_video_free(videoContext)
+                        throw LlamaLanguageModelError.unsupportedFeature
+                    }
+                    guard let bitmap = wrapper.bitmap else {
+                        throw LlamaLanguageModelError.encodingFailed
+                    }
+                    bitmaps.append(bitmap)
+                }
+
+                guard let chunks = mtmd_input_chunks_init() else {
+                    throw LlamaLanguageModelError.encodingFailed
+                }
+                defer { mtmd_input_chunks_free(chunks) }
+
+                let tokenizeResult = prompt.withCString { cPrompt -> Int32 in
+                    var inputText = mtmd_input_text(
+                        text: cPrompt,
+                        text_len: strlen(cPrompt),
+                        add_special: true,
+                        parse_special: true
+                    )
+                    return bitmaps.withUnsafeMutableBufferPointer { buffer in
+                        mtmd_tokenize(mtmdContext, chunks, &inputText, buffer.baseAddress, buffer.count)
+                    }
+                }
+                guard tokenizeResult == 0 else {
+                    throw LlamaLanguageModelError.tokenizationFailed
+                }
+
+                let evalResult = mtmd_helper_eval_chunks(
+                    mtmdContext,
+                    context,
+                    chunks,
+                    0,
+                    0,
+                    Int32(options.batchSize),
+                    true,
+                    &pastPosition
+                )
+                guard evalResult == 0 else {
+                    throw LlamaLanguageModelError.decodingFailed
+                }
+            }
+
+            guard let sampler = llama_sampler_chain_init(llama_sampler_chain_default_params()) else {
+                throw LlamaLanguageModelError.decodingFailed
+            }
+            defer { llama_sampler_free(sampler) }
+            let samplerPtr = UnsafeMutablePointer<llama_sampler>(sampler)
+
+            if options.repeatPenalty != 1.0 || options.frequencyPenalty != 0.0 || options.presencePenalty != 0.0 {
+                llama_sampler_chain_add(
+                    samplerPtr,
+                    llama_sampler_init_penalties(
+                        llama_vocab_n_tokens(vocab),
+                        options.repeatLastN,
+                        options.repeatPenalty,
+                        options.frequencyPenalty,
+                        options.presencePenalty
+                    )
+                )
+            }
+            applySampling(sampler: samplerPtr, effectiveTemperature: options.temperature, options: options)
+
+            var batch = llama_batch_init(1, 0, 1)
+            defer { llama_batch_free(batch) }
+
+            var n_cur: Int32 = Int32(pastPosition)
+            var sampleIndex: Int32 = -1
+
+            for _ in 0 ..< maxTokens {
+                if Task.isCancelled {
+                    break
+                }
+
+                let nextToken = llama_sampler_sample(samplerPtr, context, sampleIndex)
+                llama_sampler_accept(samplerPtr, nextToken)
+
+                if llama_vocab_is_eog(vocab, nextToken) {
+                    break
+                }
+
+                if let tokenText = tokenToText(vocab: vocab, token: nextToken) {
+                    onToken(tokenText)
+                }
+
+                batch.n_tokens = 1
+                batch.token[0] = nextToken
+                batch.pos[0] = n_cur
+                batch.n_seq_id[0] = 1
+                if let seq_ids = batch.seq_id, let seq_id = seq_ids[0] {
+                    seq_id[0] = 0
+                }
+                batch.logits[0] = 1
+
+                n_cur += 1
+
+                guard llama_decode(context, batch) == 0 else {
+                    break
+                }
+                sampleIndex = 0
+            }
+        }
+
         // MARK: - Image Validation
 
         private func validateNoImageSegments(in session: LanguageModelSession) throws {
@@ -1423,6 +1667,23 @@ import Foundation
             extraSystemMessage: String? = nil,
             assistantPrefill: String? = nil
         ) throws -> String {
+            var images: [Data] = []
+            return try formatPrompt(
+                for: session,
+                extraSystemMessage: extraSystemMessage,
+                assistantPrefill: assistantPrefill,
+                imageMarker: nil,
+                images: &images
+            )
+        }
+
+        private func formatPrompt(
+            for session: LanguageModelSession,
+            extraSystemMessage: String?,
+            assistantPrefill: String?,
+            imageMarker: String?,
+            images: inout [Data]
+        ) throws -> String {
             guard let model = self.model else {
                 throw LlamaLanguageModelError.modelLoadFailed
             }
@@ -1432,19 +1693,31 @@ import Foundation
             for entry in session.transcript {
                 switch entry {
                 case .instructions(let instructions):
-                    let text = extractText(from: instructions.segments)
+                    let text = try extractContent(
+                        from: instructions.segments,
+                        imageMarker: imageMarker,
+                        images: &images
+                    )
                     if !text.isEmpty {
                         messages.append(("system", text))
                     }
 
                 case .prompt(let prompt):
-                    let text = extractText(from: prompt.segments)
+                    let text = try extractContent(
+                        from: prompt.segments,
+                        imageMarker: imageMarker,
+                        images: &images
+                    )
                     if !text.isEmpty {
                         messages.append(("user", text))
                     }
 
                 case .response(let response):
-                    let text = extractText(from: response.segments)
+                    let text = try extractContent(
+                        from: response.segments,
+                        imageMarker: imageMarker,
+                        images: &images
+                    )
                     if !text.isEmpty {
                         messages.append(("assistant", text))
                     }
@@ -1520,6 +1793,42 @@ import Foundation
                 if case .text(let t) = segment { return t.content }
                 return nil
             }.joined()
+        }
+
+        /// Extracts message content from segments, replacing each image segment
+        /// with `imageMarker` and collecting its payload in order. Image segments
+        /// throw ``LlamaLanguageModelError/unsupportedFeature`` when no marker is
+        /// provided.
+        private func extractContent(
+            from segments: [Transcript.Segment],
+            imageMarker: String?,
+            images: inout [Data]
+        ) throws -> String {
+            var parts: [String] = []
+            for segment in segments {
+                switch segment {
+                case .text(let t):
+                    parts.append(t.content)
+                case .image(let image):
+                    guard let imageMarker else {
+                        throw LlamaLanguageModelError.unsupportedFeature
+                    }
+                    switch image.source {
+                    case .data(let data, _):
+                        images.append(data)
+                        parts.append(imageMarker)
+                    case .url(let url):
+                        guard url.isFileURL, let data = try? Data(contentsOf: url) else {
+                            throw LlamaLanguageModelError.unsupportedFeature
+                        }
+                        images.append(data)
+                        parts.append(imageMarker)
+                    }
+                default:
+                    break
+                }
+            }
+            return parts.joined()
         }
 
         private func tokenizeText(vocab: OpaquePointer, text: String) throws -> [llama_token] {

@@ -425,3 +425,78 @@ import Testing
         }
     }
 #endif  // Llama
+
+#if Llama
+    @Suite(
+        "LlamaLanguageModel vision",
+        .serialized,
+        .enabled(
+            if: ProcessInfo.processInfo.environment["LLAMA_VISION_MODEL_PATH"] != nil
+                && ProcessInfo.processInfo.environment["LLAMA_VISION_MMPROJ_PATH"] != nil
+        )
+    )
+    struct LlamaLanguageModelVisionTests {
+        static let redSquarePNG = Data(
+            base64Encoded: "iVBORw0KGgoAAAANSUhEUgAAAGAAAABgCAIAAABt+uBvAAABC0lEQVR4nO3OMQ0AIAAEsfdvGhyw9gaS"
+                + "CujO9j34QZwfxPlBnB/E+UGcH8T5QZwfxPlBnB/E+UGcH8T5QZwfxPlBnB/E+UGcH8T5QZwfxPlBnB/E"
+                + "+UGcH8T5QZwfxPlBnB/E+UGcH8T5QZwfxPlBnB/E+UGcH8T5QZwfxPlBnB/E+UGcH8T5QZwfxPlBnB/E"
+                + "+UGcH8T5QZwfxPlBnB/E+UGcH8T5QZwfxPlBnB/E+UGcH8T5QZwfxPlBnB/E+UGcH8T5QZwfxPlBnB/E"
+                + "+UGcH8T5QZwfxPlBnB/E+UGcH8T5QZwfxPlBnB/E+UGcH8T5QZwfxPlBnB/E+UGcH8T5QZwfxPlBnB/E"
+                + "+UHcBWwZ3g5gacwjAAAAAElFTkSuQmCC"
+        )!
+
+        let model = LlamaLanguageModel(
+            modelPath: ProcessInfo.processInfo.environment["LLAMA_VISION_MODEL_PATH"]!,
+            mmprojPath: ProcessInfo.processInfo.environment["LLAMA_VISION_MMPROJ_PATH"]!
+        )
+
+        @Test func describesImageData() async throws {
+            let transcript = Transcript(entries: [
+                .prompt(
+                    Transcript.Prompt(segments: [
+                        .text(.init(content: "What is the dominant color of this image? Answer with one word.")),
+                        .image(.init(data: Self.redSquarePNG, mimeType: "image/png")),
+                    ])
+                )
+            ])
+            let session = LanguageModelSession(model: model, transcript: transcript)
+            let response = try await session.respond(to: "")
+            #expect(response.content.lowercased().contains("red"))
+        }
+
+        @Test func streamsImageDescription() async throws {
+            let transcript = Transcript(entries: [
+                .prompt(
+                    Transcript.Prompt(segments: [
+                        .text(.init(content: "What is the dominant color of this image? Answer with one word.")),
+                        .image(.init(data: Self.redSquarePNG, mimeType: "image/png")),
+                    ])
+                )
+            ])
+            let session = LanguageModelSession(model: model, transcript: transcript)
+            let stream = session.streamResponse(to: "")
+            var last = ""
+            for try await snapshot in stream {
+                last = snapshot.content
+            }
+            #expect(last.lowercased().contains("red"))
+        }
+
+        @Test func rejectsImagesWithoutProjector() async throws {
+            let textOnlyModel = LlamaLanguageModel(
+                modelPath: ProcessInfo.processInfo.environment["LLAMA_VISION_MODEL_PATH"]!
+            )
+            let transcript = Transcript(entries: [
+                .prompt(
+                    Transcript.Prompt(segments: [
+                        .image(.init(data: Self.redSquarePNG, mimeType: "image/png"))
+                    ])
+                )
+            ])
+            let session = LanguageModelSession(model: textOnlyModel, transcript: transcript)
+            await #expect(throws: LlamaLanguageModelError.unsupportedFeature) {
+                _ = try await session.respond(to: "")
+            }
+        }
+    }
+#endif
