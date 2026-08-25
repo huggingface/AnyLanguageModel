@@ -26,11 +26,16 @@ public struct OllamaLanguageModel: LanguageModel {
     /// Available options are model-specific and defined in the model's Modelfile.
     /// Common options include `seed`, `repeat_penalty`, `stop`, and others.
     ///
+    /// Keys that Ollama defines as top-level chat request parameters
+    /// (`think` and `keep_alive`) are sent at the top level of the request
+    /// body instead of inside `options`.
+    ///
     /// ```swift
     /// var options = GenerationOptions(temperature: 0.7)
     /// options[custom: OllamaLanguageModel.self] = [
     ///     "seed": 42,
-    ///     "repeat_penalty": 1.2
+    ///     "repeat_penalty": 1.2,
+    ///     "think": true
     /// ]
     /// ```
     ///
@@ -103,7 +108,8 @@ public struct OllamaLanguageModel: LanguageModel {
             tools: ollamaTools.isEmpty ? nil : ollamaTools,
             options: ollamaOptions,
             stream: false,
-            format: ollamaFormat
+            format: ollamaFormat,
+            parameters: extractTopLevelChatParameters(options)
         )
 
         let url = baseURL.appendingPathComponent("api/chat")
@@ -197,7 +203,8 @@ public struct OllamaLanguageModel: LanguageModel {
                         tools: ollamaTools.isEmpty ? nil : ollamaTools,
                         options: ollamaOptions,
                         stream: true,
-                        format: ollamaFormat
+                        format: ollamaFormat,
+                        parameters: extractTopLevelChatParameters(options)
                     )
                     let body = try JSONEncoder().encode(params)
 
@@ -381,7 +388,7 @@ private func resolveToolCalls(
 
 // MARK: - Conversions
 
-private func convertOptions(_ options: GenerationOptions) -> [String: JSONValue]? {
+func convertOptions(_ options: GenerationOptions) -> [String: JSONValue]? {
     var ollamaOptions: [String: JSONValue] = [:]
 
     // Handle temperature
@@ -421,12 +428,24 @@ private func convertOptions(_ options: GenerationOptions) -> [String: JSONValue]
 
     // Merge custom Ollama options
     if let customOptions: [String: JSONValue] = options[custom: OllamaLanguageModel.self] {
-        for (key, value) in customOptions {
+        for (key, value) in customOptions where !topLevelChatParameterKeys.contains(key) {
             ollamaOptions[key] = value
         }
     }
 
     return ollamaOptions.isEmpty ? nil : ollamaOptions
+}
+
+/// Custom option keys that Ollama's `/api/chat` endpoint reads from the top level
+/// of the request body rather than from `options`.
+private let topLevelChatParameterKeys: Set<String> = ["think", "keep_alive"]
+
+func extractTopLevelChatParameters(_ options: GenerationOptions) -> [String: JSONValue]? {
+    guard let customOptions: [String: JSONValue] = options[custom: OllamaLanguageModel.self] else {
+        return nil
+    }
+    let parameters = customOptions.filter { topLevelChatParameterKeys.contains($0.key) }
+    return parameters.isEmpty ? nil : parameters
 }
 
 private func convertToolToOllamaFormat(_ tool: any Tool) throws -> [String: JSONValue] {
@@ -460,7 +479,8 @@ func createChatParams(
     tools: [[String: JSONValue]]?,
     options: [String: JSONValue]?,
     stream: Bool,
-    format: JSONValue?
+    format: JSONValue?,
+    parameters: [String: JSONValue]? = nil
 ) throws -> [String: JSONValue] {
     var params: [String: JSONValue] = [
         "model": .string(model),
@@ -478,6 +498,12 @@ func createChatParams(
 
     if let format {
         params["format"] = format
+    }
+
+    if let parameters {
+        for (key, value) in parameters where params[key] == nil {
+            params[key] = value
+        }
     }
 
     return params
