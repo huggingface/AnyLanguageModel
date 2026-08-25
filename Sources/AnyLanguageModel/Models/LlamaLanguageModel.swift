@@ -1759,6 +1759,9 @@ import Foundation
             )
 
             guard requiredSize > 0 else {
+                if let tmpl, String(cString: tmpl).contains("<|turn>") {
+                    return Self.renderGemma4Prompt(messages: messages, assistantPrefill: assistantPrefill)
+                }
                 throw LlamaLanguageModelError.encodingFailed
             }
 
@@ -1784,6 +1787,27 @@ import Foundation
 
             if let assistantPrefill, !assistantPrefill.isEmpty {
                 return rendered + assistantPrefill
+            }
+            return rendered
+        }
+
+        /// Renders the Gemma 4 canonical chat format, which
+        /// `llama_chat_apply_template` does not recognize: turns open with
+        /// `<|turn>role`, close with `<turn|>`, and the assistant role is named
+        /// `model`. The BOS token is applied during tokenization.
+        static func renderGemma4Prompt(
+            messages: [(role: String, content: String)],
+            assistantPrefill: String?
+        ) -> String {
+            var rendered = ""
+            for message in messages {
+                let role = message.role == "assistant" ? "model" : message.role
+                let content = message.content.trimmingCharacters(in: .whitespacesAndNewlines)
+                rendered += "<|turn>\(role)\n\(content)<turn|>\n"
+            }
+            rendered += "<|turn>model\n"
+            if let assistantPrefill, !assistantPrefill.isEmpty {
+                rendered += assistantPrefill
             }
             return rendered
         }
