@@ -473,6 +473,242 @@ import Foundation
         /// Whether the model is currently loaded
         private var isModelLoaded: Bool = false
 
+        /// A context kept alive for one session so exchanges reuse its state.
+        private struct CachedSessionContext {
+            let sessionID: ObjectIdentifier
+            let context: OpaquePointer
+            var tokens: [llama_token]
+            let contextSize: UInt32
+            let batchSize: UInt32
+            /// Whether a generation is currently decoding on the context.
+            var isCheckedOut: Bool
+            /// Whether the context should be freed once the current generation releases it.
+            var discardWhenReleased: Bool
+        }
+
+        /// Guards `cachedSessionContext`. A generation checks the cached context out
+        /// for its whole run, so a concurrent generation for another session never
+        /// frees a context that is still decoding: it runs on a transient context
+        /// instead and leaves the cache untouched.
+        private let sessionContextLock = NSLock()
+        private var cachedSessionContext: CachedSessionContext?
+
+        /// The number of prompt tokens reused from the cached context by the most
+        /// recent chat generation.
+        internal private(set) var lastReusedTokenCount: Int = 0
+
+        /// The number of prompt tokens decoded by the most recent chat generation.
+        internal private(set) var lastPrefillTokenCount: Int = 0
+
+        /// Frees the cached per-session context and the state it holds.
+        ///
+        /// The cached context, including its KV state, otherwise lives as long as the
+        /// model. The next chat generation prefills its full prompt again. Call this
+        /// under memory pressure or when a session is discarded. If a generation is
+        /// running on the cached context, it is freed as soon as that generation ends.
+        public func clearCachedContext() {
+            discardCachedSessionContext()
+        }
+
+        private func discardCachedSessionContext() {
+            sessionContextLock.lock()
+            defer { sessionContextLock.unlock() }
+            guard var cached = cachedSessionContext else { return }
+            if cached.isCheckedOut {
+                cached.discardWhenReleased = true
+                cachedSessionContext = cached
+                return
+            }
+            llama_free(cached.context)
+            cachedSessionContext = nil
+        }
+
+        private func recordCachedTokens(_ tokens: [llama_token], context: OpaquePointer) {
+            sessionContextLock.lock()
+            defer { sessionContextLock.unlock() }
+            guard var cached = cachedSessionContext, cached.context == context else { return }
+            cached.tokens = tokens
+            cachedSessionContext = cached
+        }
+
+        private func isCachedSessionContext(_ context: OpaquePointer) -> Bool {
+            sessionContextLock.lock()
+            defer { sessionContextLock.unlock() }
+            return cachedSessionContext?.context == context
+        }
+
+        /// Returns a context obtained from `acquireSessionContext`. The cached
+        /// context is checked back in (or freed, if a discard was requested while
+        /// it was busy); a transient context is freed.
+        private func releaseSessionContext(_ context: OpaquePointer) {
+            sessionContextLock.lock()
+            defer { sessionContextLock.unlock() }
+            if var cached = cachedSessionContext, cached.context == context {
+                if cached.discardWhenReleased {
+                    llama_free(cached.context)
+                    cachedSessionContext = nil
+                } else {
+                    cached.isCheckedOut = false
+                    cachedSessionContext = cached
+                }
+                return
+            }
+            llama_free(context)
+        }
+
+        /// Returns a context for the session along with the index of the first
+        /// prompt token that still needs to be decoded. Pair every call with
+        /// `releaseSessionContext(_:)` once generation ends.
+        ///
+        /// A cached context whose recorded tokens share a prefix with the prompt
+        /// keeps that prefix: matching state past the divergence point is removed
+        /// with `llama_memory_seq_rm`, and backends whose state cannot be rewound
+        /// (recurrent models) fall back to clearing the memory and decoding the
+        /// full prompt. The final prompt token is always re-decoded so sampling
+        /// has fresh logits.
+        ///
+        /// While another generation holds the cached context, the caller gets a
+        /// transient context that decodes the full prompt and is not cached.
+        private func acquireSessionContext(
+            for session: LanguageModelSession,
+            promptTokens: [llama_token],
+            options: ResolvedGenerationOptions
+        ) throws -> (context: OpaquePointer, startIndex: Int) {
+            let sessionID = ObjectIdentifier(session)
+            sessionContextLock.lock()
+            defer { sessionContextLock.unlock() }
+
+            if var cached = cachedSessionContext,
+                !cached.isCheckedOut,
+                cached.sessionID == sessionID,
+                cached.contextSize == options.contextSize,
+                cached.batchSize == options.batchSize
+            {
+                var common = 0
+                while common < cached.tokens.count, common < promptTokens.count,
+                    cached.tokens[common] == promptTokens[common]
+                {
+                    common += 1
+                }
+                if common == promptTokens.count {
+                    common = max(0, promptTokens.count - 1)
+                }
+                if common < cached.tokens.count {
+                    let memory = llama_get_memory(cached.context)
+                    if !llama_memory_seq_rm(memory, 0, llama_pos(common), -1) {
+                        llama_memory_clear(memory, true)
+                        common = 0
+                    }
+                }
+                cached.tokens = Array(promptTokens.prefix(common))
+                cached.isCheckedOut = true
+                cachedSessionContext = cached
+                return (cached.context, common)
+            }
+
+            if let cached = cachedSessionContext, cached.isCheckedOut {
+                return (try makeFreshContext(options: options), 0)
+            }
+
+            if let cached = cachedSessionContext {
+                llama_free(cached.context)
+                cachedSessionContext = nil
+            }
+            let contextParams = createContextParams(from: options)
+            guard let context = llama_init_from_model(model!, contextParams) else {
+                throw LlamaLanguageModelError.contextInitializationFailed
+            }
+            guard llama_get_memory(context) != nil else {
+                llama_free(context)
+                throw LlamaLanguageModelError.encoderOnlyModel
+            }
+            cachedSessionContext = CachedSessionContext(
+                sessionID: sessionID,
+                context: context,
+                tokens: [],
+                contextSize: options.contextSize,
+                batchSize: options.batchSize,
+                isCheckedOut: true,
+                discardWhenReleased: false
+            )
+            return (context, 0)
+        }
+
+        /// Creates a single-use context for generations that do not reuse state.
+        private func makeFreshContext(options: ResolvedGenerationOptions) throws -> OpaquePointer {
+            let contextParams = createContextParams(from: options)
+            guard let context = llama_init_from_model(model!, contextParams) else {
+                throw LlamaLanguageModelError.contextInitializationFailed
+            }
+            guard llama_get_memory(context) != nil else {
+                llama_free(context)
+                throw LlamaLanguageModelError.encoderOnlyModel
+            }
+            llama_set_causal_attn(context, true)
+            llama_set_n_threads(context, options.threads, options.threads)
+            return context
+        }
+
+        /// Runs a chat text generation for the session, reusing the session's
+        /// cached context when its state matches a prefix of the prompt.
+        private func generateChatText(
+            session: LanguageModelSession,
+            prompt: String,
+            maxTokens: Int,
+            options: ResolvedGenerationOptions,
+            onToken: (String) -> Void
+        ) throws {
+            guard let model = self.model, let vocab = llama_model_get_vocab(model) else {
+                throw LlamaLanguageModelError.contextInitializationFailed
+            }
+
+            let promptTokens = try tokenizeText(vocab: vocab, text: prompt)
+            guard !promptTokens.isEmpty else {
+                throw LlamaLanguageModelError.tokenizationFailed
+            }
+
+            if llama_model_has_encoder(model) {
+                let context = try makeFreshContext(options: options)
+                defer { llama_free(context) }
+                try performTokenGeneration(
+                    context: context,
+                    vocab: vocab,
+                    promptTokens: promptTokens,
+                    startIndex: 0,
+                    maxTokens: maxTokens,
+                    options: options,
+                    onToken: onToken
+                )
+                return
+            }
+
+            let (context, startIndex) = try acquireSessionContext(
+                for: session,
+                promptTokens: promptTokens,
+                options: options
+            )
+            defer { releaseSessionContext(context) }
+            llama_set_causal_attn(context, true)
+            llama_set_n_threads(context, options.threads, options.threads)
+
+            do {
+                try performTokenGeneration(
+                    context: context,
+                    vocab: vocab,
+                    promptTokens: promptTokens,
+                    startIndex: startIndex,
+                    maxTokens: maxTokens,
+                    options: options,
+                    onToken: onToken
+                )
+            } catch {
+                if isCachedSessionContext(context) {
+                    discardCachedSessionContext()
+                }
+                throw error
+            }
+        }
+
         /// Creates a Llama language model.
         ///
         /// - Parameters:
@@ -531,6 +767,9 @@ import Foundation
         }
 
         deinit {
+            if let cached = cachedSessionContext {
+                llama_free(cached.context)
+            }
             if let mtmdContext = mtmdContext {
                 mtmd_free(mtmdContext)
             }
@@ -553,24 +792,6 @@ import Foundation
 
             let runtimeOptions = resolvedOptions(from: options)
             let structuredOptions = resolvedStructuredOptions(from: options)
-            let contextParams = createContextParams(from: runtimeOptions)
-
-            // Try to create context with error handling
-            guard let context = llama_init_from_model(model!, contextParams) else {
-                throw LlamaLanguageModelError.contextInitializationFailed
-            }
-            defer { llama_free(context) }
-
-            // Check if this is an embedding model (no KV cache).
-            // This early check catches models configured for embeddings that lack a KV cache.
-            // A complementary architectural check in prepareInitialBatch catches encoder-only
-            // models (like BERT) by their architecture type.
-            if llama_get_memory(context) == nil {
-                throw LlamaLanguageModelError.encoderOnlyModel
-            }
-
-            llama_set_causal_attn(context, true)
-            llama_set_n_threads(context, runtimeOptions.threads, runtimeOptions.threads)
 
             var promptImages: [Data] = []
             let imageMarker = mtmdContext != nil ? String(cString: mtmd_default_marker()) : nil
@@ -598,14 +819,20 @@ import Foundation
                 let maxTokens = runtimeOptions.maximumResponseTokens ?? 100
                 let text: String
                 if promptImages.isEmpty {
-                    text = try await generateText(
-                        context: context,
-                        model: model!,
+                    var accumulated = ""
+                    try generateChatText(
+                        session: session,
                         prompt: fullPrompt,
                         maxTokens: maxTokens,
                         options: runtimeOptions
-                    )
+                    ) { tokenText in
+                        accumulated += tokenText
+                    }
+                    text = accumulated
                 } else {
+                    discardCachedSessionContext()
+                    let context = try makeFreshContext(options: runtimeOptions)
+                    defer { llama_free(context) }
                     var accumulated = ""
                     try performMultimodalGeneration(
                         context: context,
@@ -630,6 +857,8 @@ import Foundation
                 guard promptImages.isEmpty else {
                     throw LlamaLanguageModelError.unsupportedFeature
                 }
+                let context = try makeFreshContext(options: runtimeOptions)
+                defer { llama_free(context) }
                 let maxTokens = structuredOptions.maximumResponseTokens ?? 512
                 let jsonString = try await generateStructuredJSON(
                     context: context,
@@ -680,23 +909,6 @@ import Foundation
 
                             let runtimeOptions = resolvedOptions(from: options)
                             let maxTokens = runtimeOptions.maximumResponseTokens ?? 100
-                            let contextParams = createContextParams(from: runtimeOptions)
-                            guard let context = llama_init_from_model(model!, contextParams) else {
-                                throw LlamaLanguageModelError.contextInitializationFailed
-                            }
-                            defer { llama_free(context) }
-
-                            // Check if this is an embedding model (no KV cache).
-                            // This early check catches models configured for embeddings that lack a KV cache.
-                            // A complementary architectural check in prepareInitialBatch catches encoder-only
-                            // models (like BERT) by their architecture type.
-                            if llama_get_memory(context) == nil {
-                                throw LlamaLanguageModelError.encoderOnlyModel
-                            }
-
-                            // Stabilize runtime behavior per-context
-                            llama_set_causal_attn(context, true)
-                            llama_set_n_threads(context, runtimeOptions.threads, runtimeOptions.threads)
 
                             var accumulatedText = ""
                             var promptImages: [Data] = []
@@ -721,15 +933,17 @@ import Foundation
                             }
 
                             if promptImages.isEmpty {
-                                try self.performTextGeneration(
-                                    context: context,
-                                    model: model!,
+                                try self.generateChatText(
+                                    session: session,
                                     prompt: fullPrompt,
                                     maxTokens: maxTokens,
                                     options: runtimeOptions,
                                     onToken: yieldToken
                                 )
                             } else {
+                                self.discardCachedSessionContext()
+                                let context = try self.makeFreshContext(options: runtimeOptions)
+                                defer { llama_free(context) }
                                 try self.performMultimodalGeneration(
                                     context: context,
                                     prompt: fullPrompt,
@@ -768,6 +982,7 @@ import Foundation
             llama_backend_init()
 
             // Free any existing model before loading a new one
+            discardCachedSessionContext()
             if let existingContext = mtmdContext {
                 mtmd_free(existingContext)
                 self.mtmdContext = nil
@@ -911,110 +1126,6 @@ import Foundation
             }
             llama_sampler_chain_add(sampler, llama_sampler_init_temp(effectiveTemperature))
             llama_sampler_chain_add(sampler, llama_sampler_init_dist(options.seed))
-        }
-
-        private func generateText(
-            context: OpaquePointer,
-            model: OpaquePointer,
-            prompt: String,
-            maxTokens: Int,
-            options: ResolvedGenerationOptions
-        ) async throws
-            -> String
-        {
-            guard let vocab = llama_model_get_vocab(model) else {
-                throw LlamaLanguageModelError.contextInitializationFailed
-            }
-
-            // Tokenize the prompt
-            let promptTokens = try tokenizeText(vocab: vocab, text: prompt)
-            guard !promptTokens.isEmpty else {
-                throw LlamaLanguageModelError.tokenizationFailed
-            }
-
-            var batch = llama_batch_init(Int32(options.batchSize), 0, 1)
-            defer { llama_batch_free(batch) }
-
-            let hasEncoder = try prepareInitialBatch(
-                batch: &batch,
-                promptTokens: promptTokens,
-                model: model,
-                vocab: vocab,
-                context: context,
-                batchSize: options.batchSize,
-                contextSize: options.contextSize
-            )
-
-            // Initialize sampler chain with options
-            guard let sampler = llama_sampler_chain_init(llama_sampler_chain_default_params()) else {
-                throw LlamaLanguageModelError.decodingFailed
-            }
-            defer { llama_sampler_free(sampler) }
-            let samplerPtr = UnsafeMutablePointer<llama_sampler>(sampler)
-
-            let effectiveTemperature = Float(options.temperature)
-
-            // Apply repeat/frequency/presence penalties from custom options
-            let effectiveRepeatPenalty = options.repeatPenalty
-            let effectiveRepeatLastN = options.repeatLastN
-            let effectiveFrequencyPenalty = options.frequencyPenalty
-            let effectivePresencePenalty = options.presencePenalty
-
-            if effectiveRepeatPenalty != 1.0 || effectiveFrequencyPenalty != 0.0 || effectivePresencePenalty != 0.0 {
-                llama_sampler_chain_add(
-                    samplerPtr,
-                    llama_sampler_init_penalties(
-                        llama_vocab_n_tokens(vocab),
-                        effectiveRepeatLastN,
-                        effectiveRepeatPenalty,
-                        effectiveFrequencyPenalty,
-                        effectivePresencePenalty
-                    )
-                )
-            }
-
-            applySampling(sampler: samplerPtr, effectiveTemperature: effectiveTemperature, options: options)
-
-            // Generate tokens one by one
-            var generatedText = ""
-            // Track position - for encoder-decoder models, we start from position 1 (after decoder start token)
-            // For decoder-only models, we continue from the end of the prompt
-            var n_cur: Int32 = hasEncoder ? 1 : Int32(promptTokens.count)
-
-            for _ in 0 ..< maxTokens {
-                // Sample next token from logits - llama_batch_get_one creates batch with single token at index 0
-                let nextToken = llama_sampler_sample(sampler, context, batch.n_tokens - 1)
-                llama_sampler_accept(sampler, nextToken)
-
-                // Check for end of sequence
-                if llama_vocab_is_eog(vocab, nextToken) {
-                    break
-                }
-
-                // Convert token to text
-                if let tokenText = tokenToText(vocab: vocab, token: nextToken) {
-                    generatedText += tokenText
-                }
-
-                // Prepare batch for next token
-                batch.n_tokens = 1
-                batch.token[0] = nextToken
-                batch.pos[0] = n_cur
-                batch.n_seq_id[0] = 1
-                if let seq_ids = batch.seq_id, let seq_id = seq_ids[0] {
-                    seq_id[0] = 0
-                }
-                batch.logits[0] = 1
-
-                n_cur += 1
-
-                let decodeResult = llama_decode(context, batch)
-                guard decodeResult == 0 else {
-                    break
-                }
-            }
-
-            return generatedText
         }
 
         /// Builds a JSONSchema-informed prompt for structured output.
@@ -1281,23 +1392,23 @@ import Foundation
             }
         }
 
-        private func performTextGeneration(
+        private func performTokenGeneration(
             context: OpaquePointer,
-            model: OpaquePointer,
-            prompt: String,
+            vocab: OpaquePointer,
+            promptTokens: [llama_token],
+            startIndex: Int,
             maxTokens: Int,
             options: ResolvedGenerationOptions,
             onToken: (String) -> Void
         ) throws {
-            guard let vocab = llama_model_get_vocab(model) else {
-                throw LlamaLanguageModelError.contextInitializationFailed
+            guard let model = self.model else {
+                throw LlamaLanguageModelError.modelLoadFailed
             }
 
-            // Tokenize the prompt
-            let promptTokens = try tokenizeText(vocab: vocab, text: prompt)
-            guard !promptTokens.isEmpty else {
-                throw LlamaLanguageModelError.tokenizationFailed
-            }
+            sessionContextLock.lock()
+            lastReusedTokenCount = startIndex
+            lastPrefillTokenCount = promptTokens.count - startIndex
+            sessionContextLock.unlock()
 
             // Initialize batch
             var batch = llama_batch_init(Int32(options.batchSize), 0, 1)
@@ -1310,7 +1421,8 @@ import Foundation
                 vocab: vocab,
                 context: context,
                 batchSize: options.batchSize,
-                contextSize: options.contextSize
+                contextSize: options.contextSize,
+                startIndex: startIndex
             )
 
             // Initialize sampler chain with options
@@ -1348,6 +1460,7 @@ import Foundation
             // Track position - for encoder-decoder models, we start from position 1 (after decoder start token)
             // For decoder-only models, we continue from the end of the prompt
             var n_cur: Int32 = hasEncoder ? 1 : Int32(promptTokens.count)
+            var decodedTokens = promptTokens
 
             for _ in 0 ..< maxTokens {
                 if Task.isCancelled {
@@ -1384,7 +1497,10 @@ import Foundation
                 guard decodeResult == 0 else {
                     break
                 }
+                decodedTokens.append(nextToken)
             }
+
+            recordCachedTokens(decodedTokens, context: context)
         }
 
         /// Evaluates a marker-annotated multimodal prompt through the projector,
@@ -1560,6 +1676,8 @@ import Foundation
         ///   - context: The model context.
         ///   - batchSize: The batch capacity per decode call.
         ///   - contextSize: The context window the prompt must fit within.
+        ///   - startIndex: The index of the first prompt token to decode. Earlier
+        ///     tokens are already present in the context's state. Defaults to `0`.
         /// - Returns: `true` if the model has an encoder (for position tracking during generation).
         /// - Throws: `promptExceedsContextWindow` if the prompt cannot fit in the context window,
         ///   `insufficientMemory` if an encoder prompt exceeds the batch capacity, `encoderOnlyModel`
@@ -1571,7 +1689,8 @@ import Foundation
             vocab: OpaquePointer,
             context: OpaquePointer,
             batchSize: UInt32,
-            contextSize: UInt32
+            contextSize: UInt32,
+            startIndex: Int = 0
         ) throws -> Bool {
             // Leave at least one context cell free for generation.
             guard promptTokens.count < contextSize else {
@@ -1582,7 +1701,7 @@ import Foundation
             let hasDecoder = llama_model_has_decoder(model)
 
             // Encoder models ingest the full prompt in a single llama_encode call.
-            guard !hasEncoder || promptTokens.count <= batchSize else {
+            guard !hasEncoder || (startIndex == 0 && promptTokens.count <= batchSize) else {
                 throw LlamaLanguageModelError.insufficientMemory
             }
 
@@ -1634,7 +1753,7 @@ import Foundation
                 // batch-sized chunks with absolute positions, requesting logits
                 // only for the final token.
                 let capacity = Int(batchSize)
-                var start = 0
+                var start = startIndex
                 while start < promptTokens.count {
                     let count = min(capacity, promptTokens.count - start)
                     batch.n_tokens = Int32(count)

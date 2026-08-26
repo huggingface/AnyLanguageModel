@@ -47,6 +47,26 @@ import Testing
             #expect(!response.content.isEmpty)
         }
 
+        @Test func reusesSessionContextAcrossTurns() async throws {
+            let session = LanguageModelSession(model: model)
+            var options = GenerationOptions(maximumResponseTokens: 24)
+            options[custom: LlamaLanguageModel.self] = .init(contextSize: 2048, batchSize: 512)
+
+            let first = try await session.respond(
+                to: "My favorite color is blue. Reply with OK.",
+                options: options
+            )
+            #expect(!first.content.isEmpty)
+            #expect(model.lastReusedTokenCount == 0)
+
+            let second = try await session.respond(
+                to: "What is my favorite color? Answer with one word.",
+                options: options
+            )
+            #expect(!second.content.isEmpty)
+            #expect(model.lastReusedTokenCount > 0)
+        }
+
         @Test func customGenerationOptionsRoundTrip() {
             var options = GenerationOptions(
                 temperature: 0.6,
