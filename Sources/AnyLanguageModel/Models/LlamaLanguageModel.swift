@@ -660,7 +660,7 @@ import Foundation
             prompt: String,
             maxTokens: Int,
             options: ResolvedGenerationOptions,
-            onToken: (String) -> Void
+            onToken: (String) -> Bool
         ) throws {
             guard let model = self.model, let vocab = llama_model_get_vocab(model) else {
                 throw LlamaLanguageModelError.contextInitializationFailed
@@ -782,6 +782,176 @@ import Foundation
             }
         }
 
+        // MARK: - Tool calling
+
+        /// Prompt-side tool state for one exchange: the detected syntax, the
+        /// session's tool definitions, and the tool turns produced so far in
+        /// the current resolve-and-continue loop.
+        struct LlamaToolPromptContext {
+            let format: LlamaToolCallFormat
+            let definitions: [LlamaToolDefinition]
+            var pendingEntries: [Transcript.Entry]
+        }
+
+        private struct ToolInvocationResult {
+            let call: Transcript.ToolCall
+            let output: Transcript.ToolOutput
+        }
+
+        private enum ToolResolutionOutcome {
+            case stop(calls: [Transcript.ToolCall])
+            case invocations([ToolInvocationResult])
+        }
+
+        private static func maxToolIterationsExceededError(limit: Int) -> LanguageModelSession.GenerationError {
+            .decodingFailure(
+                .init(
+                    debugDescription:
+                        "Exceeded maximum tool iterations (\(limit)) while processing Llama tool calls."
+                )
+            )
+        }
+
+        private static func repeatedToolCallLoopError() -> LanguageModelSession.GenerationError {
+            .decodingFailure(
+                .init(
+                    debugDescription:
+                        "Detected repeated Llama tool-call signature and aborted to avoid an infinite tool loop."
+                )
+            )
+        }
+
+        private func makeToolPromptContext(for session: LanguageModelSession) throws -> LlamaToolPromptContext? {
+            guard !session.tools.isEmpty, let model = self.model else { return nil }
+            let template = llama_model_chat_template(model, nil).map { String(cString: $0) }
+            let format = LlamaToolCallFormat.detect(template: template)
+            let definitions = try session.tools.map { tool -> LlamaToolDefinition in
+                let schema = tool.parameters.withResolvedRoot() ?? tool.parameters
+                let data = try JSONEncoder().encode(schema)
+                let parameters = try JSONSerialization.jsonObject(with: data) as? [String: Any]
+                return LlamaToolDefinition(
+                    name: tool.name,
+                    description: tool.description,
+                    parameters: parameters
+                )
+            }
+            return LlamaToolPromptContext(format: format, definitions: definitions, pendingEntries: [])
+        }
+
+        private func toolOutputText(_ output: Transcript.ToolOutput) -> String {
+            var parts: [String] = []
+            for segment in output.segments {
+                switch segment {
+                case .text(let text):
+                    parts.append(text.content)
+                case .structure(let structure):
+                    parts.append(structure.content.jsonString)
+                case .image:
+                    break
+                }
+            }
+            return parts.joined(separator: "\n")
+        }
+
+        private func makeTranscriptToolCalls(
+            from parsedCalls: [LlamaParsedToolCall]
+        ) throws -> [Transcript.ToolCall] {
+            try parsedCalls.map { parsed in
+                Transcript.ToolCall(
+                    id: UUID().uuidString,
+                    toolName: parsed.name,
+                    arguments: try GeneratedContent(json: parsed.argumentsJSON)
+                )
+            }
+        }
+
+        private func resolveToolCalls(
+            _ parsedCalls: [LlamaParsedToolCall],
+            session: LanguageModelSession
+        ) async throws -> ToolResolutionOutcome {
+            if parsedCalls.isEmpty { return .invocations([]) }
+
+            var toolsByName: [String: any Tool] = [:]
+            for tool in session.tools where toolsByName[tool.name] == nil {
+                toolsByName[tool.name] = tool
+            }
+
+            let transcriptCalls = try makeTranscriptToolCalls(from: parsedCalls)
+
+            if let delegate = session.toolExecutionDelegate {
+                await delegate.didGenerateToolCalls(transcriptCalls, in: session)
+            }
+
+            var decisions: [ToolExecutionDecision] = []
+            decisions.reserveCapacity(transcriptCalls.count)
+
+            if let delegate = session.toolExecutionDelegate {
+                for call in transcriptCalls {
+                    let decision = await delegate.toolCallDecision(for: call, in: session)
+                    if case .stop = decision {
+                        return .stop(calls: transcriptCalls)
+                    }
+                    decisions.append(decision)
+                }
+            } else {
+                decisions = Array(repeating: .execute, count: transcriptCalls.count)
+            }
+
+            var results: [ToolInvocationResult] = []
+            results.reserveCapacity(transcriptCalls.count)
+
+            for (index, call) in transcriptCalls.enumerated() {
+                switch decisions[index] {
+                case .stop:
+                    return .stop(calls: transcriptCalls)
+                case .provideOutput(let segments):
+                    let output = Transcript.ToolOutput(
+                        id: call.id,
+                        toolName: call.toolName,
+                        segments: segments
+                    )
+                    if let delegate = session.toolExecutionDelegate {
+                        await delegate.didExecuteToolCall(call, output: output, in: session)
+                    }
+                    results.append(ToolInvocationResult(call: call, output: output))
+                case .execute:
+                    guard let tool = toolsByName[call.toolName] else {
+                        let message = Transcript.Segment.text(.init(content: "Tool not found: \(call.toolName)"))
+                        let output = Transcript.ToolOutput(
+                            id: call.id,
+                            toolName: call.toolName,
+                            segments: [message]
+                        )
+                        if let delegate = session.toolExecutionDelegate {
+                            await delegate.didExecuteToolCall(call, output: output, in: session)
+                        }
+                        results.append(ToolInvocationResult(call: call, output: output))
+                        continue
+                    }
+
+                    do {
+                        let segments = try await tool.makeOutputSegments(from: call.arguments)
+                        let output = Transcript.ToolOutput(
+                            id: call.id,
+                            toolName: tool.name,
+                            segments: segments
+                        )
+                        if let delegate = session.toolExecutionDelegate {
+                            await delegate.didExecuteToolCall(call, output: output, in: session)
+                        }
+                        results.append(ToolInvocationResult(call: call, output: output))
+                    } catch {
+                        if let delegate = session.toolExecutionDelegate {
+                            await delegate.didFailToolCall(call, error: error, in: session)
+                        }
+                        throw LanguageModelSession.ToolCallError(tool: tool, underlyingError: error)
+                    }
+                }
+            }
+
+            return .invocations(results)
+        }
+
         public func respond<Content>(
             within session: LanguageModelSession,
             to prompt: Prompt,
@@ -797,65 +967,143 @@ import Foundation
             let runtimeOptions = resolvedOptions(from: options)
             let structuredOptions = resolvedStructuredOptions(from: options)
 
-            var promptImages: [Data] = []
             let imageMarker = mtmdContext != nil ? String(cString: mtmd_default_marker()) : nil
-
-            let fullPrompt: String
-            if includeSchemaInPrompt, type != String.self {
-                fullPrompt = try formatPrompt(
-                    for: session,
-                    extraSystemMessage: schemaPrompt(for: type.generationSchema),
-                    assistantPrefill: runtimeOptions.assistantPrefill,
-                    imageMarker: imageMarker,
-                    images: &promptImages
-                )
-            } else {
-                fullPrompt = try formatPrompt(
-                    for: session,
-                    extraSystemMessage: nil,
-                    assistantPrefill: runtimeOptions.assistantPrefill,
-                    imageMarker: imageMarker,
-                    images: &promptImages
-                )
-            }
 
             if type == String.self {
                 let maxTokens = runtimeOptions.maximumResponseTokens ?? 100
-                let text: String
-                if promptImages.isEmpty {
+                var toolContext = try makeToolPromptContext(for: session)
+                let maxToolIterations = 8
+                var toolIteration = 0
+                var previousToolCallSignature: String?
+                var allEntries: [Transcript.Entry] = []
+                var text = ""
+
+                generationLoop: while true {
+                    var promptImages: [Data] = []
+                    let fullPrompt = try formatPrompt(
+                        for: session,
+                        extraSystemMessage: nil,
+                        assistantPrefill: runtimeOptions.assistantPrefill,
+                        imageMarker: imageMarker,
+                        images: &promptImages,
+                        toolContext: toolContext
+                    )
+
                     var accumulated = ""
-                    try generateChatText(
-                        session: session,
-                        prompt: fullPrompt,
-                        maxTokens: maxTokens,
-                        options: runtimeOptions
-                    ) { tokenText in
+                    let terminator = toolContext?.format.callTerminator
+                    let collectToken: (String) -> Bool = { tokenText in
                         accumulated += tokenText
+                        if let terminator,
+                            accumulated.suffix(terminator.count + 8).contains(terminator)
+                        {
+                            return false
+                        }
+                        return true
                     }
-                    text = accumulated
-                } else {
-                    discardCachedSessionContext()
-                    let context = try makeFreshContext(options: runtimeOptions)
-                    defer { llama_free(context) }
-                    var accumulated = ""
-                    try performMultimodalGeneration(
-                        context: context,
-                        prompt: fullPrompt,
-                        images: promptImages,
-                        maxTokens: maxTokens,
-                        options: runtimeOptions
-                    ) { tokenText in
-                        accumulated += tokenText
+
+                    if promptImages.isEmpty {
+                        try generateChatText(
+                            session: session,
+                            prompt: fullPrompt,
+                            maxTokens: maxTokens,
+                            options: runtimeOptions,
+                            onToken: collectToken
+                        )
+                    } else {
+                        discardCachedSessionContext()
+                        let context = try makeFreshContext(options: runtimeOptions)
+                        defer { llama_free(context) }
+                        try performMultimodalGeneration(
+                            context: context,
+                            prompt: fullPrompt,
+                            images: promptImages,
+                            maxTokens: maxTokens,
+                            options: runtimeOptions,
+                            onToken: collectToken
+                        )
                     }
-                    text = accumulated
+
+                    guard let format = toolContext?.format else {
+                        text = accumulated
+                        break generationLoop
+                    }
+                    let (visibleText, parsedCalls) = format.parseToolCalls(in: accumulated)
+                    if parsedCalls.isEmpty {
+                        text = visibleText
+                        break generationLoop
+                    }
+
+                    toolIteration += 1
+                    if toolIteration > maxToolIterations {
+                        let unresolved = try makeTranscriptToolCalls(from: parsedCalls)
+                        allEntries.append(.toolCalls(Transcript.ToolCalls(unresolved)))
+                        throw Self.maxToolIterationsExceededError(limit: maxToolIterations)
+                    }
+                    let signature =
+                        parsedCalls
+                        .map { "\($0.name):\($0.argumentsJSON)" }
+                        .joined(separator: "|")
+                    if signature == previousToolCallSignature {
+                        let unresolved = try makeTranscriptToolCalls(from: parsedCalls)
+                        allEntries.append(.toolCalls(Transcript.ToolCalls(unresolved)))
+                        throw Self.repeatedToolCallLoopError()
+                    }
+                    previousToolCallSignature = signature
+
+                    let resolution = try await resolveToolCalls(parsedCalls, session: session)
+                    switch resolution {
+                    case .stop(let calls):
+                        if !calls.isEmpty {
+                            allEntries.append(.toolCalls(Transcript.ToolCalls(calls)))
+                        }
+                        return LanguageModelSession.Response(
+                            content: "" as! Content,
+                            rawContent: GeneratedContent(""),
+                            transcriptEntries: ArraySlice(allEntries)
+                        )
+                    case .invocations(let invocations):
+                        guard !invocations.isEmpty else {
+                            text = visibleText
+                            break generationLoop
+                        }
+                        let callsEntry = Transcript.Entry.toolCalls(
+                            Transcript.ToolCalls(invocations.map(\.call))
+                        )
+                        allEntries.append(callsEntry)
+                        toolContext?.pendingEntries.append(callsEntry)
+                        for invocation in invocations {
+                            let outputEntry = Transcript.Entry.toolOutput(invocation.output)
+                            allEntries.append(outputEntry)
+                            toolContext?.pendingEntries.append(outputEntry)
+                        }
+                    }
                 }
 
                 return LanguageModelSession.Response(
                     content: text as! Content,
                     rawContent: GeneratedContent(text),
-                    transcriptEntries: ArraySlice([])
+                    transcriptEntries: ArraySlice(allEntries)
                 )
             } else {
+                var promptImages: [Data] = []
+                let fullPrompt: String
+                if includeSchemaInPrompt {
+                    fullPrompt = try formatPrompt(
+                        for: session,
+                        extraSystemMessage: schemaPrompt(for: type.generationSchema),
+                        assistantPrefill: runtimeOptions.assistantPrefill,
+                        imageMarker: imageMarker,
+                        images: &promptImages
+                    )
+                } else {
+                    fullPrompt = try formatPrompt(
+                        for: session,
+                        extraSystemMessage: nil,
+                        assistantPrefill: runtimeOptions.assistantPrefill,
+                        imageMarker: imageMarker,
+                        images: &promptImages
+                    )
+                }
                 // Structured output does not go through the projector yet; refuse rather
                 // than answer about an image the model never saw.
                 guard promptImages.isEmpty else {
@@ -926,7 +1174,7 @@ import Foundation
                                 images: &promptImages
                             )
 
-                            let yieldToken: (String) -> Void = { tokenText in
+                            let yieldToken: (String) -> Bool = { tokenText in
                                 accumulatedText += tokenText
 
                                 let snapshot = LanguageModelSession.ResponseStream<Content>.Snapshot(
@@ -934,6 +1182,7 @@ import Foundation
                                     rawContent: GeneratedContent(accumulatedText)
                                 )
                                 continuation.yield(snapshot)
+                                return true
                             }
 
                             if promptImages.isEmpty {
@@ -1406,7 +1655,7 @@ import Foundation
             startIndex: Int,
             maxTokens: Int,
             options: ResolvedGenerationOptions,
-            onToken: (String) -> Void
+            onToken: (String) -> Bool
         ) throws {
             guard let model = self.model else {
                 throw LlamaLanguageModelError.modelLoadFailed
@@ -1485,7 +1734,9 @@ import Foundation
 
                 // Convert token to text and yield it
                 if let tokenText = tokenToText(vocab: vocab, token: nextToken) {
-                    onToken(tokenText)
+                    guard onToken(tokenText) else {
+                        break
+                    }
                 }
 
                 // Prepare batch for next token
@@ -1518,7 +1769,7 @@ import Foundation
             images: [Data],
             maxTokens: Int,
             options: ResolvedGenerationOptions,
-            onToken: (String) -> Void
+            onToken: (String) -> Bool
         ) throws {
             guard let mtmdContext, let model = self.model,
                 let vocab = llama_model_get_vocab(model)
@@ -1634,7 +1885,9 @@ import Foundation
                 }
 
                 if let tokenText = tokenToText(vocab: vocab, token: nextToken) {
-                    onToken(tokenText)
+                    guard onToken(tokenText) else {
+                        break
+                    }
                 }
 
                 batch.n_tokens = 1
@@ -1794,7 +2047,8 @@ import Foundation
         private func formatPrompt(
             for session: LanguageModelSession,
             extraSystemMessage: String? = nil,
-            assistantPrefill: String? = nil
+            assistantPrefill: String? = nil,
+            toolContext: LlamaToolPromptContext? = nil
         ) throws -> String {
             var images: [Data] = []
             return try formatPrompt(
@@ -1802,7 +2056,8 @@ import Foundation
                 extraSystemMessage: extraSystemMessage,
                 assistantPrefill: assistantPrefill,
                 imageMarker: nil,
-                images: &images
+                images: &images,
+                toolContext: toolContext
             )
         }
 
@@ -1811,7 +2066,8 @@ import Foundation
             extraSystemMessage: String?,
             assistantPrefill: String?,
             imageMarker: String?,
-            images: inout [Data]
+            images: inout [Data],
+            toolContext: LlamaToolPromptContext? = nil
         ) throws -> String {
             guard let model = self.model else {
                 throw LlamaLanguageModelError.modelLoadFailed
@@ -1819,7 +2075,7 @@ import Foundation
 
             var messages: [(role: String, content: String)] = []
 
-            for entry in session.transcript {
+            func appendEntry(_ entry: Transcript.Entry) throws {
                 switch entry {
                 case .instructions(let instructions):
                     let text = try extractContent(
@@ -1851,8 +2107,56 @@ import Foundation
                         messages.append(("assistant", text))
                     }
 
-                default:
-                    break
+                case .toolCalls(let toolCalls):
+                    guard let toolContext else { break }
+                    let parsed = toolCalls.map {
+                        LlamaParsedToolCall(name: $0.toolName, argumentsJSON: $0.arguments.jsonString)
+                    }
+                    if let last = messages.last, last.role == "assistant" {
+                        let markup = toolContext.format.assistantText(for: parsed, precededByContent: true)
+                        messages[messages.count - 1].content += markup
+                    } else {
+                        let markup = toolContext.format.assistantText(for: parsed, precededByContent: false)
+                        messages.append(("assistant", markup))
+                    }
+
+                case .toolOutput(let output):
+                    guard let toolContext else { break }
+                    let message = toolContext.format.toolResponseMessage(
+                        toolName: output.toolName,
+                        content: toolOutputText(output)
+                    )
+                    if let last = messages.last, last.role == message.role, last.role == "user",
+                        last.content.hasSuffix("</tool_response>")
+                    {
+                        messages[messages.count - 1].content += "\n" + message.content
+                    } else {
+                        messages.append(message)
+                    }
+                }
+            }
+
+            for entry in session.transcript {
+                try appendEntry(entry)
+            }
+            if let toolContext {
+                for entry in toolContext.pendingEntries {
+                    try appendEntry(entry)
+                }
+            }
+
+            if let toolContext, !toolContext.definitions.isEmpty {
+                if let systemIndex = messages.firstIndex(where: { $0.role == "system" }) {
+                    messages[systemIndex].content = toolContext.format.systemMessage(
+                        existingText: messages[systemIndex].content,
+                        tools: toolContext.definitions
+                    )
+                } else {
+                    let systemText = toolContext.format.systemMessage(
+                        existingText: "",
+                        tools: toolContext.definitions
+                    )
+                    messages.insert(("system", systemText), at: 0)
                 }
             }
 
@@ -1929,12 +2233,38 @@ import Foundation
             assistantPrefill: String?
         ) -> String {
             var rendered = ""
-            for message in messages {
+            var openModelTurn = false
+            for (index, message) in messages.enumerated() {
+                if message.role == "tool" {
+                    rendered += message.content
+                    continue
+                }
                 let role = message.role == "assistant" ? "model" : message.role
                 let content = message.content.trimmingCharacters(in: .whitespacesAndNewlines)
-                rendered += "<|turn>\(role)\n\(content)<turn|>\n"
+                if role == "model" && openModelTurn {
+                    rendered += content
+                } else {
+                    if openModelTurn {
+                        rendered += "<turn|>\n"
+                        openModelTurn = false
+                    }
+                    rendered += "<|turn>\(role)\n\(content)"
+                }
+                if role == "model" {
+                    let nextRole = index + 1 < messages.count ? messages[index + 1].role : nil
+                    if nextRole == "tool" || nextRole == "assistant" {
+                        openModelTurn = true
+                    } else {
+                        rendered += "<turn|>\n"
+                        openModelTurn = false
+                    }
+                } else {
+                    rendered += "<turn|>\n"
+                }
             }
-            rendered += "<|turn>model\n"
+            if !openModelTurn {
+                rendered += "<|turn>model\n"
+            }
             if let assistantPrefill, !assistantPrefill.isEmpty {
                 rendered += assistantPrefill
             }
