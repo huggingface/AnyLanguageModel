@@ -821,10 +821,15 @@ import Foundation
             )
         }
 
-        private func makeToolPromptContext(for session: LanguageModelSession) throws -> LlamaToolPromptContext? {
-            guard !session.tools.isEmpty, let model = self.model else { return nil }
+        private func currentToolCallFormat() -> LlamaToolCallFormat {
+            guard let model = self.model else { return .hermesJSON }
             let template = llama_model_chat_template(model, nil).map { String(cString: $0) }
-            let format = LlamaToolCallFormat.detect(template: template)
+            return LlamaToolCallFormat.detect(template: template)
+        }
+
+        private func makeToolPromptContext(for session: LanguageModelSession) throws -> LlamaToolPromptContext? {
+            guard !session.tools.isEmpty, self.model != nil else { return nil }
+            let format = currentToolCallFormat()
             let definitions = try session.tools.map { tool -> LlamaToolDefinition in
                 let schema = tool.parameters.withResolvedRoot() ?? tool.parameters
                 let data = try JSONEncoder().encode(schema)
@@ -971,6 +976,7 @@ import Foundation
 
             if type == String.self {
                 let maxTokens = runtimeOptions.maximumResponseTokens ?? 100
+                let outputFormat = currentToolCallFormat()
                 var toolContext = try makeToolPromptContext(for: session)
                 let maxToolIterations = 8
                 var toolIteration = 0
@@ -1024,7 +1030,12 @@ import Foundation
                     }
 
                     guard let format = toolContext?.format else {
-                        text = accumulated
+                        if outputFormat == .gemma {
+                            text = LlamaToolCallFormat.stripGemmaThoughtChannels(from: accumulated)
+                                .trimmingCharacters(in: .whitespacesAndNewlines)
+                        } else {
+                            text = accumulated
+                        }
                         break generationLoop
                     }
                     let (visibleText, parsedCalls) = format.parseToolCalls(in: accumulated)
@@ -1161,52 +1172,149 @@ import Foundation
 
                             let runtimeOptions = resolvedOptions(from: options)
                             let maxTokens = runtimeOptions.maximumResponseTokens ?? 100
-
-                            var accumulatedText = ""
-                            var promptImages: [Data] = []
+                            let outputFormat = self.currentToolCallFormat()
+                            var toolContext = try self.makeToolPromptContext(for: session)
+                            let maxToolIterations = 8
+                            var toolIteration = 0
+                            var previousToolCallSignature: String?
+                            var accumulatedEntries: [Transcript.Entry] = []
+                            var emittedBase = ""
+                            var lastYieldedText: String?
                             let imageMarker =
                                 self.mtmdContext != nil ? String(cString: mtmd_default_marker()) : nil
-                            let fullPrompt = try self.formatPrompt(
-                                for: session,
-                                extraSystemMessage: nil,
-                                assistantPrefill: runtimeOptions.assistantPrefill,
-                                imageMarker: imageMarker,
-                                images: &promptImages
-                            )
 
-                            let yieldToken: (String) -> Bool = { tokenText in
-                                accumulatedText += tokenText
-
+                            func yieldSnapshot(_ text: String) {
+                                lastYieldedText = text
                                 let snapshot = LanguageModelSession.ResponseStream<Content>.Snapshot(
-                                    content: (accumulatedText as! Content).asPartiallyGenerated(),
-                                    rawContent: GeneratedContent(accumulatedText)
+                                    content: (text as! Content).asPartiallyGenerated(),
+                                    rawContent: GeneratedContent(text),
+                                    transcriptEntries: ArraySlice(accumulatedEntries)
                                 )
                                 continuation.yield(snapshot)
-                                return true
                             }
 
-                            if promptImages.isEmpty {
-                                try self.generateChatText(
-                                    session: session,
-                                    prompt: fullPrompt,
-                                    maxTokens: maxTokens,
-                                    options: runtimeOptions,
-                                    onToken: yieldToken
+                            generationLoop: while true {
+                                var promptImages: [Data] = []
+                                let fullPrompt = try self.formatPrompt(
+                                    for: session,
+                                    extraSystemMessage: nil,
+                                    assistantPrefill: runtimeOptions.assistantPrefill,
+                                    imageMarker: imageMarker,
+                                    images: &promptImages,
+                                    toolContext: toolContext
                                 )
-                            } else {
-                                self.discardCachedSessionContext()
-                                let context = try self.makeFreshContext(options: runtimeOptions)
-                                defer { llama_free(context) }
-                                try self.performMultimodalGeneration(
-                                    context: context,
-                                    prompt: fullPrompt,
-                                    images: promptImages,
-                                    maxTokens: maxTokens,
-                                    options: runtimeOptions,
-                                    onToken: yieldToken
+
+                                var roundRaw = ""
+                                let terminator = toolContext?.format.callTerminator
+                                let withholdToolCalls = toolContext != nil
+                                let collectToken: (String) -> Bool = { tokenText in
+                                    roundRaw += tokenText
+                                    let visible = outputFormat.streamingVisibleText(
+                                        in: roundRaw,
+                                        withholdToolCalls: withholdToolCalls
+                                    )
+                                    let total = emittedBase + visible
+                                    if !total.isEmpty, total != lastYieldedText {
+                                        yieldSnapshot(total)
+                                    }
+                                    if let terminator,
+                                        roundRaw.suffix(terminator.count + 8).contains(terminator)
+                                    {
+                                        return false
+                                    }
+                                    return true
+                                }
+
+                                if promptImages.isEmpty {
+                                    try self.generateChatText(
+                                        session: session,
+                                        prompt: fullPrompt,
+                                        maxTokens: maxTokens,
+                                        options: runtimeOptions,
+                                        onToken: collectToken
+                                    )
+                                } else {
+                                    self.discardCachedSessionContext()
+                                    let context = try self.makeFreshContext(options: runtimeOptions)
+                                    defer { llama_free(context) }
+                                    try self.performMultimodalGeneration(
+                                        context: context,
+                                        prompt: fullPrompt,
+                                        images: promptImages,
+                                        maxTokens: maxTokens,
+                                        options: runtimeOptions,
+                                        onToken: collectToken
+                                    )
+                                }
+
+                                if Task.isCancelled {
+                                    break generationLoop
+                                }
+
+                                let roundVisible = outputFormat.streamingVisibleText(
+                                    in: roundRaw,
+                                    withholdToolCalls: withholdToolCalls
                                 )
+
+                                guard let format = toolContext?.format else {
+                                    emittedBase += roundVisible
+                                    break generationLoop
+                                }
+                                let (_, parsedCalls) = format.parseToolCalls(in: roundRaw)
+                                if parsedCalls.isEmpty {
+                                    emittedBase += roundVisible
+                                    break generationLoop
+                                }
+
+                                toolIteration += 1
+                                if toolIteration > maxToolIterations {
+                                    let unresolved = try self.makeTranscriptToolCalls(from: parsedCalls)
+                                    accumulatedEntries.append(.toolCalls(Transcript.ToolCalls(unresolved)))
+                                    throw Self.maxToolIterationsExceededError(limit: maxToolIterations)
+                                }
+                                let signature =
+                                    parsedCalls
+                                    .map { "\($0.name):\($0.argumentsJSON)" }
+                                    .joined(separator: "|")
+                                if signature == previousToolCallSignature {
+                                    let unresolved = try self.makeTranscriptToolCalls(from: parsedCalls)
+                                    accumulatedEntries.append(.toolCalls(Transcript.ToolCalls(unresolved)))
+                                    throw Self.repeatedToolCallLoopError()
+                                }
+                                previousToolCallSignature = signature
+
+                                let resolution = try await self.resolveToolCalls(parsedCalls, session: session)
+                                switch resolution {
+                                case .stop(let calls):
+                                    emittedBase += roundVisible
+                                    if !calls.isEmpty {
+                                        accumulatedEntries.append(.toolCalls(Transcript.ToolCalls(calls)))
+                                        yieldSnapshot(emittedBase)
+                                    }
+                                    break generationLoop
+                                case .invocations(let invocations):
+                                    guard !invocations.isEmpty else {
+                                        emittedBase += roundVisible
+                                        break generationLoop
+                                    }
+                                    let callsEntry = Transcript.Entry.toolCalls(
+                                        Transcript.ToolCalls(invocations.map(\.call))
+                                    )
+                                    accumulatedEntries.append(callsEntry)
+                                    toolContext?.pendingEntries.append(callsEntry)
+                                    for invocation in invocations {
+                                        let outputEntry = Transcript.Entry.toolOutput(invocation.output)
+                                        accumulatedEntries.append(outputEntry)
+                                        toolContext?.pendingEntries.append(outputEntry)
+                                    }
+                                    emittedBase += roundVisible
+                                    yieldSnapshot(emittedBase)
+                                }
                             }
 
+                            if emittedBase != lastYieldedText {
+                                yieldSnapshot(emittedBase)
+                            }
                             continuation.finish()
                         } catch {
                             continuation.finish(throwing: error)

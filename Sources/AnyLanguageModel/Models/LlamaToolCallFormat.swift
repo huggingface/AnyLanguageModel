@@ -40,6 +40,94 @@ enum LlamaToolCallFormat: Sendable, Equatable {
         case .gemma: return "<tool_call|>"
         }
     }
+
+    /// The marker that starts a tool-call block in generated text.
+    var callStartMarker: String {
+        switch self {
+        case .hermesJSON, .qwenXML: return "<tool_call>"
+        case .gemma: return "<|tool_call>"
+        }
+    }
+
+    /// Markers that open a Gemma 4 thought channel. The canonical template
+    /// writes `<|channel>`, but deployed quantizations have been observed
+    /// emitting `<|channel|>`, so both spellings are recognized.
+    static let gemmaChannelOpenMarkers = ["<|channel>", "<|channel|>"]
+
+    /// The marker that closes a Gemma 4 thought channel.
+    static let gemmaChannelCloseMarker = "<channel|>"
+
+    /// Removes Gemma 4 thought-channel spans from generated text. Thinking is
+    /// opt-in via `<|think|>`, but the model volunteers thought channels
+    /// anyway; the canonical template ships a `strip_thinking` macro for the
+    /// same reason. A span left unclosed at the end of the text is removed
+    /// through the end.
+    static func stripGemmaThoughtChannels(from text: String) -> String {
+        var result = ""
+        var remainder = Substring(text)
+        while let open = earliestRange(of: gemmaChannelOpenMarkers, in: remainder) {
+            result += remainder[..<open.lowerBound]
+            let afterOpen = remainder[open.upperBound...]
+            if let close = afterOpen.range(of: gemmaChannelCloseMarker) {
+                remainder = afterOpen[close.upperBound...]
+            } else {
+                remainder = Substring("")
+            }
+        }
+        result += remainder
+        return result
+    }
+
+    private static func earliestRange(
+        of markers: [String],
+        in text: Substring
+    ) -> Range<Substring.Index>? {
+        var earliest: Range<Substring.Index>?
+        for marker in markers {
+            if let range = text.range(of: marker),
+                earliest == nil || range.lowerBound < earliest!.lowerBound
+            {
+                earliest = range
+            }
+        }
+        return earliest
+    }
+
+    /// The portion of partially generated text that is safe to show while
+    /// streaming: completed thought channels are removed (Gemma only), text
+    /// from a tool-call start onward is withheld when tools are active, and a
+    /// trailing partial match of either marker is held back until the next
+    /// token confirms or breaks it.
+    func streamingVisibleText(in raw: String, withholdToolCalls: Bool) -> String {
+        var text = raw
+        if self == .gemma {
+            text = Self.stripGemmaThoughtChannels(from: text)
+        }
+        if withholdToolCalls, let range = text.range(of: callStartMarker) {
+            text = String(text[..<range.lowerBound])
+        }
+        var candidates: [String] = []
+        if withholdToolCalls {
+            candidates.append(callStartMarker)
+        }
+        if self == .gemma {
+            candidates.append(contentsOf: Self.gemmaChannelOpenMarkers)
+        }
+        var cut = 0
+        for marker in candidates {
+            let maxLength = min(marker.count - 1, text.count)
+            guard maxLength > 0 else { continue }
+            for length in stride(from: maxLength, through: 1, by: -1)
+            where text.hasSuffix(String(marker.prefix(length))) {
+                cut = max(cut, length)
+                break
+            }
+        }
+        if cut > 0 {
+            text.removeLast(cut)
+        }
+        return text
+    }
 }
 
 /// A tool definition rendered into the system prompt.
@@ -477,7 +565,8 @@ extension LlamaToolCallFormat {
             remainder = rest
         }
         visible += remainder
-        return (visible.trimmingCharacters(in: .whitespacesAndNewlines), calls)
+        let stripped = Self.stripGemmaThoughtChannels(from: visible)
+        return (stripped.trimmingCharacters(in: .whitespacesAndNewlines), calls)
     }
 
     /// Finds the closing brace of a Gemma call body, skipping braces inside
