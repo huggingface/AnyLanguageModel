@@ -234,6 +234,92 @@ import Testing
             #expect(parsed == [call])
         }
 
+        // MARK: - Gemma thought channels
+
+        @Test func stripsCompletedThoughtChannels() {
+            let text = "<|channel>thought\nThe user said hi.\n<channel|>Hello there!"
+            #expect(LlamaToolCallFormat.stripGemmaThoughtChannels(from: text) == "Hello there!")
+        }
+
+        @Test func stripsAlternateChannelSpelling() {
+            let text = "<|channel|>thought\nReasoning.\n<channel|>Answer."
+            #expect(LlamaToolCallFormat.stripGemmaThoughtChannels(from: text) == "Answer.")
+        }
+
+        @Test func stripsUnclosedThoughtChannelToEnd() {
+            let text = "Partial<|channel>thought\nstill thinking"
+            #expect(LlamaToolCallFormat.stripGemmaThoughtChannels(from: text) == "Partial")
+        }
+
+        @Test func stripsMultipleThoughtChannels() {
+            let text = "<|channel>thought\na\n<channel|>X<|channel>thought\nb\n<channel|>Y"
+            #expect(LlamaToolCallFormat.stripGemmaThoughtChannels(from: text) == "XY")
+        }
+
+        @Test func gemmaParseStripsThoughtChannels() {
+            let text = "<|channel>thought\nplan\n<channel|>Done.<|tool_call>call:f{}<tool_call|>"
+            let (visible, calls) = LlamaToolCallFormat.gemma.parseToolCalls(in: text)
+            #expect(visible == "Done.")
+            #expect(calls.count == 1)
+        }
+
+        // MARK: - Streaming visibility
+
+        @Test func streamingWithholdsPartialToolCallMarker() {
+            let visible = LlamaToolCallFormat.hermesJSON.streamingVisibleText(
+                in: "The answer is<tool_",
+                withholdToolCalls: true
+            )
+            #expect(visible == "The answer is")
+        }
+
+        @Test func streamingFlushesBrokenMarkerPrefix() {
+            let visible = LlamaToolCallFormat.hermesJSON.streamingVisibleText(
+                in: "5 < 10 is true",
+                withholdToolCalls: true
+            )
+            #expect(visible == "5 < 10 is true")
+        }
+
+        @Test func streamingTruncatesAtCompleteToolCallStart() {
+            let visible = LlamaToolCallFormat.hermesJSON.streamingVisibleText(
+                in: "Checking.<tool_call>\n{\"name\":",
+                withholdToolCalls: true
+            )
+            #expect(visible == "Checking.")
+        }
+
+        @Test func streamingIgnoresToolMarkersWhenToolsInactive() {
+            let visible = LlamaToolCallFormat.hermesJSON.streamingVisibleText(
+                in: "text <tool_call> more",
+                withholdToolCalls: false
+            )
+            #expect(visible == "text <tool_call> more")
+        }
+
+        @Test func streamingWithholdsGemmaThoughtChannel() {
+            let format = LlamaToolCallFormat.gemma
+            #expect(format.streamingVisibleText(in: "<|chan", withholdToolCalls: false) == "")
+            #expect(
+                format.streamingVisibleText(
+                    in: "<|channel>thought\nhmm",
+                    withholdToolCalls: false
+                ) == ""
+            )
+            #expect(
+                format.streamingVisibleText(
+                    in: "<|channel>thought\nhmm\n<channel|>Hi",
+                    withholdToolCalls: false
+                ) == "Hi"
+            )
+        }
+
+        @Test func streamingWithholdsGemmaPartialToolMarkerAfterThought() {
+            let format = LlamaToolCallFormat.gemma
+            let raw = "<|channel>thought\nplan\n<channel|>Sure.<|tool_"
+            #expect(format.streamingVisibleText(in: raw, withholdToolCalls: true) == "Sure.")
+        }
+
         // MARK: - Tool response messages
 
         @Test func hermesToolResponseIsAUserTurn() {
@@ -316,6 +402,38 @@ import Testing
             let calls = await weatherTool.calls
             #expect(calls.count == 1)
             #expect(followUp.content.contains("72"))
+        }
+
+        @Test func streamsToolExchangeProgressively() async throws {
+            let weatherTool = spy(on: WeatherTool())
+            let session = LanguageModelSession(model: model, tools: [weatherTool])
+
+            var options = GenerationOptions(temperature: 0.0, maximumResponseTokens: 1024)
+            options[custom: LlamaLanguageModel.self] = .init(contextSize: 4096)
+            let stream = session.streamResponse(
+                to: "How's the weather in Paris? Use the getWeather tool.",
+                options: options
+            )
+            var snapshots: [String] = []
+            var sawToolOutputEntry = false
+            for try await snapshot in stream {
+                snapshots.append(snapshot.content)
+                for case .toolOutput(_) in snapshot.transcriptEntries {
+                    sawToolOutputEntry = true
+                }
+            }
+
+            let calls = await weatherTool.calls
+            #expect(calls.count == 1)
+            #expect(sawToolOutputEntry)
+            #expect(snapshots.count > 3)
+            let final = snapshots.last ?? ""
+            #expect(final.lowercased().contains("72") || final.lowercased().contains("sunny"))
+            for content in snapshots {
+                #expect(!content.contains("<tool_call>"))
+                #expect(!content.contains("<|tool_call>"))
+                #expect(!content.contains("<|channel"))
+            }
         }
 
         @Test func answersDirectlyWhenNoToolApplies() async throws {
