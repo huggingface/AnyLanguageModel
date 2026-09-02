@@ -405,8 +405,9 @@
                 options.temperature = temperature
             }
 
-            // Note: FoundationModels.GenerationOptions may not have all properties
-            // Only set those that are available
+            if let maximumResponseTokens = self.maximumResponseTokens {
+                options.maximumResponseTokens = maximumResponseTokens
+            }
 
             return options
         }
