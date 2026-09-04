@@ -11,7 +11,7 @@ private struct AnthropicStructuredForecast {
     var temperatureCelsius: Int
 }
 
-@Suite("AnthropicLanguageModel", .enabled(if: anthropicAPIKey?.isEmpty == false))
+@Suite("AnthropicLanguageModel", .serialized, .enabled(if: anthropicAPIKey?.isEmpty == false))
 struct AnthropicLanguageModelTests {
     let model = AnthropicLanguageModel(
         apiKey: anthropicAPIKey!,
@@ -155,3 +155,4 @@ struct AnthropicLanguageModelTests {
         #expect(!response.content.isEmpty)
     }
 }
+

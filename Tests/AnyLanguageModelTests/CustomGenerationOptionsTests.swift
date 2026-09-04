@@ -152,7 +152,7 @@ struct AnthropicCustomOptionsTests {
             stopSequences: ["END", "STOP"],
             metadata: .init(userID: "user-123"),
             toolChoice: .auto,
-            thinking: .init(budgetTokens: 1024),
+            thinking: .init(type: .enabled, budgetTokens: 1024, display: .summarized),
             serviceTier: .priority,
             extraBody: ["custom_param": .string("value")]
         )
@@ -163,6 +163,8 @@ struct AnthropicCustomOptionsTests {
         #expect(options.metadata?.userID == "user-123")
         #expect(options.toolChoice == .auto)
         #expect(options.thinking?.budgetTokens == 1024)
+        #expect(options.thinking?.type == .enabled)
+        #expect(options.thinking?.display == .summarized)
         #expect(options.serviceTier == .priority)
         #expect(options.extraBody?["custom_param"] == .string("value"))
     }
@@ -187,7 +189,7 @@ struct AnthropicCustomOptionsTests {
             stopSequences: ["END"],
             metadata: .init(userID: "user-123"),
             toolChoice: .tool(name: "my_tool"),
-            thinking: .init(budgetTokens: 2048),
+            thinking: .init(type: .enabled, budgetTokens: 2048, display: .summarized),
             serviceTier: .standard
         )
 
@@ -218,7 +220,7 @@ struct AnthropicCustomOptionsTests {
             topP: 0.9,
             topK: 40,
             stopSequences: ["END"],
-            thinking: .init(budgetTokens: 4096)
+            thinking: .init(type: .enabled, budgetTokens: 4096, display: .summarized)
         )
 
         let retrieved = options[custom: AnthropicLanguageModel.self]
@@ -226,6 +228,8 @@ struct AnthropicCustomOptionsTests {
         #expect(retrieved?.topK == 40)
         #expect(retrieved?.stopSequences == ["END"])
         #expect(retrieved?.thinking?.budgetTokens == 4096)
+        #expect(retrieved?.thinking?.type == .enabled)
+        #expect(retrieved?.thinking?.display == .summarized)
     }
 
     @Test func metadataCodable() throws {
@@ -292,7 +296,7 @@ struct AnthropicCustomOptionsTests {
     }
 
     @Test func thinkingCodable() throws {
-        let thinking = AnthropicLanguageModel.CustomGenerationOptions.Thinking(budgetTokens: 8192)
+        let thinking = AnthropicLanguageModel.CustomGenerationOptions.Thinking(type: .enabled, budgetTokens: 8192, display: .summarized)
 
         let encoder = JSONEncoder()
         let data = try encoder.encode(thinking)
@@ -302,6 +306,7 @@ struct AnthropicCustomOptionsTests {
         #expect(json.contains("budget_tokens"))
         #expect(json.contains("8192"))
         #expect(json.contains("enabled"))
+        #expect(json.contains("summarized"))
 
         let decoded = try JSONDecoder().decode(
             AnthropicLanguageModel.CustomGenerationOptions.Thinking.self,
@@ -314,6 +319,32 @@ struct AnthropicCustomOptionsTests {
         #expect(AnthropicLanguageModel.CustomGenerationOptions.ServiceTier.auto.rawValue == "auto")
         #expect(AnthropicLanguageModel.CustomGenerationOptions.ServiceTier.standard.rawValue == "standard")
         #expect(AnthropicLanguageModel.CustomGenerationOptions.ServiceTier.priority.rawValue == "priority")
+    }
+    
+    
+    @Test func thinkingDisplayValues() {
+        #expect(AnthropicLanguageModel.CustomGenerationOptions.Thinking.ThinkingDisplay.omitted.rawValue == "omitted")
+        #expect(AnthropicLanguageModel.CustomGenerationOptions.Thinking.ThinkingDisplay.summarized.rawValue == "summarized")
+    }
+    
+    @Test func thinkingTypeValues() {
+        #expect(AnthropicLanguageModel.CustomGenerationOptions.Thinking.ThinkingType.enabled.rawValue == "enabled")
+        #expect(AnthropicLanguageModel.CustomGenerationOptions.Thinking.ThinkingType.adaptive.rawValue == "adaptive")
+    }
+    
+    
+    @Test func thinkingAdaptiveConvenience() {
+        let thinking = AnthropicLanguageModel.CustomGenerationOptions.Thinking.adaptive(display: .omitted)
+        #expect(thinking.budgetTokens == nil)
+        #expect(thinking.display == .omitted)
+        #expect(thinking.type == .adaptive)
+    }
+    
+    @Test func thinkingEnabledConvenience() {
+        let thinking = AnthropicLanguageModel.CustomGenerationOptions.Thinking.enabled(budgetTokens: 10, display: .summarized)
+        #expect(thinking.budgetTokens == 10)
+        #expect(thinking.display == .summarized)
+        #expect(thinking.type == .enabled)
     }
 }
 

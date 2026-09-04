@@ -98,7 +98,9 @@ public struct AnthropicLanguageModel: LanguageModel {
         /// These parameters are merged into the top-level request JSON,
         /// allowing you to pass additional options not explicitly modeled.
         public var extraBody: [String: JSONValue]?
-
+        
+        public var effort: Effort?
+        
         // MARK: - Nested Types
 
         /// Metadata about the request.
@@ -182,34 +184,62 @@ public struct AnthropicLanguageModel: LanguageModel {
         public struct Thinking: Hashable, Codable, Sendable {
             /// The type of thinking to use.
             public var type: ThinkingType
-
-            /// The maximum number of tokens to use for thinking.
+            
+            /// The maximum number of tokens to use for thinking. Nil when `type` = `.adaptive`.
             ///
             /// This budget is the maximum number of tokens the model can use for its
             /// internal reasoning process. Larger budgets can improve response quality
             /// for complex tasks but increase latency and cost.
-            public var budgetTokens: Int
-
+            public var budgetTokens: Int?
+            
+            /// How thinking should be displayed.
+            public var display: ThinkingDisplay?
+            
             /// The type of thinking mode.
             public enum ThinkingType: String, Hashable, Codable, Sendable {
                 /// Enables extended thinking.
                 case enabled
+                /// Enables adaptive thinking.
+                case adaptive
             }
-
+            
+            /// How thinking should be returned during generation.
+            public enum ThinkingDisplay: String, Hashable, Codable, Sendable {
+                /// Thinking will be summarized.
+                case summarized
+                /// No thoughts will be returned.
+                case omitted
+            }
+            
             enum CodingKeys: String, CodingKey {
                 case type
                 case budgetTokens = "budget_tokens"
+                case display
             }
-
+            
             /// Creates a thinking configuration.
             ///
-            /// - Parameter budgetTokens: The maximum number of tokens to use for thinking.
-            public init(budgetTokens: Int) {
-                self.type = .enabled
+            /// - Parameters:
+            ///   - type: The type of thinking to perform.
+            ///   - budgetTokens: The maximum number of tokens to use for thinking. Only required when `type` == `.enabled`.
+            ///   - display: The display type for thoughts.
+            public init(type: ThinkingType, budgetTokens: Int?, display: ThinkingDisplay?) {
+                self.type = type
                 self.budgetTokens = budgetTokens
+                self.display = display
+            }
+            
+            /// Convenience function for enabling adaptive thinking on supported models.
+            public static func adaptive(display: ThinkingDisplay?) -> Thinking {
+                return Thinking.init(type: .adaptive, budgetTokens: nil, display: display)
+            }
+            
+            /// Convenience function for enabling thinking with a token budget on supported models.
+            public static func enabled(budgetTokens: Int, display: ThinkingDisplay?) -> Thinking {
+                return Thinking.init(type: .enabled, budgetTokens: budgetTokens, display: display)
             }
         }
-
+        
         /// The tier of service for processing the request.
         public enum ServiceTier: String, Hashable, Codable, Sendable {
             /// Automatically select the best available tier.
@@ -220,6 +250,33 @@ public struct AnthropicLanguageModel: LanguageModel {
 
             /// Priority tier processing with faster response times.
             case priority
+        }
+        
+        /// How much effort the model should put into a task.
+        ///
+        /// Docs: https://platform.claude.com/docs/en/build-with-claude/effort
+        public enum Effort: String, Hashable, Codable, Sendable {
+            /// Absolute maximum capability with no constraints on token spending.
+            ///
+            /// Use Case: Tasks requiring the deepest possible reasoning and most thorough analysis
+            /// Availability: Claude Fable 5, Claude Mythos 5, Claude Opus 4.8, Claude Mythos Preview, Claude Opus 4.7, Claude Opus 4.6, Claude Sonnet 5, and Claude Sonnet 4.6.
+            case max
+            /// Extended capability for long-horizon work.
+            /// Use Case: Long-running agentic and coding tasks (over 30 minutes) with token budgets in the millions
+            /// Availability: Claude Fable 5, Claude Mythos 5, Claude Opus 4.8, Claude Opus 4.7, and Claude Sonnet 5.
+            case extraHigh = "xHigh"
+            /// High capability. Equivalent to not setting the parameter.
+            /// Use Case: Complex reasoning, difficult coding problems, agentic tasks
+            /// Availability: All Models
+            case high
+            /// Balanced approach with moderate token savings.
+            /// Use Case: Agentic tasks that require a balance of speed, cost, and performance
+            /// Availability: All Models
+            case medium
+            /// Most efficient. Significant token savings with some capability reduction.
+            /// Use Case: Simpler tasks that need the best speed and lowest costs, like subagents
+            /// Availability: All Models
+            case low
         }
 
         /// Creates custom generation options for Anthropic's Claude API.
@@ -233,6 +290,7 @@ public struct AnthropicLanguageModel: LanguageModel {
         ///   - thinking: Configuration for extended thinking.
         ///   - serviceTier: The tier of service to use for the request.
         ///   - extraBody: Additional parameters to include in the request body.
+        ///   - effort: How much effort the model should put into the response.
         public init(
             topP: Double? = nil,
             topK: Int? = nil,
@@ -241,7 +299,8 @@ public struct AnthropicLanguageModel: LanguageModel {
             toolChoice: ToolChoice? = nil,
             thinking: Thinking? = nil,
             serviceTier: ServiceTier? = nil,
-            extraBody: [String: JSONValue]? = nil
+            extraBody: [String: JSONValue]? = nil,
+            effort: Effort? = nil
         ) {
             self.topP = topP
             self.topK = topK
@@ -251,6 +310,7 @@ public struct AnthropicLanguageModel: LanguageModel {
             self.thinking = thinking
             self.serviceTier = serviceTier
             self.extraBody = extraBody
+            self.effort = effort
         }
     }
     /// The reason the model is unavailable.
@@ -506,7 +566,8 @@ private func createMessageParams(
     messages: [AnthropicMessage],
     tools: [AnthropicTool]?,
     responseSchema: JSONSchema?,
-    options: GenerationOptions
+    options: GenerationOptions,
+    stream: Bool? = nil
 ) throws -> [String: JSONValue] {
     var params: [String: JSONValue] = [
         "model": .string(model),
@@ -577,22 +638,40 @@ private func createMessageParams(
                 params["tool_choice"] = .object(["type": .string("none")])
             }
         }
+        if let effort = customOptions.effort {
+            // If output_config was previously set during the response schema options, we need to append insert into that dictionary instead of replacing it.
+            if let output_config = params["output_config"], var object = output_config.objectValue {
+                object["effort"] = .string(effort.rawValue)
+                params["output_config"] = .object(object)
+            } else {
+                params["output_config"] = .object([
+                    "effort": .string(effort.rawValue)
+                ])
+            }
+        }
         if let thinking = customOptions.thinking {
-            params["thinking"] = .object([
-                "type": .string(thinking.type.rawValue),
-                "budget_tokens": .int(thinking.budgetTokens),
-            ])
+            var thinkingObject: [String: JSONValue] = [
+                "type": .string(thinking.type.rawValue)
+            ]
+            if let budget = thinking.budgetTokens {
+                thinkingObject["budget_tokens"] = .int(budget)
+            }
+            if let display = thinking.display {
+                thinkingObject["display"] = .string(display.rawValue)
+            }
+            
+            params["thinking"] = .object(thinkingObject)
         }
-        if let serviceTier = customOptions.serviceTier {
-            params["service_tier"] = .string(serviceTier.rawValue)
-        }
-
         // Merge custom extraBody into the request
         if let extraBody = customOptions.extraBody {
             for (key, value) in extraBody {
                 params[key] = value
             }
         }
+    }
+    
+    if let stream {
+        params["stream"] = .bool(stream)
     }
 
     return params
@@ -903,10 +982,12 @@ private enum AnthropicContent: Codable, Sendable {
 private struct AnthropicThinking: Codable, Sendable {
     let type: String
     let thinking: String
-
-    init(thinking: String) {
+    let signature: String
+    
+    init(thinking: String, signature: String) {
         self.type = "thinking"
         self.thinking = thinking
+        self.signature = signature
     }
 }
 
@@ -1118,6 +1199,8 @@ private enum AnthropicStreamEvent: Codable, Sendable {
         enum Delta: Codable, Sendable {
             case textDelta(TextDelta)
             case inputJsonDelta(InputJsonDelta)
+            case thinkingDelta(ThinkingDelta)
+            case signatureDelta(SignatureDelta)
             case ignored
 
             enum CodingKeys: String, CodingKey { case type }
@@ -1131,6 +1214,10 @@ private enum AnthropicStreamEvent: Codable, Sendable {
                     self = .textDelta(try TextDelta(from: decoder))
                 case "input_json_delta":
                     self = .inputJsonDelta(try InputJsonDelta(from: decoder))
+                case "thinking_delta":
+                    self = .thinkingDelta(try ThinkingDelta(from: decoder))
+                case "signature_delta":
+                    self = .signatureDelta(try SignatureDelta(from: decoder))
                 default:
                     self = .ignored
                 }
@@ -1143,6 +1230,8 @@ private enum AnthropicStreamEvent: Codable, Sendable {
                 case .ignored:
                     var container = encoder.container(keyedBy: CodingKeys.self)
                     try container.encode("ignored", forKey: .type)
+                case .thinkingDelta(let delta): try delta.encode(to: encoder)
+                case .signatureDelta(let delta): try delta.encode(to: encoder)
                 }
             }
 
@@ -1159,6 +1248,20 @@ private enum AnthropicStreamEvent: Codable, Sendable {
                     case type
                     case partialJson = "partial_json"
                 }
+            }
+            
+            struct ThinkingDelta: Codable, SendableMetatype {
+                let type: String
+                let thinking: String
+            }
+            
+            /// Cryptographic signature for a completed thinking block.
+            ///
+            /// Emitted at the end of a thinking block, even when ``CustomGenerationOptions/Thinking/display`` is set to `omitted`.
+            /// The signature must be preserved verbatim for thought to be recovered in the transcript. Otherwise the Claude API will throw out any text provided in thinking blocks.
+            struct SignatureDelta: Codable, Sendable {
+                let type: String
+                let signature: String
             }
         }
     }
