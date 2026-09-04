@@ -226,3 +226,48 @@ struct OllamaChatRequestEncodingTests {
         #expect(message["images"] == nil)
     }
 }
+
+@Suite("Ollama top-level chat parameters")
+struct OllamaTopLevelChatParametersTests {
+    @Test func routesThinkToTheTopLevelOfTheRequest() throws {
+        var options = GenerationOptions()
+        options[custom: OllamaLanguageModel.self] = [
+            "think": .bool(true),
+            "repeat_penalty": .double(1.2),
+        ]
+
+        let params = try createChatParams(
+            model: "qwen3:8b",
+            messages: [OllamaMessage(role: .user, content: "Hello")],
+            tools: nil,
+            options: convertOptions(options),
+            stream: false,
+            format: nil,
+            parameters: extractTopLevelChatParameters(options)
+        )
+
+        #expect(params["think"] == .bool(true))
+
+        guard case .object(let requestOptions)? = params["options"] else {
+            Issue.record("Expected options to encode as an object")
+            return
+        }
+        #expect(requestOptions["think"] == nil)
+        #expect(requestOptions["repeat_penalty"] == .double(1.2))
+    }
+
+    @Test func topLevelParametersDoNotOverrideReservedKeys() throws {
+        let params = try createChatParams(
+            model: "gpt-oss:20b",
+            messages: [OllamaMessage(role: .user, content: "Hello")],
+            tools: nil,
+            options: nil,
+            stream: false,
+            format: nil,
+            parameters: ["model": .string("injected"), "think": .string("high")]
+        )
+
+        #expect(params["model"] == .string("gpt-oss:20b"))
+        #expect(params["think"] == .string("high"))
+    }
+}
