@@ -901,6 +901,68 @@ struct GeminiCustomOptionsTests {
             #expect(retrieved?.kvCache.quantizedStart == 256)
         }
 
+        // MARK: - SamplingMode → MLX derivation
+
+        @Test func samplingDerivationGreedy() {
+            let derived = samplingDerivedParameters(from: GenerationOptions(sampling: .greedy))
+            #expect(derived.topP == nil)
+            #expect(derived.topK == nil)
+            #expect(derived.greedyTemperature == 0)
+        }
+
+        @Test func samplingDerivationTopK() {
+            let derived = samplingDerivedParameters(from: GenerationOptions(sampling: .random(top: 40, seed: 7)))
+            #expect(derived.topK == 40)
+            #expect(derived.topP == nil)
+            #expect(derived.greedyTemperature == nil)
+        }
+
+        @Test func samplingDerivationNucleus() {
+            let derived = samplingDerivedParameters(from: GenerationOptions(sampling: .random(probabilityThreshold: 0.9)))
+            #expect(derived.topP == 0.9)
+            #expect(derived.topK == nil)
+            #expect(derived.greedyTemperature == nil)
+        }
+
+        @Test func samplingDerivationNil() {
+            let derived = samplingDerivedParameters(from: GenerationOptions())
+            #expect(derived.topP == nil)
+            #expect(derived.topK == nil)
+            #expect(derived.greedyTemperature == nil)
+        }
+
+        // MARK: - Mapping precedence (custom-wins → sampling-fills → default)
+
+        @Test func samplingFillsWhenNoCustomBlock() {
+            let params = toGenerateParameters(GenerationOptions(sampling: .random(top: 12)))
+            #expect(params.topK == 12)          // top-k now reaches MLX via sampling
+            #expect(params.topP == 1.0)         // untouched default
+        }
+
+        @Test func customBlockWinsOverSampling() {
+            var options = GenerationOptions(sampling: .random(probabilityThreshold: 0.9))
+            options[custom: MLXLanguageModel.self] = .init(
+                kvCache: .default,
+                userInputProcessing: nil,
+                additionalContext: nil,
+                topP: 0.3,
+                topK: 5
+            )
+            let params = toGenerateParameters(options)
+            #expect(params.topP == 0.3)         // custom wins over sampling's 0.9
+            #expect(params.topK == 5)           // custom wins (sampling expressed no top-k)
+        }
+
+        @Test func greedyMapsToZeroTemperature() {
+            let params = toGenerateParameters(GenerationOptions(sampling: .greedy))
+            #expect(params.temperature == 0)
+        }
+
+        @Test func explicitTemperatureWinsOverGreedy() {
+            let params = toGenerateParameters(GenerationOptions(sampling: .greedy, temperature: 0.7))
+            #expect(params.temperature == Float(0.7))
+        }
+
         @Test func codable() throws {
             let options = MLXLanguageModel.CustomGenerationOptions(
                 kvCache: .init(
