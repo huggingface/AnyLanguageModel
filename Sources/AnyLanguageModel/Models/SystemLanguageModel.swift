@@ -1,6 +1,8 @@
 #if canImport(FoundationModels)
+    import CoreGraphics
     import FoundationModels
     import Foundation
+    import ImageIO
     import PartialJSONDecoder
 
     import JSONSchema
@@ -53,6 +55,21 @@
             guardrails: FoundationModels.SystemLanguageModel.Guardrails = .default
         ) {
             self.systemModel = FoundationModels.SystemLanguageModel(adapter: adapter, guardrails: guardrails)
+        }
+
+        /// The size of the context window in tokens.
+        nonisolated public var contextSize: Int {
+            systemModel.contextSize
+        }
+
+        /// Whether the model accepts image input.
+        nonisolated public var supportsImageInput: Bool {
+            #if compiler(>=6.4) && !os(tvOS) && !os(watchOS)
+                if #available(macOS 27.0, iOS 27.0, visionOS 27.0, *) {
+                    return systemModel.capabilities.contains(.vision)
+                }
+            #endif
+            return false
         }
 
         /// The availability status for the system language model.
@@ -405,8 +422,9 @@
                 options.temperature = temperature
             }
 
-            // Note: FoundationModels.GenerationOptions may not have all properties
-            // Only set those that are available
+            if let maximumResponseTokens = self.maximumResponseTokens {
+                options.maximumResponseTokens = maximumResponseTokens
+            }
 
             return options
         }
@@ -769,13 +787,45 @@
                             content: fmContent
                         )
                     )
-                case .image:
-                    // FoundationModels Transcript does not support image segments
+                case .image(let imageSegment):
+                    #if compiler(>=6.4) && !os(tvOS)
+                        if #available(macOS 27.0, iOS 27.0, visionOS 27.0, watchOS 27.0, *) {
+                            guard let fmImage = FoundationModels.Transcript.ImageAttachment(imageSegment) else {
+                                return nil
+                            }
+                            return .attachment(
+                                .init(
+                                    id: imageSegment.id,
+                                    content: .image(fmImage)
+                                )
+                            )
+                        }
+                    #endif
                     return nil
                 }
             }
         }
     }
+
+    #if compiler(>=6.4) && !os(tvOS)
+        @available(macOS 27.0, iOS 27.0, visionOS 27.0, watchOS 27.0, *)
+        extension FoundationModels.Transcript.ImageAttachment {
+            fileprivate init?(_ imageSegment: Transcript.ImageSegment) {
+                switch imageSegment.source {
+                case .url(let url):
+                    self.init(imageURL: url)
+                case .data(let data, _):
+                    guard
+                        let imageSource = CGImageSourceCreateWithData(data as CFData, nil),
+                        let cgImage = CGImageSourceCreateImageAtIndex(imageSource, 0, nil)
+                    else {
+                        return nil
+                    }
+                    self.init(cgImage)
+                }
+            }
+        }
+    #endif
 
     @available(macOS 26.0, iOS 26.0, watchOS 26.0, tvOS 26.0, visionOS 26.0, *)
     extension Array where Element == Transcript.ToolDefinition {
