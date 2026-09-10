@@ -151,9 +151,11 @@ public final class LanguageModelSession: @unchecked Sendable {
                         lastSnapshot = snapshot
                         continuation.yield(snapshot)
                     }
-                    continuation.finish()
 
-                    // Add response to transcript after stream completes
+                    // Commit the response to the transcript
+                    // before the stream reports completion,
+                    // so a caller that drains the stream
+                    // and starts the next turn sees the full history.
                     if let lastSnapshot {
                         // Extract text content from the generated content
                         let textContent: String
@@ -176,10 +178,12 @@ public final class LanguageModelSession: @unchecked Sendable {
                             }
                         }
                     }
+                    session.endResponding()
+                    continuation.finish()
                 } catch {
+                    session.endResponding()
                     continuation.finish(throwing: error)
                 }
-                session.endResponding()
             }
             continuation.onTermination = { termination in
                 if case .cancelled = termination {
