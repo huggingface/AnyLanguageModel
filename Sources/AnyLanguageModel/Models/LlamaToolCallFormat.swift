@@ -427,7 +427,7 @@ extension LlamaToolCallFormat {
 
 extension LlamaToolCallFormat {
     /// Splits generated text into the visible response and any tool calls,
-    /// removing the call markup from the visible portion.
+    /// removing the call markup while preserving whitespace between rounds.
     func parseToolCalls(in text: String) -> (visibleText: String, calls: [LlamaParsedToolCall]) {
         switch self {
         case .hermesJSON:
@@ -467,7 +467,7 @@ extension LlamaToolCallFormat {
             remainder = afterStart[endRange.upperBound...]
         }
         visible += remainder
-        return (visible.trimmingCharacters(in: .whitespacesAndNewlines), calls)
+        return (visible, calls)
     }
 
     private func parseHermesCall(_ body: String) -> LlamaParsedToolCall? {
@@ -494,25 +494,34 @@ extension LlamaToolCallFormat {
     }
 
     private func parseQwenXMLCall(_ body: String) -> LlamaParsedToolCall? {
-        guard let nameStart = body.range(of: "<function=") else { return nil }
-        let afterName = body[nameStart.upperBound...]
+        let trimmed = body.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard trimmed.hasPrefix("<function=") else { return nil }
+        let afterName = trimmed.dropFirst("<function=".count)
         guard let nameEnd = afterName.firstIndex(of: ">") else { return nil }
         let name = String(afterName[..<nameEnd])
-        guard !name.isEmpty else { return nil }
+        guard !name.isEmpty, !name.contains("<"),
+            let functionEnd = afterName.range(of: "</function>"),
+            functionEnd.upperBound == afterName.endIndex,
+            nameEnd < functionEnd.lowerBound
+        else { return nil }
 
         var arguments: [String: Any] = [:]
-        var remainder = afterName[afterName.index(after: nameEnd)...]
-        while let paramStart = remainder.range(of: "<parameter=") {
-            let afterParam = remainder[paramStart.upperBound...]
-            guard let keyEnd = afterParam.firstIndex(of: ">") else { break }
+        var remainder = afterName[afterName.index(after: nameEnd) ..< functionEnd.lowerBound]
+            .drop(while: \.isWhitespace)
+        while !remainder.isEmpty {
+            guard remainder.hasPrefix("<parameter=") else { return nil }
+            let afterParam = remainder.dropFirst("<parameter=".count)
+            guard let keyEnd = afterParam.firstIndex(of: ">") else { return nil }
             let key = String(afterParam[..<keyEnd])
+            guard !key.isEmpty, !key.contains("<") else { return nil }
             let valueStart = afterParam.index(after: keyEnd)
-            guard let paramEnd = afterParam[valueStart...].range(of: "</parameter>") else { break }
+            guard let paramEnd = afterParam[valueStart...].range(of: "</parameter>") else { return nil }
             var value = String(afterParam[valueStart ..< paramEnd.lowerBound])
+            guard !value.contains("<parameter="), !value.contains("<parameter>") else { return nil }
             if value.hasPrefix("\n") { value.removeFirst() }
             if value.hasSuffix("\n") { value.removeLast() }
             arguments[key] = qwenXMLDecodedValue(value)
-            remainder = afterParam[paramEnd.upperBound...]
+            remainder = afterParam[paramEnd.upperBound...].drop(while: \.isWhitespace)
         }
 
         guard
@@ -573,7 +582,7 @@ extension LlamaToolCallFormat {
         }
         visible += remainder
         let stripped = Self.stripGemmaThoughtChannels(from: visible)
-        return (stripped.trimmingCharacters(in: .whitespacesAndNewlines), calls)
+        return (stripped, calls)
     }
 
     /// Finds the closing brace of a Gemma call body, skipping braces inside

@@ -4,6 +4,21 @@ import Testing
 @testable import AnyLanguageModel
 
 #if Llama
+    private struct LlamaSchemaOptOutTool: Tool {
+        let name = "innate_weather"
+        let description = "Weather lookup known to the model."
+        let includesSchemaInInstructions = false
+
+        var parameters: GenerationSchema {
+            Issue.record("An opted-out tool's schema should not be read for the prompt.")
+            return WeatherTool.Arguments.generationSchema
+        }
+
+        func call(arguments: WeatherTool.Arguments) async throws -> String {
+            arguments.city
+        }
+    }
+
     @Suite("LlamaToolCallFormat")
     struct LlamaToolCallFormatTests {
         private let weatherTool = LlamaToolDefinition(
@@ -79,6 +94,32 @@ import Testing
             #expect(message == "Hi.")
         }
 
+        @Test(
+            arguments: [LlamaToolCallFormat.hermesJSON, .qwenXML, .gemma],
+            [false, true]
+        )
+        func promptDefinitionsHonorSchemaOptOut(
+            format: LlamaToolCallFormat,
+            includeAdvertisedTool: Bool
+        ) throws {
+            let optedOutTool = LlamaSchemaOptOutTool()
+            var tools: [any Tool] = [optedOutTool]
+            if includeAdvertisedTool {
+                tools.append(WeatherTool())
+            }
+            let context = try LlamaLanguageModel.LlamaToolPromptContext(format: format, tools: tools)
+            #expect(context.definitions.map(\.name) == (includeAdvertisedTool ? ["getWeather"] : []))
+            let message = context.format.systemMessage(existingText: "Hi.", tools: context.definitions)
+            #expect(!message.contains(optedOutTool.name))
+            #expect(!message.contains(optedOutTool.description))
+            if includeAdvertisedTool {
+                #expect(message.contains("getWeather"))
+                #expect(message.contains("city"))
+            } else {
+                #expect(message == "Hi.")
+            }
+        }
+
         // MARK: - Hermes JSON parsing
 
         @Test func parsesHermesCall() {
@@ -89,7 +130,7 @@ import Testing
                 </tool_call>
                 """
             let (visible, calls) = LlamaToolCallFormat.hermesJSON.parseToolCalls(in: text)
-            #expect(visible == "Let me check that for you.")
+            #expect(visible == "Let me check that for you.\n")
             #expect(calls.count == 1)
             #expect(calls.first?.name == "get_weather")
             #expect(calls.first?.argumentsJSON == "{\"city\":\"Paris\"}")
@@ -111,7 +152,7 @@ import Testing
                 </tool_call>
                 """
             let (visible, calls) = LlamaToolCallFormat.hermesJSON.parseToolCalls(in: text)
-            #expect(visible.isEmpty)
+            #expect(visible == "\n")
             #expect(calls.map(\.name) == ["a", "b"])
         }
 
@@ -142,7 +183,7 @@ import Testing
                 </tool_call>
                 """
             let (visible, calls) = LlamaToolCallFormat.qwenXML.parseToolCalls(in: text)
-            #expect(visible == "I will look that up.")
+            #expect(visible == "I will look that up.\n")
             #expect(calls.count == 1)
             #expect(calls.first?.name == "get_weather")
             #expect(calls.first?.argumentsJSON == "{\"city\":\"Paris\"}")
@@ -175,6 +216,44 @@ import Testing
                 """
             let (_, calls) = LlamaToolCallFormat.qwenXML.parseToolCalls(in: text)
             #expect(calls.first?.argumentsJSON == "{\"items\":[\"a\",\"b\"]}")
+        }
+
+        @Test func qwenXMLAcceptsCompleteZeroArgumentCall() {
+            let text = "<tool_call><function=f></function></tool_call>"
+            let (_, calls) = LlamaToolCallFormat.qwenXML.parseToolCalls(in: text)
+            #expect(calls == [LlamaParsedToolCall(name: "f", argumentsJSON: "{}")])
+        }
+
+        @Test func qwenXMLAcceptsMultipleCompleteParameters() {
+            let text = """
+                <tool_call>
+                <function=f>
+                <parameter=city>Paris</parameter>
+                <parameter=units>celsius</parameter>
+                </function>
+                </tool_call>
+                """
+            let (_, calls) = LlamaToolCallFormat.qwenXML.parseToolCalls(in: text)
+            #expect(calls.first?.argumentsJSON == "{\"city\":\"Paris\",\"units\":\"celsius\"}")
+        }
+
+        @Test(arguments: [
+            "<function=side_effect>",
+            "<function=f><parameter=city>Paris</parameter>",
+            "<function=f><parameter=city>Paris</function>",
+            "<function=f><parameter=city</function>",
+            "<function=f><parameter=city>Paris</parameter><parameter=units</function>",
+            "<function=f><parameter=city>Paris</parameter><parameter=units>celsius</function>",
+            "<function=f><parameter=city>Paris<parameter=units>celsius</parameter></function>",
+            "<function=f><parameter>Paris</parameter></function>",
+            "<function=f><parameter=>Paris</parameter></function>",
+            "<function=f><parameter=city</parameter></function>",
+            "<function=f><parameter=city>Paris</function></parameter>",
+            "<function=f></function><parameter=city>Paris</parameter>",
+        ])
+        func qwenXMLRejectsIncompleteOrMalformedCalls(body: String) {
+            let (_, calls) = LlamaToolCallFormat.qwenXML.parseToolCalls(in: "<tool_call>\(body)</tool_call>")
+            #expect(calls.isEmpty)
         }
 
         // MARK: - Gemma parsing
@@ -264,6 +343,32 @@ import Testing
         }
 
         // MARK: - Streaming visibility
+
+        @Test(
+            arguments: [LlamaToolCallFormat.hermesJSON, .qwenXML, .gemma],
+            [" ", "\n", "\n\n", "\t"]
+        )
+        func preservesWhitespaceBetweenToolRounds(format: LlamaToolCallFormat, separator: String) {
+            let markup = format.assistantText(
+                for: [LlamaParsedToolCall(name: "get_weather", argumentsJSON: "{\"city\":\"Paris\"}")],
+                precededByContent: false
+            )
+            let rounds = ["Checking." + separator + markup, markup, "It is 72."]
+            let response = rounds.map { format.parseToolCalls(in: $0).visibleText }.joined()
+            let streamed = rounds.map {
+                format.streamingVisibleText(in: $0, withholdToolCalls: true, holdPartialMarkers: false)
+            }.joined()
+            #expect(response == "Checking." + separator + "It is 72.")
+            #expect(response == streamed)
+        }
+
+        @Test(arguments: [LlamaToolCallFormat.hermesJSON, .qwenXML, .gemma])
+        func preservesWhitespaceInPlainText(format: LlamaToolCallFormat) {
+            let text = "\n  It is 72.\n"
+            let (visible, calls) = format.parseToolCalls(in: text)
+            #expect(visible == text)
+            #expect(calls.isEmpty)
+        }
 
         @Test func streamingWithholdsPartialToolCallMarker() {
             let visible = LlamaToolCallFormat.hermesJSON.streamingVisibleText(

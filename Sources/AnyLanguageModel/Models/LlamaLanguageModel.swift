@@ -790,7 +790,21 @@ import Foundation
         struct LlamaToolPromptContext {
             let format: LlamaToolCallFormat
             let definitions: [LlamaToolDefinition]
-            var pendingEntries: [Transcript.Entry]
+            var pendingEntries: [Transcript.Entry] = []
+
+            init(format: LlamaToolCallFormat, tools: [any Tool]) throws {
+                self.format = format
+                self.definitions = try tools.filter(\.includesSchemaInInstructions).map { tool in
+                    let schema = tool.parameters.withResolvedRoot() ?? tool.parameters
+                    let data = try JSONEncoder().encode(schema)
+                    let parameters = try JSONSerialization.jsonObject(with: data) as? [String: Any]
+                    return LlamaToolDefinition(
+                        name: tool.name,
+                        description: tool.description,
+                        parameters: parameters
+                    )
+                }
+            }
         }
 
         private struct ToolInvocationResult {
@@ -829,18 +843,7 @@ import Foundation
 
         private func makeToolPromptContext(for session: LanguageModelSession) throws -> LlamaToolPromptContext? {
             guard !session.tools.isEmpty, self.model != nil else { return nil }
-            let format = currentToolCallFormat()
-            let definitions = try session.tools.map { tool -> LlamaToolDefinition in
-                let schema = tool.parameters.withResolvedRoot() ?? tool.parameters
-                let data = try JSONEncoder().encode(schema)
-                let parameters = try JSONSerialization.jsonObject(with: data) as? [String: Any]
-                return LlamaToolDefinition(
-                    name: tool.name,
-                    description: tool.description,
-                    parameters: parameters
-                )
-            }
-            return LlamaToolPromptContext(format: format, definitions: definitions, pendingEntries: [])
+            return try LlamaToolPromptContext(format: currentToolCallFormat(), tools: session.tools)
         }
 
         private func toolOutputText(_ output: Transcript.ToolOutput) -> String {
