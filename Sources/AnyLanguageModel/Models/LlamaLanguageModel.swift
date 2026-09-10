@@ -846,21 +846,6 @@ import Foundation
             return try LlamaToolPromptContext(format: currentToolCallFormat(), tools: session.tools)
         }
 
-        private func toolOutputText(_ output: Transcript.ToolOutput) -> String {
-            var parts: [String] = []
-            for segment in output.segments {
-                switch segment {
-                case .text(let text):
-                    parts.append(text.content)
-                case .structure(let structure):
-                    parts.append(structure.content.jsonString)
-                case .image:
-                    break
-                }
-            }
-            return parts.joined(separator: "\n")
-        }
-
         private func makeTranscriptToolCalls(
             from parsedCalls: [LlamaParsedToolCall]
         ) throws -> [Transcript.ToolCall] {
@@ -1033,12 +1018,11 @@ import Foundation
                     }
 
                     guard let format = toolContext?.format else {
-                        if outputFormat == .gemma {
-                            text = LlamaToolCallFormat.stripGemmaThoughtChannels(from: accumulated)
-                                .trimmingCharacters(in: .whitespacesAndNewlines)
-                        } else {
-                            text = accumulated
-                        }
+                        text = outputFormat.streamingVisibleText(
+                            in: accumulated,
+                            withholdToolCalls: false,
+                            holdPartialMarkers: false
+                        )
                         break generationLoop
                     }
                     let (visibleText, parsedCalls) = format.parseToolCalls(in: accumulated)
@@ -2237,7 +2221,7 @@ import Foundation
                     guard let toolContext else { break }
                     let message = toolContext.format.toolResponseMessage(
                         toolName: output.toolName,
-                        content: toolOutputText(output)
+                        segments: output.segments
                     )
                     if let last = messages.last, last.role == message.role, last.role == "user",
                         last.content.hasSuffix("</tool_response>")
@@ -2260,12 +2244,12 @@ import Foundation
 
             if let toolContext, !toolContext.definitions.isEmpty {
                 if let systemIndex = messages.firstIndex(where: { $0.role == "system" }) {
-                    messages[systemIndex].content = toolContext.format.systemMessage(
+                    messages[systemIndex].content = try toolContext.format.systemMessage(
                         existingText: messages[systemIndex].content,
                         tools: toolContext.definitions
                     )
                 } else {
-                    let systemText = toolContext.format.systemMessage(
+                    let systemText = try toolContext.format.systemMessage(
                         existingText: "",
                         tools: toolContext.definitions
                     )

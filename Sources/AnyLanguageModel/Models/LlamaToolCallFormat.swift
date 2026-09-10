@@ -155,7 +155,7 @@ struct LlamaParsedToolCall: Equatable {
 extension LlamaToolCallFormat {
     /// Renders the tool section of the system prompt and merges it with any
     /// existing system text, following each template's own ordering.
-    func systemMessage(existingText: String, tools: [LlamaToolDefinition]) -> String {
+    func systemMessage(existingText: String, tools: [LlamaToolDefinition]) throws -> String {
         guard !tools.isEmpty else { return existingText }
         switch self {
         case .hermesJSON:
@@ -165,7 +165,7 @@ extension LlamaToolCallFormat {
             let block = qwenXMLToolsBlock(tools: tools)
             return existingText.isEmpty ? block : block + "\n\n" + existingText
         case .gemma:
-            let declarations = tools.map { "<|tool>" + gemmaDeclaration(for: $0) + "<tool|>" }.joined()
+            let declarations = try tools.map { "<|tool>" + (try gemmaDeclaration(for: $0)) + "<tool|>" }.joined()
             return existingText + declarations
         }
     }
@@ -234,13 +234,69 @@ extension LlamaToolCallFormat {
 // MARK: - Gemma declaration and argument notation
 
 extension LlamaToolCallFormat {
+    enum SchemaReferenceError: Error, Equatable {
+        case unresolvedReference(String)
+        case recursiveReference(String)
+    }
+
+    /// Gemma declarations cannot carry JSON Schema references. Inline them
+    /// before rendering, and reject cycles that cannot be expanded finitely.
+    private func gemmaResolvedSchema(
+        _ schema: [String: Any],
+        definitions: [String: [String: Any]],
+        resolving: Set<String> = []
+    ) throws -> [String: Any] {
+        if let reference = schema["$ref"] as? String {
+            guard !resolving.contains(reference) else {
+                throw SchemaReferenceError.recursiveReference(reference)
+            }
+            let prefix = "#/$defs/"
+            let name = String(reference.dropFirst(prefix.count))
+                .replacingOccurrences(of: "~1", with: "/")
+                .replacingOccurrences(of: "~0", with: "~")
+            guard reference.hasPrefix(prefix), let target = definitions[name] else {
+                throw SchemaReferenceError.unresolvedReference(reference)
+            }
+            var overrides = schema
+            overrides.removeValue(forKey: "$ref")
+            return try gemmaResolvedSchema(
+                target.merging(overrides, uniquingKeysWith: { _, override in override }),
+                definitions: definitions,
+                resolving: resolving.union([reference])
+            )
+        }
+
+        var resolved = schema
+        resolved.removeValue(forKey: "$defs")
+        if let properties = schema["properties"] as? [String: [String: Any]] {
+            resolved["properties"] = try properties.mapValues {
+                try gemmaResolvedSchema($0, definitions: definitions, resolving: resolving)
+            }
+        }
+        if let items = schema["items"] as? [String: Any] {
+            resolved["items"] = try gemmaResolvedSchema(items, definitions: definitions, resolving: resolving)
+        }
+        for keyword in ["anyOf", "allOf", "oneOf"] {
+            if let choices = schema[keyword] as? [[String: Any]] {
+                resolved[keyword] = try choices.map {
+                    try gemmaResolvedSchema($0, definitions: definitions, resolving: resolving)
+                }
+            }
+        }
+        return resolved
+    }
+
     /// Renders one Gemma 4 function declaration:
     /// `declaration:name{description:<|"|>...<|"|>,parameters:{...}}`.
     /// Types are uppercased and strings are quoted with the `<|"|>` token, per
     /// the canonical template's `format_function_declaration` macro.
-    fileprivate func gemmaDeclaration(for tool: LlamaToolDefinition) -> String {
+    fileprivate func gemmaDeclaration(for tool: LlamaToolDefinition) throws -> String {
         var rendered = "declaration:\(tool.name){description:\(gemmaQuote(tool.description))"
         if let parameters = tool.parameters {
+            let parameters = try gemmaResolvedSchema(
+                parameters,
+                definitions: parameters["$defs"] as? [String: [String: Any]] ?? [:]
+            )
             rendered += ",parameters:{"
             var parts: [String] = []
             if let properties = parameters["properties"] as? [String: Any], !properties.isEmpty {
@@ -273,21 +329,7 @@ extension LlamaToolCallFormat {
                 fields.append("enum:[\(items)]")
             }
             if type == "ARRAY", let items = value["items"] as? [String: Any], !items.isEmpty {
-                var itemFields: [String] = []
-                for itemKey in items.keys.sorted() {
-                    guard let itemValue = items[itemKey] else { continue }
-                    if itemKey == "type", let itemType = itemValue as? String {
-                        itemFields.append("type:\(gemmaQuote(itemType.uppercased()))")
-                    } else if itemKey == "properties", let nested = itemValue as? [String: Any] {
-                        itemFields.append("properties:{" + gemmaProperties(nested) + "}")
-                    } else if itemKey == "required", let required = itemValue as? [Any] {
-                        let names = required.map { gemmaQuote("\($0)") }.joined(separator: ",")
-                        itemFields.append("required:[\(names)]")
-                    } else {
-                        itemFields.append("\(itemKey):\(gemmaArgument(itemValue))")
-                    }
-                }
-                fields.append("items:{" + itemFields.joined(separator: ",") + "}")
+                fields.append("items:{" + gemmaArrayItems(items) + "}")
             }
             if type == "OBJECT", let nested = value["properties"] as? [String: Any] {
                 fields.append("properties:{" + gemmaProperties(nested) + "}")
@@ -300,6 +342,23 @@ extension LlamaToolCallFormat {
             parts.append("\(key):{" + fields.joined(separator: ",") + "}")
         }
         return parts.joined(separator: ",")
+    }
+
+    private func gemmaArrayItems(_ items: [String: Any]) -> String {
+        var fields: [String] = []
+        for key in items.keys.sorted() {
+            guard let value = items[key] else { continue }
+            if key == "type", let type = value as? String {
+                fields.append("type:\(gemmaQuote(type.uppercased()))")
+            } else if key == "properties", let nested = value as? [String: Any] {
+                fields.append("properties:{" + gemmaProperties(nested) + "}")
+            } else if key == "items", let nested = value as? [String: Any] {
+                fields.append("items:{" + gemmaArrayItems(nested) + "}")
+            } else {
+                fields.append("\(key):\(gemmaArgument(value))")
+            }
+        }
+        return fields.joined(separator: ",")
     }
 
     fileprivate func gemmaQuote(_ string: String) -> String {
@@ -332,6 +391,24 @@ extension LlamaToolCallFormat {
             return "[" + array.map { gemmaArgument($0) }.joined(separator: ",") + "]"
         default:
             return gemmaQuote("\(value)")
+        }
+    }
+
+    private func gemmaArgument(_ content: GeneratedContent) -> String {
+        switch content.kind {
+        case .null:
+            return "null"
+        case .bool(let value):
+            return value ? "true" : "false"
+        case .number(let value):
+            return gemmaArgument(NSNumber(value: value))
+        case .string(let value):
+            return gemmaQuote(value)
+        case .array(let elements):
+            return "[" + elements.map { gemmaArgument($0) }.joined(separator: ",") + "]"
+        case .structure(let properties, _):
+            let fields = properties.keys.sorted().map { "\($0):\(gemmaArgument(properties[$0]!))" }
+            return "{" + fields.joined(separator: ",") + "}"
         }
     }
 
@@ -405,20 +482,43 @@ extension LlamaToolCallFormat {
     /// Renders one tool output as the message that carries it back to the model.
     /// Hermes and Qwen XML formats deliver results inside a user turn; Gemma 4
     /// continues the open model turn with a `<|tool_response>` block.
-    func toolResponseMessage(toolName: String, content: String) -> (role: String, content: String) {
+    /// Gemma preserves segment types, wrapping non-object values in `value`
+    /// and collecting multiple segments into an array in their original order.
+    func toolResponseMessage(
+        toolName: String,
+        segments: [Transcript.Segment]
+    ) -> (role: String, content: String) {
         switch self {
         case .hermesJSON, .qwenXML:
+            let content = segments.compactMap { segment -> String? in
+                switch segment {
+                case .text(let text): return text.content
+                case .structure(let structure): return structure.content.jsonString
+                case .image: return nil
+                }
+            }.joined(separator: "\n")
             return ("user", "<tool_response>\n\(content)\n</tool_response>")
         case .gemma:
-            let body: String
-            if let data = content.data(using: .utf8),
-                let object = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
-            {
-                body = object.keys.sorted().map { "\($0):\(gemmaArgument(object[$0]!))" }.joined(separator: ",")
-            } else {
-                body = "value:\(gemmaArgument(content))"
+            let values = segments.compactMap { segment -> GeneratedContent? in
+                switch segment {
+                case .text(let text): return GeneratedContent(text.content)
+                case .structure(let structure): return structure.content
+                case .image: return nil
+                }
             }
-            return ("tool", "<|tool_response>response:\(toolName){\(body)}<tool_response|>")
+            let content: GeneratedContent
+            switch values.count {
+            case 0: content = GeneratedContent("")
+            case 1: content = values[0]
+            default: content = GeneratedContent(kind: .array(values))
+            }
+            let body: String
+            if case .structure = content.kind {
+                body = gemmaArgument(content)
+            } else {
+                body = "{value:\(gemmaArgument(content))}"
+            }
+            return ("tool", "<|tool_response>response:\(toolName)\(body)<tool_response|>")
         }
     }
 }
