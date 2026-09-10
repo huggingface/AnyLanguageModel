@@ -98,7 +98,11 @@ enum LlamaToolCallFormat: Sendable, Equatable {
     /// from a tool-call start onward is withheld when tools are active, and a
     /// trailing partial match of either marker is held back until the next
     /// token confirms or breaks it.
-    func streamingVisibleText(in raw: String, withholdToolCalls: Bool) -> String {
+    func streamingVisibleText(
+        in raw: String,
+        withholdToolCalls: Bool,
+        holdPartialMarkers: Bool = true
+    ) -> String {
         var text = raw
         if self == .gemma {
             text = Self.stripGemmaThoughtChannels(from: text)
@@ -106,6 +110,9 @@ enum LlamaToolCallFormat: Sendable, Equatable {
         if withholdToolCalls, let range = text.range(of: callStartMarker) {
             text = String(text[..<range.lowerBound])
         }
+        // Once a round has ended, a trailing marker prefix is real output,
+        // so release it rather than hold it back.
+        guard holdPartialMarkers else { return text }
         var candidates: [String] = []
         if withholdToolCalls {
             candidates.append(callStartMarker)

@@ -1039,8 +1039,10 @@ import Foundation
                         break generationLoop
                     }
                     let (visibleText, parsedCalls) = format.parseToolCalls(in: accumulated)
+                    // Keep the text from every round, as the streaming path does,
+                    // so a preamble before a tool call is not lost.
+                    text += visibleText
                     if parsedCalls.isEmpty {
-                        text = visibleText
                         break generationLoop
                     }
 
@@ -1074,7 +1076,6 @@ import Foundation
                         )
                     case .invocations(let invocations):
                         guard !invocations.isEmpty else {
-                            text = visibleText
                             break generationLoop
                         }
                         let callsEntry = Transcript.Entry.toolCalls(
@@ -1253,7 +1254,8 @@ import Foundation
 
                                 let roundVisible = outputFormat.streamingVisibleText(
                                     in: roundRaw,
-                                    withholdToolCalls: withholdToolCalls
+                                    withholdToolCalls: withholdToolCalls,
+                                    holdPartialMarkers: false
                                 )
 
                                 guard let format = toolContext?.format else {

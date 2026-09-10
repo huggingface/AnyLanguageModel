@@ -281,6 +281,15 @@ import Testing
             #expect(visible == "5 < 10 is true")
         }
 
+        @Test func streamingReleasesPartialMarkerAtEndOfRound() {
+            let visible = LlamaToolCallFormat.hermesJSON.streamingVisibleText(
+                in: "The answer is <",
+                withholdToolCalls: true,
+                holdPartialMarkers: false
+            )
+            #expect(visible == "The answer is <")
+        }
+
         @Test func streamingTruncatesAtCompleteToolCallStart() {
             let visible = LlamaToolCallFormat.hermesJSON.streamingVisibleText(
                 in: "Checking.<tool_call>\n{\"name\":",
