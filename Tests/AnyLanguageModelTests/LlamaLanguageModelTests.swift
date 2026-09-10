@@ -31,6 +31,28 @@ import Testing
             #expect(customModel.repeatLastN == 64)
         }
 
+        @Test func concurrentFirstRequests() async throws {
+            try await withThrowingTaskGroup(of: String.self) { group in
+                for _ in 0 ..< 2 {
+                    group.addTask {
+                        let session = LanguageModelSession(model: model)
+                        let response = try await session.respond(
+                            to: "Reply with a single word.",
+                            options: GenerationOptions(maximumResponseTokens: 16)
+                        )
+                        return response.content
+                    }
+                }
+
+                var responseCount = 0
+                for try await content in group {
+                    #expect(!content.isEmpty)
+                    responseCount += 1
+                }
+                #expect(responseCount == 2)
+            }
+        }
+
         @Test func promptLongerThanBatchSize() async throws {
             let session = LanguageModelSession(model: model)
             var options = GenerationOptions(maximumResponseTokens: 16)

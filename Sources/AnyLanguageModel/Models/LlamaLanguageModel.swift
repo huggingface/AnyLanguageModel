@@ -470,7 +470,11 @@ import Foundation
             return try body()
         }
 
-        /// Whether the model is currently loaded
+        /// Serializes the loaded-state check, loading, and publication of the model,
+        /// vocabulary, and projector so concurrent first requests cannot reload them.
+        private let modelLoadLock = NSLock()
+
+        /// Whether the model is currently loaded. Protected by `modelLoadLock`.
         private var isModelLoaded: Bool = false
 
         /// A context kept alive for one session so exchanges reuse its state.
@@ -788,7 +792,7 @@ import Foundation
             if mmprojPath == nil {
                 try validateNoImageSegments(in: session)
             }
-            try await ensureModelLoaded()
+            try ensureModelLoaded()
 
             let runtimeOptions = resolvedOptions(from: options)
             let structuredOptions = resolvedStructuredOptions(from: options)
@@ -905,7 +909,7 @@ import Foundation
                 AsyncThrowingStream { continuation in
                     let task = Task {
                         do {
-                            try await ensureModelLoaded()
+                            try ensureModelLoaded()
 
                             let runtimeOptions = resolvedOptions(from: options)
                             let maxTokens = runtimeOptions.maximumResponseTokens ?? 100
@@ -970,7 +974,10 @@ import Foundation
 
         // MARK: - Private Helpers
 
-        private func ensureModelLoaded() async throws {
+        private func ensureModelLoaded() throws {
+            modelLoadLock.lock()
+            defer { modelLoadLock.unlock() }
+
             guard !isModelLoaded else { return }
 
             // Check if model file exists
