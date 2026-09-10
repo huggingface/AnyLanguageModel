@@ -208,7 +208,7 @@ import Testing
 
         @Test func gemmaRejectsUnresolvedSchemaReferences() {
             let tool = LlamaToolDefinition(name: "f", description: "", parameters: ["$ref": "#/$defs/Missing"])
-            #expect(throws: LlamaToolCallFormat.SchemaReferenceError.unresolvedReference("#/$defs/Missing")) {
+            #expect(throws: LlamaToolCallFormat.SchemaRenderingError.unresolvedReference("#/$defs/Missing")) {
                 try LlamaToolCallFormat.gemma.systemMessage(existingText: "", tools: [tool])
             }
         }
@@ -227,9 +227,74 @@ import Testing
                     ],
                 ]
             )
-            #expect(throws: LlamaToolCallFormat.SchemaReferenceError.recursiveReference("#/$defs/Node")) {
+            #expect(throws: LlamaToolCallFormat.SchemaRenderingError.recursiveReference("#/$defs/Node")) {
                 try LlamaToolCallFormat.gemma.systemMessage(existingText: "", tools: [tool])
             }
+        }
+
+        enum SchemaPosition: CaseIterable {
+            case root, property, arrayItem
+
+            func wrap(_ schema: DynamicGenerationSchema) -> DynamicGenerationSchema {
+                switch self {
+                case .root:
+                    return schema
+                case .property:
+                    return DynamicGenerationSchema(
+                        name: "Arguments",
+                        properties: [.init(name: "value", schema: schema)]
+                    )
+                case .arrayItem:
+                    return DynamicGenerationSchema(
+                        name: "Arguments",
+                        properties: [.init(name: "values", schema: .init(arrayOf: schema))]
+                    )
+                }
+            }
+
+            func wrap(_ schema: [String: Any]) -> [String: Any] {
+                switch self {
+                case .root: return schema
+                case .property: return ["type": "object", "properties": ["value": schema]]
+                case .arrayItem:
+                    return ["type": "object", "properties": ["values": ["type": "array", "items": schema]]]
+                }
+            }
+        }
+
+        @Test(arguments: SchemaPosition.allCases)
+        func gemmaRejectsReferencedDynamicUnions(position: SchemaPosition) throws {
+            let choice = DynamicGenerationSchema(
+                name: "Choice",
+                anyOf: [.init(type: String.self), .init(type: Int.self)]
+            )
+            let schema = try GenerationSchema(root: position.wrap(choice), dependencies: [])
+            let data = try JSONEncoder().encode(schema)
+            let parameters = try #require(JSONSerialization.jsonObject(with: data) as? [String: Any])
+            let tool = LlamaToolDefinition(name: "f", description: "", parameters: parameters)
+            #expect(throws: LlamaToolCallFormat.SchemaRenderingError.unsupportedComposition("anyOf")) {
+                try LlamaToolCallFormat.gemma.systemMessage(existingText: "", tools: [tool])
+            }
+        }
+
+        @Test(arguments: SchemaPosition.allCases, ["anyOf", "oneOf", "allOf"])
+        func gemmaRejectsInlineSchemaCompositions(position: SchemaPosition, keyword: String) {
+            let parameters = position.wrap([keyword: [["type": "string"], ["type": "integer"]]])
+            let tool = LlamaToolDefinition(name: "f", description: "", parameters: parameters)
+            #expect(throws: LlamaToolCallFormat.SchemaRenderingError.unsupportedComposition(keyword)) {
+                try LlamaToolCallFormat.gemma.systemMessage(existingText: "", tools: [tool])
+            }
+        }
+
+        @Test(arguments: [LlamaToolCallFormat.hermesJSON, .qwenXML])
+        func otherFormatsPreserveUnionSchemas(format: LlamaToolCallFormat) throws {
+            let tool = LlamaToolDefinition(
+                name: "f",
+                description: "",
+                parameters: ["anyOf": [["type": "string"], ["type": "integer"]]]
+            )
+            let message = try format.systemMessage(existingText: "", tools: [tool])
+            #expect(message.contains("\"anyOf\":[{\"type\":\"string\"},{\"type\":\"integer\"}]"))
         }
 
         // MARK: - Hermes JSON parsing

@@ -234,13 +234,25 @@ extension LlamaToolCallFormat {
 // MARK: - Gemma declaration and argument notation
 
 extension LlamaToolCallFormat {
-    enum SchemaReferenceError: Error, Equatable {
+    enum SchemaRenderingError: Error, Equatable, LocalizedError {
         case unresolvedReference(String)
         case recursiveReference(String)
+        case unsupportedComposition(String)
+
+        var errorDescription: String? {
+            switch self {
+            case .unresolvedReference(let reference):
+                return "Gemma tool schema reference '\(reference)' could not be resolved."
+            case .recursiveReference(let reference):
+                return "Gemma tool schema reference '\(reference)' is recursive and cannot be expanded."
+            case .unsupportedComposition(let keyword):
+                return "Gemma tool declarations do not support JSON Schema '\(keyword)' compositions."
+            }
+        }
     }
 
     /// Gemma declarations cannot carry JSON Schema references. Inline them
-    /// before rendering, and reject cycles that cannot be expanded finitely.
+    /// before rendering, and reject cycles and unsupported schema compositions.
     private func gemmaResolvedSchema(
         _ schema: [String: Any],
         definitions: [String: [String: Any]],
@@ -248,14 +260,14 @@ extension LlamaToolCallFormat {
     ) throws -> [String: Any] {
         if let reference = schema["$ref"] as? String {
             guard !resolving.contains(reference) else {
-                throw SchemaReferenceError.recursiveReference(reference)
+                throw SchemaRenderingError.recursiveReference(reference)
             }
             let prefix = "#/$defs/"
             let name = String(reference.dropFirst(prefix.count))
                 .replacingOccurrences(of: "~1", with: "/")
                 .replacingOccurrences(of: "~0", with: "~")
             guard reference.hasPrefix(prefix), let target = definitions[name] else {
-                throw SchemaReferenceError.unresolvedReference(reference)
+                throw SchemaRenderingError.unresolvedReference(reference)
             }
             var overrides = schema
             overrides.removeValue(forKey: "$ref")
@@ -264,6 +276,10 @@ extension LlamaToolCallFormat {
                 definitions: definitions,
                 resolving: resolving.union([reference])
             )
+        }
+
+        for keyword in ["anyOf", "allOf", "oneOf"] where schema[keyword] != nil {
+            throw SchemaRenderingError.unsupportedComposition(keyword)
         }
 
         var resolved = schema
@@ -275,13 +291,6 @@ extension LlamaToolCallFormat {
         }
         if let items = schema["items"] as? [String: Any] {
             resolved["items"] = try gemmaResolvedSchema(items, definitions: definitions, resolving: resolving)
-        }
-        for keyword in ["anyOf", "allOf", "oneOf"] {
-            if let choices = schema[keyword] as? [[String: Any]] {
-                resolved[keyword] = try choices.map {
-                    try gemmaResolvedSchema($0, definitions: definitions, resolving: resolving)
-                }
-            }
         }
         return resolved
     }
