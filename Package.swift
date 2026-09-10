@@ -40,7 +40,7 @@ let package = Package(
             ]
         ),
         .package(url: "https://github.com/mattt/JSONSchema", from: "1.3.0"),
-        .package(url: "https://github.com/mattt/llama.swift", .upToNextMajor(from: "2.7484.0")),
+        .package(url: "https://github.com/mattt/llama.swift", .upToNextMajor(from: "2.10549.0")),
         .package(url: "https://github.com/mattt/PartialJSONDecoder", from: "1.0.0"),
         .package(url: "https://github.com/ml-explore/mlx-swift-lm", from: "3.0.0"),
         .package(url: "https://github.com/swiftlang/swift-syntax", from: "602.0.0"),

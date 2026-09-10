@@ -1425,6 +1425,9 @@ import Foundation
                         )
                     }
                     if let videoContext = wrapper.video_ctx {
+                        if let bitmap = wrapper.bitmap {
+                            mtmd_bitmap_free(bitmap)
+                        }
                         mtmd_helper_video_free(videoContext)
                         throw LlamaLanguageModelError.unsupportedFeature
                     }
