@@ -398,17 +398,24 @@
 
     @available(macOS 26.0, iOS 26.0, watchOS 26.0, tvOS 26.0, visionOS 26.0, *)
     extension GenerationOptions {
-        fileprivate func toFoundationModels() -> FoundationModels.GenerationOptions {
-            var options = FoundationModels.GenerationOptions()
-
-            if let temperature = self.temperature {
-                options.temperature = temperature
+        func toFoundationModels() -> FoundationModels.GenerationOptions {
+            let sampling: FoundationModels.GenerationOptions.SamplingMode?
+            switch self.sampling?.mode {
+            case .greedy:
+                sampling = .greedy
+            case .topK(let k, let seed):
+                sampling = .random(top: k, seed: seed)
+            case .nucleus(let probabilityThreshold, let seed):
+                sampling = .random(probabilityThreshold: probabilityThreshold, seed: seed)
+            case nil:
+                sampling = nil
             }
 
-            // Note: FoundationModels.GenerationOptions may not have all properties
-            // Only set those that are available
-
-            return options
+            return FoundationModels.GenerationOptions(
+                sampling: sampling,
+                temperature: temperature,
+                maximumResponseTokens: maximumResponseTokens
+            )
         }
     }
 
