@@ -52,6 +52,8 @@ private final class StringTokenCache: @unchecked Sendable {
     }
 
     private let tokensByKey = Locked<[Key: Set<Int>]>([:])
+    private let integerTokensByKey = Locked<[Key: Set<Int>]>([:])
+    private let decimalTokensByKey = Locked<[Key: Set<Int>]>([:])
 
     func tokens(for key: Key) -> Set<Int>? {
         tokensByKey.withLock { $0[key] }
@@ -59,6 +61,22 @@ private final class StringTokenCache: @unchecked Sendable {
 
     func store(_ tokens: Set<Int>, for key: Key) {
         tokensByKey.withLock { $0[key] = tokens }
+    }
+
+    func integerTokens(for key: Key) -> Set<Int>? {
+        integerTokensByKey.withLock { $0[key] }
+    }
+
+    func storeIntegerTokens(_ tokens: Set<Int>, for key: Key) {
+        integerTokensByKey.withLock { $0[key] = tokens }
+    }
+
+    func decimalTokens(for key: Key) -> Set<Int>? {
+        decimalTokensByKey.withLock { $0[key] }
+    }
+
+    func storeDecimalTokens(_ tokens: Set<Int>, for key: Key) {
+        decimalTokensByKey.withLock { $0[key] = tokens }
     }
 }
 
@@ -207,6 +225,11 @@ struct ConstrainedJSONGenerator<Backend: TokenBackend> {
     /// two tokens. Requiring every token to contain a digit excluded `-` and made negatives
     /// unrepresentable except via rare multi-character tokens.
     private static func buildValidIntegerTokens(backend: Backend) -> Set<Int> {
+        let cacheKey = stringTokenCacheKey(for: backend)
+        if let cached = StringTokenCache.shared.integerTokens(for: cacheKey) {
+            return cached
+        }
+
         var allowed = Set<Int>()
         for token in 0 ..< backend.vocabSize {
             if backend.isSpecialToken(token) { continue }
@@ -218,6 +241,8 @@ struct ConstrainedJSONGenerator<Backend: TokenBackend> {
                 allowed.insert(token)
             }
         }
+
+        StringTokenCache.shared.storeIntegerTokens(allowed, for: cacheKey)
         return allowed
     }
 
@@ -228,6 +253,11 @@ struct ConstrainedJSONGenerator<Backend: TokenBackend> {
     /// which dropped `.` and forced the model to pad zeros until `maxDecimalTokenLimit`
     /// (pathological `e+31` values after Double re-serialization).
     private static func buildValidDecimalTokens(backend: Backend) -> Set<Int> {
+        let cacheKey = stringTokenCacheKey(for: backend)
+        if let cached = StringTokenCache.shared.decimalTokens(for: cacheKey) {
+            return cached
+        }
+
         var allowed = Set<Int>()
         for token in 0 ..< backend.vocabSize {
             if backend.isSpecialToken(token) { continue }
@@ -241,6 +271,8 @@ struct ConstrainedJSONGenerator<Backend: TokenBackend> {
                 allowed.insert(token)
             }
         }
+
+        StringTokenCache.shared.storeDecimalTokens(allowed, for: cacheKey)
         return allowed
     }
 
