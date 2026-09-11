@@ -314,10 +314,21 @@ public struct Transcript: Sendable, Equatable, Codable {
 
         private var calls: [ToolCall]
 
+        internal var providerMetadata: [String: String]?
+
         public init<S>(id: String = UUID().uuidString, _ calls: S)
         where S: Sequence, S.Element == ToolCall {
+            self.init(id: id, calls, providerMetadata: nil)
+        }
+
+        internal init<S>(
+            id: String = UUID().uuidString,
+            _ calls: S,
+            providerMetadata: [String: String]?
+        ) where S: Sequence, S.Element == ToolCall {
             self.id = id
             self.calls = Array(calls)
+            self.providerMetadata = providerMetadata
         }
     }
 
@@ -384,14 +395,26 @@ public struct Transcript: Sendable, Equatable, Codable {
         /// Ordered prompt segments.
         public var segments: [Segment]
 
+        internal var providerMetadata: [String: String]?
+
         public init(
             id: String = UUID().uuidString,
             assetIDs: [String],
             segments: [Segment]
         ) {
+            self.init(id: id, assetIDs: assetIDs, segments: segments, providerMetadata: nil)
+        }
+
+        internal init(
+            id: String = UUID().uuidString,
+            assetIDs: [String],
+            segments: [Segment],
+            providerMetadata: [String: String]?
+        ) {
             self.id = id
             self.assetIDs = assetIDs
             self.segments = segments
+            self.providerMetadata = providerMetadata
         }
     }
 

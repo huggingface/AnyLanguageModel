@@ -310,6 +310,7 @@ public struct GeminiLanguageModel: LanguageModel {
                 throw GeminiError.noCandidate
             }
 
+            let providerMetadata = try textPartMetadata(firstCandidate.content.parts ?? [])
             let functionCalls: [GeminiFunctionCall] =
                 firstCandidate.content.parts?.compactMap { part in
                     if case .functionCall(let call) = part { return call }
@@ -322,7 +323,7 @@ public struct GeminiLanguageModel: LanguageModel {
                 switch resolution {
                 case .stop(let calls):
                     if !calls.isEmpty {
-                        entries.append(.toolCalls(Transcript.ToolCalls(calls)))
+                        entries.append(.toolCalls(Transcript.ToolCalls(calls, providerMetadata: providerMetadata)))
                     }
                     let empty = try emptyResponseContent(for: type)
                     return LanguageModelSession.Response(
@@ -333,7 +334,7 @@ public struct GeminiLanguageModel: LanguageModel {
                 case .invocations(let invocations):
                     if !invocations.isEmpty {
                         let calls = Transcript.Entry.toolCalls(
-                            Transcript.ToolCalls(invocations.map(\.call))
+                            Transcript.ToolCalls(invocations.map(\.call), providerMetadata: providerMetadata)
                         )
                         transcript.append(calls)
                         entries.append(calls)
@@ -362,7 +363,8 @@ public struct GeminiLanguageModel: LanguageModel {
                     return LanguageModelSession.Response(
                         content: text as! Content,
                         rawContent: GeneratedContent(text),
-                        transcriptEntries: ArraySlice(entries)
+                        transcriptEntries: ArraySlice(entries),
+                        providerMetadata: providerMetadata
                     )
                 }
 
@@ -371,7 +373,8 @@ public struct GeminiLanguageModel: LanguageModel {
                 return LanguageModelSession.Response(
                     content: content,
                     rawContent: generatedContent,
-                    transcriptEntries: ArraySlice(entries)
+                    transcriptEntries: ArraySlice(entries),
+                    providerMetadata: providerMetadata
                 )
             }
         }
@@ -426,6 +429,7 @@ public struct GeminiLanguageModel: LanguageModel {
                         )
 
                     var accumulatedText = ""
+                    var accumulatedParts: [GeminiPart] = []
 
                     for try await chunk in stream {
                         guard let candidate = chunk.candidates.first else { continue }
@@ -434,6 +438,7 @@ public struct GeminiLanguageModel: LanguageModel {
                             for part in parts {
                                 if case .text(let textPart) = part {
                                     accumulatedText += textPart.text
+                                    accumulatedParts.append(part)
 
                                     var raw: GeneratedContent
                                     let content: Content.PartiallyGenerated?
@@ -454,7 +459,13 @@ public struct GeminiLanguageModel: LanguageModel {
                                     }
 
                                     if let content {
-                                        continuation.yield(.init(content: content, rawContent: raw))
+                                        continuation.yield(
+                                            .init(
+                                                content: content,
+                                                rawContent: raw,
+                                                providerMetadata: try textPartMetadata(accumulatedParts)
+                                            )
+                                        )
                                     }
                                 }
                             }
@@ -734,7 +745,7 @@ private func toGeneratedContent(_ value: [String: JSONValue]?) throws -> Generat
 }
 
 private func fromGeneratedContent(_ content: GeneratedContent) throws -> [String: JSONValue] {
-    let data = try JSONEncoder().encode(content)
+    let data = Data(content.jsonString.utf8)
     let jsonValue = try JSONDecoder().decode(JSONValue.self, from: data)
 
     guard case .object(let dict) = jsonValue else {
@@ -790,7 +801,8 @@ extension Transcript {
                 messages.append(
                     .init(
                         role: .model,
-                        parts: convertSegmentsToGeminiParts(response.segments)
+                        parts: restoreTextParts(from: response.providerMetadata)
+                            ?? convertSegmentsToGeminiParts(response.segments)
                     )
                 )
             case .toolCalls(let toolCalls):
@@ -808,7 +820,8 @@ extension Transcript {
                 messages.append(
                     .init(
                         role: .model,
-                        parts: functionCallParts
+                        parts: restoreTextParts(from: toolCalls.providerMetadata, around: functionCallParts)
+                            ?? functionCallParts
                     )
                 )
             case .toolOutput(let toolOutput):
@@ -901,6 +914,7 @@ private enum GeminiPart: Codable, Sendable {
         case functionCall
         case functionResponse
         case thoughtSignature
+        case thought
         case inlineData
         case fileData
     }
@@ -910,7 +924,13 @@ private enum GeminiPart: Codable, Sendable {
 
         if container.contains(.text) {
             let text = try container.decode(String.self, forKey: .text)
-            self = .text(GeminiTextPart(text: text))
+            self = .text(
+                GeminiTextPart(
+                    text: text,
+                    thoughtSignature: try container.decodeIfPresent(String.self, forKey: .thoughtSignature),
+                    thought: try container.decodeIfPresent(Bool.self, forKey: .thought)
+                )
+            )
         } else if container.contains(.functionCall) {
             // `thoughtSignature` is a sibling of `functionCall` within the part, not a member of it.
             // Thinking models require it to be echoed back verbatim, so it travels with the call.
@@ -923,6 +943,14 @@ private enum GeminiPart: Codable, Sendable {
             self = .inlineData(try container.decode(GeminiInlineData.self, forKey: .inlineData))
         } else if container.contains(.fileData) {
             self = .fileData(try container.decode(GeminiFileData.self, forKey: .fileData))
+        } else if container.contains(.thoughtSignature) {
+            // Streaming may deliver a signature in a final part without text.
+            self = .text(
+                GeminiTextPart(
+                    text: "",
+                    thoughtSignature: try container.decode(String.self, forKey: .thoughtSignature)
+                )
+            )
         } else {
             throw DecodingError.dataCorrupted(
                 DecodingError.Context(
@@ -938,6 +966,8 @@ private enum GeminiPart: Codable, Sendable {
         switch self {
         case .text(let part):
             try container.encode(part.text, forKey: .text)
+            try container.encodeIfPresent(part.thoughtSignature, forKey: .thoughtSignature)
+            try container.encodeIfPresent(part.thought, forKey: .thought)
         case .functionCall(let call):
             try container.encode(call, forKey: .functionCall)
             try container.encodeIfPresent(call.thoughtSignature, forKey: .thoughtSignature)
@@ -953,6 +983,43 @@ private enum GeminiPart: Codable, Sendable {
 
 private struct GeminiTextPart: Codable, Sendable {
     let text: String
+    var thoughtSignature: String? = nil
+    var thought: Bool? = nil
+}
+
+private let textPartsMetadataKey = "gemini.textParts"
+
+private struct GeminiTextHistoryPart: Codable {
+    let index: Int
+    let part: GeminiTextPart
+}
+
+// Keep signed text on its original part,
+// including unsigned siblings and their order relative to function calls.
+// Call arguments remain in the transcript's semantic representation.
+private func textPartMetadata(_ parts: [GeminiPart]) throws -> [String: String]? {
+    let textParts = parts.enumerated().compactMap { index, part -> GeminiTextHistoryPart? in
+        guard case .text(let text) = part else { return nil }
+        return GeminiTextHistoryPart(index: index, part: text)
+    }
+    guard textParts.contains(where: { $0.part.thoughtSignature != nil }) else { return nil }
+    let data = try JSONEncoder().encode(textParts)
+    return [textPartsMetadataKey: String(decoding: data, as: UTF8.self)]
+}
+
+private func restoreTextParts(
+    from metadata: [String: String]?,
+    around functionCalls: [GeminiPart] = []
+) -> [GeminiPart]? {
+    guard let json = metadata?[textPartsMetadataKey],
+        let textParts = try? JSONDecoder().decode([GeminiTextHistoryPart].self, from: Data(json.utf8))
+    else { return nil }
+    var parts = functionCalls
+    for text in textParts {
+        guard (0 ... parts.count).contains(text.index) else { return nil }
+        parts.insert(.text(text.part), at: text.index)
+    }
+    return parts
 }
 
 private struct GeminiInlineData: Codable, Sendable {
