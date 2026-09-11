@@ -291,12 +291,15 @@ import Foundation
 
             /// Top-p (nucleus) sampling threshold.
             ///
-            /// Set this to `nil` to use the backend default (`1.0`, i.e. disabled).
+            /// Set this to `nil` to inherit nucleus sampling from `GenerationOptions.sampling`,
+            /// otherwise use `1.0` for regular generation or `0.95` for structured generation.
+            /// Set this to `1.0` to disable top-p sampling explicitly.
             public var topP: Float?
 
             /// Top-k sampling: restricts sampling to the `k` most likely tokens.
             ///
-            /// Set this to `nil` or `0` to disable top-k sampling.
+            /// Set this to `nil` to inherit top-k sampling from `GenerationOptions.sampling`,
+            /// otherwise disable top-k sampling. Set this to `0` to disable it explicitly.
             public var topK: Int?
 
             /// Min-p sampling threshold, relative to the most likely token's probability.
@@ -306,12 +309,13 @@ import Foundation
 
             /// Penalty factor applied to recently generated tokens to reduce repetition.
             ///
-            /// Set this to `nil` to disable the repetition penalty.
+            /// Set this to `nil` to use no penalty for regular generation or `1.1` for
+            /// structured generation. Set this to `1.0` to neutralize the penalty explicitly.
             public var repetitionPenalty: Float?
 
             /// Number of recent tokens considered by the repetition penalty.
             ///
-            /// Set this to `nil` to use the backend default.
+            /// Set this to `nil` to use `20` for regular generation or `64` for structured generation.
             public var repetitionContextSize: Int?
 
             /// Creates MLX-specific generation options.
@@ -322,12 +326,17 @@ import Foundation
             ///     template rendering context.
             ///   - userInputProcessing: Processing to apply to user media before input preparation.
             ///     Defaults to `nil`, which lets MLX use its default media handling.
-            ///   - topP: Top-p (nucleus) sampling threshold. Defaults to `nil` (backend default).
-            ///   - topK: Top-k sampling count. Defaults to `nil` (disabled).
+            ///   - topP: Top-p (nucleus) sampling threshold. Defaults to `nil`, which inherits
+            ///     nucleus sampling or uses `1.0` for regular generation and `0.95` for structured
+            ///     generation. Set to `1.0` to disable explicitly.
+            ///   - topK: Top-k sampling count. Defaults to `nil`, which inherits top-k sampling
+            ///     or disables it. Set to `0` to disable explicitly.
             ///   - minP: Min-p sampling threshold. Defaults to `nil` (disabled).
-            ///   - repetitionPenalty: Repetition penalty factor. Defaults to `nil` (disabled).
+            ///   - repetitionPenalty: Repetition penalty factor. Defaults to `nil`, which uses no
+            ///     penalty for regular generation or `1.1` for structured generation. Set to `1.0`
+            ///     to neutralize the penalty explicitly.
             ///   - repetitionContextSize: Repetition-penalty token window. Defaults to `nil`
-            ///     (backend default).
+            ///     (`20` for regular generation or `64` for structured generation).
             public init(
                 kvCache: KVCache,
                 userInputProcessing: UserInputProcessing?,
@@ -1374,7 +1383,7 @@ import Foundation
             kvBits: custom?.kvCache.bits,
             kvGroupSize: custom?.kvCache.groupSize ?? 64,
             quantizedKVStart: custom?.kvCache.quantizedStart ?? 0,
-            temperature: Float(options.temperature ?? derived.greedyTemperature.map(Double.init) ?? 0.6),
+            temperature: Float(derived.greedyTemperature.map(Double.init) ?? options.temperature ?? 0.6),
             topP: custom?.topP ?? derived.topP ?? 1.0,
             topK: custom?.topK ?? derived.topK ?? 0,
             minP: custom?.minP ?? 0.0,
@@ -1393,7 +1402,7 @@ import Foundation
             kvBits: custom?.kvCache.bits,
             kvGroupSize: custom?.kvCache.groupSize ?? 64,
             quantizedKVStart: custom?.kvCache.quantizedStart ?? 0,
-            temperature: Float(options.temperature ?? derived.greedyTemperature.map(Double.init) ?? 0.2),
+            temperature: Float(derived.greedyTemperature.map(Double.init) ?? options.temperature ?? 0.2),
             topP: custom?.topP ?? derived.topP ?? 0.95,
             topK: custom?.topK ?? derived.topK ?? 0,
             minP: custom?.minP ?? 0.0,

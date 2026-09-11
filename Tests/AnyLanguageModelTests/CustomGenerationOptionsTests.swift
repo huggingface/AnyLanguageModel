@@ -1054,14 +1054,87 @@ struct GeminiCustomOptionsTests {
             #expect(params.topK == 5)  // custom wins (sampling expressed no top-k)
         }
 
-        @Test func greedyMapsToZeroTemperature() {
-            let params = toGenerateParameters(GenerationOptions(sampling: .greedy))
+        @Test(arguments: [false, true])
+        func greedyMapsToZeroTemperature(structured: Bool) {
+            let options = GenerationOptions(sampling: .greedy)
+            let params = structured ? toStructuredGenerateParameters(options) : toGenerateParameters(options)
             #expect(params.temperature == 0)
         }
 
-        @Test func explicitTemperatureWinsOverGreedy() {
-            let params = toGenerateParameters(GenerationOptions(sampling: .greedy, temperature: 0.7))
+        @Test(arguments: [false, true])
+        func greedyWinsOverExplicitTemperature(structured: Bool) {
+            let options = GenerationOptions(sampling: .greedy, temperature: 0.7)
+            let params = structured ? toStructuredGenerateParameters(options) : toGenerateParameters(options)
+            #expect(params.temperature == 0)
+        }
+
+        @Test(arguments: [false, true])
+        func explicitTemperatureIsPreservedWithoutGreedy(structured: Bool) {
+            for sampling: GenerationOptions.SamplingMode? in [
+                nil, .random(top: 12), .random(probabilityThreshold: 0.9),
+            ] {
+                let options = GenerationOptions(sampling: sampling, temperature: 0.7)
+                let params = structured ? toStructuredGenerateParameters(options) : toGenerateParameters(options)
+                #expect(params.temperature == Float(0.7))
+            }
+        }
+
+        // MARK: - Structured generation defaults and overrides
+
+        @Test(arguments: [false, true])
+        func structuredDefaultsArePreserved(withCustomBlock: Bool) {
+            var options = GenerationOptions()
+            if withCustomBlock {
+                options[custom: MLXLanguageModel.self] = .default
+            }
+            let params = toStructuredGenerateParameters(options)
+            #expect(params.temperature == Float(0.2))
+            #expect(params.topP == Float(0.95))
+            #expect(params.topK == 0)
+            #expect(params.minP == 0)
+            #expect(params.repetitionPenalty == Float(1.1))
+            #expect(params.repetitionContextSize == 64)
+        }
+
+        @Test(arguments: [false, true])
+        func structuredSamplingFillsUnsetCustomValues(withCustomBlock: Bool) {
+            var options = GenerationOptions(sampling: .random(probabilityThreshold: 0.8))
+            if withCustomBlock {
+                options[custom: MLXLanguageModel.self] = .default
+            }
+            let nucleusParams = toStructuredGenerateParameters(options)
+            #expect(nucleusParams.topP == Float(0.8))
+            #expect(nucleusParams.topK == 0)
+
+            options.sampling = .random(top: 12)
+            let topKParams = toStructuredGenerateParameters(options)
+            #expect(topKParams.topK == 12)
+            #expect(topKParams.topP == Float(0.95))
+        }
+
+        @Test(arguments: [
+            GenerationOptions.SamplingMode.random(top: 40),
+            GenerationOptions.SamplingMode.random(probabilityThreshold: 0.9),
+        ])
+        func structuredCustomValuesOverrideSamplingAndDefaults(sampling: GenerationOptions.SamplingMode) {
+            var options = GenerationOptions(sampling: sampling, temperature: 0.7)
+            options[custom: MLXLanguageModel.self] = .init(
+                kvCache: .default,
+                userInputProcessing: nil,
+                additionalContext: nil,
+                topP: 1.0,
+                topK: 0,
+                minP: 0.1,
+                repetitionPenalty: 1.0,
+                repetitionContextSize: 128
+            )
+            let params = toStructuredGenerateParameters(options)
             #expect(params.temperature == Float(0.7))
+            #expect(params.topP == 1.0)
+            #expect(params.topK == 0)
+            #expect(params.minP == Float(0.1))
+            #expect(params.repetitionPenalty == 1.0)
+            #expect(params.repetitionContextSize == 128)
         }
 
         @Test func codable() throws {
