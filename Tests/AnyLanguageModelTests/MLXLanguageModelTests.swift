@@ -32,7 +32,10 @@ import Testing
     @Suite("MLXLanguageModel", .enabled(if: shouldRunMLXTests), .serialized)
     struct MLXLanguageModelTests {
         // Qwen3-0.6B is a small model that supports tool calling
-        let model = MLXLanguageModel(modelId: "mlx-community/Qwen3-0.6B-4bit")
+        let model = MLXLanguageModel(
+            modelId: "mlx-community/Qwen3-0.6B-4bit",
+            directory: ProcessInfo.processInfo.environment["MLX_MODEL_DIRECTORY"].map { URL(fileURLWithPath: $0) }
+        )
         let visionModel = MLXLanguageModel(modelId: "mlx-community/Qwen2-VL-2B-Instruct-4bit")
 
         @Test func availabilityBecomesAvailableAfterSuccessfulLoad() async throws {
@@ -67,6 +70,123 @@ import Testing
             }
 
             #expect(!chunks.isEmpty)
+        }
+
+        @Test func tokenUsageAndCacheReuse() async throws {
+            let options = GenerationOptions(sampling: .greedy, maximumResponseTokens: 8)
+            let session = LanguageModelSession(model: model)
+            let first = try await session.respond(to: "Say hello.", options: options)
+            #expect(first.usage.input.totalTokenCount > 0)
+            #expect(first.usage.input.cachedTokenCount == 0)
+            #expect(first.usage.output.totalTokenCount > 0)
+            #expect(first.usage.output.totalTokenCount <= 8)
+
+            let second = try await session.respond(to: "Say goodbye.", options: options)
+            #expect(second.usage.input.cachedTokenCount == first.usage.input.totalTokenCount)
+            #expect(second.usage.input.totalTokenCount > second.usage.input.cachedTokenCount)
+            #expect(session.usage.totalTokenCount == first.usage.totalTokenCount + second.usage.totalTokenCount)
+
+            let fresh = LanguageModelSession(model: model)
+            var snapshots: [LanguageModelSession.ResponseStream<String>.Snapshot] = []
+            for try await snapshot in fresh.streamResponse(to: "Say hello.", options: options) {
+                snapshots.append(snapshot)
+            }
+            let final = try #require(snapshots.last)
+            #expect(final.usage == first.usage)
+            #expect(final.content == first.content)
+            #expect(fresh.usage == final.usage)
+            #expect(snapshots.count >= 2)
+            #expect(snapshots.dropLast().last?.rawContent == final.rawContent)
+            #expect(snapshots.dropLast().last?.usage == .zero)
+        }
+
+        @Test func tokenUsageStructuredResponseStreamParity() async throws {
+            let options = GenerationOptions(sampling: .greedy, maximumResponseTokens: 16)
+            let response = try await LanguageModelSession(model: model).respond(
+                to: "Return true.",
+                generating: Bool.self,
+                options: options
+            )
+            let session = LanguageModelSession(model: model)
+            let streamed = try await session.streamResponse(
+                to: "Return true.",
+                generating: Bool.self,
+                options: options
+            ).collect()
+            #expect(response.usage.input.totalTokenCount > 0)
+            #expect(response.usage.output.totalTokenCount > 0)
+            #expect(response.usage.input.cachedTokenCount == 0)
+            #expect(streamed.content == response.content)
+            #expect(streamed.usage == response.usage)
+            #expect(session.usage == streamed.usage)
+
+            let withoutSchema = try await LanguageModelSession(model: model).respond(
+                to: "Return true.",
+                generating: Bool.self,
+                includeSchemaInPrompt: false,
+                options: options
+            )
+            #expect(response.usage.input.totalTokenCount > withoutSchema.usage.input.totalTokenCount)
+        }
+
+        @Test func tokenUsageSurvivesToolStopAndFailure() async throws {
+            var options = GenerationOptions(sampling: .greedy, maximumResponseTokens: 512)
+            var custom = MLXLanguageModel.CustomGenerationOptions.default
+            custom.additionalContext = ["enable_thinking": .bool(false)]
+            options[custom: MLXLanguageModel.self] = custom
+            let prompt = "Use getWeather to get the weather in San Francisco."
+            let stopped = LanguageModelSession(model: model, tools: [WeatherTool()])
+            stopped.toolExecutionDelegate = UsageStopDelegate()
+            let response = try await stopped.respond(to: prompt, options: options)
+            #expect(response.transcriptEntries.contains { if case .toolCalls = $0 { true } else { false } })
+            #expect(response.usage.input.totalTokenCount > 0)
+            #expect(response.usage.output.totalTokenCount > 0)
+
+            let streamed = LanguageModelSession(model: model, tools: [WeatherTool()])
+            streamed.toolExecutionDelegate = UsageStopDelegate()
+            let collected = try await streamed.streamResponse(to: prompt, options: options).collect()
+            #expect(collected.usage == response.usage)
+            #expect(streamed.usage == response.usage)
+
+            let completed = LanguageModelSession(model: model, tools: [WeatherTool()])
+            var reportedRounds: [LanguageModelSession.Usage] = []
+            for try await snapshot in completed.streamResponse(to: prompt, options: options) {
+                if snapshot.usage != .zero, snapshot.usage != reportedRounds.last {
+                    reportedRounds.append(snapshot.usage)
+                }
+            }
+            #expect(reportedRounds.count == 2)
+            #expect(reportedRounds.first == response.usage)
+            let total = try #require(reportedRounds.last)
+            #expect(total.input.totalTokenCount > response.usage.input.totalTokenCount)
+            #expect(total.output.totalTokenCount > response.usage.output.totalTokenCount)
+            #expect(completed.usage == total)
+            let fullResponse = try await LanguageModelSession(model: model, tools: [WeatherTool()]).respond(
+                to: prompt,
+                options: options
+            )
+            #expect(fullResponse.usage == total)
+
+            let failing = LanguageModelSession(model: model, tools: [UsageFailingWeatherTool()])
+            await #expect(throws: LanguageModelSession.ToolCallError.self) {
+                try await failing.streamResponse(to: prompt, options: options).collect()
+            }
+            #expect(failing.usage == response.usage)
+        }
+
+        private struct UsageStopDelegate: ToolExecutionDelegate {
+            func toolCallDecision(for toolCall: Transcript.ToolCall, in session: LanguageModelSession) async
+                -> ToolExecutionDecision
+            {
+                .stop
+            }
+        }
+
+        private struct UsageFailingWeatherTool: Tool {
+            let name = WeatherTool().name
+            let description = WeatherTool().description
+            struct Failure: Error {}
+            func call(arguments: WeatherTool.Arguments) async throws -> String { throw Failure() }
         }
 
         @Test func multiTurnSameSession() async throws {
@@ -136,6 +256,9 @@ import Testing
                 foundToolOutput = true
             }
             #expect(foundToolOutput)
+            #expect(response.usage.input.totalTokenCount > 0)
+            #expect(response.usage.output.totalTokenCount > 0)
+            #expect(session.usage == response.usage)
 
             let calls = await weatherTool.calls
             #expect(calls.count >= 1)
@@ -181,6 +304,9 @@ import Testing
                 foundToolOutput = true
             }
             #expect(foundToolOutput)
+            #expect((lastSnapshot?.usage.input.totalTokenCount ?? 0) > 0)
+            #expect((lastSnapshot?.usage.output.totalTokenCount ?? 0) > 0)
+            #expect(session.usage == lastSnapshot?.usage)
         }
 
         @Test func multimodalWithImageURL() async throws {

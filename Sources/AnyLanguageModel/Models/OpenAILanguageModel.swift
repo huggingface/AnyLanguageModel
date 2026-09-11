@@ -9,6 +9,7 @@ import JSONSchema
 ///
 /// Use this model to generate text using OpenAI's Chat Completions or Responses APIs.
 /// You can specify a custom base URL to work with OpenAI-compatible services.
+/// Chat Completions streaming usage is requested only for the official OpenAI endpoint.
 ///
 /// ```swift
 /// let model = OpenAILanguageModel(
@@ -469,6 +470,7 @@ public struct OpenAILanguageModel: LanguageModel {
     ) async throws -> LanguageModelSession.Response<Content> where Content: Generable {
 
         var entries: [Transcript.Entry] = []
+        var usage = ReportedUsage()
         var text = ""
         var messages = messages
 
@@ -493,6 +495,8 @@ public struct OpenAILanguageModel: LanguageModel {
                 ],
                 body: body
             )
+
+            usage.add(resp.usage?.reportedUsage)
 
             guard let choice = resp.choices.first else {
                 throw OpenAILanguageModelError.noResponseGenerated
@@ -525,7 +529,8 @@ public struct OpenAILanguageModel: LanguageModel {
                     return LanguageModelSession.Response(
                         content: empty.content,
                         rawContent: empty.rawContent,
-                        transcriptEntries: ArraySlice(entries)
+                        transcriptEntries: ArraySlice(entries),
+                        usage: usage.value
                     )
                 case .invocations(let invocations):
                     if !invocations.isEmpty {
@@ -553,7 +558,8 @@ public struct OpenAILanguageModel: LanguageModel {
             return LanguageModelSession.Response(
                 content: text as! Content,
                 rawContent: GeneratedContent(text),
-                transcriptEntries: ArraySlice(entries)
+                transcriptEntries: ArraySlice(entries),
+                usage: usage.value
             )
         }
 
@@ -562,7 +568,8 @@ public struct OpenAILanguageModel: LanguageModel {
         return LanguageModelSession.Response(
             content: content,
             rawContent: generatedContent,
-            transcriptEntries: ArraySlice(entries)
+            transcriptEntries: ArraySlice(entries),
+            usage: usage.value
         )
     }
 
@@ -574,6 +581,7 @@ public struct OpenAILanguageModel: LanguageModel {
         session: LanguageModelSession
     ) async throws -> LanguageModelSession.Response<Content> where Content: Generable {
         var entries: [Transcript.Entry] = []
+        var usage = ReportedUsage()
         var text = ""
         var lastOutput: [JSONValue]?
         var messages = messages
@@ -602,6 +610,8 @@ public struct OpenAILanguageModel: LanguageModel {
                 body: body
             )
 
+            usage.add(resp.usage?.reportedUsage)
+
             let toolCalls = extractToolCallsFromOutput(resp.output)
             lastOutput = resp.output
             if !toolCalls.isEmpty {
@@ -620,7 +630,8 @@ public struct OpenAILanguageModel: LanguageModel {
                     return LanguageModelSession.Response(
                         content: empty.content,
                         rawContent: empty.rawContent,
-                        transcriptEntries: ArraySlice(entries)
+                        transcriptEntries: ArraySlice(entries),
+                        usage: usage.value
                     )
                 case .invocations(let invocations):
                     if !invocations.isEmpty {
@@ -650,7 +661,8 @@ public struct OpenAILanguageModel: LanguageModel {
             return LanguageModelSession.Response(
                 content: text as! Content,
                 rawContent: GeneratedContent(text),
-                transcriptEntries: ArraySlice(entries)
+                transcriptEntries: ArraySlice(entries),
+                usage: usage.value
             )
         }
 
@@ -660,7 +672,8 @@ public struct OpenAILanguageModel: LanguageModel {
             return LanguageModelSession.Response(
                 content: content,
                 rawContent: generatedContent,
-                transcriptEntries: ArraySlice(entries)
+                transcriptEntries: ArraySlice(entries),
+                usage: usage.value
             )
         }
         throw OpenAILanguageModelError.noResponseGenerated
@@ -714,41 +727,33 @@ public struct OpenAILanguageModel: LanguageModel {
                                 )
 
                             var accumulatedText = ""
+                            var usage = ReportedUsage()
 
                             for try await event in events {
                                 switch event {
                                 case .outputTextDelta(let delta):
                                     accumulatedText += delta
 
-                                    var raw: GeneratedContent
-                                    let content: Content.PartiallyGenerated?
-
-                                    if type == String.self {
-                                        raw = GeneratedContent(accumulatedText)
-                                        content = (accumulatedText as! Content).asPartiallyGenerated()
-                                    } else {
-                                        raw =
-                                            (try? GeneratedContent(json: accumulatedText))
-                                            ?? GeneratedContent(accumulatedText)
-                                        if let parsed = try? type.init(raw) {
-                                            content = parsed.asPartiallyGenerated()
-                                        } else {
-                                            // Skip snapshots until the accumulated JSON parses.
-                                            content = nil
-                                        }
+                                    if let snapshot = LanguageModelSession.ResponseStream<Content>.Snapshot(
+                                        text: accumulatedText,
+                                        usage: usage.value
+                                    ) {
+                                        continuation.yield(snapshot)
                                     }
-
-                                    if let content {
-                                        continuation.yield(.init(content: content, rawContent: raw))
-                                    }
-
                                 case .toolCallCreated(_):
                                     // Minimal streaming implementation ignores tool call events
                                     break
                                 case .toolCallDelta(_):
                                     // Minimal streaming implementation ignores tool call deltas
                                     break
-                                case .completed(_):
+                                case .completed(let responseUsage):
+                                    usage.merge(responseUsage?.reportedUsage)
+                                    if let snapshot = LanguageModelSession.ResponseStream<Content>.Snapshot(
+                                        text: accumulatedText,
+                                        usage: usage.value
+                                    ) {
+                                        continuation.yield(snapshot)
+                                    }
                                     continuation.finish()
                                 case .ignored:
                                     break
@@ -780,7 +785,8 @@ public struct OpenAILanguageModel: LanguageModel {
                         tools: openAITools,
                         generating: type,
                         options: options,
-                        stream: true
+                        stream: true,
+                        includeUsage: baseURL.host == Self.defaultBaseURL.host
                     )
 
                     let task = Task { @Sendable in
@@ -798,37 +804,20 @@ public struct OpenAILanguageModel: LanguageModel {
                                 )
 
                             var accumulatedText = ""
+                            var usage = ReportedUsage()
 
                             for try await chunk in events {
-                                if let choice = chunk.choices.first {
-                                    if let piece = choice.delta.content, !piece.isEmpty {
-                                        accumulatedText += piece
-
-                                        var raw: GeneratedContent
-                                        let content: Content.PartiallyGenerated?
-
-                                        if type == String.self {
-                                            raw = GeneratedContent(accumulatedText)
-                                            content = (accumulatedText as! Content).asPartiallyGenerated()
-                                        } else {
-                                            raw =
-                                                (try? GeneratedContent(json: accumulatedText))
-                                                ?? GeneratedContent(accumulatedText)
-                                            if let parsed = try? type.init(raw) {
-                                                content = parsed.asPartiallyGenerated()
-                                            } else {
-                                                // Skip snapshots until the accumulated JSON parses.
-                                                content = nil
-                                            }
-                                        }
-
-                                        if let content {
-                                            continuation.yield(.init(content: content, rawContent: raw))
-                                        }
-                                    }
-
-                                    if choice.finishReason != nil {
-                                        continuation.finish()
+                                usage.merge(chunk.usage?.reportedUsage)
+                                let piece = chunk.choices.first?.delta.content
+                                if let piece { accumulatedText += piece }
+                                // A usage-only chunk follows the finish reason
+                                // when include_usage is enabled.
+                                if piece?.isEmpty == false || chunk.usage?.reportedUsage != nil {
+                                    if let snapshot = LanguageModelSession.ResponseStream<Content>.Snapshot(
+                                        text: accumulatedText,
+                                        usage: usage.value
+                                    ) {
+                                        continuation.yield(snapshot)
                                     }
                                 }
                             }
@@ -858,13 +847,18 @@ private enum ChatCompletions {
         tools: [OpenAITool]?,
         generating type: Content.Type,
         options: GenerationOptions,
-        stream: Bool
+        stream: Bool,
+        includeUsage: Bool = false
     ) throws -> JSONValue {
         var body: [String: JSONValue] = [
             "model": .string(model),
             "messages": .array(messages.map { $0.jsonValue(for: .chatCompletions) }),
             "stream": .bool(stream),
         ]
+
+        if stream && includeUsage {
+            body["stream_options"] = .object(["include_usage": .bool(true)])
+        }
 
         if let tools {
             body["tools"] = .array(tools.map { $0.jsonValue(for: .chatCompletions) })
@@ -973,6 +967,7 @@ private enum ChatCompletions {
     struct Response: Decodable, Sendable {
         let id: String
         let choices: [Choice]
+        let usage: ChatCompletionsUsage?
 
         struct Choice: Codable, Sendable {
             let message: Message
@@ -1222,6 +1217,7 @@ private enum Responses {
     struct Response: Decodable, Sendable {
         let id: String
         let output: [JSONValue]?
+        let usage: ResponsesUsage?
         let error: [JSONValue]?
         let outputText: String?
         let finishReason: String?
@@ -1229,6 +1225,7 @@ private enum Responses {
         private enum CodingKeys: String, CodingKey {
             case id
             case output
+            case usage
             case outputText = "output_text"
             case finishReason = "finish_reason"
             case error = "error"
@@ -1554,7 +1551,7 @@ private enum OpenAIResponsesServerEvent: Decodable, Sendable {
     case outputTextDelta(String)
     case toolCallCreated(OpenAIToolCall)
     case toolCallDelta(OpenAIToolCall)
-    case completed(String)
+    case completed(ResponsesUsage?)
     case ignored
 
     init(from decoder: any Decoder) throws {
@@ -1568,7 +1565,12 @@ private enum OpenAIResponsesServerEvent: Decodable, Sendable {
         case "response.tool_call.delta":
             self = .toolCallDelta(try container.decode(OpenAIToolCall.self, forKey: .toolCall))
         case "response.completed":
-            self = .completed((try? container.decode(String.self, forKey: .finishReason)) ?? "stop")
+            if container.contains(.response), !(try container.decodeNil(forKey: .response)) {
+                let response = try container.nestedContainer(keyedBy: CodingKeys.self, forKey: .response)
+                self = .completed(try response.decodeIfPresent(ResponsesUsage.self, forKey: .usage))
+            } else {
+                self = .completed(nil)
+            }
         default:
             self = .ignored
         }
@@ -1577,6 +1579,7 @@ private enum OpenAIResponsesServerEvent: Decodable, Sendable {
     private enum CodingKeys: String, CodingKey {
         case type
         case delta
+        case response, usage
         case toolCall = "tool_call"
         case finishReason = "finish_reason"
     }
@@ -1599,6 +1602,7 @@ private struct OpenAIChatCompletionsChunk: Decodable, Sendable {
 
     let id: String
     let choices: [Choice]
+    let usage: ChatCompletionsUsage?
 }
 
 private struct OpenAIToolInvocationResult {
@@ -1946,5 +1950,29 @@ private extension GenerationSchema {
         }
 
         return jsonSchemaValue
+    }
+}
+
+private struct ChatCompletionsUsage: Decodable, Sendable {
+    let promptTokens: Int?
+    let completionTokens: Int?
+    let promptTokensDetails: ResponsesUsage.InputDetails?
+    let completionTokensDetails: ResponsesUsage.OutputDetails?
+
+    enum CodingKeys: String, CodingKey {
+        case promptTokens = "prompt_tokens"
+        case completionTokens = "completion_tokens"
+        case promptTokensDetails = "prompt_tokens_details"
+        case completionTokensDetails = "completion_tokens_details"
+    }
+
+    var reportedUsage: ReportedUsage? {
+        ReportedUsage(
+            input: .init(totalTokenCount: promptTokens, cachedTokenCount: promptTokensDetails?.cachedTokens),
+            output: .init(
+                totalTokenCount: completionTokens,
+                reasoningTokenCount: completionTokensDetails?.reasoningTokens
+            )
+        ).normalized
     }
 }

@@ -75,6 +75,9 @@ struct ConstrainedJSONGenerator<Backend: TokenBackend> {
     private static var maxIntegerTokenLimit: Int { 20 }
     private static var maxDecimalTokenLimit: Int { 32 }
 
+    /// Includes sampled content and forced syntax decoded through the backend.
+    var generatedTokenCount: Int { backend.totalTokenBudget - backend.remainingTokens }
+
     private var backend: Backend
     private let schema: GenerationSchema
     private var emittedText = ""
