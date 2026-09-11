@@ -73,8 +73,6 @@ session.toolExecutionDelegate = ToolExecutionObserver()
 - [x] [Core ML](https://developer.apple.com/documentation/coreml) models
 - [x] [MLX](https://github.com/ml-explore/mlx-swift) models
 - [x] [llama.cpp](https://github.com/ggml-org/llama.cpp) (GGUF models)
-- [x] [LiteRT-LM](https://github.com/google-ai-edge/litert-lm)
-  (`.litertlm` models, using the official Swift package)
 - [x] Ollama [HTTP API](https://github.com/ollama/ollama/blob/main/docs/api.md)
 - [x] Anthropic [Messages API](https://docs.claude.com/en/api/messages)
 - [x] Google [Gemini API](https://ai.google.dev/api/generate-content)
@@ -100,7 +98,7 @@ Add this package to your `Package.swift`:
 
 ```swift
 dependencies: [
-    .package(url: "https://github.com/huggingface/AnyLanguageModel", from: "0.10.0")
+    .package(url: "https://github.com/huggingface/AnyLanguageModel", from: "0.11.0")
 ]
 ```
 
@@ -119,9 +117,6 @@ This results in smaller binary sizes and faster build times.
   (depends on `ml-explore/mlx-swift-lm`)
 - `Llama`: Enables llama.cpp support
   (requires `mattt/llama.swift`)
-- `LiteRT`: Enables LiteRT-LM support for Gemma 4 and other `.litertlm` models
-  (requires the official `google-ai-edge/LiteRT-LM` Swift package;
-  iOS and macOS only)
 
 By default, no traits are enabled.
 To enable specific traits, specify them in your package's dependencies:
@@ -131,7 +126,7 @@ To enable specific traits, specify them in your package's dependencies:
 dependencies: [
     .package(
         url: "https://github.com/huggingface/AnyLanguageModel.git",
-        from: "0.10.0",
+        from: "0.11.0",
         traits: ["CoreML", "MLX"] // Enable CoreML and MLX support
     )
 ]
@@ -148,7 +143,7 @@ dependencies: [
 > dependencies: [
 >     .package(
 >         url: "https://github.com/huggingface/AnyLanguageModel.git",
->         from: "0.10.0",
+>         from: "0.11.0",
 >         traits: ["CoreML", "MLX", "Llama"]
 >     ),
 >     .package(url: "https://github.com/huggingface/swift-transformers", from: "1.0.0"), // CoreML
@@ -241,89 +236,11 @@ Your app can now import `AnyLanguageModel` with MLX support enabled.
 
 ### LiteRT-LM Checkout Fails with a Git LFS Smudge Error
 
-If Git LFS is installed and configured globally,
-a fresh dependency checkout may fail
-with this error from LiteRT-LM 0.17.0:
-
-```text
-error: 'litert-lm': Couldn’t check out revision ‘e9fd8c53ff968071774206163027dd84bedfe925’:
-    Downloading prebuilt/android_arm64/libGemmaModelConstraintProvider.so (20 MB)
-    Error downloading object: prebuilt/android_arm64/libGemmaModelConstraintProvider.so (2db0cfa): Smudge error: Error downloading prebuilt/android_arm64/libGemmaModelConstraintProvider.so (2db0cfa5d45391df18e6c8de4b1e5ffbe1882d3695c0a0b5e087e4e482e1d680): error transferring "2db0cfa5d45391df18e6c8de4b1e5ffbe1882d3695c0a0b5e087e4e482e1d680": [0] remote missing object 2db0cfa5d45391df18e6c8de4b1e5ffbe1882d3695c0a0b5e087e4e482e1d680
-```
-
-Git LFS tries to download a prebuilt Android library during checkout,
-but the referenced object is missing from the LFS remote used by that checkout.
-Swift Package Manager creates dependency checkouts from a local repository mirror,
-which Git LFS can treat as its remote
-instead of the original GitHub repository.
-That mirror may lack LFS objects required by the selected version,
-even when those objects are available on GitHub.
-See [upstream issue #2407](https://github.com/google-ai-edge/LiteRT-LM/issues/2407)
-for discussion and updates,
-and [upstream PR #3563](https://github.com/google-ai-edge/LiteRT-LM/pull/3563)
-for a proposed fix that explicitly configures the GitHub LFS endpoint.
-This can happen even when the `LiteRT` trait is disabled,
-because Swift Package Manager still resolves the package dependency.
-
-The failure occurs during dependency checkout,
-before compilation.
-It can affect `swift build`, `swift test`, `xcodebuild`,
-and package resolution in Xcode,
-blocking Build or Run.
-An existing successful checkout may hide the problem
-until dependencies are fetched again,
-for example after deleting `.build`
-or resetting Xcode's package caches.
-It doesn't affect an already-built app at runtime.
-
-To skip LFS downloads for a Swift Package Manager command,
-prefix it with `GIT_LFS_SKIP_SMUDGE=1`:
-
-```bash
-GIT_LFS_SKIP_SMUDGE=1 swift build
-GIT_LFS_SKIP_SMUDGE=1 swift test
-```
-
-For a clean build, use:
-
-```bash
-rm -rf .build && GIT_LFS_SKIP_SMUDGE=1 swift test
-```
-
-For `xcodebuild`,
-use the same prefix
-with your usual project or workspace and scheme arguments.
-For example,
-replacing `MyApp` with your project and scheme names:
-
-```bash
-GIT_LFS_SKIP_SMUDGE=1 xcodebuild -project MyApp.xcodeproj -scheme MyApp build
-```
-
-For Xcode's Build and Run actions,
-quit Xcode completely,
-then launch its executable from Terminal with the variable set:
-
-```bash
-GIT_LFS_SKIP_SMUDGE=1 /Applications/Xcode.app/Contents/MacOS/Xcode
-```
-
-Adjust the path
-if Xcode is installed under a different name or location,
-then open your project and retry package resolution or the build.
-Setting the variable in a terminal
-doesn't affect an already-running Xcode.
-Adding it to a scheme's Run environment variables won't help either:
-those variables apply to the launched app,
-after package resolution.
-
-LiteRT-LM's [Swift package manifest](https://github.com/google-ai-edge/LiteRT-LM/blob/e9fd8c53ff968071774206163027dd84bedfe925/Package.swift)
-downloads Apple XCFrameworks separately from release assets,
-so its Git LFS binaries aren't needed for Swift Package Manager builds.
-The repository's [CI workflow](.github/workflows/ci.yml)
-already uses this workaround.
-The environment variable applies only to the command and its subprocesses;
-it doesn't change your global Git LFS configuration.
+LiteRT-LM support introduced in 0.10.0 was removed in 0.11.0
+because its dependency could prevent builds even when the backend was disabled.
+Upgrade to 0.11.0 or later to remove this dependency.
+The `LiteRT` trait and `LiteRTLanguageModel` are no longer available;
+projects using them must remove the trait and switch to another backend.
 
 ## API Credentials and Security
 
@@ -459,14 +376,13 @@ Image support varies by provider:
 | Core ML                 | —               |
 | MLX                     | model-dependent |
 | llama.cpp               | —               |
-| LiteRT-LM               | model-dependent |
 | Ollama                  | model-dependent |
 | OpenAI                  | yes             |
 | Open Responses          | yes             |
 | Anthropic               | yes             |
 | Google Gemini           | yes             |
 
-For MLX, LiteRT-LM, and Ollama,
+For MLX and Ollama,
 use a vision-capable model 
 (for example, a VLM or `-vl` variant).
 
@@ -563,7 +479,7 @@ Enable the trait in Package.swift:
 ```swift
 .package(
     url: "https://github.com/huggingface/AnyLanguageModel.git",
-    from: "0.10.0",
+    from: "0.11.0",
     traits: ["CoreML"]
 )
 ```
@@ -649,7 +565,7 @@ Enable the trait in Package.swift:
 ```swift
 .package(
     url: "https://github.com/huggingface/AnyLanguageModel.git",
-    from: "0.10.0",
+    from: "0.11.0",
     traits: ["MLX"]
 )
 ```
@@ -673,7 +589,7 @@ Enable the trait in Package.swift:
 ```swift
 .package(
     url: "https://github.com/huggingface/AnyLanguageModel.git",
-    from: "0.10.0",
+    from: "0.11.0",
     traits: ["Llama"]
 )
 ```
@@ -703,39 +619,6 @@ let response = try await session.respond(
     options: options
 )
 ```
-
-### LiteRT-LM
-
-Runs `.litertlm` models (for example, Gemma 4) fully on-device
-via Google's [LiteRT-LM](https://github.com/google-ai-edge/litert-lm) runtime
-with Metal GPU acceleration
-(requires `LiteRT` trait;
-iOS and macOS only):
-
-```swift
-let model = LiteRTLanguageModel(modelFileURL: modelURL)
-
-let session = LanguageModelSession(model: model)
-let response = try await session.respond(to: "What is the capital of France?")
-```
-
-You can also load a `.litertlm` file from Hugging Face.
-The file is downloaded on first use
-using the Hub client's cache and authentication:
-
-```swift
-// Any Hugging Face repo
-let model = LiteRTLanguageModel(
-    huggingFaceRepo: "litert-community/gemma-4-E4B-it-litert-lm",
-    fileName: "gemma-4-E4B-it.litertlm")
-```
-
-Image inputs are supported for models that ship a vision tower
-(pass `visionBackend: .cpu()`).
-Structured generation is prompt-driven —
-the JSON schema is included in the prompt and the response is parsed.
-Tool calling is supported for `respond`
-(not yet for streaming).
 
 ### Ollama
 
