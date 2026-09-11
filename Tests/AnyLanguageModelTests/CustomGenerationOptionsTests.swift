@@ -1007,6 +1007,7 @@ struct GeminiCustomOptionsTests {
             #expect(derived.topP == nil)
             #expect(derived.topK == nil)
             #expect(derived.greedyTemperature == 0)
+            #expect(derived.seed == nil)
         }
 
         @Test func samplingDerivationTopK() {
@@ -1014,15 +1015,17 @@ struct GeminiCustomOptionsTests {
             #expect(derived.topK == 40)
             #expect(derived.topP == nil)
             #expect(derived.greedyTemperature == nil)
+            #expect(derived.seed == 7)
         }
 
         @Test func samplingDerivationNucleus() {
             let derived = samplingDerivedParameters(
-                from: GenerationOptions(sampling: .random(probabilityThreshold: 0.9))
+                from: GenerationOptions(sampling: .random(probabilityThreshold: 0.9, seed: 42))
             )
             #expect(derived.topP == 0.9)
             #expect(derived.topK == nil)
             #expect(derived.greedyTemperature == nil)
+            #expect(derived.seed == 42)
         }
 
         @Test func samplingDerivationNil() {
@@ -1030,9 +1033,31 @@ struct GeminiCustomOptionsTests {
             #expect(derived.topP == nil)
             #expect(derived.topK == nil)
             #expect(derived.greedyTemperature == nil)
+            #expect(derived.seed == nil)
         }
 
         // MARK: - Mapping precedence (custom-wins → sampling-fills → default)
+
+        @Test(arguments: [false, true], [nil, 0, 7, UInt64.max] as [UInt64?])
+        func samplingSeedIsPreserved(structured: Bool, seed: UInt64?) {
+            for sampling: GenerationOptions.SamplingMode in [
+                .random(top: 12, seed: seed), .random(probabilityThreshold: 0.9, seed: seed),
+            ] {
+                var options = GenerationOptions(sampling: sampling)
+                let params = structured ? toStructuredGenerateParameters(options) : toGenerateParameters(options)
+                #expect(params.seed == seed)
+
+                options[custom: MLXLanguageModel.self] = .init(
+                    kvCache: .default,
+                    userInputProcessing: nil,
+                    additionalContext: nil,
+                    topP: 0.8,
+                    topK: 5
+                )
+                let customParams = structured ? toStructuredGenerateParameters(options) : toGenerateParameters(options)
+                #expect(customParams.seed == seed)
+            }
+        }
 
         @Test func samplingFillsWhenNoCustomBlock() {
             let params = toGenerateParameters(GenerationOptions(sampling: .random(top: 12)))
@@ -1059,6 +1084,7 @@ struct GeminiCustomOptionsTests {
             let options = GenerationOptions(sampling: .greedy)
             let params = structured ? toStructuredGenerateParameters(options) : toGenerateParameters(options)
             #expect(params.temperature == 0)
+            #expect(params.seed == nil)
         }
 
         @Test(arguments: [false, true])

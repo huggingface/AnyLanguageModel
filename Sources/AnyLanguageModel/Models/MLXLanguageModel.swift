@@ -291,15 +291,18 @@ import Foundation
 
             /// Top-p (nucleus) sampling threshold.
             ///
-            /// Set this to `nil` to inherit nucleus sampling from `GenerationOptions.sampling`,
-            /// otherwise use `1.0` for regular generation or `0.95` for structured generation.
+            /// A non-`nil` value overrides nucleus sampling from `GenerationOptions.sampling`.
+            /// When this is `nil`, the nucleus sampling threshold is used if provided. If neither
+            /// supplies a threshold, regular generation uses `1.0` and structured generation uses `0.95`.
             /// Set this to `1.0` to disable top-p sampling explicitly.
             public var topP: Float?
 
             /// Top-k sampling: restricts sampling to the `k` most likely tokens.
             ///
-            /// Set this to `nil` to inherit top-k sampling from `GenerationOptions.sampling`,
-            /// otherwise disable top-k sampling. Set this to `0` to disable it explicitly.
+            /// A positive value restricts sampling to that many tokens. A non-`nil` value overrides
+            /// top-k sampling from `GenerationOptions.sampling`. When this is `nil`, the top-k count
+            /// is inherited if provided; if neither supplies a count, top-k sampling is disabled.
+            /// Set this to `0` to disable top-k sampling explicitly.
             public var topK: Int?
 
             /// Min-p sampling threshold, relative to the most likely token's probability.
@@ -326,11 +329,12 @@ import Foundation
             ///     template rendering context.
             ///   - userInputProcessing: Processing to apply to user media before input preparation.
             ///     Defaults to `nil`, which lets MLX use its default media handling.
-            ///   - topP: Top-p (nucleus) sampling threshold. Defaults to `nil`, which inherits
-            ///     nucleus sampling or uses `1.0` for regular generation and `0.95` for structured
-            ///     generation. Set to `1.0` to disable explicitly.
-            ///   - topK: Top-k sampling count. Defaults to `nil`, which inherits top-k sampling
-            ///     or disables it. Set to `0` to disable explicitly.
+            ///   - topP: Top-p (nucleus) sampling override. Defaults to `nil`, which inherits the
+            ///     core nucleus threshold if provided. When neither supplies a threshold, regular
+            ///     generation uses `1.0` and structured generation uses `0.95`. Set to `1.0` to disable.
+            ///   - topK: Top-k sampling override. Positive values restrict sampling to that many
+            ///     tokens; `0` disables it. Defaults to `nil`, which inherits the core top-k count
+            ///     if provided. When neither supplies a count, top-k sampling is disabled.
             ///   - minP: Min-p sampling threshold. Defaults to `nil` (disabled).
             ///   - repetitionPenalty: Repetition penalty factor. Defaults to `nil`, which uses no
             ///     penalty for regular generation or `1.1` for structured generation. Set to `1.0`
@@ -1356,21 +1360,21 @@ import Foundation
     /// FoundationModels consumes). Returns `nil` for any field the sampling mode doesn't express.
     ///
     /// Precedence at the call sites is custom-block → this (sampling) → existing default, so an
-    /// explicit `CustomGenerationOptions` value always wins. The `SamplingMode` seed is not
-    /// forwarded: `MLXLMCommon.GenerateParameters` has no per-call seed field.
+    /// explicit `CustomGenerationOptions` value always wins. The `SamplingMode` seed is forwarded
+    /// to `MLXLMCommon.GenerateParameters` for reproducible sampling.
     func samplingDerivedParameters(
         from options: GenerationOptions
-    ) -> (topP: Float?, topK: Int?, greedyTemperature: Float?) {
+    ) -> (topP: Float?, topK: Int?, greedyTemperature: Float?, seed: UInt64?) {
         switch options.sampling?.mode {
         case .greedy:
             // Greedy = argmax; MLX realizes this with temperature 0.
-            return (topP: nil, topK: nil, greedyTemperature: 0)
-        case .topK(let k, _):
-            return (topP: nil, topK: k, greedyTemperature: nil)
-        case .nucleus(let threshold, _):
-            return (topP: Float(threshold), topK: nil, greedyTemperature: nil)
+            return (topP: nil, topK: nil, greedyTemperature: 0, seed: nil)
+        case .topK(let k, let seed):
+            return (topP: nil, topK: k, greedyTemperature: nil, seed: seed)
+        case .nucleus(let threshold, let seed):
+            return (topP: Float(threshold), topK: nil, greedyTemperature: nil, seed: seed)
         case nil:
-            return (topP: nil, topK: nil, greedyTemperature: nil)
+            return (topP: nil, topK: nil, greedyTemperature: nil, seed: nil)
         }
     }
 
@@ -1388,7 +1392,8 @@ import Foundation
             topK: custom?.topK ?? derived.topK ?? 0,
             minP: custom?.minP ?? 0.0,
             repetitionPenalty: custom?.repetitionPenalty,
-            repetitionContextSize: custom?.repetitionContextSize ?? 20
+            repetitionContextSize: custom?.repetitionContextSize ?? 20,
+            seed: derived.seed
         )
     }
 
@@ -1407,7 +1412,8 @@ import Foundation
             topK: custom?.topK ?? derived.topK ?? 0,
             minP: custom?.minP ?? 0.0,
             repetitionPenalty: custom?.repetitionPenalty ?? 1.1,
-            repetitionContextSize: custom?.repetitionContextSize ?? 64
+            repetitionContextSize: custom?.repetitionContextSize ?? 64,
+            seed: derived.seed
         )
     }
 
