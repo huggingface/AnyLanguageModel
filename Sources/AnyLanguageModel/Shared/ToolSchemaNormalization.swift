@@ -185,11 +185,12 @@ private func strippingResidualRefs(_ value: Any, depth: Int) -> Any {
 /// Coerces `"type"` values so a chat template can render every property.
 ///
 /// A non-string `"type"` becomes a scalar string — an array-valued one becomes its
-/// first non-`"null"` element — and a property or item schema with no `"type"` gets
-/// `"string"`. A `"properties"` or `"items"` value that is not a schema mapping is
-/// replaced with one, since templates hand those straight to filters that require a
-/// mapping. All of these are valid JSON Schema but throw in templates that inspect
-/// `"type"` directly. Well-formed schemas pass through unchanged.
+/// first non-`"null"` element. A typeless `anyOf`/`oneOf` adopts the first non-null
+/// member's type and object/array shape, while other property or item schemas with no
+/// `"type"` get `"string"`. A `"properties"` or `"items"` value that is not a schema
+/// mapping is replaced with one, since templates hand those straight to filters that
+/// require a mapping. All of these are valid JSON Schema but throw in templates that
+/// inspect `"type"` directly. Well-formed schemas pass through unchanged.
 func normalizeToolSchemaTypes(_ schema: [String: Any]) -> [String: Any] {
     normalizeSchemaTypes(schema, depth: 0)
 }
@@ -197,6 +198,18 @@ func normalizeToolSchemaTypes(_ schema: [String: Any]) -> [String: Any] {
 private func normalizeSchemaTypes(_ schema: [String: Any], depth: Int) -> [String: Any] {
     guard depth < maxSchemaDepth else { return safeScalarSchema }
     var normalized = schema
+
+    if normalized["type"] == nil,
+        let members = (["anyOf", "oneOf"].compactMap { normalized[$0] as? [Any] }).first
+    {
+        let member = members.compactMap { $0 as? [String: Any] }.first {
+            $0["type"] != nil && $0["type"] as? String != "null"
+        }
+        normalized["type"] = member?["type"] ?? "string"
+        for key in ["properties", "items"] where member?[key] != nil {
+            normalized[key] = member?[key]
+        }
+    }
 
     if let type = normalized["type"], !(type is String) {
         let named = (type as? [Any])?.compactMap { $0 as? String }.filter { $0 != "null" }

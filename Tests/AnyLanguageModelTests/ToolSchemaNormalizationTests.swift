@@ -1528,8 +1528,8 @@ struct ToolSchemaNormalizationTests {
         let members = address?["anyOf"] as? [Any]
         #expect((members?.first as? [String: Any])?["type"] as? String == "object")
         #expect(((members?.first as? [String: Any])?["properties"] as? [String: Any])?["city"] != nil)
-        // The union leaf carries no scalar type of its own until normalization adds one.
-        #expect(address?["type"] as? String == "string")
+        // Normalization promotes the non-null union member's shape for the template.
+        #expect(address?["type"] as? String == "object")
         #expect(!containsRef(prepared))
     }
 
