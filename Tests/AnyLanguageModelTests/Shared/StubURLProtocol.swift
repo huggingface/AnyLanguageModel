@@ -30,7 +30,6 @@ import Foundation
             state.withLock { $0.pending.append(Exchange(statusCode: statusCode, body: Data(json.utf8))) }
         }
 
-        /// Queues a finite server-sent event stream.
         static func enqueue(eventStream: [String]) {
             let body = eventStream.map { "data: \($0)\n\n" }.joined()
             state.withLock {

@@ -994,8 +994,9 @@ private struct GeminiTextHistoryPart: Codable {
     let part: GeminiTextPart
 }
 
-/// Keep signed text on its original part, including unsigned siblings and their order relative
-/// to function calls. Call arguments remain in the transcript's semantic representation.
+// Keep signed text on its original part,
+// including unsigned siblings and their order relative to function calls.
+// Call arguments remain in the transcript's semantic representation.
 private func textPartMetadata(_ parts: [GeminiPart]) throws -> [String: String]? {
     let textParts = parts.enumerated().compactMap { index, part -> GeminiTextHistoryPart? in
         guard case .text(let text) = part else { return nil }

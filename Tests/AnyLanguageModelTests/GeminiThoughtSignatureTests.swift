@@ -131,6 +131,7 @@ import Testing
             // The tool call is replayed once, still signed, however many turns later.
             #expect(try functionCallSignatures(in: bodies[3]) == [Self.signature])
         }
+
         private func response(parts: [[String: Any]]) throws -> String {
             let data = try JSONSerialization.data(withJSONObject: [
                 "candidates": [

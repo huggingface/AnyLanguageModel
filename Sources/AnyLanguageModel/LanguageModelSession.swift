@@ -200,7 +200,6 @@ public final class LanguageModelSession: @unchecked Sendable {
         public let rawContent: GeneratedContent
         public let transcriptEntries: ArraySlice<Transcript.Entry>
 
-        /// Opaque, provider-specific state to preserve on the transcript response.
         internal let providerMetadata: [String: String]?
 
         /// Creates a response value from generated content and transcript entries.
@@ -866,7 +865,6 @@ extension LanguageModelSession {
             /// Cumulative across tool rounds; empty for providers that don't stream tool activity.
             public var transcriptEntries: ArraySlice<Transcript.Entry>
 
-            /// Opaque, provider-specific state accumulated for the response so far.
             internal var providerMetadata: [String: String]?
 
             /// Creates a snapshot from partially generated content and raw content.

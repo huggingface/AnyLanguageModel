@@ -169,6 +169,7 @@ struct TranscriptTests {
 
         #expect(decoded.providerMetadata == ["thoughtSignature": "opaque-signature"])
     }
+
     @Test func responseAndToolCallsRoundTripProviderMetadata() throws {
         let metadata = ["provider.state": "opaque-signature"]
         for metadata in [nil, metadata] {
@@ -186,5 +187,4 @@ struct TranscriptTests {
             }
         }
     }
-
 }

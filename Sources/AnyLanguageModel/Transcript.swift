@@ -314,8 +314,6 @@ public struct Transcript: Sendable, Equatable, Codable {
 
         private var calls: [ToolCall]
 
-        /// Opaque, provider-specific state attached to the model turn containing these calls.
-        /// Synthesized Codable preserves this state when saving or replaying a transcript.
         internal var providerMetadata: [String: String]?
 
         public init<S>(id: String = UUID().uuidString, _ calls: S)
@@ -397,8 +395,6 @@ public struct Transcript: Sendable, Equatable, Codable {
         /// Ordered prompt segments.
         public var segments: [Segment]
 
-        /// Opaque, provider-specific state attached to this response.
-        /// Synthesized Codable preserves this state when saving or replaying a transcript.
         internal var providerMetadata: [String: String]?
 
         public init(
