@@ -121,6 +121,35 @@ struct ToolSchemaNormalizationTests {
         #expect(normalized["type"] == nil)
     }
 
+    @Test func promotesArrayShapeAfterArrayValuedNullMember() {
+        let schema: [String: Any] = [
+            "type": "object",
+            "properties": [
+                "addresses": [
+                    "anyOf": [
+                        ["type": ["null"]],
+                        [
+                            "type": "array",
+                            "items": [
+                                "type": "object",
+                                "properties": ["city": ["type": "string"]],
+                            ],
+                        ],
+                    ]
+                ]
+            ],
+        ]
+
+        let normalized = normalizeToolSchemaTypes(schema)
+
+        let properties = normalized["properties"] as? [String: Any]
+        let addresses = properties?["addresses"] as? [String: Any]
+        let items = addresses?["items"] as? [String: Any]
+        #expect(addresses?["type"] as? String == "array")
+        #expect(items?["type"] as? String == "object")
+        #expect((items?["properties"] as? [String: Any])?["city"] != nil)
+    }
+
     // MARK: - Nesting
 
     @Test func normalizesDeeplyNestedSchemas() {
@@ -1530,6 +1559,7 @@ struct ToolSchemaNormalizationTests {
         #expect(((members?.first as? [String: Any])?["properties"] as? [String: Any])?["city"] != nil)
         // Normalization promotes the non-null union member's shape for the template.
         #expect(address?["type"] as? String == "object")
+        #expect((address?["properties"] as? [String: Any])?["city"] != nil)
         #expect(!containsRef(prepared))
     }
 

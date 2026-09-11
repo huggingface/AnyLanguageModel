@@ -205,7 +205,10 @@ private func normalizeSchemaTypes(_ schema: [String: Any], depth: Int) -> [Strin
         let members = (["anyOf", "oneOf"].compactMap { normalized[$0] as? [Any] }).first
     {
         let member = members.compactMap { $0 as? [String: Any] }.first {
-            $0["type"] != nil && $0["type"] as? String != "null"
+            if let type = $0["type"] as? String { return type != "null" }
+            return ($0["type"] as? [Any])?.contains {
+                ($0 as? String).map { $0 != "null" } == true
+            } == true
         }
         normalized["type"] = member?["type"] ?? "string"
         for key in ["properties", "items"] where member?[key] != nil {
