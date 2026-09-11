@@ -315,15 +315,18 @@ public struct Transcript: Sendable, Equatable, Codable {
         private var calls: [ToolCall]
 
         /// Opaque, provider-specific state attached to the model turn containing these calls.
-        /// Preserve this state when saving or replaying a transcript.
-        ///
-        /// - Note: This property is exclusive to AnyLanguageModel
-        public var providerMetadata: [String: String]?
+        /// Synthesized Codable preserves this state when saving or replaying a transcript.
+        internal var providerMetadata: [String: String]?
 
-        public init<S>(
+        public init<S>(id: String = UUID().uuidString, _ calls: S)
+        where S: Sequence, S.Element == ToolCall {
+            self.init(id: id, calls, providerMetadata: nil)
+        }
+
+        internal init<S>(
             id: String = UUID().uuidString,
             _ calls: S,
-            providerMetadata: [String: String]? = nil
+            providerMetadata: [String: String]?
         ) where S: Sequence, S.Element == ToolCall {
             self.id = id
             self.calls = Array(calls)
@@ -395,16 +398,22 @@ public struct Transcript: Sendable, Equatable, Codable {
         public var segments: [Segment]
 
         /// Opaque, provider-specific state attached to this response.
-        /// Preserve this state when saving or replaying a transcript.
-        ///
-        /// - Note: This property is exclusive to AnyLanguageModel
-        public var providerMetadata: [String: String]?
+        /// Synthesized Codable preserves this state when saving or replaying a transcript.
+        internal var providerMetadata: [String: String]?
 
         public init(
             id: String = UUID().uuidString,
             assetIDs: [String],
+            segments: [Segment]
+        ) {
+            self.init(id: id, assetIDs: assetIDs, segments: segments, providerMetadata: nil)
+        }
+
+        internal init(
+            id: String = UUID().uuidString,
+            assetIDs: [String],
             segments: [Segment],
-            providerMetadata: [String: String]? = nil
+            providerMetadata: [String: String]?
         ) {
             self.id = id
             self.assetIDs = assetIDs
