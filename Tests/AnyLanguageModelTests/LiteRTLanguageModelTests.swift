@@ -3,7 +3,40 @@ import Testing
 
 @testable import AnyLanguageModel
 
-#if LiteRT
+#if LiteRT && (os(iOS) || os(macOS)) && !targetEnvironment(macCatalyst)
+    @Suite("LiteRTLanguageModel configuration")
+    struct LiteRTLanguageModelConfigurationTests {
+        @Test func missingLocalModelThrows() async {
+            let url = FileManager.default.temporaryDirectory
+                .appendingPathComponent(UUID().uuidString)
+                .appendingPathExtension("litertlm")
+            let session = LanguageModelSession(model: LiteRTLanguageModel(modelFileURL: url))
+
+            do {
+                _ = try await session.respond(to: "Hello")
+                Issue.record("Expected a missing model error")
+            } catch let error as CocoaError {
+                #expect(error.code == .fileReadNoSuchFile)
+            } catch {
+                Issue.record("Unexpected error: \(error)")
+            }
+        }
+
+        @Test func invalidRepositoryThrows() async {
+            let model = LiteRTLanguageModel(huggingFaceRepo: "", fileName: "model.litertlm")
+            let session = LanguageModelSession(model: model)
+
+            do {
+                _ = try await session.respond(to: "Hello")
+                Issue.record("Expected an invalid repository error")
+            } catch let error as URLError {
+                #expect(error.code == .badURL)
+            } catch {
+                Issue.record("Unexpected error: \(error)")
+            }
+        }
+    }
+
     /// Path to a local `.litertlm` file to test against
     /// (for example, gemma-4-E2B-it.litertlm).
     /// These tests load multi-GB weights, so they only run when explicitly
@@ -21,8 +54,7 @@ import Testing
     struct LiteRTLanguageModelTests {
         private var model: LiteRTLanguageModel {
             LiteRTLanguageModel(
-                modelFileURL: URL(fileURLWithPath: liteRTTestModelPath!),
-                modalities: []
+                modelFileURL: URL(fileURLWithPath: liteRTTestModelPath!)
             )
         }
 

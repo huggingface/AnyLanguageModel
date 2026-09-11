@@ -1,7 +1,9 @@
 import Foundation
 
-#if LiteRT
-    @preconcurrency import LiteRTFoundation
+#if LiteRT && (os(iOS) || os(macOS)) && !targetEnvironment(macCatalyst)
+    @preconcurrency import LiteRTLM
+    import class HuggingFace.HubClient
+    import enum HuggingFace.Repo
 
     /// A language model that runs `.litertlm` models fully on-device via Google's
     /// [LiteRT-LM](https://github.com/google-ai-edge/litert-lm) runtime.
@@ -11,13 +13,13 @@ import Foundation
     /// ship a vision tower.
     ///
     /// ```swift
-    /// let model = LiteRTLanguageModel(model: .gemma4_E2B)
+    /// let model = LiteRTLanguageModel(modelFileURL: modelURL)
     /// let session = LanguageModelSession(model: model)
     /// let response = try await session.respond(to: "What is the capital of France?")
     /// ```
     ///
-    /// The model file is downloaded from Hugging Face on first use and cached under
-    /// Application Support. Loading is lazy: the engine is brought up on the first
+    /// Hugging Face models are downloaded on first use and stored in the Hub cache.
+    /// Loading is lazy: the engine is brought up on the first
     /// request (or when ``prewarm(for:promptPrefix:)`` is called).
     ///
     /// Structured generation is prompt-driven (the JSON schema is included in the
@@ -31,140 +33,78 @@ import Foundation
 
         private let engine: LazyEngine
 
-        /// Creates a model from the swift-litert-lm catalog, downloading the
-        /// `.litertlm` from Hugging Face on first use.
+        /// Creates a model from a local `.litertlm` file.
         ///
         /// - Parameters:
-        ///   - model: The catalog model to run (for example, `.gemma4_E2B`).
-        ///   - modalities: Towers to enable. Defaults to the model's default
-        ///     modalities. Requesting an unsupported tower is ignored.
-        ///   - storageDirectory: Where to keep the downloaded model. Defaults to
-        ///     Application Support/LiteRTModels.
-        ///   - allowUnsafeMemory: Bypass the device-RAM safety check.
-        ///   - maxTokens: Context (KV cache) budget. Defaults to the catalog value.
-        ///   - onDownloadProgress: Called during the first-run model download.
-        public init(
-            model: LiteRTModel,
-            modalities: Modality? = nil,
-            storageDirectory: URL? = nil,
-            allowUnsafeMemory: Bool = false,
-            maxTokens: Int? = nil,
-            onDownloadProgress: (@Sendable (ModelDownloader.Progress) -> Void)? = nil
-        ) {
-            self.engine = LazyEngine {
-                if !allowUnsafeMemory {
-                    let ram = Int64(ProcessInfo.processInfo.physicalMemory)
-                    if ram < model.minimumDeviceRAM {
-                        throw LiteRTChatError.insufficientMemory(
-                            haveBytes: ram,
-                            needBytes: model.minimumDeviceRAM
-                        )
-                    }
-                }
-                let path = try await LiteRTChat.ensureModel(
-                    model,
-                    storageDirectory: storageDirectory,
-                    onProgress: onDownloadProgress
-                )
-                var wanted = modalities ?? model.defaultModalities
-                wanted.formIntersection(model.supportedModalities)
-                return try await makeEngine(
-                    modelPath: path,
-                    modalities: wanted,
-                    visionBackend: model.visionBackend,
-                    audioBackend: model.audioBackend,
-                    maxTokens: maxTokens ?? model.defaultMaxTokens,
-                    visualTokenBudget: model.defaultVisualTokenBudget
-                )
-            }
-        }
-
-        /// Creates a model from a local `.litertlm` file. No download.
-        ///
-        /// - Parameters:
-        ///   - modelFileURL: Absolute file URL of an on-disk `.litertlm`.
-        ///   - modalities: Towers to bring up. Defaults to `.all`; only the ones
-        ///     the model actually contains will work.
-        ///   - visionBackend: Backend for the vision encoder. Defaults to `.cpu()`
-        ///     (the safe choice for Gemma 4 on iOS).
-        ///   - audioBackend: Backend for the audio encoder. Defaults to `.cpu()`.
-        ///   - visualTokenBudget: Per-image visual-token cap (`nil` = engine default).
+        ///   - modelFileURL: File URL of an on-disk `.litertlm` model.
+        ///   - backend: Backend for text generation. Defaults to Metal GPU.
+        ///   - visionBackend: Backend for the vision encoder. Pass `.cpu()` for
+        ///     a model with image support; `nil` disables vision.
+        ///   - audioBackend: Backend for the audio encoder; `nil` disables audio.
         ///   - maxTokens: Context (KV cache) budget.
         public init(
             modelFileURL: URL,
-            modalities: Modality = .all,
-            visionBackend: Backend = .cpu(),
-            audioBackend: Backend = .cpu(),
-            visualTokenBudget: Int32? = nil,
+            backend: Backend = .gpu,
+            visionBackend: Backend? = nil,
+            audioBackend: Backend? = nil,
             maxTokens: Int = 2048
         ) {
             self.engine = LazyEngine {
-                guard FileManager.default.fileExists(atPath: modelFileURL.path) else {
-                    throw LiteRTChatError.modelFileNotFound(modelFileURL)
+                guard modelFileURL.isFileURL,
+                    FileManager.default.fileExists(atPath: modelFileURL.path)
+                else {
+                    throw CocoaError(.fileReadNoSuchFile, userInfo: [NSURLErrorKey: modelFileURL])
                 }
                 return try await makeEngine(
                     modelPath: modelFileURL.path,
-                    modalities: modalities,
+                    backend: backend,
                     visionBackend: visionBackend,
                     audioBackend: audioBackend,
-                    maxTokens: maxTokens,
-                    visualTokenBudget: visualTokenBudget
+                    maxTokens: maxTokens
                 )
             }
         }
 
-        /// Creates a model from any Hugging Face repo hosting a `.litertlm`,
-        /// downloading it on first use.
+        /// Creates a model from a Hugging Face repository hosting a `.litertlm` file.
+        /// The file is downloaded lazily using the Hub client's cache and authentication.
         ///
         /// - Parameters:
-        ///   - huggingFaceRepo: For example, `"litert-community/gemma-4-E4B-it-litert-lm"`.
-        ///   - fileName: The `.litertlm` file in that repo.
+        ///   - huggingFaceRepo: The Hugging Face model repository identifier.
+        ///   - fileName: The path to the `.litertlm` file within the repository.
         ///   - revision: Git revision or branch. Defaults to `main`.
-        ///   - modalities: Defaults to text-only (`[]`) — the safe choice for an
-        ///     unknown model. Pass `.textImage` or `.all` if the model ships those
-        ///     encoders.
-        ///   - visionBackend: Backend for the vision encoder. Defaults to `.cpu()`.
-        ///   - audioBackend: Backend for the audio encoder. Defaults to `.cpu()`.
-        ///   - visualTokenBudget: Per-image visual-token cap (`nil` = engine default).
+        ///   - backend: Backend for text generation. Defaults to Metal GPU.
+        ///   - visionBackend: Backend for the vision encoder; `nil` disables vision.
+        ///   - audioBackend: Backend for the audio encoder; `nil` disables audio.
         ///   - maxTokens: Context (KV cache) budget.
-        ///   - storageDirectory: Where to keep the downloaded model.
-        ///   - onDownloadProgress: Called during the first-run model download.
+        ///   - hub: Optional Hub client for authentication and cache configuration.
+        ///   - downloadProgress: Optional progress object for the model download.
         public init(
             huggingFaceRepo: String,
             fileName: String,
             revision: String = "main",
-            modalities: Modality = [],
-            visionBackend: Backend = .cpu(),
-            audioBackend: Backend = .cpu(),
-            visualTokenBudget: Int32? = nil,
+            backend: Backend = .gpu,
+            visionBackend: Backend? = nil,
+            audioBackend: Backend? = nil,
             maxTokens: Int = 2048,
-            storageDirectory: URL? = nil,
-            onDownloadProgress: (@Sendable (ModelDownloader.Progress) -> Void)? = nil
+            hub: HubClient? = nil,
+            downloadProgress: Progress? = nil
         ) {
             self.engine = LazyEngine {
-                guard
-                    let url = URL(
-                        string:
-                            "https://huggingface.co/\(huggingFaceRepo)/resolve/\(revision)/\(fileName)?download=true"
-                    )
-                else {
-                    throw LiteRTChatError.modelFileNotFound(URL(fileURLWithPath: fileName))
+                guard let repo = Repo.ID(rawValue: huggingFaceRepo) else {
+                    throw URLError(.badURL)
                 }
-                let directory = try storageDirectory ?? LiteRTChat.defaultStorageDirectory()
-                let destination = directory.appendingPathComponent(fileName)
-                try await ModelDownloader.shared.download(
-                    from: url,
-                    to: destination,
-                    expectedBytes: nil,
-                    onProgress: onDownloadProgress
+                let destination = try await (hub ?? .default).downloadFile(
+                    at: fileName,
+                    from: repo,
+                    revision: revision,
+                    progress: downloadProgress
                 )
                 return try await makeEngine(
                     modelPath: destination.path,
-                    modalities: modalities,
+                    backend: backend,
                     visionBackend: visionBackend,
                     audioBackend: audioBackend,
-                    maxTokens: maxTokens,
-                    visualTokenBudget: visualTokenBudget
+                    maxTokens: maxTokens
                 )
             }
         }
@@ -366,27 +306,19 @@ import Foundation
 
     private func makeEngine(
         modelPath: String,
-        modalities: Modality,
-        visionBackend: Backend,
-        audioBackend: Backend,
-        maxTokens: Int,
-        visualTokenBudget: Int32?
+        backend: Backend,
+        visionBackend: Backend?,
+        audioBackend: Backend?,
+        maxTokens: Int
     ) async throws -> Engine {
-        ExperimentalFlags.optIntoExperimentalAPIs()
-        if modalities.contains(.vision), let visualTokenBudget {
-            ExperimentalFlags.visualTokenBudget = visualTokenBudget
-        }
         let caches = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first
         let config = try EngineConfig(
             modelPath: modelPath,
-            backend: .gpu,
-            visionBackend: modalities.contains(.vision) ? visionBackend : nil,
-            audioBackend: modalities.contains(.audio) ? audioBackend : nil,
+            backend: backend,
+            visionBackend: visionBackend,
+            audioBackend: audioBackend,
             maxNumTokens: maxTokens,
-            cacheDir: caches?.path,
-            // The engine default is 1 image per conversation (a 2nd image
-            // overwrites the 1st); allow several so multi-image chats work.
-            maxNumImages: modalities.contains(.vision) ? 16 : nil
+            cacheDir: caches?.path
         )
         let engine = Engine(engineConfig: config)
         try await engine.initialize()

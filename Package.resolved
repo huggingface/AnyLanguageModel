@@ -1,5 +1,5 @@
 {
-  "originHash" : "6173d2b219d89622a95aae2fcb7d8bde21639f4c400f469b7ec9877bfc9f2987",
+  "originHash" : "802c7ad583bfa4b4de0e754641d0e364438151ba6bdd8bcbcd9050572a0cfc4f",
   "pins" : [
     {
       "identity" : "eventsource",
@@ -20,12 +20,30 @@
       }
     },
     {
+      "identity" : "litert-lm",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/google-ai-edge/LiteRT-LM",
+      "state" : {
+        "revision" : "e9fd8c53ff968071774206163027dd84bedfe925",
+        "version" : "0.17.0"
+      }
+    },
+    {
       "identity" : "partialjsondecoder",
       "kind" : "remoteSourceControl",
       "location" : "https://github.com/mattt/PartialJSONDecoder",
       "state" : {
         "revision" : "e4d389e6bcc6771bb988d1a8a17695d8bfa97172",
         "version" : "1.0.0"
+      }
+    },
+    {
+      "identity" : "swift-asn1",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/apple/swift-asn1.git",
+      "state" : {
+        "revision" : "d9a5b37470adc940d22c3bcd5ca6953a516b727f",
+        "version" : "1.7.2"
       }
     },
     {
@@ -47,12 +65,21 @@
       }
     },
     {
-      "identity" : "swift-litert-lm",
+      "identity" : "swift-crypto",
       "kind" : "remoteSourceControl",
-      "location" : "https://github.com/john-rocky/swift-litert-lm",
+      "location" : "https://github.com/apple/swift-crypto.git",
       "state" : {
-        "revision" : "50c524e925c24e2651aaad1ae6baee82a15ab6b3",
-        "version" : "0.1.1"
+        "revision" : "da9d28d69ebe3894b18376c8f2395c2f37b8448f",
+        "version" : "4.5.2"
+      }
+    },
+    {
+      "identity" : "swift-huggingface",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/huggingface/swift-huggingface",
+      "state" : {
+        "revision" : "b5403ed09403f674601fd1123e07c5b32914d16f",
+        "version" : "0.10.1"
       }
     },
     {

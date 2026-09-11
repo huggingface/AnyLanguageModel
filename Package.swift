@@ -44,7 +44,7 @@ let package = Package(
         .package(url: "https://github.com/mattt/llama.swift", .upToNextMajor(from: "2.7484.0")),
         .package(url: "https://github.com/mattt/PartialJSONDecoder", from: "1.0.0"),
         .package(url: "https://github.com/ml-explore/mlx-swift-lm", from: "3.0.0"),
-        .package(url: "https://github.com/john-rocky/swift-litert-lm", from: "0.1.1"),
+        .package(url: "https://github.com/google-ai-edge/LiteRT-LM", from: "0.17.0"),
         .package(url: "https://github.com/swiftlang/swift-syntax", from: "602.0.0"),
         .package(url: "https://github.com/swift-server/async-http-client.git", from: "1.24.0"),
     ],
@@ -79,7 +79,7 @@ let package = Package(
                 .product(
                     name: "HuggingFace",
                     package: "swift-huggingface",
-                    condition: .when(traits: ["MLX"])
+                    condition: .when(traits: ["MLX", "LiteRT"])
                 ),
                 .product(
                     name: "Tokenizers",
@@ -97,8 +97,8 @@ let package = Package(
                     condition: .when(traits: ["Llama"])
                 ),
                 .product(
-                    name: "LiteRTFoundation",
-                    package: "swift-litert-lm",
+                    name: "LiteRTLM",
+                    package: "LiteRT-LM",
                     condition: .when(platforms: [.iOS, .macOS], traits: ["LiteRT"])
                 ),
                 .product(
