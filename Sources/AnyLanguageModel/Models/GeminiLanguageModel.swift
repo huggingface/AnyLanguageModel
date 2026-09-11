@@ -1037,20 +1037,33 @@ private struct GeminiCandidate: Codable, Sendable {
 
 private struct GeminiUsageMetadata: Codable, Sendable {
     let promptTokenCount: Int?
+    let toolUsePromptTokenCount: Int?
     let cachedContentTokenCount: Int?
     let candidatesTokenCount: Int?
     let totalTokenCount: Int?
     let thoughtsTokenCount: Int?
 
     var reportedUsage: ReportedUsage? {
-        ReportedUsage(
-            input: .init(totalTokenCount: promptTokenCount, cachedTokenCount: cachedContentTokenCount),
-            output: .init(totalTokenCount: candidatesTokenCount, reasoningTokenCount: thoughtsTokenCount)
+        func sum(_ lhs: Int?, _ rhs: Int?) -> Int? {
+            guard lhs != nil || rhs != nil else { return nil }
+            return (lhs ?? 0) + (rhs ?? 0)
+        }
+        // Gemini reports tool-use prompts and reasoning separately from the main counts.
+        return ReportedUsage(
+            input: .init(
+                totalTokenCount: sum(promptTokenCount, toolUsePromptTokenCount),
+                cachedTokenCount: cachedContentTokenCount
+            ),
+            output: .init(
+                totalTokenCount: sum(candidatesTokenCount, thoughtsTokenCount),
+                reasoningTokenCount: thoughtsTokenCount
+            )
         ).normalized
     }
 
     enum CodingKeys: String, CodingKey {
         case promptTokenCount
+        case toolUsePromptTokenCount
         case cachedContentTokenCount
         case candidatesTokenCount
         case totalTokenCount

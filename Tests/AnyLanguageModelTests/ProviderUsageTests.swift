@@ -58,6 +58,7 @@ import Testing
                     return [
                         "promptTokenCount": 100, "cachedContentTokenCount": 25,
                         "candidatesTokenCount": 20, "thoughtsTokenCount": 5,
+                        "toolUsePromptTokenCount": 10, "totalTokenCount": 135,
                     ]
                 case .ollama:
                     return ["prompt_eval_count": 100, "eval_count": 20]
@@ -67,11 +68,11 @@ import Testing
             var expected: LanguageModelSession.Usage {
                 .init(
                     input: .init(
-                        totalTokenCount: self == .anthropic ? 135 : 100,
+                        totalTokenCount: self == .anthropic ? 135 : (self == .gemini ? 110 : 100),
                         cachedTokenCount: self == .ollama ? 0 : 25
                     ),
                     output: .init(
-                        totalTokenCount: 20,
+                        totalTokenCount: self == .gemini ? 25 : 20,
                         reasoningTokenCount: self == .anthropic || self == .ollama ? 0 : 5
                     ),
                     metadata: self == .anthropic ? ["cache_creation_input_tokens": 10] : [:]
@@ -172,6 +173,7 @@ import Testing
                 case .gemini:
                     var early = counts
                     early["candidatesTokenCount"] = 7
+                    early["totalTokenCount"] = 122
                     events = [response(text: text, counts: includeUsage ? early : nil)]
                     if includeUsage { events.append(["usageMetadata": counts]) }
                 case .ollama:
@@ -265,6 +267,38 @@ import Testing
             )
         }
 
+        @Test(
+            arguments: ["promptTokenCount", "toolUsePromptTokenCount", "candidatesTokenCount", "thoughtsTokenCount"],
+            [0, 10]
+        )
+        func partialGeminiUsage(_ key: String, _ count: Int) async throws {
+            UsageURLProtocol.reset()
+            UsageURLProtocol.enqueue(json: try Self.json(Provider.gemini.response(counts: [key: count])))
+            let response = try await Provider.gemini.makeSession().respond(to: "Hi")
+            let isInput = key == "promptTokenCount" || key == "toolUsePromptTokenCount"
+            #expect(response.usage.input.totalTokenCount == (isInput ? count : 0))
+            #expect(response.usage.output.totalTokenCount == (isInput ? 0 : count))
+            #expect(response.usage.output.reasoningTokenCount == (key == "thoughtsTokenCount" ? count : 0))
+            #expect(response.usage.totalTokenCount == count)
+        }
+
+        @Test func geminiStreamingRetainsOmittedUsageTotals() async throws {
+            UsageURLProtocol.reset()
+            let events: [[String: Any]] = [
+                Provider.gemini.response(counts: ["promptTokenCount": 100, "toolUsePromptTokenCount": 10]),
+                ["usageMetadata": ["candidatesTokenCount": 20, "thoughtsTokenCount": 5]],
+                ["usageMetadata": ["cachedContentTokenCount": 25]],
+            ]
+            let stream = try events.map { "data: \(try Self.json($0))\n\n" }.joined()
+            UsageURLProtocol.enqueue(json: stream)
+            let session = Provider.gemini.makeSession()
+            let response = try await session.streamResponse(to: "Hi").collect()
+            #expect(response.content == "Hello")
+            #expect(response.usage == Provider.gemini.expected)
+            #expect(response.usage.totalTokenCount == 135)
+            #expect(session.usage == response.usage)
+        }
+
         @Generable
         struct Answer { var answer: String }
 
@@ -334,8 +368,8 @@ import Testing
             let response = try await session.respond(to: "Weather?")
             #expect(session.usage == response.usage)
             #expect(response.content == "Hello")
-            #expect(response.usage.input.totalTokenCount == 200)
-            #expect(response.usage.output.totalTokenCount == 40)
+            #expect(response.usage.input.totalTokenCount == (provider == .gemini ? 220 : 200))
+            #expect(response.usage.output.totalTokenCount == (provider == .gemini ? 50 : 40))
             #expect(response.usage.output.reasoningTokenCount == 10)
             #expect(response.usage.input.cachedTokenCount == 50)
             #expect(response.transcriptEntries.count == 2)

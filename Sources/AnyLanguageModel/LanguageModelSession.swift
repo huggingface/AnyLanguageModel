@@ -303,13 +303,16 @@ public final class LanguageModelSession: @unchecked Sendable {
         }
 
         /// Returns counts not yet accounted for in this stream,
-        /// retaining the highest reported count for each field.
+        /// retaining the highest reported count for each field
+        /// and returning only new or changed metadata keys.
         func increment(since previous: inout Self) -> Self {
             func increase(_ count: Int, _ highest: inout Int) -> Int {
                 let delta = max(0, count - highest)
                 highest = max(highest, count)
                 return delta
             }
+            let changedMetadata = metadata.filter { previous.metadata[$0.key] != $0.value }
+            previous.metadata.merge(changedMetadata) { _, latest in latest }
             return Self(
                 input: .init(
                     totalTokenCount: increase(input.totalTokenCount, &previous.input.totalTokenCount),
@@ -319,7 +322,7 @@ public final class LanguageModelSession: @unchecked Sendable {
                     totalTokenCount: increase(output.totalTokenCount, &previous.output.totalTokenCount),
                     reasoningTokenCount: increase(output.reasoningTokenCount, &previous.output.reasoningTokenCount)
                 ),
-                metadata: metadata
+                metadata: changedMetadata
             )
         }
     }

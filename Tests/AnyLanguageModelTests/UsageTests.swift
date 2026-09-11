@@ -69,6 +69,39 @@ struct UsageTests {
         #expect(reported.value.output.totalTokenCount == 10)
     }
 
+    @Test func streamingIncrementsOnlyIncludeChangedMetadata() {
+        var previous = Usage.zero
+        var snapshot = usage
+        snapshot.metadata = [
+            "cache_creation_input_tokens": GeneratedContent(10),
+            "service_tier": GeneratedContent("standard"),
+        ]
+        #expect(snapshot.increment(since: &previous) == snapshot)
+        #expect(previous == snapshot)
+        #expect(snapshot.increment(since: &previous) == .zero)
+
+        snapshot.metadata["service_tier"] = GeneratedContent("priority")
+        let changed = snapshot.increment(since: &previous)
+        #expect(changed.totalTokenCount == 0)
+        #expect(changed.metadata == ["service_tier": GeneratedContent("priority")])
+        #expect(previous == snapshot)
+        #expect(snapshot.increment(since: &previous) == .zero)
+
+        let retainedMetadata = snapshot.metadata
+        snapshot.metadata = [:]
+        #expect(snapshot.increment(since: &previous) == .zero)
+        #expect(previous.metadata == retainedMetadata)
+        snapshot.metadata = retainedMetadata
+        #expect(snapshot.increment(since: &previous) == .zero)
+
+        snapshot.metadata["cache_creation_input_tokens"] = GeneratedContent(0)
+        snapshot.output.totalTokenCount += 3
+        let increased = snapshot.increment(since: &previous)
+        #expect(increased.output.totalTokenCount == 3)
+        #expect(increased.metadata == ["cache_creation_input_tokens": GeneratedContent(0)])
+        #expect(snapshot.increment(since: &previous) == .zero)
+    }
+
     @Test func codableRoundTrip() throws {
         var withMetadata = usage
         withMetadata.metadata = ["service_tier": GeneratedContent("standard")]
