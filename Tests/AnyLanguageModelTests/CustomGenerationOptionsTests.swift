@@ -1017,7 +1017,9 @@ struct GeminiCustomOptionsTests {
         }
 
         @Test func samplingDerivationNucleus() {
-            let derived = samplingDerivedParameters(from: GenerationOptions(sampling: .random(probabilityThreshold: 0.9)))
+            let derived = samplingDerivedParameters(
+                from: GenerationOptions(sampling: .random(probabilityThreshold: 0.9))
+            )
             #expect(derived.topP == 0.9)
             #expect(derived.topK == nil)
             #expect(derived.greedyTemperature == nil)
@@ -1034,8 +1036,8 @@ struct GeminiCustomOptionsTests {
 
         @Test func samplingFillsWhenNoCustomBlock() {
             let params = toGenerateParameters(GenerationOptions(sampling: .random(top: 12)))
-            #expect(params.topK == 12)          // top-k now reaches MLX via sampling
-            #expect(params.topP == 1.0)         // untouched default
+            #expect(params.topK == 12)  // top-k now reaches MLX via sampling
+            #expect(params.topP == 1.0)  // untouched default
         }
 
         @Test func customBlockWinsOverSampling() {
@@ -1048,8 +1050,8 @@ struct GeminiCustomOptionsTests {
                 topK: 5
             )
             let params = toGenerateParameters(options)
-            #expect(params.topP == 0.3)         // custom wins over sampling's 0.9
-            #expect(params.topK == 5)           // custom wins (sampling expressed no top-k)
+            #expect(params.topP == 0.3)  // custom wins over sampling's 0.9
+            #expect(params.topK == 5)  // custom wins (sampling expressed no top-k)
         }
 
         @Test func greedyMapsToZeroTemperature() {
