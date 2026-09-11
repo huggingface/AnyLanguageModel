@@ -10,6 +10,11 @@ permissions:
   contents: read
   pull-requests: write
 
+# LiteRT-LM's Swift package uses release XCFrameworks;
+# its Git LFS assets are not needed by SwiftPM.
+env:
+  GIT_LFS_SKIP_SMUDGE: "1"
+
 jobs:
   test-macos:
     name: Swift ${{ matrix.swift }} on macOS ${{ matrix.macos }} with Xcode ${{ matrix.xcode }}${{ matrix.traits != '' && format(' and --traits {0}', matrix.traits) || '' }}
@@ -63,10 +68,10 @@ jobs:
         run: swift format lint --strict --recursive .
 
       - name: Build
-        run: swift build --build-tests --traits MLX,Llama,CoreML${{ matrix.traits != '' && format(',{0}', matrix.traits) || '' }}
+        run: swift build --build-tests --traits MLX,Llama,CoreML,LiteRT${{ matrix.traits != '' && format(',{0}', matrix.traits) || '' }}
 
       - name: Test
-        run: swift test --skip-build --traits MLX,Llama,CoreML${{ matrix.traits != '' && format(',{0}', matrix.traits) || '' }}
+        run: swift test --skip-build --traits MLX,Llama,CoreML,LiteRT${{ matrix.traits != '' && format(',{0}', matrix.traits) || '' }}
 
   test-linux:
     name: Swift ${{ matrix.swift }} on Linux${{ matrix.traits != '' && format(' and --traits {0}', matrix.traits) || '' }}

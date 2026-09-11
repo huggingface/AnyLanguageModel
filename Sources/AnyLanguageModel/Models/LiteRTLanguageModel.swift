@@ -34,7 +34,8 @@ import Foundation
         /// loading errors surface when responding.
         public typealias UnavailableReason = Never
 
-        private let engine: LazyEngine
+        private let engine: LiteRTModelLoader
+        private let imageSession: URLSession
 
         /// Creates a model from a local `.litertlm` file.
         ///
@@ -55,7 +56,8 @@ import Foundation
             audioBackend: Backend? = nil,
             maxTokens: Int = 2048
         ) {
-            self.engine = LazyEngine {
+            self.imageSession = .shared
+            self.engine = LiteRTModelLoader {
                 guard modelFileURL.isFileURL,
                     FileManager.default.fileExists(atPath: modelFileURL.path)
                 else {
@@ -99,7 +101,8 @@ import Foundation
             hub: HubClient? = nil,
             downloadProgress: Progress? = nil
         ) {
-            self.engine = LazyEngine {
+            self.imageSession = .shared
+            self.engine = LiteRTModelLoader {
                 guard let repo = Repo.ID(rawValue: huggingFaceRepo) else {
                     throw URLError(.badURL)
                 }
@@ -117,6 +120,14 @@ import Foundation
                     maxTokens: maxTokens
                 )
             }
+        }
+
+        init(
+            load: @escaping @Sendable () async throws -> any LiteRTRuntime,
+            imageSession: URLSession = .shared
+        ) {
+            self.engine = LiteRTModelLoader(load)
+            self.imageSession = imageSession
         }
 
         public func prewarm(
@@ -144,11 +155,12 @@ import Foundation
             }
 
             let tools = session.tools
-            var plan = makePlan(
+            var plan = try await makePlan(
                 from: session.transcript,
                 fallbackPrompt: prompt.description,
                 schemaJSON: includeSchemaInPrompt ? schemaJSON : nil,
-                tools: tools
+                tools: tools,
+                imageSession: imageSession
             )
             let sampler = makeSampler(for: options, structured: schemaJSON != nil || !tools.isEmpty)
 
@@ -157,8 +169,8 @@ import Foundation
             var toolRounds = 0
 
             while true {
-                let conversation = try await engine.createConversation(
-                    with: ConversationConfig(
+                let conversation = try await engine.makeConversation(
+                    config: ConversationConfig(
                         systemMessage: plan.systemMessage,
                         initialMessages: plan.history,
                         samplerConfig: sampler
@@ -166,14 +178,22 @@ import Foundation
                 )
 
                 text = ""
-                for try await chunk in conversation.sendMessageStream(plan.prompt) {
-                    text += chunk.toString
+                try await generateLiteRTResponse(
+                    conversation: conversation,
+                    prompt: plan.prompt,
+                    maximumResponseTokens: options.maximumResponseTokens
+                ) { chunk in
+                    text += chunk
                 }
 
                 guard !tools.isEmpty,
-                    toolRounds < maxToolRounds,
                     let parsed = parseToolCall(from: text, tools: tools)
                 else { break }
+                guard toolRounds < maxToolRounds else {
+                    throw LanguageModelSession.GenerationError.decodingFailure(
+                        .init(debugDescription: "Exceeded maximum LiteRT tool iterations (\(maxToolRounds)).")
+                    )
+                }
                 toolRounds += 1
 
                 let resolution = try await resolveToolCall(
@@ -183,6 +203,14 @@ import Foundation
                 )
                 switch resolution {
                 case .stop(let call):
+                    guard type == String.self else {
+                        throw LanguageModelSession.GenerationError.decodingFailure(
+                            .init(
+                                debugDescription:
+                                    "Tool execution stopped before LiteRT generated a structured response."
+                            )
+                        )
+                    }
                     entries.append(.toolCalls(Transcript.ToolCalls([call])))
                     return LanguageModelSession.Response(
                         content: "" as! Content,
@@ -235,14 +263,15 @@ import Foundation
                                 schemaJSON = try encodeSchema(type.generationSchema)
                             }
 
-                            let plan = makePlan(
+                            let plan = try await makePlan(
                                 from: session.transcript,
                                 fallbackPrompt: prompt.description,
                                 schemaJSON: includeSchemaInPrompt ? schemaJSON : nil,
-                                tools: []
+                                tools: [],
+                                imageSession: imageSession
                             )
-                            let conversation = try await engine.createConversation(
-                                with: ConversationConfig(
+                            let conversation = try await engine.makeConversation(
+                                config: ConversationConfig(
                                     systemMessage: plan.systemMessage,
                                     initialMessages: plan.history,
                                     samplerConfig: makeSampler(for: options, structured: schemaJSON != nil)
@@ -250,9 +279,12 @@ import Foundation
                             )
 
                             var text = ""
-                            for try await chunk in conversation.sendMessageStream(plan.prompt) {
-                                let delta = chunk.toString
-                                guard !delta.isEmpty else { continue }
+                            try await generateLiteRTResponse(
+                                conversation: conversation,
+                                prompt: plan.prompt,
+                                maximumResponseTokens: options.maximumResponseTokens
+                            ) { delta in
+                                guard !delta.isEmpty else { return }
                                 text += delta
 
                                 if type == String.self {
@@ -294,26 +326,6 @@ import Foundation
     }
 
     // MARK: - Engine Bring-Up
-
-    /// Brings up the engine on first use and shares it across requests.
-    /// Engine bring-up loads multi-GB weights,
-    /// so it must happen exactly once.
-    private actor LazyEngine {
-        private var task: Task<Engine, any Error>?
-        private let bringUp: @Sendable () async throws -> Engine
-
-        init(_ bringUp: @escaping @Sendable () async throws -> Engine) {
-            self.bringUp = bringUp
-        }
-
-        func ready() async throws -> Engine {
-            if task == nil {
-                let bringUp = self.bringUp
-                task = Task { try await bringUp() }
-            }
-            return try await task!.value
-        }
-    }
 
     private func makeEngine(
         modelPath: String,
@@ -367,8 +379,9 @@ import Foundation
         from transcript: Transcript,
         fallbackPrompt: String,
         schemaJSON: String?,
-        tools: [any Tool]
-    ) -> GenerationPlan {
+        tools: [any Tool],
+        imageSession: URLSession
+    ) async throws -> GenerationPlan {
         let entries = Array(transcript)
         let triggerIndex = entries.lastIndex { entry in
             switch entry {
@@ -378,8 +391,9 @@ import Foundation
         }
 
         var systemText: [String] = []
-        if !tools.isEmpty {
-            systemText.append(toolInstructions(tools))
+        let describedTools = tools.filter(\.includesSchemaInInstructions)
+        if !describedTools.isEmpty {
+            systemText.append(toolInstructions(describedTools))
         }
         var history: [Message] = []
         var trigger: Message?
@@ -390,7 +404,7 @@ import Foundation
             case .instructions(let instructions):
                 systemText.append(textContent(of: instructions.segments))
             case .prompt(let prompt):
-                var contents = messageContents(of: prompt.segments)
+                var contents = try await messageContents(of: prompt.segments, session: imageSession)
                 if isTrigger, let schemaJSON, !schemaJSON.isEmpty {
                     contents.append(
                         .text(
@@ -425,7 +439,10 @@ import Foundation
 
     /// Maps transcript segments to LiteRT content:
     /// text, structured content as JSON text, and images.
-    private func messageContents(of segments: [Transcript.Segment]) -> [Content] {
+    private func messageContents(
+        of segments: [Transcript.Segment],
+        session: URLSession
+    ) async throws -> [Content] {
         var contents: [Content] = []
         for segment in segments {
             switch segment {
@@ -442,7 +459,13 @@ import Foundation
                 case .url(let url):
                     if url.isFileURL {
                         contents.append(.imageFile(url.path))
-                    } else if let data = try? Data(contentsOf: url) {
+                    } else {
+                        let (data, response) = try await session.data(from: url)
+                        if let response = response as? HTTPURLResponse,
+                            !(200 ... 299).contains(response.statusCode)
+                        {
+                            throw URLError(.badServerResponse)
+                        }
                         contents.append(.imageData(data))
                     }
                 }
@@ -451,10 +474,15 @@ import Foundation
         return contents.isEmpty ? [.text("")] : contents
     }
 
-    /// Concatenates the text of a segment list (non-text segments are ignored).
+    /// Concatenates text and structured JSON from a segment list.
+    /// Image segments are ignored.
     private func textContent(of segments: [Transcript.Segment]) -> String {
         segments.compactMap { segment in
-            if case .text(let text) = segment { return text.content } else { return nil }
+            switch segment {
+            case .text(let text): return text.content
+            case .structure(let structure): return structure.content.jsonString
+            case .image: return nil
+            }
         }.joined(separator: " ")
     }
 
