@@ -440,25 +440,25 @@ public struct OpenResponsesLanguageModel: LanguageModel {
                                 body: body
                             )
                         var accumulatedText = ""
+                        var usage = ReportedUsage()
                         for try await event in events {
                             switch event {
                             case .outputTextDelta(let delta):
                                 accumulatedText += delta
-                                var raw: GeneratedContent
-                                let content: Content.PartiallyGenerated?
-                                if type == String.self {
-                                    raw = GeneratedContent(accumulatedText)
-                                    content = (accumulatedText as! Content).asPartiallyGenerated()
-                                } else {
-                                    raw =
-                                        (try? GeneratedContent(json: accumulatedText))
-                                        ?? GeneratedContent(accumulatedText)
-                                    content = (try? type.init(raw))?.asPartiallyGenerated()
+                                if let snapshot = LanguageModelSession.ResponseStream<Content>.Snapshot(
+                                    text: accumulatedText,
+                                    usage: usage.value
+                                ) {
+                                    continuation.yield(snapshot)
                                 }
-                                if let content {
-                                    continuation.yield(.init(content: content, rawContent: raw))
+                            case .completed(let responseUsage):
+                                usage.merge(responseUsage?.reportedUsage)
+                                if let snapshot = LanguageModelSession.ResponseStream<Content>.Snapshot(
+                                    text: accumulatedText,
+                                    usage: usage.value
+                                ) {
+                                    continuation.yield(snapshot)
                                 }
-                            case .completed:
                                 continuation.finish()
                                 return
                             case .failed:
@@ -490,6 +490,7 @@ public struct OpenResponsesLanguageModel: LanguageModel {
         session: LanguageModelSession
     ) async throws -> LanguageModelSession.Response<Content> where Content: Generable {
         var entries: [Transcript.Entry] = []
+        var usage = ReportedUsage()
         var text = ""
         var lastOutput: [JSONValue]?
         var messages = messages
@@ -512,6 +513,8 @@ public struct OpenResponsesLanguageModel: LanguageModel {
                 body: body
             )
 
+            usage.add(resp.usage?.reportedUsage)
+
             let toolCalls = extractToolCallsFromOutput(resp.output)
             lastOutput = resp.output
             if !toolCalls.isEmpty {
@@ -530,7 +533,8 @@ public struct OpenResponsesLanguageModel: LanguageModel {
                     return LanguageModelSession.Response(
                         content: empty.content,
                         rawContent: empty.rawContent,
-                        transcriptEntries: ArraySlice(entries)
+                        transcriptEntries: ArraySlice(entries),
+                        usage: usage.value
                     )
                 case .invocations(let invocations):
                     if !invocations.isEmpty {
@@ -557,7 +561,8 @@ public struct OpenResponsesLanguageModel: LanguageModel {
             return LanguageModelSession.Response(
                 content: text as! Content,
                 rawContent: GeneratedContent(text),
-                transcriptEntries: ArraySlice(entries)
+                transcriptEntries: ArraySlice(entries),
+                usage: usage.value
             )
         }
         if let jsonString = extractJSONFromOutput(lastOutput) {
@@ -566,7 +571,8 @@ public struct OpenResponsesLanguageModel: LanguageModel {
             return LanguageModelSession.Response(
                 content: content,
                 rawContent: generatedContent,
-                transcriptEntries: ArraySlice(entries)
+                transcriptEntries: ArraySlice(entries),
+                usage: usage.value
             )
         }
         throw OpenResponsesLanguageModelError.noResponseGenerated
@@ -729,12 +735,14 @@ private enum OpenResponsesAPI {
     struct Response: Decodable, Sendable {
         let id: String
         let output: [JSONValue]?
+        let usage: ResponsesUsage?
         let outputText: String?
         let error: OpenResponsesError?
 
         private enum CodingKeys: String, CodingKey {
             case id
             case output
+            case usage
             case outputText = "output_text"
             case error
         }
@@ -1108,7 +1116,7 @@ private func resolveToolCalls(
 
 private enum OpenResponsesStreamEvent: Decodable, Sendable {
     case outputTextDelta(String)
-    case completed
+    case completed(ResponsesUsage?)
     case failed
     case ignored
 
@@ -1119,14 +1127,19 @@ private enum OpenResponsesStreamEvent: Decodable, Sendable {
         case "response.output_text.delta":
             self = .outputTextDelta(try c.decode(String.self, forKey: .delta))
         case "response.completed":
-            self = .completed
+            if c.contains(.response), !(try c.decodeNil(forKey: .response)) {
+                let response = try c.nestedContainer(keyedBy: CodingKeys.self, forKey: .response)
+                self = .completed(try response.decodeIfPresent(ResponsesUsage.self, forKey: .usage))
+            } else {
+                self = .completed(nil)
+            }
         case "response.failed":
             self = .failed
         default:
             self = .ignored
         }
     }
-    private enum CodingKeys: String, CodingKey { case type, delta }
+    private enum CodingKeys: String, CodingKey { case type, delta, response, usage }
 }
 
 // MARK: - Errors
