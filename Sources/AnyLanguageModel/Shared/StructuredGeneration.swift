@@ -41,14 +41,16 @@ private enum OptionalStructureBudget {
     }
 }
 
-private final class StringTokenCache: @unchecked Sendable {
-    static let shared = StringTokenCache()
+private final class TokenSetCache: @unchecked Sendable {
+    static let shared = TokenSetCache()
 
     struct Key: Hashable {
         let vocabSize: Int
         let eosToken: Int
         let endTokens: Set<Int>
+        let sampleTokenIds: [Int]
         let sampleTexts: [String]
+        let sampleSpecialTokens: [Bool]
     }
 
     private let tokensByKey = Locked<[Key: Set<Int>]>([:])
@@ -126,11 +128,16 @@ struct ConstrainedJSONGenerator<Backend: TokenBackend> {
             let token = try Self.singleToken(for: structuralText, backend: backend)
             structuralTerminators.insert(token)
         }
+        let cacheKey = Self.tokenSetCacheKey(for: backend)
         self.basicTerminators = structuralTerminators
-        self.integerTerminators = Self.buildValidIntegerTokens(backend: backend).union(structuralTerminators)
-        self.doubleTerminators = Self.buildValidDecimalTokens(backend: backend).union(structuralTerminators)
+        self.integerTerminators = Self.buildValidIntegerTokens(backend: backend, cacheKey: cacheKey).union(
+            structuralTerminators
+        )
+        self.doubleTerminators = Self.buildValidDecimalTokens(backend: backend, cacheKey: cacheKey).union(
+            structuralTerminators
+        )
 
-        let stringContentTokens = Self.buildValidStringTokens(backend: backend)
+        let stringContentTokens = Self.buildValidStringTokens(backend: backend, cacheKey: cacheKey)
         self.stringInitialAllowedTokens = stringContentTokens
         self.stringContinuationAllowedTokens = stringContentTokens.union(stringTerminators)
     }
@@ -159,9 +166,11 @@ struct ConstrainedJSONGenerator<Backend: TokenBackend> {
         return token
     }
 
-    private static func buildValidStringTokens(backend: Backend) -> Set<Int> {
-        let cacheKey = stringTokenCacheKey(for: backend)
-        if let cached = StringTokenCache.shared.tokens(for: cacheKey) {
+    private static func buildValidStringTokens(
+        backend: Backend,
+        cacheKey: TokenSetCache.Key
+    ) -> Set<Int> {
+        if let cached = TokenSetCache.shared.tokens(for: cacheKey) {
             return cached
         }
 
@@ -184,18 +193,20 @@ struct ConstrainedJSONGenerator<Backend: TokenBackend> {
             }
         }
 
-        StringTokenCache.shared.store(allowed, for: cacheKey)
+        TokenSetCache.shared.store(allowed, for: cacheKey)
         return allowed
     }
 
-    private static func stringTokenCacheKey(for backend: Backend) -> StringTokenCache.Key {
+    private static func tokenSetCacheKey(for backend: Backend) -> TokenSetCache.Key {
         let sampleTokenIds = sampleTokenIds(for: backend)
         let sampleTexts = sampleTokenIds.map { backend.tokenText($0) ?? "" }
-        return StringTokenCache.Key(
+        return TokenSetCache.Key(
             vocabSize: backend.vocabSize,
             eosToken: backend.eosToken,
             endTokens: backend.endTokens,
-            sampleTexts: sampleTexts
+            sampleTokenIds: sampleTokenIds,
+            sampleTexts: sampleTexts,
+            sampleSpecialTokens: sampleTokenIds.map { backend.isSpecialToken($0) }
         )
     }
 
@@ -210,6 +221,13 @@ struct ConstrainedJSONGenerator<Backend: TokenBackend> {
             backend.eosToken,
         ]
         samples.formUnion(backend.endTokens)
+        // Include numeric encodings so tokenizers with different digit, sign, or
+        // decimal-point mappings do not share cached token sets.
+        for text in ["0", "1", "2", "3", "4", "5", "6", "7", "8", "9", ".", "-"] {
+            if let tokens = try? backend.tokenize(text) {
+                samples.formUnion(tokens)
+            }
+        }
         return samples.filter { $0 >= 0 && $0 < vocabSize }.sorted()
     }
 
@@ -224,9 +242,11 @@ struct ConstrainedJSONGenerator<Backend: TokenBackend> {
     /// Standalone `-` is required because BPE tokenizers (Qwen2.5, etc.) encode `-1` as
     /// two tokens. Requiring every token to contain a digit excluded `-` and made negatives
     /// unrepresentable except via rare multi-character tokens.
-    private static func buildValidIntegerTokens(backend: Backend) -> Set<Int> {
-        let cacheKey = stringTokenCacheKey(for: backend)
-        if let cached = StringTokenCache.shared.integerTokens(for: cacheKey) {
+    private static func buildValidIntegerTokens(
+        backend: Backend,
+        cacheKey: TokenSetCache.Key
+    ) -> Set<Int> {
+        if let cached = TokenSetCache.shared.integerTokens(for: cacheKey) {
             return cached
         }
 
@@ -242,7 +262,7 @@ struct ConstrainedJSONGenerator<Backend: TokenBackend> {
             }
         }
 
-        StringTokenCache.shared.storeIntegerTokens(allowed, for: cacheKey)
+        TokenSetCache.shared.storeIntegerTokens(allowed, for: cacheKey)
         return allowed
     }
 
@@ -252,9 +272,11 @@ struct ConstrainedJSONGenerator<Backend: TokenBackend> {
     /// `4` `7` `3` `.` `0` `0`. The previous filter required every token to contain a digit,
     /// which dropped `.` and forced the model to pad zeros until `maxDecimalTokenLimit`
     /// (pathological `e+31` values after Double re-serialization).
-    private static func buildValidDecimalTokens(backend: Backend) -> Set<Int> {
-        let cacheKey = stringTokenCacheKey(for: backend)
-        if let cached = StringTokenCache.shared.decimalTokens(for: cacheKey) {
+    private static func buildValidDecimalTokens(
+        backend: Backend,
+        cacheKey: TokenSetCache.Key
+    ) -> Set<Int> {
+        if let cached = TokenSetCache.shared.decimalTokens(for: cacheKey) {
             return cached
         }
 
@@ -272,7 +294,7 @@ struct ConstrainedJSONGenerator<Backend: TokenBackend> {
             }
         }
 
-        StringTokenCache.shared.storeDecimalTokens(allowed, for: cacheKey)
+        TokenSetCache.shared.storeDecimalTokens(allowed, for: cacheKey)
         return allowed
     }
 
