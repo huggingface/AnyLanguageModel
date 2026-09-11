@@ -253,7 +253,7 @@ error: 'litert-lm': Couldn’t check out revision ‘e9fd8c53ff96807177420616302
 
 Git LFS tries to download a prebuilt Android library during checkout,
 but the referenced object is missing from the LFS remote used by that checkout.
-SwiftPM creates dependency checkouts from a local repository mirror,
+Swift Package Manager creates dependency checkouts from a local repository mirror,
 which Git LFS can treat as its remote
 instead of the original GitHub repository.
 That mirror may lack LFS objects required by the selected version,
@@ -263,7 +263,7 @@ for discussion and updates,
 and [upstream PR #3563](https://github.com/google-ai-edge/LiteRT-LM/pull/3563)
 for a proposed fix that explicitly configures the GitHub LFS endpoint.
 This can happen even when the `LiteRT` trait is disabled,
-because SwiftPM still resolves the package dependency.
+because Swift Package Manager still resolves the package dependency.
 
 The failure occurs during dependency checkout,
 before compilation.
@@ -276,7 +276,7 @@ for example after deleting `.build`
 or resetting Xcode's package caches.
 It doesn't affect an already-built app at runtime.
 
-To skip LFS downloads for a SwiftPM command,
+To skip LFS downloads for a Swift Package Manager command,
 prefix it with `GIT_LFS_SKIP_SMUDGE=1`:
 
 ```bash
@@ -319,7 +319,7 @@ after package resolution.
 
 LiteRT-LM's [Swift package manifest](https://github.com/google-ai-edge/LiteRT-LM/blob/e9fd8c53ff968071774206163027dd84bedfe925/Package.swift)
 downloads Apple XCFrameworks separately from release assets,
-so its Git LFS binaries aren't needed for SwiftPM builds.
+so its Git LFS binaries aren't needed for Swift Package Manager builds.
 The repository's [CI workflow](.github/workflows/ci.yml)
 already uses this workaround.
 The environment variable applies only to the command and its subprocesses;
