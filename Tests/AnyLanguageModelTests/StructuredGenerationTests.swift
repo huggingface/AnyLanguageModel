@@ -851,16 +851,17 @@ struct StructuredGenerationTests {
             maximumTokens: 64
         )
         let schema = String.generationSchema
+        let cache = StructuredGenerationTokenCache()
 
-        _ = try ConstrainedJSONGenerator(backend: backend, schema: schema)
+        _ = try ConstrainedJSONGenerator(backend: backend, schema: schema, tokenCache: cache)
         let coldTextCalls = backend.capture.tokenTextCalls
         let coldSpecialCalls = backend.capture.specialTokenCalls
-        #expect(coldTextCalls >= 3 * backend.vocabSize - 1)
-        #expect(coldSpecialCalls >= 3 * backend.vocabSize - 1)
+        #expect(coldTextCalls == backend.vocabSize)
+        #expect(coldSpecialCalls == backend.vocabSize)
 
-        _ = try ConstrainedJSONGenerator(backend: backend, schema: schema)
-        #expect(backend.capture.tokenTextCalls - coldTextCalls < backend.vocabSize)
-        #expect(backend.capture.specialTokenCalls - coldSpecialCalls < backend.vocabSize)
+        _ = try ConstrainedJSONGenerator(backend: backend, schema: schema, tokenCache: cache)
+        #expect(backend.capture.tokenTextCalls == coldTextCalls)
+        #expect(backend.capture.specialTokenCalls == coldSpecialCalls)
     }
 
     @Test(arguments: ["0", "1", "2", "3", "4", "5", "6", "7", "8", "9", ".", "-"])
@@ -875,8 +876,8 @@ struct StructuredGenerationTests {
         let output = numericText == "." ? "1.0" : numericText == "-" ? "-1" : numericText
 
         // Both vocabularies have identical original samples. Moving every numeric
-        // token preserves even the ordered numeric sample texts, so the key must
-        // also retain their IDs.
+        // token preserves even the ordered numeric sample texts. Each loaded
+        // tokenizer must own a separate cache.
         for offset in [60, 80] {
             var maps = baseTokenMaps()
             maps.tokenToText = maps.tokenToText.filter { !$0.value.contains(where: { "0123456789-".contains($0) }) }
@@ -894,7 +895,11 @@ struct StructuredGenerationTests {
                 maximumTokens: 64,
                 samplingQueue: queue
             )
-            var generator = try ConstrainedJSONGenerator(backend: backend, schema: schema)
+            var generator = try ConstrainedJSONGenerator(
+                backend: backend,
+                schema: schema,
+                tokenCache: StructuredGenerationTokenCache()
+            )
             #expect(try await generator.generate() == output)
         }
     }
@@ -918,10 +923,14 @@ struct StructuredGenerationTests {
             maximumTokens: 64,
             samplingQueue: [6, 2]
         )
-        _ = try ConstrainedJSONGenerator(backend: backend, schema: schema)
+        _ = try ConstrainedJSONGenerator(backend: backend, schema: schema, tokenCache: StructuredGenerationTokenCache())
 
         backend.specialTokens = []
-        var generator = try ConstrainedJSONGenerator(backend: backend, schema: schema)
+        var generator = try ConstrainedJSONGenerator(
+            backend: backend,
+            schema: schema,
+            tokenCache: StructuredGenerationTokenCache()
+        )
         #expect(try await generator.generate() == "1")
     }
 

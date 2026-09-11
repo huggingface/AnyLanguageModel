@@ -41,44 +41,75 @@ private enum OptionalStructureBudget {
     }
 }
 
-private final class TokenSetCache: @unchecked Sendable {
-    static let shared = TokenSetCache()
+/// Vocabulary-derived content tokens, independent of generation-specific terminators.
+struct StructuredGenerationTokenSets: Sendable {
+    let stringContent: Set<Int>
+    let integerContent: Set<Int>
+    let decimalContent: Set<Int>
 
-    struct Key: Hashable {
-        let vocabSize: Int
-        let eosToken: Int
-        let endTokens: Set<Int>
-        let sampleTokenIds: [Int]
-        let sampleTexts: [String]
-        let sampleSpecialTokens: [Bool]
+    /// Classifies all content types in one synchronous vocabulary pass.
+    init<Backend: TokenBackend>(backend: Backend) {
+        let allowedWhitespace: Set<Character> = [" ", "\t", "\n"]
+        var strings = Set<Int>()
+        var integers = Set<Int>()
+        var decimals = Set<Int>()
+        strings.reserveCapacity(backend.vocabSize / 4)
+
+        for token in 0 ..< backend.vocabSize {
+            if backend.isSpecialToken(token) { continue }
+            guard let text = backend.tokenText(token), !text.isEmpty else { continue }
+
+            if text.allSatisfy({ $0.isValidJSONStringCharacter }) {
+                if !text.allSatisfy({ $0.isWhitespace })
+                    || (text.count == 1 && text.first.map { allowedWhitespace.contains($0) } == true)
+                {
+                    strings.insert(token)
+                }
+            }
+
+            let hasDigit = text.contains { Self.isASCIIDigit($0) }
+            // Standalone signs and decimal points are needed by split numeric encodings.
+            if text.allSatisfy({ Self.isASCIIDigit($0) || $0 == "-" }),
+                hasDigit || text == "-"
+            {
+                integers.insert(token)
+            }
+            if text.allSatisfy({ Self.isASCIIDigit($0) || $0 == "-" || $0 == "." }),
+                hasDigit || text == "-" || text == "."
+            {
+                decimals.insert(token)
+            }
+        }
+
+        self.stringContent = strings
+        self.integerContent = integers
+        self.decimalContent = decimals
     }
 
-    private let tokensByKey = Locked<[Key: Set<Int>]>([:])
-    private let integerTokensByKey = Locked<[Key: Set<Int>]>([:])
-    private let decimalTokensByKey = Locked<[Key: Set<Int>]>([:])
-
-    func tokens(for key: Key) -> Set<Int>? {
-        tokensByKey.withLock { $0[key] }
+    /// JSON numbers accept ASCII digits only, not other Unicode number characters.
+    private static func isASCIIDigit(_ character: Character) -> Bool {
+        character >= "0" && character <= "9"
     }
+}
 
-    func store(_ tokens: Set<Int>, for key: Key) {
-        tokensByKey.withLock { $0[key] = tokens }
-    }
+/// Owned by one loaded tokenizer with immutable token text and special-token classification.
+/// Replacing the tokenizer or special-token registry requires a new cache; changing only
+/// end tokens does not. Vocabulary size indexes valid token-ID ranges, not tokenizer identity.
+final class StructuredGenerationTokenCache: Sendable {
+    private let tokensByVocabSize = Locked<[Int: StructuredGenerationTokenSets]>([:])
 
-    func integerTokens(for key: Key) -> Set<Int>? {
-        integerTokensByKey.withLock { $0[key] }
-    }
-
-    func storeIntegerTokens(_ tokens: Set<Int>, for key: Key) {
-        integerTokensByKey.withLock { $0[key] = tokens }
-    }
-
-    func decimalTokens(for key: Key) -> Set<Int>? {
-        decimalTokensByKey.withLock { $0[key] }
-    }
-
-    func storeDecimalTokens(_ tokens: Set<Int>, for key: Key) {
-        decimalTokensByKey.withLock { $0[key] = tokens }
+    func tokens<Backend: TokenBackend>(for backend: Backend) -> StructuredGenerationTokenSets {
+        tokensByVocabSize.withLock { entries in
+            if let tokens = entries[backend.vocabSize] {
+                return tokens
+            }
+            // Hold this owner's lock through construction and publication so concurrent
+            // first use performs one scan. Classification does no inference or async work
+            // and must not recursively access this cache. No backend is retained.
+            let tokens = StructuredGenerationTokenSets(backend: backend)
+            entries[backend.vocabSize] = tokens
+            return tokens
+        }
     }
 }
 
@@ -113,8 +144,13 @@ struct ConstrainedJSONGenerator<Backend: TokenBackend> {
     /// - Parameters:
     ///   - backend: A backend that provides tokenization and sampling.
     ///   - schema: The generation schema to satisfy.
+    ///   - tokenCache: The loaded tokenizer's cache, or nil to classify fresh token sets.
     /// - Throws: ``ConstrainedGenerationError`` when required tokens cannot be tokenized.
-    init(backend: Backend, schema: GenerationSchema) throws {
+    init(
+        backend: Backend,
+        schema: GenerationSchema,
+        tokenCache: StructuredGenerationTokenCache? = nil
+    ) throws {
         self.backend = backend
         self.schema = schema
 
@@ -128,16 +164,12 @@ struct ConstrainedJSONGenerator<Backend: TokenBackend> {
             let token = try Self.singleToken(for: structuralText, backend: backend)
             structuralTerminators.insert(token)
         }
-        let cacheKey = Self.tokenSetCacheKey(for: backend)
+        let tokens = tokenCache?.tokens(for: backend) ?? StructuredGenerationTokenSets(backend: backend)
         self.basicTerminators = structuralTerminators
-        self.integerTerminators = Self.buildValidIntegerTokens(backend: backend, cacheKey: cacheKey).union(
-            structuralTerminators
-        )
-        self.doubleTerminators = Self.buildValidDecimalTokens(backend: backend, cacheKey: cacheKey).union(
-            structuralTerminators
-        )
+        self.integerTerminators = tokens.integerContent.union(structuralTerminators)
+        self.doubleTerminators = tokens.decimalContent.union(structuralTerminators)
 
-        let stringContentTokens = Self.buildValidStringTokens(backend: backend, cacheKey: cacheKey)
+        let stringContentTokens = tokens.stringContent.subtracting(backend.endTokens)
         self.stringInitialAllowedTokens = stringContentTokens
         self.stringContinuationAllowedTokens = stringContentTokens.union(stringTerminators)
     }
@@ -164,138 +196,6 @@ struct ConstrainedJSONGenerator<Backend: TokenBackend> {
             throw ConstrainedGenerationError.unsupportedTokenizer("Expected single-token encoding for '\(text)'")
         }
         return token
-    }
-
-    private static func buildValidStringTokens(
-        backend: Backend,
-        cacheKey: TokenSetCache.Key
-    ) -> Set<Int> {
-        if let cached = TokenSetCache.shared.tokens(for: cacheKey) {
-            return cached
-        }
-
-        let allowedWhitespace: Set<Character> = [" ", "\t", "\n"]
-        var allowed = Set<Int>()
-        allowed.reserveCapacity(backend.vocabSize / 4)
-
-        for token in 0 ..< backend.vocabSize {
-            if backend.endTokens.contains(token) { continue }
-            if backend.isSpecialToken(token) { continue }
-            guard let text = backend.tokenText(token), !text.isEmpty else { continue }
-            guard text.allSatisfy({ $0.isValidJSONStringCharacter }) else { continue }
-
-            if text.allSatisfy({ $0.isWhitespace }) {
-                if text.count == 1, let char = text.first, allowedWhitespace.contains(char) {
-                    allowed.insert(token)
-                }
-            } else {
-                allowed.insert(token)
-            }
-        }
-
-        TokenSetCache.shared.store(allowed, for: cacheKey)
-        return allowed
-    }
-
-    private static func tokenSetCacheKey(for backend: Backend) -> TokenSetCache.Key {
-        let sampleTokenIds = sampleTokenIds(for: backend)
-        let sampleTexts = sampleTokenIds.map { backend.tokenText($0) ?? "" }
-        return TokenSetCache.Key(
-            vocabSize: backend.vocabSize,
-            eosToken: backend.eosToken,
-            endTokens: backend.endTokens,
-            sampleTokenIds: sampleTokenIds,
-            sampleTexts: sampleTexts,
-            sampleSpecialTokens: sampleTokenIds.map { backend.isSpecialToken($0) }
-        )
-    }
-
-    private static func sampleTokenIds(for backend: Backend) -> [Int] {
-        let vocabSize = max(0, backend.vocabSize)
-        var samples: Set<Int> = [
-            0,
-            1,
-            2,
-            max(0, vocabSize / 2),
-            max(0, vocabSize - 1),
-            backend.eosToken,
-        ]
-        samples.formUnion(backend.endTokens)
-        // Include numeric encodings so tokenizers with different digit, sign, or
-        // decimal-point mappings do not share cached token sets.
-        for text in ["0", "1", "2", "3", "4", "5", "6", "7", "8", "9", ".", "-"] {
-            if let tokens = try? backend.tokenize(text) {
-                samples.formUnion(tokens)
-            }
-        }
-        return samples.filter { $0 >= 0 && $0 < vocabSize }.sorted()
-    }
-
-    /// ASCII digit `0`...`9` only — JSON numbers must not accept fullwidth / superscript
-    /// forms that `Character.isNumber` would otherwise admit.
-    private static func isASCIIDigit(_ character: Character) -> Bool {
-        character >= "0" && character <= "9"
-    }
-
-    /// Tokens that may appear inside a JSON integer: ASCII digits and standalone `-`.
-    ///
-    /// Standalone `-` is required because BPE tokenizers (Qwen2.5, etc.) encode `-1` as
-    /// two tokens. Requiring every token to contain a digit excluded `-` and made negatives
-    /// unrepresentable except via rare multi-character tokens.
-    private static func buildValidIntegerTokens(
-        backend: Backend,
-        cacheKey: TokenSetCache.Key
-    ) -> Set<Int> {
-        if let cached = TokenSetCache.shared.integerTokens(for: cacheKey) {
-            return cached
-        }
-
-        var allowed = Set<Int>()
-        for token in 0 ..< backend.vocabSize {
-            if backend.isSpecialToken(token) { continue }
-            guard let text = backend.tokenText(token), !text.isEmpty else { continue }
-            let onlyIntegerChars = text.allSatisfy { Self.isASCIIDigit($0) || $0 == "-" }
-            let hasDigit = text.contains { Self.isASCIIDigit($0) }
-            let isStandaloneMinus = text == "-"
-            if onlyIntegerChars && (hasDigit || isStandaloneMinus) {
-                allowed.insert(token)
-            }
-        }
-
-        TokenSetCache.shared.storeIntegerTokens(allowed, for: cacheKey)
-        return allowed
-    }
-
-    /// Tokens that may appear inside a JSON number: ASCII digits, `-`, and `.`.
-    ///
-    /// **Critical:** standalone `.` and `-` must be included. Qwen2.5 encodes `473.00` as
-    /// `4` `7` `3` `.` `0` `0`. The previous filter required every token to contain a digit,
-    /// which dropped `.` and forced the model to pad zeros until `maxDecimalTokenLimit`
-    /// (pathological `e+31` values after Double re-serialization).
-    private static func buildValidDecimalTokens(
-        backend: Backend,
-        cacheKey: TokenSetCache.Key
-    ) -> Set<Int> {
-        if let cached = TokenSetCache.shared.decimalTokens(for: cacheKey) {
-            return cached
-        }
-
-        var allowed = Set<Int>()
-        for token in 0 ..< backend.vocabSize {
-            if backend.isSpecialToken(token) { continue }
-            guard let text = backend.tokenText(token), !text.isEmpty else { continue }
-            let onlyNumberChars = text.allSatisfy {
-                Self.isASCIIDigit($0) || $0 == "-" || $0 == "."
-            }
-            let hasDigit = text.contains { Self.isASCIIDigit($0) }
-            let isStandaloneSignOrDot = text == "-" || text == "."
-            if onlyNumberChars && (hasDigit || isStandaloneSignOrDot) {
-                allowed.insert(token)
-            }
-        }
-
-        TokenSetCache.shared.storeDecimalTokens(allowed, for: cacheKey)
-        return allowed
     }
 
     private mutating func emit(_ text: String) async throws -> String {

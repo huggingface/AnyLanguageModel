@@ -20,10 +20,16 @@ import Foundation
     import HuggingFace
     import Tokenizers
 
+    /// Keeps vocabulary-derived tokens alive with the loaded model and tokenizer.
+    private struct LoadedModelContext {
+        let context: ModelContext
+        let tokenCache = StructuredGenerationTokenCache()
+    }
+
     /// Wrapper to store model availability state in NSCache.
     private final class CachedModelState: NSObject, @unchecked Sendable {
         enum Value {
-            case loaded(ModelContext)
+            case loaded(LoadedModelContext)
             case failed(String)
         }
 
@@ -50,7 +56,7 @@ import Foundation
         func context(
             for key: String,
             loader: @escaping @Sendable () async throws -> ModelContext
-        ) async throws -> ModelContext {
+        ) async throws -> LoadedModelContext {
             let cacheKey = key as NSString
             if let cached = cache.object(forKey: cacheKey),
                 case .loaded(let context) = cached.value
@@ -68,7 +74,7 @@ import Foundation
 
             let task = Task {
                 let context = try await loader()
-                return CachedModelState(.loaded(context))
+                return CachedModelState(.loaded(LoadedModelContext(context: context)))
             }
             setInFlight(task, for: key)
 
@@ -731,7 +737,7 @@ import Foundation
         }
 
         /// Get or load model context with caching
-        private func loadContext(modelId: String, hub: HubClient?, directory: URL?) async throws -> ModelContext {
+        private func loadContext(modelId: String, hub: HubClient?, directory: URL?) async throws -> LoadedModelContext {
             let key = directory?.absoluteString ?? modelId
 
             return try await modelCache.context(for: key) {
@@ -941,13 +947,16 @@ import Foundation
             defer { Self.releaseGenerationSlot(for: session) }
 
             // Get cached or load fresh ModelContext
-            let context = try await loadContext(modelId: modelId, hub: hub, directory: directory)
+            let loaded = try await loadContext(modelId: modelId, hub: hub, directory: directory)
+            defer { withExtendedLifetime(loaded) {} }
+            let context = loaded.context
             let generationScope = beginGenerationScope()
             defer { endGenerationScope(generationScope) }
 
             if type != String.self {
                 let jsonString = try await generateStructuredJSON(
                     context: context,
+                    tokenCache: loaded.tokenCache,
                     session: session,
                     prompt: prompt,
                     schema: type.generationSchema,
@@ -1149,7 +1158,9 @@ import Foundation
 
                     do {
                         // Get cached or load fresh ModelContext
-                        let context = try await loadContext(modelId: modelId, hub: hub, directory: directory)
+                        let loaded = try await loadContext(modelId: modelId, hub: hub, directory: directory)
+                        defer { withExtendedLifetime(loaded) {} }
+                        let context = loaded.context
 
                         // Build chat inside task to avoid Sendable issues
                         let generateParameters = toGenerateParameters(options)
@@ -1324,7 +1335,9 @@ import Foundation
                 defer { endGenerationScope(generationScope) }
 
                 do {
-                    let context = try await loadContext(modelId: modelId, hub: hub, directory: directory)
+                    let loaded = try await loadContext(modelId: modelId, hub: hub, directory: directory)
+                    defer { withExtendedLifetime(loaded) {} }
+                    let context = loaded.context
                     guard let instructions = session.instructions?.description, !instructions.isEmpty else {
                         return
                     }
@@ -1795,6 +1808,7 @@ import Foundation
 
     private func generateStructuredJSON(
         context: ModelContext,
+        tokenCache: StructuredGenerationTokenCache,
         session: LanguageModelSession,
         prompt: Prompt,
         schema: GenerationSchema,
@@ -1829,7 +1843,7 @@ import Foundation
             endTokens: []
         )
 
-        var generator = try ConstrainedJSONGenerator(backend: backend, schema: schema)
+        var generator = try ConstrainedJSONGenerator(backend: backend, schema: schema, tokenCache: tokenCache)
         let json = try await generator.generate()
         // Ensure pending MLX operations complete before returning JSON.
         // This synchronization can be a performance cost if called frequently.
