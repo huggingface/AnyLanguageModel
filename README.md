@@ -616,6 +616,8 @@ let response = try await session.respond(
 
 LiteRT-LM support was added in 0.10.0 and removed in 0.11.0
 because its dependency could prevent builds even when the backend was disabled.
+See [upstream issue #2407](https://github.com/google-ai-edge/LiteRT-LM/issues/2407)
+for details.
 The `LiteRT` trait and `LiteRTLanguageModel` are no longer available.
 
 ### Ollama
