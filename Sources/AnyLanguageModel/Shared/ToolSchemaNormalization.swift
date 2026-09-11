@@ -184,13 +184,15 @@ private func strippingResidualRefs(_ value: Any, depth: Int) -> Any {
 
 /// Coerces `"type"` values so a chat template can render every property.
 ///
-/// A non-string `"type"` becomes a scalar string — an array-valued one becomes its
-/// first non-`"null"` element. A typeless `anyOf`/`oneOf` adopts the first non-null
-/// member's type and object/array shape, while other property or item schemas with no
-/// `"type"` get `"string"`. A `"properties"` or `"items"` value that is not a schema
-/// mapping is replaced with one, since templates hand those straight to filters that
-/// require a mapping. All of these are valid JSON Schema but throw in templates that
-/// inspect `"type"` directly. Well-formed schemas pass through unchanged.
+/// A non-string `"type"` becomes a scalar string;
+/// an array-valued one becomes its first non-`"null"` element.
+/// A typeless `anyOf`/`oneOf` adopts the first non-null member's type and object/array shape,
+/// while other property or item schemas with no `"type"` get `"string"`.
+/// A `"properties"` or `"items"` value that is not a schema mapping is replaced with one,
+/// since templates hand those straight to filters that require a mapping.
+/// All of these are valid JSON Schema,
+/// but throw in templates that inspect `"type"` directly.
+/// Well-formed schemas pass through unchanged.
 func normalizeToolSchemaTypes(_ schema: [String: Any]) -> [String: Any] {
     normalizeSchemaTypes(schema, depth: 0)
 }
