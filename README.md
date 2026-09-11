@@ -232,16 +232,6 @@ Your app can now import `AnyLanguageModel` with MLX support enabled.
 > For a working example of package traits in an Xcode app project,
 > see [chat-ui-swift](https://github.com/mattt/chat-ui-swift).
 
-## Troubleshooting
-
-### LiteRT-LM Checkout Fails with a Git LFS Smudge Error
-
-LiteRT-LM support introduced in 0.10.0 was removed in 0.11.0
-because its dependency could prevent builds even when the backend was disabled.
-Upgrade to 0.11.0 or later to remove this dependency.
-The `LiteRT` trait and `LiteRTLanguageModel` are no longer available;
-projects using them must remove the trait and switch to another backend.
-
 ## API Credentials and Security
 
 When using third-party language model providers like OpenAI, Anthropic, or Google Gemini,
@@ -619,6 +609,14 @@ let response = try await session.respond(
     options: options
 )
 ```
+
+<a id="litert-lm-checkout-fails-with-a-git-lfs-smudge-error"></a>
+
+### LiteRT-LM
+
+LiteRT-LM support was added in 0.10.0 and removed in 0.11.0
+because its dependency could prevent builds even when the backend was disabled.
+The `LiteRT` trait and `LiteRTLanguageModel` are no longer available.
 
 ### Ollama
 
