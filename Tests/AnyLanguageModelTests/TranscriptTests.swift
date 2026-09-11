@@ -169,4 +169,22 @@ struct TranscriptTests {
 
         #expect(decoded.providerMetadata == ["thoughtSignature": "opaque-signature"])
     }
+    @Test func responseAndToolCallsRoundTripProviderMetadata() throws {
+        let metadata = ["provider.state": "opaque-signature"]
+        for metadata in [nil, metadata] {
+            let response = Transcript.Response(assetIDs: [], segments: [], providerMetadata: metadata)
+            let calls = Transcript.ToolCalls([Transcript.ToolCall](), providerMetadata: metadata)
+            let responseData = try JSONEncoder().encode(response)
+            let callsData = try JSONEncoder().encode(calls)
+            #expect(try JSONDecoder().decode(Transcript.Response.self, from: responseData) == response)
+            #expect(try JSONDecoder().decode(Transcript.ToolCalls.self, from: callsData) == calls)
+            if metadata == nil {
+                let responseJSON = try #require(try JSONSerialization.jsonObject(with: responseData) as? [String: Any])
+                let callsJSON = try #require(try JSONSerialization.jsonObject(with: callsData) as? [String: Any])
+                #expect(responseJSON["providerMetadata"] == nil)
+                #expect(callsJSON["providerMetadata"] == nil)
+            }
+        }
+    }
+
 }

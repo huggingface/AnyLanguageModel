@@ -10,6 +10,7 @@ import Foundation
         struct Exchange: Sendable {
             var statusCode: Int = 200
             var body: Data
+            var contentType: String = "application/json"
         }
 
         private struct State: Sendable {
@@ -27,6 +28,14 @@ import Foundation
         /// Queues one JSON response, returned to the next request that arrives.
         static func enqueue(json: String, statusCode: Int = 200) {
             state.withLock { $0.pending.append(Exchange(statusCode: statusCode, body: Data(json.utf8))) }
+        }
+
+        /// Queues a finite server-sent event stream.
+        static func enqueue(eventStream: [String]) {
+            let body = eventStream.map { "data: \($0)\n\n" }.joined()
+            state.withLock {
+                $0.pending.append(Exchange(body: Data(body.utf8), contentType: "text/event-stream"))
+            }
         }
 
         /// The bodies of the requests seen so far, in order.
@@ -63,7 +72,7 @@ import Foundation
                 url: url,
                 statusCode: exchange.statusCode,
                 httpVersion: "HTTP/1.1",
-                headerFields: ["Content-Type": "application/json"]
+                headerFields: ["Content-Type": exchange.contentType]
             )!
 
             client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)

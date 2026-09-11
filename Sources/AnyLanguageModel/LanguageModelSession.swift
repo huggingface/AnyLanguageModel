@@ -168,7 +168,8 @@ public final class LanguageModelSession: @unchecked Sendable {
                         let responseEntry = Transcript.Entry.response(
                             Transcript.Response(
                                 assetIDs: [],
-                                segments: [.text(.init(content: textContent))]
+                                segments: [.text(.init(content: textContent))],
+                                providerMetadata: lastSnapshot.providerMetadata
                             )
                         )
                         session.withMutation(keyPath: \.transcript) {
@@ -199,19 +200,25 @@ public final class LanguageModelSession: @unchecked Sendable {
         public let rawContent: GeneratedContent
         public let transcriptEntries: ArraySlice<Transcript.Entry>
 
+        /// Opaque, provider-specific state to preserve on the transcript response.
+        public let providerMetadata: [String: String]?
+
         /// Creates a response value from generated content and transcript entries.
         /// - Parameters:
         ///   - content: The decoded response content.
         ///   - rawContent: The raw content produced by the model.
         ///   - transcriptEntries: Transcript entries associated with the response.
+        ///   - providerMetadata: Opaque state to preserve when replaying the response.
         public init(
             content: Content,
             rawContent: GeneratedContent,
-            transcriptEntries: ArraySlice<Transcript.Entry>
+            transcriptEntries: ArraySlice<Transcript.Entry>,
+            providerMetadata: [String: String]? = nil
         ) {
             self.content = content
             self.rawContent = rawContent
             self.transcriptEntries = transcriptEntries
+            self.providerMetadata = providerMetadata
         }
     }
 
@@ -254,7 +261,8 @@ public final class LanguageModelSession: @unchecked Sendable {
             let responseEntry = Transcript.Entry.response(
                 Transcript.Response(
                     assetIDs: [],
-                    segments: [.text(.init(content: textContent))]
+                    segments: [.text(.init(content: textContent))],
+                    providerMetadata: response.providerMetadata
                 )
             )
 
@@ -606,7 +614,8 @@ extension LanguageModelSession {
             let responseEntry = Transcript.Entry.response(
                 Transcript.Response(
                     assetIDs: [],
-                    segments: [.text(.init(content: textContent))]
+                    segments: [.text(.init(content: textContent))],
+                    providerMetadata: response.providerMetadata
                 )
             )
 
@@ -845,19 +854,25 @@ extension LanguageModelSession {
             /// Cumulative across tool rounds; empty for providers that don't stream tool activity.
             public var transcriptEntries: ArraySlice<Transcript.Entry>
 
+            /// Opaque, provider-specific state accumulated for the response so far.
+            public var providerMetadata: [String: String]?
+
             /// Creates a snapshot from partially generated content and raw content.
             /// - Parameters:
             ///   - content: The partially generated content.
             ///   - rawContent: The raw content produced by the model.
             ///   - transcriptEntries: Transcript entries accumulated so far (tool calls/outputs).
+            ///   - providerMetadata: Opaque state to preserve when replaying the response.
             public init(
                 content: Content.PartiallyGenerated,
                 rawContent: GeneratedContent,
-                transcriptEntries: ArraySlice<Transcript.Entry> = []
+                transcriptEntries: ArraySlice<Transcript.Entry> = [],
+                providerMetadata: [String: String]? = nil
             ) {
                 self.content = content
                 self.rawContent = rawContent
                 self.transcriptEntries = transcriptEntries
+                self.providerMetadata = providerMetadata
             }
         }
     }
@@ -920,7 +935,8 @@ extension LanguageModelSession.ResponseStream: AsyncSequence {
                 return LanguageModelSession.Response(
                     content: finalContent,
                     rawContent: last.rawContent,
-                    transcriptEntries: last.transcriptEntries
+                    transcriptEntries: last.transcriptEntries,
+                    providerMetadata: last.providerMetadata
                 )
             }
         }
@@ -935,7 +951,8 @@ extension LanguageModelSession.ResponseStream: AsyncSequence {
             return LanguageModelSession.Response(
                 content: finalContent,
                 rawContent: fallbackSnapshot.rawContent,
-                transcriptEntries: fallbackSnapshot.transcriptEntries
+                transcriptEntries: fallbackSnapshot.transcriptEntries,
+                providerMetadata: fallbackSnapshot.providerMetadata
             )
         }
 

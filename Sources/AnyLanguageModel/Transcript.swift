@@ -314,10 +314,20 @@ public struct Transcript: Sendable, Equatable, Codable {
 
         private var calls: [ToolCall]
 
-        public init<S>(id: String = UUID().uuidString, _ calls: S)
-        where S: Sequence, S.Element == ToolCall {
+        /// Opaque, provider-specific state attached to the model turn containing these calls.
+        /// Preserve this state when saving or replaying a transcript.
+        ///
+        /// - Note: This property is exclusive to AnyLanguageModel
+        public var providerMetadata: [String: String]?
+
+        public init<S>(
+            id: String = UUID().uuidString,
+            _ calls: S,
+            providerMetadata: [String: String]? = nil
+        ) where S: Sequence, S.Element == ToolCall {
             self.id = id
             self.calls = Array(calls)
+            self.providerMetadata = providerMetadata
         }
     }
 
@@ -384,14 +394,22 @@ public struct Transcript: Sendable, Equatable, Codable {
         /// Ordered prompt segments.
         public var segments: [Segment]
 
+        /// Opaque, provider-specific state attached to this response.
+        /// Preserve this state when saving or replaying a transcript.
+        ///
+        /// - Note: This property is exclusive to AnyLanguageModel
+        public var providerMetadata: [String: String]?
+
         public init(
             id: String = UUID().uuidString,
             assetIDs: [String],
-            segments: [Segment]
+            segments: [Segment],
+            providerMetadata: [String: String]? = nil
         ) {
             self.id = id
             self.assetIDs = assetIDs
             self.segments = segments
+            self.providerMetadata = providerMetadata
         }
     }
 
