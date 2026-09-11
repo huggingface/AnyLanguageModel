@@ -259,7 +259,9 @@ instead of the original GitHub repository.
 That mirror may lack LFS objects required by the selected version,
 even when those objects are available on GitHub.
 See [upstream issue #2407](https://github.com/google-ai-edge/LiteRT-LM/issues/2407)
-for discussion and updates.
+for discussion and updates,
+and [upstream PR #3563](https://github.com/google-ai-edge/LiteRT-LM/pull/3563)
+for a proposed fix that explicitly configures the GitHub LFS endpoint.
 This can happen even when the `LiteRT` trait is disabled,
 because SwiftPM still resolves the package dependency.
 
