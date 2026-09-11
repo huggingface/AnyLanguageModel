@@ -332,10 +332,26 @@ public struct Transcript: Sendable, Equatable, Codable {
         /// Arguments to pass to the invoked tool.
         public var arguments: GeneratedContent
 
-        public init(id: String, toolName: String, arguments: GeneratedContent) {
+        /// Opaque, provider-specific state attached to this call.
+        ///
+        /// Some providers hand back values alongside a tool call that must be echoed
+        /// verbatim on every later request — Gemini's thought signatures, for instance.
+        /// The values are meaningful only to the model that produced them; nothing else
+        /// should interpret or modify them.
+        ///
+        /// - Note: This property is exclusive to AnyLanguageModel
+        public var providerMetadata: [String: String]?
+
+        public init(
+            id: String,
+            toolName: String,
+            arguments: GeneratedContent,
+            providerMetadata: [String: String]? = nil
+        ) {
             self.id = id
             self.toolName = toolName
             self.arguments = arguments
+            self.providerMetadata = providerMetadata
         }
     }
 

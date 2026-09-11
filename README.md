@@ -824,19 +824,33 @@ print(response.content)
 ```
 
 Use custom generation options for Anthropic-specific parameters like
-extended thinking, tool choice control, and sampling parameters:
+extended thinking, tool choice control, and effort:
 
 ```swift
-var options = GenerationOptions(temperature: 0.7)
+var options = GenerationOptions(maximumResponseTokens: 8192)
 options[custom: AnthropicLanguageModel.self] = .init(
-    topP: 0.9,
-    topK: 40,
-    stopSequences: ["END", "STOP"],
-    thinking: .init(budgetTokens: 4096),  // Extended thinking
-    toolChoice: .auto,                     // Tool selection control
+    toolChoice: .auto,
+    thinking: .enabled(budgetTokens: 4096),
     serviceTier: .priority
 )
 ```
+
+On models that support adaptive thinking, omit the token budget and use effort
+to control how much work the model puts into its response:
+
+```swift
+var options = GenerationOptions(maximumResponseTokens: 8192)
+options[custom: AnthropicLanguageModel.self] = .init(
+    thinking: .adaptive(display: .omitted),
+    effort: .medium
+)
+```
+
+Effort levels are `.low`, `.medium`, `.high`, `.extraHigh`, and `.max`;
+[support varies by model](https://platform.claude.com/docs/en/build-with-claude/effort).
+The existing `Thinking(budgetTokens:)` initializer remains available.
+Thinking text and signatures are not currently exposed in session responses or streaming snapshots,
+and signed thinking blocks are not preserved for tool-call follow-ups.
 
 ### Google Gemini
 

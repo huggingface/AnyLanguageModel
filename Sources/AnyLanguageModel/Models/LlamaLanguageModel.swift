@@ -137,6 +137,15 @@ import Foundation
             /// Mirostat sampling mode for adaptive perplexity control.
             public var mirostat: MirostatMode?
 
+            /// Text appended after the assistant header of the rendered prompt.
+            ///
+            /// The model continues generating from this text.
+            /// Use it to steer the start of the response,
+            /// for example by prefilling an empty `<think></think>` block
+            /// to suppress a model's default reasoning output
+            /// when its chat template offers no switch for it.
+            public var assistantPrefill: String?
+
             /// Creates custom generation options for llama.cpp.
             public init(
                 contextSize: UInt32? = nil,
@@ -150,7 +159,8 @@ import Foundation
                 repeatLastN: Int32? = nil,
                 frequencyPenalty: Float? = nil,
                 presencePenalty: Float? = nil,
-                mirostat: MirostatMode? = nil
+                mirostat: MirostatMode? = nil,
+                assistantPrefill: String? = nil
             ) {
                 self.contextSize = contextSize
                 self.batchSize = batchSize
@@ -164,6 +174,7 @@ import Foundation
                 self.frequencyPenalty = frequencyPenalty
                 self.presencePenalty = presencePenalty
                 self.mirostat = mirostat
+                self.assistantPrefill = assistantPrefill
             }
 
             /// Default llama.cpp options used when none are provided at runtime.
@@ -191,6 +202,30 @@ import Foundation
 
         /// The path to the GGUF model file.
         public let modelPath: String
+
+        /// The number of model layers to offload to the GPU.
+        ///
+        /// A negative value offloads all layers, and `0` runs entirely on the CPU.
+        public let gpuLayers: Int32
+
+        /// The path to the multimodal projector GGUF file, when the model has one.
+        ///
+        /// Prompts may include image segments only when a projector is loaded.
+        public let mmprojPath: String?
+
+        /// The default GPU layer count for the current platform.
+        ///
+        /// All layers are offloaded by default: the prebuilt llama.cpp binaries
+        /// ship with Metal enabled and the shader library embedded. The simulator
+        /// defaults to CPU-only execution, which remains the reliable
+        /// configuration there.
+        public static var defaultGPULayerCount: Int32 {
+            #if targetEnvironment(simulator)
+                return 0
+            #else
+                return -1
+            #endif
+        }
 
         /// The context size for the model.
         ///
@@ -321,6 +356,7 @@ import Foundation
             var frequencyPenalty: Float
             var presencePenalty: Float
             var mirostat: CustomGenerationOptions.MirostatMode?
+            var assistantPrefill: String?
             var sampling: GenerationOptions.SamplingMode?
             var maximumResponseTokens: Int?
 
@@ -337,6 +373,7 @@ import Foundation
                 frequencyPenalty: Float = 0.0,
                 presencePenalty: Float = 0.0,
                 mirostat: CustomGenerationOptions.MirostatMode? = nil,
+                assistantPrefill: String? = nil,
                 sampling: GenerationOptions.SamplingMode? = nil,
                 maximumResponseTokens: Int? = nil
             ) {
@@ -352,6 +389,7 @@ import Foundation
                 self.frequencyPenalty = frequencyPenalty
                 self.presencePenalty = presencePenalty
                 self.mirostat = mirostat
+                self.assistantPrefill = assistantPrefill
                 self.sampling = sampling
                 self.maximumResponseTokens = maximumResponseTokens
             }
@@ -389,6 +427,7 @@ import Foundation
                         frequencyPenalty: base.frequencyPenalty,
                         presencePenalty: base.presencePenalty,
                         mirostat: base.mirostat,
+                        assistantPrefill: base.assistantPrefill,
                         sampling: sampling ?? base.sampling,
                         maximumResponseTokens: maximumResponseTokens ?? base.maximumResponseTokens
                     )
@@ -407,6 +446,7 @@ import Foundation
                 self.frequencyPenalty = options.frequencyPenalty ?? base.frequencyPenalty
                 self.presencePenalty = options.presencePenalty ?? base.presencePenalty
                 self.mirostat = options.mirostat ?? base.mirostat
+                self.assistantPrefill = options.assistantPrefill ?? base.assistantPrefill
                 self.sampling = sampling ?? base.sampling
                 self.maximumResponseTokens = maximumResponseTokens ?? base.maximumResponseTokens
             }
@@ -418,15 +458,279 @@ import Foundation
         /// The model's vocabulary
         private var vocab: OpaquePointer?
 
-        /// Whether the model is currently loaded
+        /// The multimodal projector context, when a projector file was provided
+        private var mtmdContext: OpaquePointer?
+        /// `mtmd_helper_eval_chunks` is not thread-safe and every multimodal generation
+        /// shares the one projector context, so bitmap init through eval runs under this lock.
+        private let projectorLock = NSLock()
+
+        private func projectorLocked<T>(_ body: () throws -> T) rethrows -> T {
+            projectorLock.lock()
+            defer { projectorLock.unlock() }
+            return try body()
+        }
+
+        /// Serializes the loaded-state check, loading, and publication of the model,
+        /// vocabulary, and projector so concurrent first requests cannot reload them.
+        private let modelLoadLock = NSLock()
+
+        /// Whether the model is currently loaded. Protected by `modelLoadLock`.
         private var isModelLoaded: Bool = false
+
+        /// A context kept alive for one session so exchanges reuse its state.
+        private struct CachedSessionContext {
+            let sessionID: ObjectIdentifier
+            let context: OpaquePointer
+            var tokens: [llama_token]
+            let contextSize: UInt32
+            let batchSize: UInt32
+            /// Whether a generation is currently decoding on the context.
+            var isCheckedOut: Bool
+            /// Whether the context should be freed once the current generation releases it.
+            var discardWhenReleased: Bool
+        }
+
+        /// Guards `cachedSessionContext`. A generation checks the cached context out
+        /// for its whole run, so a concurrent generation for another session never
+        /// frees a context that is still decoding: it runs on a transient context
+        /// instead and leaves the cache untouched.
+        private let sessionContextLock = NSLock()
+        private var cachedSessionContext: CachedSessionContext?
+
+        /// The number of prompt tokens reused from the cached context by the most
+        /// recent chat generation.
+        internal private(set) var lastReusedTokenCount: Int = 0
+
+        /// The number of prompt tokens decoded by the most recent chat generation.
+        internal private(set) var lastPrefillTokenCount: Int = 0
+
+        /// Frees the cached per-session context and the state it holds.
+        ///
+        /// The cached context, including its KV state, otherwise lives as long as the
+        /// model. The next chat generation prefills its full prompt again. Call this
+        /// under memory pressure or when a session is discarded. If a generation is
+        /// running on the cached context, it is freed as soon as that generation ends.
+        public func clearCachedContext() {
+            discardCachedSessionContext()
+        }
+
+        private func discardCachedSessionContext() {
+            sessionContextLock.lock()
+            defer { sessionContextLock.unlock() }
+            guard var cached = cachedSessionContext else { return }
+            if cached.isCheckedOut {
+                cached.discardWhenReleased = true
+                cachedSessionContext = cached
+                return
+            }
+            llama_free(cached.context)
+            cachedSessionContext = nil
+        }
+
+        private func recordCachedTokens(_ tokens: [llama_token], context: OpaquePointer) {
+            sessionContextLock.lock()
+            defer { sessionContextLock.unlock() }
+            guard var cached = cachedSessionContext, cached.context == context else { return }
+            cached.tokens = tokens
+            cachedSessionContext = cached
+        }
+
+        private func isCachedSessionContext(_ context: OpaquePointer) -> Bool {
+            sessionContextLock.lock()
+            defer { sessionContextLock.unlock() }
+            return cachedSessionContext?.context == context
+        }
+
+        /// Returns a context obtained from `acquireSessionContext`. The cached
+        /// context is checked back in (or freed, if a discard was requested while
+        /// it was busy); a transient context is freed.
+        private func releaseSessionContext(_ context: OpaquePointer) {
+            sessionContextLock.lock()
+            defer { sessionContextLock.unlock() }
+            if var cached = cachedSessionContext, cached.context == context {
+                if cached.discardWhenReleased {
+                    llama_free(cached.context)
+                    cachedSessionContext = nil
+                } else {
+                    cached.isCheckedOut = false
+                    cachedSessionContext = cached
+                }
+                return
+            }
+            llama_free(context)
+        }
+
+        /// Returns a context for the session along with the index of the first
+        /// prompt token that still needs to be decoded. Pair every call with
+        /// `releaseSessionContext(_:)` once generation ends.
+        ///
+        /// A cached context whose recorded tokens share a prefix with the prompt
+        /// keeps that prefix: matching state past the divergence point is removed
+        /// with `llama_memory_seq_rm`, and backends whose state cannot be rewound
+        /// (recurrent models) fall back to clearing the memory and decoding the
+        /// full prompt. The final prompt token is always re-decoded so sampling
+        /// has fresh logits.
+        ///
+        /// While another generation holds the cached context, the caller gets a
+        /// transient context that decodes the full prompt and is not cached.
+        private func acquireSessionContext(
+            for session: LanguageModelSession,
+            promptTokens: [llama_token],
+            options: ResolvedGenerationOptions
+        ) throws -> (context: OpaquePointer, startIndex: Int) {
+            let sessionID = ObjectIdentifier(session)
+            sessionContextLock.lock()
+            defer { sessionContextLock.unlock() }
+
+            if var cached = cachedSessionContext,
+                !cached.isCheckedOut,
+                cached.sessionID == sessionID,
+                cached.contextSize == options.contextSize,
+                cached.batchSize == options.batchSize
+            {
+                var common = 0
+                while common < cached.tokens.count, common < promptTokens.count,
+                    cached.tokens[common] == promptTokens[common]
+                {
+                    common += 1
+                }
+                if common == promptTokens.count {
+                    common = max(0, promptTokens.count - 1)
+                }
+                if common < cached.tokens.count {
+                    let memory = llama_get_memory(cached.context)
+                    if !llama_memory_seq_rm(memory, 0, llama_pos(common), -1) {
+                        llama_memory_clear(memory, true)
+                        common = 0
+                    }
+                }
+                cached.tokens = Array(promptTokens.prefix(common))
+                cached.isCheckedOut = true
+                cachedSessionContext = cached
+                return (cached.context, common)
+            }
+
+            if let cached = cachedSessionContext, cached.isCheckedOut {
+                return (try makeFreshContext(options: options), 0)
+            }
+
+            if let cached = cachedSessionContext {
+                llama_free(cached.context)
+                cachedSessionContext = nil
+            }
+            let contextParams = createContextParams(from: options)
+            guard let context = llama_init_from_model(model!, contextParams) else {
+                throw LlamaLanguageModelError.contextInitializationFailed
+            }
+            guard llama_get_memory(context) != nil else {
+                llama_free(context)
+                throw LlamaLanguageModelError.encoderOnlyModel
+            }
+            cachedSessionContext = CachedSessionContext(
+                sessionID: sessionID,
+                context: context,
+                tokens: [],
+                contextSize: options.contextSize,
+                batchSize: options.batchSize,
+                isCheckedOut: true,
+                discardWhenReleased: false
+            )
+            return (context, 0)
+        }
+
+        /// Creates a single-use context for generations that do not reuse state.
+        private func makeFreshContext(options: ResolvedGenerationOptions) throws -> OpaquePointer {
+            let contextParams = createContextParams(from: options)
+            guard let context = llama_init_from_model(model!, contextParams) else {
+                throw LlamaLanguageModelError.contextInitializationFailed
+            }
+            guard llama_get_memory(context) != nil else {
+                llama_free(context)
+                throw LlamaLanguageModelError.encoderOnlyModel
+            }
+            llama_set_causal_attn(context, true)
+            llama_set_n_threads(context, options.threads, options.threads)
+            return context
+        }
+
+        /// Runs a chat text generation for the session, reusing the session's
+        /// cached context when its state matches a prefix of the prompt.
+        private func generateChatText(
+            session: LanguageModelSession,
+            prompt: String,
+            maxTokens: Int,
+            options: ResolvedGenerationOptions,
+            onToken: (String) -> Bool
+        ) throws {
+            guard let model = self.model, let vocab = llama_model_get_vocab(model) else {
+                throw LlamaLanguageModelError.contextInitializationFailed
+            }
+
+            let promptTokens = try tokenizeText(vocab: vocab, text: prompt)
+            guard !promptTokens.isEmpty else {
+                throw LlamaLanguageModelError.tokenizationFailed
+            }
+
+            if llama_model_has_encoder(model) {
+                let context = try makeFreshContext(options: options)
+                defer { llama_free(context) }
+                try performTokenGeneration(
+                    context: context,
+                    vocab: vocab,
+                    promptTokens: promptTokens,
+                    startIndex: 0,
+                    maxTokens: maxTokens,
+                    options: options,
+                    onToken: onToken
+                )
+                return
+            }
+
+            let (context, startIndex) = try acquireSessionContext(
+                for: session,
+                promptTokens: promptTokens,
+                options: options
+            )
+            defer { releaseSessionContext(context) }
+            llama_set_causal_attn(context, true)
+            llama_set_n_threads(context, options.threads, options.threads)
+
+            do {
+                try performTokenGeneration(
+                    context: context,
+                    vocab: vocab,
+                    promptTokens: promptTokens,
+                    startIndex: startIndex,
+                    maxTokens: maxTokens,
+                    options: options,
+                    onToken: onToken
+                )
+            } catch {
+                if isCachedSessionContext(context) {
+                    discardCachedSessionContext()
+                }
+                throw error
+            }
+        }
 
         /// Creates a Llama language model.
         ///
         /// - Parameters:
         ///   - modelPath: The path to the GGUF model file.
-        public init(modelPath: String) {
+        ///   - gpuLayers: The number of model layers to offload to the GPU.
+        ///     Defaults to ``defaultGPULayerCount``.
+        ///   - mmprojPath: The path to a multimodal projector GGUF file matching
+        ///     the model. When provided, prompts may include image segments,
+        ///     which are encoded through the projector. Defaults to `nil`
+        ///     (text only).
+        public init(
+            modelPath: String,
+            gpuLayers: Int32 = LlamaLanguageModel.defaultGPULayerCount,
+            mmprojPath: String? = nil
+        ) {
             self.modelPath = modelPath
+            self.gpuLayers = gpuLayers
+            self.mmprojPath = mmprojPath
             self.legacyDefaults = ResolvedGenerationOptions()
         }
 
@@ -467,9 +771,178 @@ import Foundation
         }
 
         deinit {
+            if let cached = cachedSessionContext {
+                llama_free(cached.context)
+            }
+            if let mtmdContext = mtmdContext {
+                mtmd_free(mtmdContext)
+            }
             if let model = model {
                 llama_model_free(model)
             }
+        }
+
+        // MARK: - Tool calling
+
+        /// Prompt-side tool state for one exchange: the detected syntax, the
+        /// session's tool definitions, and the tool turns produced so far in
+        /// the current resolve-and-continue loop.
+        struct LlamaToolPromptContext {
+            let format: LlamaToolCallFormat
+            let definitions: [LlamaToolDefinition]
+            var pendingEntries: [Transcript.Entry] = []
+
+            init(format: LlamaToolCallFormat, tools: [any Tool]) throws {
+                self.format = format
+                self.definitions = try tools.filter(\.includesSchemaInInstructions).map { tool in
+                    let schema = tool.parameters.withResolvedRoot() ?? tool.parameters
+                    let data = try JSONEncoder().encode(schema)
+                    let parameters = try JSONSerialization.jsonObject(with: data) as? [String: Any]
+                    return LlamaToolDefinition(
+                        name: tool.name,
+                        description: tool.description,
+                        parameters: parameters
+                    )
+                }
+            }
+        }
+
+        private struct ToolInvocationResult {
+            let call: Transcript.ToolCall
+            let output: Transcript.ToolOutput
+        }
+
+        private enum ToolResolutionOutcome {
+            case stop(calls: [Transcript.ToolCall])
+            case invocations([ToolInvocationResult])
+        }
+
+        private static func maxToolIterationsExceededError(limit: Int) -> LanguageModelSession.GenerationError {
+            .decodingFailure(
+                .init(
+                    debugDescription:
+                        "Exceeded maximum tool iterations (\(limit)) while processing Llama tool calls."
+                )
+            )
+        }
+
+        private static func repeatedToolCallLoopError() -> LanguageModelSession.GenerationError {
+            .decodingFailure(
+                .init(
+                    debugDescription:
+                        "Detected repeated Llama tool-call signature and aborted to avoid an infinite tool loop."
+                )
+            )
+        }
+
+        private func currentToolCallFormat() -> LlamaToolCallFormat {
+            guard let model = self.model else { return .hermesJSON }
+            let template = llama_model_chat_template(model, nil).map { String(cString: $0) }
+            return LlamaToolCallFormat.detect(template: template)
+        }
+
+        private func makeToolPromptContext(for session: LanguageModelSession) throws -> LlamaToolPromptContext? {
+            guard !session.tools.isEmpty, self.model != nil else { return nil }
+            return try LlamaToolPromptContext(format: currentToolCallFormat(), tools: session.tools)
+        }
+
+        private func makeTranscriptToolCalls(
+            from parsedCalls: [LlamaParsedToolCall]
+        ) throws -> [Transcript.ToolCall] {
+            try parsedCalls.map { parsed in
+                Transcript.ToolCall(
+                    id: UUID().uuidString,
+                    toolName: parsed.name,
+                    arguments: try GeneratedContent(json: parsed.argumentsJSON)
+                )
+            }
+        }
+
+        private func resolveToolCalls(
+            _ parsedCalls: [LlamaParsedToolCall],
+            session: LanguageModelSession
+        ) async throws -> ToolResolutionOutcome {
+            if parsedCalls.isEmpty { return .invocations([]) }
+
+            var toolsByName: [String: any Tool] = [:]
+            for tool in session.tools where toolsByName[tool.name] == nil {
+                toolsByName[tool.name] = tool
+            }
+
+            let transcriptCalls = try makeTranscriptToolCalls(from: parsedCalls)
+
+            if let delegate = session.toolExecutionDelegate {
+                await delegate.didGenerateToolCalls(transcriptCalls, in: session)
+            }
+
+            var decisions: [ToolExecutionDecision] = []
+            decisions.reserveCapacity(transcriptCalls.count)
+
+            if let delegate = session.toolExecutionDelegate {
+                for call in transcriptCalls {
+                    let decision = await delegate.toolCallDecision(for: call, in: session)
+                    if case .stop = decision {
+                        return .stop(calls: transcriptCalls)
+                    }
+                    decisions.append(decision)
+                }
+            } else {
+                decisions = Array(repeating: .execute, count: transcriptCalls.count)
+            }
+
+            var results: [ToolInvocationResult] = []
+            results.reserveCapacity(transcriptCalls.count)
+
+            for (index, call) in transcriptCalls.enumerated() {
+                switch decisions[index] {
+                case .stop:
+                    return .stop(calls: transcriptCalls)
+                case .provideOutput(let segments):
+                    let output = Transcript.ToolOutput(
+                        id: call.id,
+                        toolName: call.toolName,
+                        segments: segments
+                    )
+                    if let delegate = session.toolExecutionDelegate {
+                        await delegate.didExecuteToolCall(call, output: output, in: session)
+                    }
+                    results.append(ToolInvocationResult(call: call, output: output))
+                case .execute:
+                    guard let tool = toolsByName[call.toolName] else {
+                        let message = Transcript.Segment.text(.init(content: "Tool not found: \(call.toolName)"))
+                        let output = Transcript.ToolOutput(
+                            id: call.id,
+                            toolName: call.toolName,
+                            segments: [message]
+                        )
+                        if let delegate = session.toolExecutionDelegate {
+                            await delegate.didExecuteToolCall(call, output: output, in: session)
+                        }
+                        results.append(ToolInvocationResult(call: call, output: output))
+                        continue
+                    }
+
+                    do {
+                        let segments = try await tool.makeOutputSegments(from: call.arguments)
+                        let output = Transcript.ToolOutput(
+                            id: call.id,
+                            toolName: tool.name,
+                            segments: segments
+                        )
+                        if let delegate = session.toolExecutionDelegate {
+                            await delegate.didExecuteToolCall(call, output: output, in: session)
+                        }
+                        results.append(ToolInvocationResult(call: call, output: output))
+                    } catch {
+                        if let delegate = session.toolExecutionDelegate {
+                            await delegate.didFailToolCall(call, error: error, in: session)
+                        }
+                        throw LanguageModelSession.ToolCallError(tool: tool, underlyingError: error)
+                    }
+                }
+            }
+
+            return .invocations(results)
         }
 
         public func respond<Content>(
@@ -479,58 +952,164 @@ import Foundation
             includeSchemaInPrompt: Bool,
             options: GenerationOptions
         ) async throws -> LanguageModelSession.Response<Content> where Content: Generable {
-            // Validate that no image segments are present
-            try validateNoImageSegments(in: session)
-            try await ensureModelLoaded()
+            if mmprojPath == nil {
+                try validateNoImageSegments(in: session)
+            }
+            try ensureModelLoaded()
 
             let runtimeOptions = resolvedOptions(from: options)
             let structuredOptions = resolvedStructuredOptions(from: options)
-            let contextParams = createContextParams(from: runtimeOptions)
 
-            // Try to create context with error handling
-            guard let context = llama_init_from_model(model!, contextParams) else {
-                throw LlamaLanguageModelError.contextInitializationFailed
-            }
-            defer { llama_free(context) }
-
-            // Check if this is an embedding model (no KV cache).
-            // This early check catches models configured for embeddings that lack a KV cache.
-            // A complementary architectural check in prepareInitialBatch catches encoder-only
-            // models (like BERT) by their architecture type.
-            if llama_get_memory(context) == nil {
-                throw LlamaLanguageModelError.encoderOnlyModel
-            }
-
-            llama_set_causal_attn(context, true)
-            llama_set_warmup(context, false)
-            llama_set_n_threads(context, runtimeOptions.threads, runtimeOptions.threads)
-
-            let fullPrompt: String
-            if includeSchemaInPrompt, type != String.self {
-                fullPrompt = try formatPrompt(
-                    for: session,
-                    extraSystemMessage: schemaPrompt(for: type.generationSchema)
-                )
-            } else {
-                fullPrompt = try formatPrompt(for: session)
-            }
+            let imageMarker = mtmdContext != nil ? String(cString: mtmd_default_marker()) : nil
 
             if type == String.self {
                 let maxTokens = runtimeOptions.maximumResponseTokens ?? 100
-                let text = try await generateText(
-                    context: context,
-                    model: model!,
-                    prompt: fullPrompt,
-                    maxTokens: maxTokens,
-                    options: runtimeOptions
-                )
+                let outputFormat = currentToolCallFormat()
+                var toolContext = try makeToolPromptContext(for: session)
+                let maxToolIterations = 8
+                var toolIteration = 0
+                var previousToolCallSignature: String?
+                var allEntries: [Transcript.Entry] = []
+                var text = ""
+
+                generationLoop: while true {
+                    var promptImages: [Data] = []
+                    let fullPrompt = try formatPrompt(
+                        for: session,
+                        extraSystemMessage: nil,
+                        assistantPrefill: runtimeOptions.assistantPrefill,
+                        imageMarker: imageMarker,
+                        images: &promptImages,
+                        toolContext: toolContext
+                    )
+
+                    var accumulated = ""
+                    let terminator = toolContext?.format.callTerminator
+                    let collectToken: (String) -> Bool = { tokenText in
+                        accumulated += tokenText
+                        if let terminator,
+                            accumulated.suffix(terminator.count + 8).contains(terminator)
+                        {
+                            return false
+                        }
+                        return true
+                    }
+
+                    if promptImages.isEmpty {
+                        try generateChatText(
+                            session: session,
+                            prompt: fullPrompt,
+                            maxTokens: maxTokens,
+                            options: runtimeOptions,
+                            onToken: collectToken
+                        )
+                    } else {
+                        discardCachedSessionContext()
+                        let context = try makeFreshContext(options: runtimeOptions)
+                        defer { llama_free(context) }
+                        try performMultimodalGeneration(
+                            context: context,
+                            prompt: fullPrompt,
+                            images: promptImages,
+                            maxTokens: maxTokens,
+                            options: runtimeOptions,
+                            onToken: collectToken
+                        )
+                    }
+
+                    guard let format = toolContext?.format else {
+                        text = outputFormat.streamingVisibleText(
+                            in: accumulated,
+                            withholdToolCalls: false,
+                            holdPartialMarkers: false
+                        )
+                        break generationLoop
+                    }
+                    let (visibleText, parsedCalls) = format.parseToolCalls(in: accumulated)
+                    // Keep the text from every round, as the streaming path does,
+                    // so a preamble before a tool call is not lost.
+                    text += visibleText
+                    if parsedCalls.isEmpty {
+                        break generationLoop
+                    }
+
+                    toolIteration += 1
+                    if toolIteration > maxToolIterations {
+                        let unresolved = try makeTranscriptToolCalls(from: parsedCalls)
+                        allEntries.append(.toolCalls(Transcript.ToolCalls(unresolved)))
+                        throw Self.maxToolIterationsExceededError(limit: maxToolIterations)
+                    }
+                    let signature =
+                        parsedCalls
+                        .map { "\($0.name):\($0.argumentsJSON)" }
+                        .joined(separator: "|")
+                    if signature == previousToolCallSignature {
+                        let unresolved = try makeTranscriptToolCalls(from: parsedCalls)
+                        allEntries.append(.toolCalls(Transcript.ToolCalls(unresolved)))
+                        throw Self.repeatedToolCallLoopError()
+                    }
+                    previousToolCallSignature = signature
+
+                    let resolution = try await resolveToolCalls(parsedCalls, session: session)
+                    switch resolution {
+                    case .stop(let calls):
+                        if !calls.isEmpty {
+                            allEntries.append(.toolCalls(Transcript.ToolCalls(calls)))
+                        }
+                        return LanguageModelSession.Response(
+                            content: "" as! Content,
+                            rawContent: GeneratedContent(""),
+                            transcriptEntries: ArraySlice(allEntries)
+                        )
+                    case .invocations(let invocations):
+                        guard !invocations.isEmpty else {
+                            break generationLoop
+                        }
+                        let callsEntry = Transcript.Entry.toolCalls(
+                            Transcript.ToolCalls(invocations.map(\.call))
+                        )
+                        allEntries.append(callsEntry)
+                        toolContext?.pendingEntries.append(callsEntry)
+                        for invocation in invocations {
+                            let outputEntry = Transcript.Entry.toolOutput(invocation.output)
+                            allEntries.append(outputEntry)
+                            toolContext?.pendingEntries.append(outputEntry)
+                        }
+                    }
+                }
 
                 return LanguageModelSession.Response(
                     content: text as! Content,
                     rawContent: GeneratedContent(text),
-                    transcriptEntries: ArraySlice([])
+                    transcriptEntries: ArraySlice(allEntries)
                 )
             } else {
+                var promptImages: [Data] = []
+                let fullPrompt: String
+                if includeSchemaInPrompt {
+                    fullPrompt = try formatPrompt(
+                        for: session,
+                        extraSystemMessage: schemaPrompt(for: type.generationSchema),
+                        assistantPrefill: runtimeOptions.assistantPrefill,
+                        imageMarker: imageMarker,
+                        images: &promptImages
+                    )
+                } else {
+                    fullPrompt = try formatPrompt(
+                        for: session,
+                        extraSystemMessage: nil,
+                        assistantPrefill: runtimeOptions.assistantPrefill,
+                        imageMarker: imageMarker,
+                        images: &promptImages
+                    )
+                }
+                // Structured output does not go through the projector yet; refuse rather
+                // than answer about an image the model never saw.
+                guard promptImages.isEmpty else {
+                    throw LlamaLanguageModelError.unsupportedFeature
+                }
+                let context = try makeFreshContext(options: runtimeOptions)
+                defer { llama_free(context) }
                 let maxTokens = structuredOptions.maximumResponseTokens ?? 512
                 let jsonString = try await generateStructuredJSON(
                     context: context,
@@ -561,68 +1140,170 @@ import Foundation
                 fatalError("LlamaLanguageModel only supports generating String content")
             }
 
-            // Validate that no image segments are present
-            do {
-                try validateNoImageSegments(in: session)
-            } catch {
-                return LanguageModelSession.ResponseStream(
-                    stream: AsyncThrowingStream { continuation in
-                        continuation.finish(throwing: error)
-                    }
-                )
+            if mmprojPath == nil {
+                do {
+                    try validateNoImageSegments(in: session)
+                } catch {
+                    return LanguageModelSession.ResponseStream(
+                        stream: AsyncThrowingStream { continuation in
+                            continuation.finish(throwing: error)
+                        }
+                    )
+                }
             }
 
             let stream: AsyncThrowingStream<LanguageModelSession.ResponseStream<Content>.Snapshot, any Error> =
                 AsyncThrowingStream { continuation in
                     let task = Task {
                         do {
-                            try await ensureModelLoaded()
+                            try ensureModelLoaded()
 
                             let runtimeOptions = resolvedOptions(from: options)
                             let maxTokens = runtimeOptions.maximumResponseTokens ?? 100
-                            let contextParams = createContextParams(from: runtimeOptions)
-                            guard let context = llama_init_from_model(model!, contextParams) else {
-                                throw LlamaLanguageModelError.contextInitializationFailed
+                            let outputFormat = self.currentToolCallFormat()
+                            var toolContext = try self.makeToolPromptContext(for: session)
+                            let maxToolIterations = 8
+                            var toolIteration = 0
+                            var previousToolCallSignature: String?
+                            var accumulatedEntries: [Transcript.Entry] = []
+                            var emittedBase = ""
+                            var lastYieldedText: String?
+                            let imageMarker =
+                                self.mtmdContext != nil ? String(cString: mtmd_default_marker()) : nil
+
+                            func yieldSnapshot(_ text: String) {
+                                lastYieldedText = text
+                                let snapshot = LanguageModelSession.ResponseStream<Content>.Snapshot(
+                                    content: (text as! Content).asPartiallyGenerated(),
+                                    rawContent: GeneratedContent(text),
+                                    transcriptEntries: ArraySlice(accumulatedEntries)
+                                )
+                                continuation.yield(snapshot)
                             }
-                            defer { llama_free(context) }
 
-                            // Check if this is an embedding model (no KV cache).
-                            // This early check catches models configured for embeddings that lack a KV cache.
-                            // A complementary architectural check in prepareInitialBatch catches encoder-only
-                            // models (like BERT) by their architecture type.
-                            if llama_get_memory(context) == nil {
-                                throw LlamaLanguageModelError.encoderOnlyModel
-                            }
+                            generationLoop: while true {
+                                var promptImages: [Data] = []
+                                let fullPrompt = try self.formatPrompt(
+                                    for: session,
+                                    extraSystemMessage: nil,
+                                    assistantPrefill: runtimeOptions.assistantPrefill,
+                                    imageMarker: imageMarker,
+                                    images: &promptImages,
+                                    toolContext: toolContext
+                                )
 
-                            // Stabilize runtime behavior per-context
-                            llama_set_causal_attn(context, true)
-                            llama_set_warmup(context, false)
-                            llama_set_n_threads(context, runtimeOptions.threads, runtimeOptions.threads)
-
-                            var accumulatedText = ""
-                            let fullPrompt = try self.formatPrompt(for: session)
-
-                            do {
-                                for try await tokenText in generateTextStream(
-                                    context: context,
-                                    model: model!,
-                                    prompt: fullPrompt,
-                                    maxTokens: maxTokens,
-                                    options: runtimeOptions
-                                ) {
-                                    accumulatedText += tokenText
-
-                                    let snapshot = LanguageModelSession.ResponseStream<Content>.Snapshot(
-                                        content: (accumulatedText as! Content).asPartiallyGenerated(),
-                                        rawContent: GeneratedContent(accumulatedText)
+                                var roundRaw = ""
+                                let terminator = toolContext?.format.callTerminator
+                                let withholdToolCalls = toolContext != nil
+                                let collectToken: (String) -> Bool = { tokenText in
+                                    roundRaw += tokenText
+                                    let visible = outputFormat.streamingVisibleText(
+                                        in: roundRaw,
+                                        withholdToolCalls: withholdToolCalls
                                     )
-                                    continuation.yield(snapshot)
+                                    let total = emittedBase + visible
+                                    if !total.isEmpty, total != lastYieldedText {
+                                        yieldSnapshot(total)
+                                    }
+                                    if let terminator,
+                                        roundRaw.suffix(terminator.count + 8).contains(terminator)
+                                    {
+                                        return false
+                                    }
+                                    return true
                                 }
-                            } catch {
-                                continuation.finish(throwing: error)
-                                return
+
+                                if promptImages.isEmpty {
+                                    try self.generateChatText(
+                                        session: session,
+                                        prompt: fullPrompt,
+                                        maxTokens: maxTokens,
+                                        options: runtimeOptions,
+                                        onToken: collectToken
+                                    )
+                                } else {
+                                    self.discardCachedSessionContext()
+                                    let context = try self.makeFreshContext(options: runtimeOptions)
+                                    defer { llama_free(context) }
+                                    try self.performMultimodalGeneration(
+                                        context: context,
+                                        prompt: fullPrompt,
+                                        images: promptImages,
+                                        maxTokens: maxTokens,
+                                        options: runtimeOptions,
+                                        onToken: collectToken
+                                    )
+                                }
+
+                                if Task.isCancelled {
+                                    break generationLoop
+                                }
+
+                                let roundVisible = outputFormat.streamingVisibleText(
+                                    in: roundRaw,
+                                    withholdToolCalls: withholdToolCalls,
+                                    holdPartialMarkers: false
+                                )
+
+                                guard let format = toolContext?.format else {
+                                    emittedBase += roundVisible
+                                    break generationLoop
+                                }
+                                let (_, parsedCalls) = format.parseToolCalls(in: roundRaw)
+                                if parsedCalls.isEmpty {
+                                    emittedBase += roundVisible
+                                    break generationLoop
+                                }
+
+                                toolIteration += 1
+                                if toolIteration > maxToolIterations {
+                                    let unresolved = try self.makeTranscriptToolCalls(from: parsedCalls)
+                                    accumulatedEntries.append(.toolCalls(Transcript.ToolCalls(unresolved)))
+                                    throw Self.maxToolIterationsExceededError(limit: maxToolIterations)
+                                }
+                                let signature =
+                                    parsedCalls
+                                    .map { "\($0.name):\($0.argumentsJSON)" }
+                                    .joined(separator: "|")
+                                if signature == previousToolCallSignature {
+                                    let unresolved = try self.makeTranscriptToolCalls(from: parsedCalls)
+                                    accumulatedEntries.append(.toolCalls(Transcript.ToolCalls(unresolved)))
+                                    throw Self.repeatedToolCallLoopError()
+                                }
+                                previousToolCallSignature = signature
+
+                                let resolution = try await self.resolveToolCalls(parsedCalls, session: session)
+                                switch resolution {
+                                case .stop(let calls):
+                                    emittedBase += roundVisible
+                                    if !calls.isEmpty {
+                                        accumulatedEntries.append(.toolCalls(Transcript.ToolCalls(calls)))
+                                        yieldSnapshot(emittedBase)
+                                    }
+                                    break generationLoop
+                                case .invocations(let invocations):
+                                    guard !invocations.isEmpty else {
+                                        emittedBase += roundVisible
+                                        break generationLoop
+                                    }
+                                    let callsEntry = Transcript.Entry.toolCalls(
+                                        Transcript.ToolCalls(invocations.map(\.call))
+                                    )
+                                    accumulatedEntries.append(callsEntry)
+                                    toolContext?.pendingEntries.append(callsEntry)
+                                    for invocation in invocations {
+                                        let outputEntry = Transcript.Entry.toolOutput(invocation.output)
+                                        accumulatedEntries.append(outputEntry)
+                                        toolContext?.pendingEntries.append(outputEntry)
+                                    }
+                                    emittedBase += roundVisible
+                                    yieldSnapshot(emittedBase)
+                                }
                             }
 
+                            if emittedBase != lastYieldedText {
+                                yieldSnapshot(emittedBase)
+                            }
                             continuation.finish()
                         } catch {
                             continuation.finish(throwing: error)
@@ -639,7 +1320,10 @@ import Foundation
 
         // MARK: - Private Helpers
 
-        private func ensureModelLoaded() async throws {
+        private func ensureModelLoaded() throws {
+            modelLoadLock.lock()
+            defer { modelLoadLock.unlock() }
+
             guard !isModelLoaded else { return }
 
             // Check if model file exists
@@ -651,6 +1335,11 @@ import Foundation
             llama_backend_init()
 
             // Free any existing model before loading a new one
+            discardCachedSessionContext()
+            if let existingContext = mtmdContext {
+                mtmd_free(existingContext)
+                self.mtmdContext = nil
+            }
             if let existingModel = model {
                 llama_model_free(existingModel)
                 self.model = nil
@@ -661,6 +1350,22 @@ import Foundation
                 throw LlamaLanguageModelError.modelLoadFailed
             }
 
+            if let mmprojPath {
+                guard FileManager.default.fileExists(atPath: mmprojPath) else {
+                    llama_model_free(loadedModel)
+                    throw LlamaLanguageModelError.invalidModelPath
+                }
+                var mtmdParams = mtmd_context_params_default()
+                mtmdParams.use_gpu = gpuLayers != 0
+                mtmdParams.print_timings = false
+                mtmdParams.n_threads = legacyDefaults.threads
+                guard let projector = mtmd_init_from_file(mmprojPath, loadedModel, mtmdParams) else {
+                    llama_model_free(loadedModel)
+                    throw LlamaLanguageModelError.modelLoadFailed
+                }
+                self.mtmdContext = projector
+            }
+
             self.model = loadedModel
             self.vocab = llama_model_get_vocab(loadedModel)
             self.isModelLoaded = true
@@ -668,13 +1373,10 @@ import Foundation
 
         private func createModelParams() -> llama_model_params {
             var params = llama_model_default_params()
-
-            // Force CPU-only execution to avoid Metal GPU issues
-            params.n_gpu_layers = 0
+            params.n_gpu_layers = gpuLayers
 
             // Try to reduce memory usage
-            params.use_mmap = true
-            params.use_mlock = false
+            params.load_mode = LLAMA_LOAD_MODE_MMAP
             return params
         }
 
@@ -779,108 +1481,6 @@ import Foundation
             llama_sampler_chain_add(sampler, llama_sampler_init_dist(options.seed))
         }
 
-        private func generateText(
-            context: OpaquePointer,
-            model: OpaquePointer,
-            prompt: String,
-            maxTokens: Int,
-            options: ResolvedGenerationOptions
-        ) async throws
-            -> String
-        {
-            guard let vocab = llama_model_get_vocab(model) else {
-                throw LlamaLanguageModelError.contextInitializationFailed
-            }
-
-            // Tokenize the prompt
-            let promptTokens = try tokenizeText(vocab: vocab, text: prompt)
-            guard !promptTokens.isEmpty else {
-                throw LlamaLanguageModelError.tokenizationFailed
-            }
-
-            var batch = llama_batch_init(Int32(options.batchSize), 0, 1)
-            defer { llama_batch_free(batch) }
-
-            let hasEncoder = try prepareInitialBatch(
-                batch: &batch,
-                promptTokens: promptTokens,
-                model: model,
-                vocab: vocab,
-                context: context,
-                batchSize: options.batchSize
-            )
-
-            // Initialize sampler chain with options
-            guard let sampler = llama_sampler_chain_init(llama_sampler_chain_default_params()) else {
-                throw LlamaLanguageModelError.decodingFailed
-            }
-            defer { llama_sampler_free(sampler) }
-            let samplerPtr = UnsafeMutablePointer<llama_sampler>(sampler)
-
-            let effectiveTemperature = Float(options.temperature)
-
-            // Apply repeat/frequency/presence penalties from custom options
-            let effectiveRepeatPenalty = options.repeatPenalty
-            let effectiveRepeatLastN = options.repeatLastN
-            let effectiveFrequencyPenalty = options.frequencyPenalty
-            let effectivePresencePenalty = options.presencePenalty
-
-            if effectiveRepeatPenalty != 1.0 || effectiveFrequencyPenalty != 0.0 || effectivePresencePenalty != 0.0 {
-                llama_sampler_chain_add(
-                    samplerPtr,
-                    llama_sampler_init_penalties(
-                        effectiveRepeatLastN,
-                        effectiveRepeatPenalty,
-                        effectiveFrequencyPenalty,
-                        effectivePresencePenalty
-                    )
-                )
-            }
-
-            applySampling(sampler: samplerPtr, effectiveTemperature: effectiveTemperature, options: options)
-
-            // Generate tokens one by one
-            var generatedText = ""
-            // Track position - for encoder-decoder models, we start from position 1 (after decoder start token)
-            // For decoder-only models, we continue from the end of the prompt
-            var n_cur: Int32 = hasEncoder ? 1 : batch.n_tokens
-
-            for _ in 0 ..< maxTokens {
-                // Sample next token from logits - llama_batch_get_one creates batch with single token at index 0
-                let nextToken = llama_sampler_sample(sampler, context, batch.n_tokens - 1)
-                llama_sampler_accept(sampler, nextToken)
-
-                // Check for end of sequence
-                if llama_vocab_is_eog(vocab, nextToken) {
-                    break
-                }
-
-                // Convert token to text
-                if let tokenText = tokenToText(vocab: vocab, token: nextToken) {
-                    generatedText += tokenText
-                }
-
-                // Prepare batch for next token
-                batch.n_tokens = 1
-                batch.token[0] = nextToken
-                batch.pos[0] = n_cur
-                batch.n_seq_id[0] = 1
-                if let seq_ids = batch.seq_id, let seq_id = seq_ids[0] {
-                    seq_id[0] = 0
-                }
-                batch.logits[0] = 1
-
-                n_cur += 1
-
-                let decodeResult = llama_decode(context, batch)
-                guard decodeResult == 0 else {
-                    break
-                }
-            }
-
-            return generatedText
-        }
-
         /// Builds a JSONSchema-informed prompt for structured output.
         private func schemaPrompt(for schema: GenerationSchema) -> String {
             let encoder = JSONEncoder()
@@ -945,7 +1545,8 @@ import Foundation
                 model: model!,
                 vocab: vocab,
                 context: context,
-                batchSize: options.batchSize
+                batchSize: options.batchSize,
+                contextSize: options.contextSize
             )
 
             guard let sampler = llama_sampler_chain_init(llama_sampler_chain_default_params()) else {
@@ -958,6 +1559,7 @@ import Foundation
                 llama_sampler_chain_add(
                     samplerPointer,
                     llama_sampler_init_penalties(
+                        llama_vocab_n_tokens(vocab),
                         options.repeatLastN,
                         options.repeatPenalty,
                         options.frequencyPenalty,
@@ -968,7 +1570,7 @@ import Foundation
             applySampling(sampler: samplerPointer, effectiveTemperature: options.temperature, options: options)
 
             let vocabSize = Int(llama_vocab_n_tokens(vocab))
-            let initialPosition: Int32 = hasEncoder ? 1 : batchPointer.pointee.n_tokens
+            let initialPosition: Int32 = hasEncoder ? 1 : Int32(promptTokens.count)
 
             let backend = LlamaTokenBackend(
                 context: context,
@@ -1109,146 +1711,297 @@ import Foundation
             }
 
             mutating func sample(from allowedTokens: Set<Int>) async throws -> Int {
-                guard let logits = llama_get_logits(context) else {
+                // Masking llama_get_logits in place does not constrain
+                // llama_sampler_sample: the context can refresh that buffer when
+                // the sampler fetches logits, dropping the mask. Build a candidate
+                // array holding only the allowed tokens and run the sampler chain
+                // over it instead.
+                guard let logits = llama_get_logits_ith(context, batch.pointee.n_tokens - 1) else {
                     return eosToken
                 }
 
-                for tokenIndex in 0 ..< vocabSize {
-                    if !allowedTokens.contains(tokenIndex) {
-                        logits[tokenIndex] = -Float.infinity
-                    }
+                var candidates = allowedTokens.compactMap { token -> llama_token_data? in
+                    guard token >= 0, token < vocabSize else { return nil }
+                    return llama_token_data(id: llama_token(token), logit: logits[token], p: 0)
+                }
+                guard !candidates.isEmpty else {
+                    return eosToken
                 }
 
-                let tokenIndex = batch.pointee.n_tokens - 1
-                return Int(llama_sampler_sample(sampler, context, tokenIndex))
+                let selectedToken = candidates.withUnsafeMutableBufferPointer { buffer -> Int in
+                    var array = llama_token_data_array(
+                        data: buffer.baseAddress,
+                        size: buffer.count,
+                        selected: -1,
+                        sorted: false
+                    )
+                    llama_sampler_apply(sampler, &array)
+                    guard array.selected >= 0, array.selected < Int64(array.size), let data = array.data else {
+                        return eosToken
+                    }
+                    return Int(data[Int(array.selected)].id)
+                }
+                return selectedToken
             }
         }
 
-        private func generateTextStream(
+        private func performTokenGeneration(
             context: OpaquePointer,
-            model: OpaquePointer,
-            prompt: String,
-            maxTokens: Int,
-            options: ResolvedGenerationOptions
-        ) -> AsyncThrowingStream<String, Error> {
-            return AsyncThrowingStream { continuation in
-                self.performTextGeneration(
-                    context: context,
-                    model: model,
-                    prompt: prompt,
-                    maxTokens: maxTokens,
-                    options: options,
-                    continuation: continuation
-                )
-            }
-        }
-
-        private func performTextGeneration(
-            context: OpaquePointer,
-            model: OpaquePointer,
-            prompt: String,
+            vocab: OpaquePointer,
+            promptTokens: [llama_token],
+            startIndex: Int,
             maxTokens: Int,
             options: ResolvedGenerationOptions,
-            continuation: AsyncThrowingStream<String, Error>.Continuation
-        ) {
-            do {
-                guard let vocab = llama_model_get_vocab(model) else {
-                    continuation.finish(throwing: LlamaLanguageModelError.contextInitializationFailed)
-                    return
-                }
+            onToken: (String) -> Bool
+        ) throws {
+            guard let model = self.model else {
+                throw LlamaLanguageModelError.modelLoadFailed
+            }
 
-                // Tokenize the prompt
-                let promptTokens = try tokenizeText(vocab: vocab, text: prompt)
-                guard !promptTokens.isEmpty else {
-                    continuation.finish(throwing: LlamaLanguageModelError.tokenizationFailed)
-                    return
-                }
+            sessionContextLock.lock()
+            lastReusedTokenCount = startIndex
+            lastPrefillTokenCount = promptTokens.count - startIndex
+            sessionContextLock.unlock()
 
-                // Initialize batch
-                var batch = llama_batch_init(Int32(options.batchSize), 0, 1)
-                defer { llama_batch_free(batch) }
+            // Initialize batch
+            var batch = llama_batch_init(Int32(options.batchSize), 0, 1)
+            defer { llama_batch_free(batch) }
 
-                let hasEncoder = try prepareInitialBatch(
-                    batch: &batch,
-                    promptTokens: promptTokens,
-                    model: model,
-                    vocab: vocab,
-                    context: context,
-                    batchSize: options.batchSize
+            let hasEncoder = try prepareInitialBatch(
+                batch: &batch,
+                promptTokens: promptTokens,
+                model: model,
+                vocab: vocab,
+                context: context,
+                batchSize: options.batchSize,
+                contextSize: options.contextSize,
+                startIndex: startIndex
+            )
+
+            // Initialize sampler chain with options
+            guard let sampler = llama_sampler_chain_init(llama_sampler_chain_default_params()) else {
+                throw LlamaLanguageModelError.decodingFailed
+            }
+            defer { llama_sampler_free(sampler) }
+            let samplerPtr = UnsafeMutablePointer<llama_sampler>(sampler)
+
+            let effectiveTemperature = Float(options.temperature)
+
+            // Apply repeat/frequency/presence penalties from custom options
+            let effectiveRepeatPenalty = options.repeatPenalty
+            let effectiveRepeatLastN = options.repeatLastN
+            let effectiveFrequencyPenalty = options.frequencyPenalty
+            let effectivePresencePenalty = options.presencePenalty
+
+            if effectiveRepeatPenalty != 1.0 || effectiveFrequencyPenalty != 0.0 || effectivePresencePenalty != 0.0 {
+                llama_sampler_chain_add(
+                    samplerPtr,
+                    llama_sampler_init_penalties(
+                        llama_vocab_n_tokens(vocab),
+                        effectiveRepeatLastN,
+                        effectiveRepeatPenalty,
+                        effectiveFrequencyPenalty,
+                        effectivePresencePenalty
+                    )
                 )
+            }
 
-                // Initialize sampler chain with options
-                guard let sampler = llama_sampler_chain_init(llama_sampler_chain_default_params()) else {
+            // Check for mirostat sampling (takes precedence over standard sampling)
+            applySampling(sampler: samplerPtr, effectiveTemperature: effectiveTemperature, options: options)
+
+            // Generate tokens one by one
+            // Track position - for encoder-decoder models, we start from position 1 (after decoder start token)
+            // For decoder-only models, we continue from the end of the prompt
+            var n_cur: Int32 = hasEncoder ? 1 : Int32(promptTokens.count)
+            var decodedTokens = promptTokens
+
+            for _ in 0 ..< maxTokens {
+                if Task.isCancelled {
+                    break
+                }
+
+                // Sample next token from logits of the last token we just decoded
+                let nextToken = llama_sampler_sample(sampler, context, batch.n_tokens - 1)
+                llama_sampler_accept(sampler, nextToken)
+
+                // Check for end of sequence
+                if llama_vocab_is_eog(vocab, nextToken) {
+                    break
+                }
+
+                // Convert token to text and yield it
+                if let tokenText = tokenToText(vocab: vocab, token: nextToken) {
+                    guard onToken(tokenText) else {
+                        break
+                    }
+                }
+
+                // Prepare batch for next token
+                batch.n_tokens = 1
+                batch.token[0] = nextToken
+                batch.pos[0] = n_cur
+                batch.n_seq_id[0] = 1
+                if let seq_ids = batch.seq_id, let seq_id = seq_ids[0] {
+                    seq_id[0] = 0
+                }
+                batch.logits[0] = 1
+
+                n_cur += 1
+
+                let decodeResult = llama_decode(context, batch)
+                guard decodeResult == 0 else {
+                    break
+                }
+                decodedTokens.append(nextToken)
+            }
+
+            recordCachedTokens(decodedTokens, context: context)
+        }
+
+        /// Evaluates a marker-annotated multimodal prompt through the projector,
+        /// then generates text tokens from the resulting state.
+        private func performMultimodalGeneration(
+            context: OpaquePointer,
+            prompt: String,
+            images: [Data],
+            maxTokens: Int,
+            options: ResolvedGenerationOptions,
+            onToken: (String) -> Bool
+        ) throws {
+            guard let mtmdContext, let model = self.model,
+                let vocab = llama_model_get_vocab(model)
+            else {
+                throw LlamaLanguageModelError.contextInitializationFailed
+            }
+
+            var pastPosition: llama_pos = 0
+            try projectorLocked {
+                var bitmaps: [OpaquePointer?] = []
+                defer {
+                    for bitmap in bitmaps {
+                        if let bitmap {
+                            mtmd_bitmap_free(bitmap)
+                        }
+                    }
+                }
+                for imageData in images {
+                    // Pinned to the current llama.swift signature. llama.cpp master adds a
+                    // trailing options argument to this helper; update alongside the dependency.
+                    let wrapper = imageData.withUnsafeBytes { raw -> mtmd_helper_bitmap_wrapper in
+                        mtmd_helper_bitmap_init_from_buf(
+                            mtmdContext,
+                            raw.bindMemory(to: UInt8.self).baseAddress,
+                            imageData.count,
+                            false
+                        )
+                    }
+                    if let videoContext = wrapper.video_ctx {
+                        if let bitmap = wrapper.bitmap {
+                            mtmd_bitmap_free(bitmap)
+                        }
+                        mtmd_helper_video_free(videoContext)
+                        throw LlamaLanguageModelError.unsupportedFeature
+                    }
+                    guard let bitmap = wrapper.bitmap else {
+                        throw LlamaLanguageModelError.encodingFailed
+                    }
+                    bitmaps.append(bitmap)
+                }
+
+                guard let chunks = mtmd_input_chunks_init() else {
+                    throw LlamaLanguageModelError.encodingFailed
+                }
+                defer { mtmd_input_chunks_free(chunks) }
+
+                let tokenizeResult = prompt.withCString { cPrompt -> Int32 in
+                    var inputText = mtmd_input_text(
+                        text: cPrompt,
+                        text_len: strlen(cPrompt),
+                        add_special: true,
+                        parse_special: true
+                    )
+                    return bitmaps.withUnsafeMutableBufferPointer { buffer in
+                        mtmd_tokenize(mtmdContext, chunks, &inputText, buffer.baseAddress, buffer.count)
+                    }
+                }
+                guard tokenizeResult == 0 else {
+                    throw LlamaLanguageModelError.tokenizationFailed
+                }
+
+                let evalResult = mtmd_helper_eval_chunks(
+                    mtmdContext,
+                    context,
+                    chunks,
+                    0,
+                    0,
+                    Int32(options.batchSize),
+                    true,
+                    &pastPosition
+                )
+                guard evalResult == 0 else {
                     throw LlamaLanguageModelError.decodingFailed
                 }
-                defer { llama_sampler_free(sampler) }
-                let samplerPtr = UnsafeMutablePointer<llama_sampler>(sampler)
+            }
 
-                let effectiveTemperature = Float(options.temperature)
+            guard let sampler = llama_sampler_chain_init(llama_sampler_chain_default_params()) else {
+                throw LlamaLanguageModelError.decodingFailed
+            }
+            defer { llama_sampler_free(sampler) }
+            let samplerPtr = UnsafeMutablePointer<llama_sampler>(sampler)
 
-                // Apply repeat/frequency/presence penalties from custom options
-                let effectiveRepeatPenalty = options.repeatPenalty
-                let effectiveRepeatLastN = options.repeatLastN
-                let effectiveFrequencyPenalty = options.frequencyPenalty
-                let effectivePresencePenalty = options.presencePenalty
-
-                if effectiveRepeatPenalty != 1.0 || effectiveFrequencyPenalty != 0.0 || effectivePresencePenalty != 0.0
-                {
-                    llama_sampler_chain_add(
-                        samplerPtr,
-                        llama_sampler_init_penalties(
-                            effectiveRepeatLastN,
-                            effectiveRepeatPenalty,
-                            effectiveFrequencyPenalty,
-                            effectivePresencePenalty
-                        )
+            if options.repeatPenalty != 1.0 || options.frequencyPenalty != 0.0 || options.presencePenalty != 0.0 {
+                llama_sampler_chain_add(
+                    samplerPtr,
+                    llama_sampler_init_penalties(
+                        llama_vocab_n_tokens(vocab),
+                        options.repeatLastN,
+                        options.repeatPenalty,
+                        options.frequencyPenalty,
+                        options.presencePenalty
                     )
+                )
+            }
+            applySampling(sampler: samplerPtr, effectiveTemperature: options.temperature, options: options)
+
+            var batch = llama_batch_init(1, 0, 1)
+            defer { llama_batch_free(batch) }
+
+            var n_cur: Int32 = Int32(pastPosition)
+            var sampleIndex: Int32 = -1
+
+            for _ in 0 ..< maxTokens {
+                if Task.isCancelled {
+                    break
                 }
 
-                // Check for mirostat sampling (takes precedence over standard sampling)
-                applySampling(sampler: samplerPtr, effectiveTemperature: effectiveTemperature, options: options)
+                let nextToken = llama_sampler_sample(samplerPtr, context, sampleIndex)
+                llama_sampler_accept(samplerPtr, nextToken)
 
-                // Generate tokens one by one
-                // Track position - for encoder-decoder models, we start from position 1 (after decoder start token)
-                // For decoder-only models, we continue from the end of the prompt
-                var n_cur: Int32 = hasEncoder ? 1 : batch.n_tokens
+                if llama_vocab_is_eog(vocab, nextToken) {
+                    break
+                }
 
-                for _ in 0 ..< maxTokens {
-                    // Sample next token from logits of the last token we just decoded
-                    let nextToken = llama_sampler_sample(sampler, context, batch.n_tokens - 1)
-                    llama_sampler_accept(sampler, nextToken)
-
-                    // Check for end of sequence
-                    if llama_vocab_is_eog(vocab, nextToken) {
-                        break
-                    }
-
-                    // Convert token to text and yield it
-                    if let tokenText = tokenToText(vocab: vocab, token: nextToken) {
-                        continuation.yield(tokenText)
-                    }
-
-                    // Prepare batch for next token
-                    batch.n_tokens = 1
-                    batch.token[0] = nextToken
-                    batch.pos[0] = n_cur
-                    batch.n_seq_id[0] = 1
-                    if let seq_ids = batch.seq_id, let seq_id = seq_ids[0] {
-                        seq_id[0] = 0
-                    }
-                    batch.logits[0] = 1
-
-                    n_cur += 1
-
-                    let decodeResult = llama_decode(context, batch)
-                    guard decodeResult == 0 else {
+                if let tokenText = tokenToText(vocab: vocab, token: nextToken) {
+                    guard onToken(tokenText) else {
                         break
                     }
                 }
 
-                continuation.finish()
-            } catch {
-                continuation.finish(throwing: error)
+                batch.n_tokens = 1
+                batch.token[0] = nextToken
+                batch.pos[0] = n_cur
+                batch.n_seq_id[0] = 1
+                if let seq_ids = batch.seq_id, let seq_id = seq_ids[0] {
+                    seq_id[0] = 0
+                }
+                batch.logits[0] = 1
+
+                n_cur += 1
+
+                guard llama_decode(context, batch) == 0 else {
+                    break
+                }
+                sampleIndex = 0
             }
         }
 
@@ -1272,30 +2025,45 @@ import Foundation
 
         /// Prepares the initial batch for text generation, handling encoder-decoder vs decoder-only models.
         ///
+        /// Decoder-only prompts longer than the batch capacity are ingested in
+        /// batch-sized chunks. Encoder models must fit the prompt in one batch.
+        ///
         /// - Parameters:
         ///   - batch: The batch to prepare (must be initialized with sufficient capacity).
         ///   - promptTokens: The tokenized prompt tokens.
         ///   - model: The loaded model.
         ///   - vocab: The model vocabulary.
         ///   - context: The model context.
-        ///   - batchSize: The batch capacity to validate against (prevents buffer overflow).
+        ///   - batchSize: The batch capacity per decode call.
+        ///   - contextSize: The context window the prompt must fit within.
+        ///   - startIndex: The index of the first prompt token to decode. Earlier
+        ///     tokens are already present in the context's state. Defaults to `0`.
         /// - Returns: `true` if the model has an encoder (for position tracking during generation).
-        /// - Throws: `insufficientMemory` if prompt token count exceeds batch capacity, `encoderOnlyModel` if the model cannot generate text, `encodingFailed` or `decodingFailed` on failure.
+        /// - Throws: `promptExceedsContextWindow` if the prompt cannot fit in the context window,
+        ///   `insufficientMemory` if an encoder prompt exceeds the batch capacity, `encoderOnlyModel`
+        ///   if the model cannot generate text, `encodingFailed` or `decodingFailed` on failure.
         private func prepareInitialBatch(
             batch: inout llama_batch,
             promptTokens: [llama_token],
             model: OpaquePointer,
             vocab: OpaquePointer,
             context: OpaquePointer,
-            batchSize: UInt32
+            batchSize: UInt32,
+            contextSize: UInt32,
+            startIndex: Int = 0
         ) throws -> Bool {
-            // Validate that prompt token count doesn't exceed batch capacity to prevent buffer overflow
-            guard promptTokens.count <= batchSize else {
-                throw LlamaLanguageModelError.insufficientMemory
+            // Leave at least one context cell free for generation.
+            guard promptTokens.count < contextSize else {
+                throw LlamaLanguageModelError.promptExceedsContextWindow
             }
 
             let hasEncoder = llama_model_has_encoder(model)
             let hasDecoder = llama_model_has_decoder(model)
+
+            // Encoder models ingest the full prompt in a single llama_encode call.
+            guard !hasEncoder || (startIndex == 0 && promptTokens.count <= batchSize) else {
+                throw LlamaLanguageModelError.insufficientMemory
+            }
 
             if hasEncoder {
                 // For encoder models, first encode the prompt
@@ -1341,25 +2109,32 @@ import Foundation
                     throw LlamaLanguageModelError.encoderOnlyModel
                 }
             } else {
-                // Standard decoder-only model (most LLMs)
-                batch.n_tokens = Int32(promptTokens.count)
-                for i in 0 ..< promptTokens.count {
-                    let idx = Int(i)
-                    batch.token[idx] = promptTokens[idx]
-                    batch.pos[idx] = Int32(i)
-                    batch.n_seq_id[idx] = 1
-                    if let seq_ids = batch.seq_id, let seq_id = seq_ids[idx] {
-                        seq_id[0] = 0
+                // Standard decoder-only model (most LLMs): feed the prompt in
+                // batch-sized chunks with absolute positions, requesting logits
+                // only for the final token.
+                let capacity = Int(batchSize)
+                var start = startIndex
+                while start < promptTokens.count {
+                    let count = min(capacity, promptTokens.count - start)
+                    batch.n_tokens = Int32(count)
+                    for i in 0 ..< count {
+                        batch.token[i] = promptTokens[start + i]
+                        batch.pos[i] = Int32(start + i)
+                        batch.n_seq_id[i] = 1
+                        if let seq_ids = batch.seq_id, let seq_id = seq_ids[i] {
+                            seq_id[0] = 0
+                        }
+                        batch.logits[i] = 0
                     }
-                    batch.logits[idx] = 0
-                }
 
-                if batch.n_tokens > 0 {
-                    batch.logits[Int(batch.n_tokens) - 1] = 1
-                }
+                    if start + count == promptTokens.count {
+                        batch.logits[count - 1] = 1
+                    }
 
-                guard llama_decode(context, batch) == 0 else {
-                    throw LlamaLanguageModelError.decodingFailed
+                    guard llama_decode(context, batch) == 0 else {
+                        throw LlamaLanguageModelError.decodingFailed
+                    }
+                    start += count
                 }
             }
 
@@ -1368,7 +2143,28 @@ import Foundation
 
         private func formatPrompt(
             for session: LanguageModelSession,
-            extraSystemMessage: String? = nil
+            extraSystemMessage: String? = nil,
+            assistantPrefill: String? = nil,
+            toolContext: LlamaToolPromptContext? = nil
+        ) throws -> String {
+            var images: [Data] = []
+            return try formatPrompt(
+                for: session,
+                extraSystemMessage: extraSystemMessage,
+                assistantPrefill: assistantPrefill,
+                imageMarker: nil,
+                images: &images,
+                toolContext: toolContext
+            )
+        }
+
+        private func formatPrompt(
+            for session: LanguageModelSession,
+            extraSystemMessage: String?,
+            assistantPrefill: String?,
+            imageMarker: String?,
+            images: inout [Data],
+            toolContext: LlamaToolPromptContext? = nil
         ) throws -> String {
             guard let model = self.model else {
                 throw LlamaLanguageModelError.modelLoadFailed
@@ -1376,28 +2172,88 @@ import Foundation
 
             var messages: [(role: String, content: String)] = []
 
-            for entry in session.transcript {
+            func appendEntry(_ entry: Transcript.Entry) throws {
                 switch entry {
                 case .instructions(let instructions):
-                    let text = extractText(from: instructions.segments)
+                    let text = try extractContent(
+                        from: instructions.segments,
+                        imageMarker: imageMarker,
+                        images: &images
+                    )
                     if !text.isEmpty {
                         messages.append(("system", text))
                     }
 
                 case .prompt(let prompt):
-                    let text = extractText(from: prompt.segments)
+                    let text = try extractContent(
+                        from: prompt.segments,
+                        imageMarker: imageMarker,
+                        images: &images
+                    )
                     if !text.isEmpty {
                         messages.append(("user", text))
                     }
 
                 case .response(let response):
-                    let text = extractText(from: response.segments)
+                    let text = try extractContent(
+                        from: response.segments,
+                        imageMarker: imageMarker,
+                        images: &images
+                    )
                     if !text.isEmpty {
                         messages.append(("assistant", text))
                     }
 
-                default:
-                    break
+                case .toolCalls(let toolCalls):
+                    guard let toolContext else { break }
+                    let parsed = toolCalls.map {
+                        LlamaParsedToolCall(name: $0.toolName, argumentsJSON: $0.arguments.jsonString)
+                    }
+                    if let last = messages.last, last.role == "assistant" {
+                        let markup = toolContext.format.assistantText(for: parsed, precededByContent: true)
+                        messages[messages.count - 1].content += markup
+                    } else {
+                        let markup = toolContext.format.assistantText(for: parsed, precededByContent: false)
+                        messages.append(("assistant", markup))
+                    }
+
+                case .toolOutput(let output):
+                    guard let toolContext else { break }
+                    let message = toolContext.format.toolResponseMessage(
+                        toolName: output.toolName,
+                        segments: output.segments
+                    )
+                    if let last = messages.last, last.role == message.role, last.role == "user",
+                        last.content.hasSuffix("</tool_response>")
+                    {
+                        messages[messages.count - 1].content += "\n" + message.content
+                    } else {
+                        messages.append(message)
+                    }
+                }
+            }
+
+            for entry in session.transcript {
+                try appendEntry(entry)
+            }
+            if let toolContext {
+                for entry in toolContext.pendingEntries {
+                    try appendEntry(entry)
+                }
+            }
+
+            if let toolContext, !toolContext.definitions.isEmpty {
+                if let systemIndex = messages.firstIndex(where: { $0.role == "system" }) {
+                    messages[systemIndex].content = try toolContext.format.systemMessage(
+                        existingText: messages[systemIndex].content,
+                        tools: toolContext.definitions
+                    )
+                } else {
+                    let systemText = try toolContext.format.systemMessage(
+                        existingText: "",
+                        tools: toolContext.definitions
+                    )
+                    messages.insert(("system", systemText), at: 0)
                 }
             }
 
@@ -1433,6 +2289,9 @@ import Foundation
             )
 
             guard requiredSize > 0 else {
+                if let tmpl, String(cString: tmpl).contains("<|turn>") {
+                    return Self.renderGemma4Prompt(messages: messages, assistantPrefill: assistantPrefill)
+                }
                 throw LlamaLanguageModelError.encodingFailed
             }
 
@@ -1452,9 +2311,61 @@ import Foundation
                 throw LlamaLanguageModelError.encodingFailed
             }
 
-            return buffer.withUnsafeBytes { rawBuffer in
+            let rendered = buffer.withUnsafeBytes { rawBuffer in
                 String(decoding: rawBuffer.prefix(Int(result)), as: UTF8.self)
             }
+
+            if let assistantPrefill, !assistantPrefill.isEmpty {
+                return rendered + assistantPrefill
+            }
+            return rendered
+        }
+
+        /// Renders the Gemma 4 canonical chat format, which
+        /// `llama_chat_apply_template` does not recognize: turns open with
+        /// `<|turn>role`, close with `<turn|>`, and the assistant role is named
+        /// `model`. The BOS token is applied during tokenization.
+        static func renderGemma4Prompt(
+            messages: [(role: String, content: String)],
+            assistantPrefill: String?
+        ) -> String {
+            var rendered = ""
+            var openModelTurn = false
+            for (index, message) in messages.enumerated() {
+                if message.role == "tool" {
+                    rendered += message.content
+                    continue
+                }
+                let role = message.role == "assistant" ? "model" : message.role
+                let content = message.content.trimmingCharacters(in: .whitespacesAndNewlines)
+                if role == "model" && openModelTurn {
+                    rendered += content
+                } else {
+                    if openModelTurn {
+                        rendered += "<turn|>\n"
+                        openModelTurn = false
+                    }
+                    rendered += "<|turn>\(role)\n\(content)"
+                }
+                if role == "model" {
+                    let nextRole = index + 1 < messages.count ? messages[index + 1].role : nil
+                    if nextRole == "tool" || nextRole == "assistant" {
+                        openModelTurn = true
+                    } else {
+                        rendered += "<turn|>\n"
+                        openModelTurn = false
+                    }
+                } else {
+                    rendered += "<turn|>\n"
+                }
+            }
+            if !openModelTurn {
+                rendered += "<|turn>model\n"
+            }
+            if let assistantPrefill, !assistantPrefill.isEmpty {
+                rendered += assistantPrefill
+            }
+            return rendered
         }
 
         private func extractText(from segments: [Transcript.Segment]) -> String {
@@ -1462,6 +2373,42 @@ import Foundation
                 if case .text(let t) = segment { return t.content }
                 return nil
             }.joined()
+        }
+
+        /// Extracts message content from segments, replacing each image segment
+        /// with `imageMarker` and collecting its payload in order. Image segments
+        /// throw ``LlamaLanguageModelError/unsupportedFeature`` when no marker is
+        /// provided.
+        private func extractContent(
+            from segments: [Transcript.Segment],
+            imageMarker: String?,
+            images: inout [Data]
+        ) throws -> String {
+            var parts: [String] = []
+            for segment in segments {
+                switch segment {
+                case .text(let t):
+                    parts.append(t.content)
+                case .image(let image):
+                    guard let imageMarker else {
+                        throw LlamaLanguageModelError.unsupportedFeature
+                    }
+                    switch image.source {
+                    case .data(let data, _):
+                        images.append(data)
+                        parts.append(imageMarker)
+                    case .url(let url):
+                        guard url.isFileURL, let data = try? Data(contentsOf: url) else {
+                            throw LlamaLanguageModelError.unsupportedFeature
+                        }
+                        images.append(data)
+                        parts.append(imageMarker)
+                    }
+                default:
+                    break
+                }
+            }
+            return parts.joined()
         }
 
         private func tokenizeText(vocab: OpaquePointer, text: String) throws -> [llama_token] {
@@ -1537,6 +2484,7 @@ import Foundation
         case decodingFailed
         case invalidModelPath
         case insufficientMemory
+        case promptExceedsContextWindow
         case unsupportedFeature
         case encoderOnlyModel
 
@@ -1556,6 +2504,8 @@ import Foundation
                 return "Invalid model file path"
             case .insufficientMemory:
                 return "Insufficient memory for operation"
+            case .promptExceedsContextWindow:
+                return "Prompt is longer than the model's context window"
             case .unsupportedFeature:
                 return "This LlamaLanguageModel does not support image segments"
             case .encoderOnlyModel:

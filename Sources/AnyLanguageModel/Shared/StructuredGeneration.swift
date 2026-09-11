@@ -20,10 +20,16 @@ protocol TokenBackend {
     var totalTokenBudget: Int { get }
 }
 
-/// Heuristics for deciding when to include optional properties in generated output.
-private enum OptionalPropertyBudget {
-    /// Minimum absolute number of tokens that should remain before we consider
-    /// adding optional properties.
+/// Last-resort token-budget floor for optional structure (object keys / array items).
+///
+/// Optional *selection* is model-driven (see ``ConstrainedJSONGenerator``).
+/// This floor only kicks in when generation is about to run out of tokens: once the
+/// schema-valid minimum has been emitted (all required keys, or `minItems` elements),
+/// the generator stops offering further optionals and closes rather than risking a
+/// hard budget failure mid-value.
+private enum OptionalStructureBudget {
+    /// Minimum absolute number of tokens that should remain before offering more
+    /// optional properties or array elements.
     static let minimumRemainingTokens = 8
 
     /// Require at least this fraction of the total budget (divisor form).
@@ -68,10 +74,6 @@ struct ConstrainedJSONGenerator<Backend: TokenBackend> {
     /// Upper bounds for numeric token generation heuristics.
     private static var maxIntegerTokenLimit: Int { 20 }
     private static var maxDecimalTokenLimit: Int { 32 }
-
-    /// Heuristics for default array sizes when no bounds are specified.
-    private static var arrayDefaultCountDivisor: Int { 32 }
-    private static var arrayDefaultCountMax: Int { 16 }
 
     private var backend: Backend
     private let schema: GenerationSchema
@@ -193,28 +195,49 @@ struct ConstrainedJSONGenerator<Backend: TokenBackend> {
         return samples.filter { $0 >= 0 && $0 < vocabSize }.sorted()
     }
 
+    /// ASCII digit `0`...`9` only — JSON numbers must not accept fullwidth / superscript
+    /// forms that `Character.isNumber` would otherwise admit.
+    private static func isASCIIDigit(_ character: Character) -> Bool {
+        character >= "0" && character <= "9"
+    }
+
+    /// Tokens that may appear inside a JSON integer: ASCII digits and standalone `-`.
+    ///
+    /// Standalone `-` is required because BPE tokenizers (Qwen2.5, etc.) encode `-1` as
+    /// two tokens. Requiring every token to contain a digit excluded `-` and made negatives
+    /// unrepresentable except via rare multi-character tokens.
     private static func buildValidIntegerTokens(backend: Backend) -> Set<Int> {
         var allowed = Set<Int>()
         for token in 0 ..< backend.vocabSize {
             if backend.isSpecialToken(token) { continue }
             guard let text = backend.tokenText(token), !text.isEmpty else { continue }
-            if text.allSatisfy({ $0.isNumber || $0 == "-" }),
-                text.contains(where: { $0.isNumber })
-            {
+            let onlyIntegerChars = text.allSatisfy { Self.isASCIIDigit($0) || $0 == "-" }
+            let hasDigit = text.contains { Self.isASCIIDigit($0) }
+            let isStandaloneMinus = text == "-"
+            if onlyIntegerChars && (hasDigit || isStandaloneMinus) {
                 allowed.insert(token)
             }
         }
         return allowed
     }
 
+    /// Tokens that may appear inside a JSON number: ASCII digits, `-`, and `.`.
+    ///
+    /// **Critical:** standalone `.` and `-` must be included. Qwen2.5 encodes `473.00` as
+    /// `4` `7` `3` `.` `0` `0`. The previous filter required every token to contain a digit,
+    /// which dropped `.` and forced the model to pad zeros until `maxDecimalTokenLimit`
+    /// (pathological `e+31` values after Double re-serialization).
     private static func buildValidDecimalTokens(backend: Backend) -> Set<Int> {
         var allowed = Set<Int>()
         for token in 0 ..< backend.vocabSize {
             if backend.isSpecialToken(token) { continue }
             guard let text = backend.tokenText(token), !text.isEmpty else { continue }
-            if text.allSatisfy({ $0.isNumber || $0 == "-" || $0 == "." }),
-                text.contains(where: { $0.isNumber })
-            {
+            let onlyNumberChars = text.allSatisfy {
+                Self.isASCIIDigit($0) || $0 == "-" || $0 == "."
+            }
+            let hasDigit = text.contains { Self.isASCIIDigit($0) }
+            let isStandaloneSignOrDot = text == "-" || text == "."
+            if onlyNumberChars && (hasDigit || isStandaloneSignOrDot) {
                 allowed.insert(token)
             }
         }
@@ -425,17 +448,66 @@ struct ConstrainedJSONGenerator<Backend: TokenBackend> {
     }
 
     private mutating func generateObject(_ node: GenerationSchema.ObjectNode) async throws -> String {
-        let keys = node.properties.keys.sorted()
-        let includedKeys = keys.filter { shouldIncludeOptionalProperty($0, required: node.required) }
+        // Object *key set* is model-driven under the JSON grammar. The previous
+        // implementation pre-filtered optional properties with a hash of the field
+        // name XOR the token budget, so each optional was always-on or always-off
+        // for a given budget — decided before the model was consulted.
+        //
+        // After each property the mask permits any not-yet-emitted key, and permits
+        // `}` once every required property has been emitted. For schemas with no
+        // required properties that makes `{}` reachable (schema-valid, and what the
+        // model asked for) — a visible behaviour change for such schemas.
+        var remainingKeys = Set(node.properties.keys)
+        let required = node.required
         var output = try await emit("{")
+        var emittedAnyProperty = false
 
-        for (index, key) in includedKeys.enumerated() {
-            output += try await emit("\"\(key)\":")
-            output += try await generateNode(node.properties[key] ?? .string(.init()))
+        while !remainingKeys.isEmpty {
+            let missingRequired = required.intersection(remainingKeys)
+            let canClose = missingRequired.isEmpty
+            let budgetAllowsMoreOptionals = hasBudgetForOptionalStructure()
 
-            if index < includedKeys.count - 1 {
-                output += try await emit(",")
+            let keysToOffer: [String]
+            if budgetAllowsMoreOptionals {
+                // Model chooses any not-yet-emitted property (required or optional).
+                keysToOffer = remainingKeys.sorted()
+            } else if canClose {
+                // Genuine last resort: stop offering optionals when the budget is nearly
+                // exhausted. Required properties are already present, so close cleanly.
+                break
+            } else {
+                // Still missing required keys — only those may be emitted under pressure.
+                keysToOffer = missingRequired.sorted()
             }
+
+            var candidates: [String] = keysToOffer.map { key in
+                let prefix = emittedAnyProperty ? "," : ""
+                return "\(prefix)\"\(key)\":"
+            }
+            // Closing is legal once every required property has been emitted. The model
+            // may leave remaining optionals out; that is schema-valid JSON.
+            if canClose {
+                candidates.append("}")
+            }
+
+            guard !candidates.isEmpty else { break }
+
+            let choice = try await generateChoice(candidates)
+            output += choice
+
+            // Model elected to close; remaining keys are optional and intentionally omitted.
+            if choice == "}" {
+                return output
+            }
+
+            guard let key = propertyKey(fromPropertyStart: choice),
+                let valueNode = node.properties[key]
+            else {
+                throw ConstrainedGenerationError.tokenizationFailed
+            }
+            remainingKeys.remove(key)
+            output += try await generateNode(valueNode)
+            emittedAnyProperty = true
         }
 
         output += try await emit("}")
@@ -443,40 +515,171 @@ struct ConstrainedJSONGenerator<Backend: TokenBackend> {
     }
 
     private mutating func generateArray(_ node: GenerationSchema.ArrayNode) async throws -> String {
-        // Derive a default item count from the total token budget when the schema
-        // does not specify explicit minItems/maxItems. We use a small fraction of the
-        // budget and clamp it to a reasonable range to avoid overlong arrays.
-        let budgetBasedCount = backend.totalTokenBudget / Self.arrayDefaultCountDivisor
-        let defaultCount = max(1, min(Self.arrayDefaultCountMax, budgetBasedCount))
-        let count: Int
+        // Array *length* is model-driven under the JSON grammar — same family of fix as
+        // model-driven optional object keys. After each element the mask permits both
+        // continuing (`,`) and closing (`]`), subject to schema `minItems` / `maxItems`.
+        // A budget-derived fixed count (or `totalTokenBudget % rangeSize`) would force the
+        // same length for every document and invent filler or truncate real items.
+        let minItems = max(0, node.minItems ?? 0)
+        let maxItems = node.maxItems
 
-        if let minItems = node.minItems, let maxItems = node.maxItems {
-            if minItems > maxItems {
-                throw ConstrainedGenerationError.invalidArrayBounds(
-                    "Minimum items \(minItems) exceeds maximum \(maxItems)"
-                )
-            }
-            let rangeSize = maxItems - minItems + 1
-            let offset = rangeSize > 0 ? backend.totalTokenBudget % rangeSize : 0
-            count = minItems + offset
-        } else if let minItems = node.minItems {
-            count = minItems
-        } else if let maxItems = node.maxItems {
-            count = maxItems
-        } else {
-            count = defaultCount
+        if let maxItems, minItems > maxItems {
+            throw ConstrainedGenerationError.invalidArrayBounds(
+                "Minimum items \(minItems) exceeds maximum \(maxItems)"
+            )
         }
-        var output = try await emit("[")
 
-        for index in 0 ..< count {
-            output += try await generateNode(node.items)
-            if index < count - 1 {
-                output += try await emit(",")
+        var output = try await emit("[")
+        var count = 0
+
+        while true {
+            if let maxItems, count >= maxItems {
+                break
             }
+
+            let canClose = count >= minItems
+            let budgetAllowsMore = hasBudgetForOptionalStructure()
+
+            if canClose && !budgetAllowsMore {
+                // Genuine last resort: close once minItems is satisfied rather than
+                // failing mid-element under a hard budget floor.
+                break
+            }
+
+            if count > 0 {
+                if canClose {
+                    // Model chooses continue vs close.
+                    let choice = try await generateChoice([",", "]"])
+                    if choice == "]" {
+                        output += choice
+                        return output
+                    }
+                    output += choice
+                } else {
+                    // Still below minItems — must emit another element.
+                    output += try await emit(",")
+                }
+            } else if canClose {
+                // Empty array is legal (`minItems == 0`). Probe whether the model wants
+                // `]` or a first element. Sampling is non-committing for non-`]` tokens
+                // (see ``sampleWhetherToCloseEmptyArray``); the element is then generated
+                // from the same decode state.
+                if try await sampleWhetherToCloseEmptyArray(items: node.items) {
+                    output += try await emit("]")
+                    return output
+                }
+            }
+
+            output += try await generateNode(node.items)
+            count += 1
         }
 
         output += try await emit("]")
         return output
+    }
+
+    /// Probe after `[` when `minItems == 0`: model may close immediately or start an item.
+    ///
+    /// Samples once among closing tokens and tokens that can start the item type. Choosing
+    /// a close means close; any other sample is discarded without decoding so
+    /// ``generateNode`` can emit the first element from the same backend state.
+    ///
+    /// Byte-pair vocabularies put most item-start probability on merged tokens (a quote
+    /// fused with the first word, or a leading space), so the probe admits every token
+    /// whose first non-whitespace character starts the item type, not just the bare
+    /// single-character token.
+    private mutating func sampleWhetherToCloseEmptyArray(
+        items: GenerationSchema.Node
+    ) async throws -> Bool {
+        let closeTokens = tokensMatchingTrimmed("]")
+        var allowed = try itemStartTokens(for: items)
+        allowed.formUnion(closeTokens)
+        guard !allowed.isEmpty, !closeTokens.isEmpty else {
+            return false
+        }
+        let token = try await backend.sample(from: allowed)
+        return closeTokens.contains(token)
+    }
+
+    /// Tokens whose text equals `text` after trimming surrounding whitespace.
+    private func tokensMatchingTrimmed(_ text: String) -> Set<Int> {
+        var tokens = Set<Int>()
+        for token in 0 ..< backend.vocabSize {
+            if backend.isSpecialToken(token) { continue }
+            guard let tokenText = backend.tokenText(token) else { continue }
+            if tokenText.trimmingCharacters(in: .whitespacesAndNewlines) == text {
+                tokens.insert(token)
+            }
+        }
+        return tokens
+    }
+
+    /// Tokens whose text, after leading whitespace, is a non-empty prefix of one of `literals`.
+    private func tokensPrefixing(anyOf literals: [String]) -> Set<Int> {
+        var tokens = Set<Int>()
+        for token in 0 ..< backend.vocabSize {
+            if backend.isSpecialToken(token) { continue }
+            guard let text = backend.tokenText(token) else { continue }
+            let trimmed = text.drop(while: { $0.isWhitespace })
+            guard !trimmed.isEmpty else { continue }
+            if literals.contains(where: { $0.hasPrefix(trimmed) }) {
+                tokens.insert(token)
+            }
+        }
+        return tokens
+    }
+
+    /// Tokens whose first non-whitespace character is `prefix`.
+    private func tokensStarting(with prefix: Character) -> Set<Int> {
+        var tokens = Set<Int>()
+        for token in 0 ..< backend.vocabSize {
+            if backend.isSpecialToken(token) { continue }
+            guard let text = backend.tokenText(token) else { continue }
+            guard let first = text.drop(while: { $0.isWhitespace }).first else { continue }
+            if first == prefix {
+                tokens.insert(token)
+            }
+        }
+        return tokens
+    }
+
+    /// Tokens that can begin a JSON value for `node` (empty-array probe).
+    private func itemStartTokens(for node: GenerationSchema.Node) throws -> Set<Int> {
+        switch node {
+        case .string:
+            return tokensStarting(with: "\"")
+        case .object:
+            return tokensStarting(with: "{")
+        case .array:
+            return tokensStarting(with: "[")
+        case .boolean:
+            return tokensPrefixing(anyOf: ["true", "false"])
+        case .number(let numberNode):
+            let numeric =
+                numberNode.integerOnly
+                ? integerTerminators.subtracting(basicTerminators)
+                : doubleTerminators.subtracting(basicTerminators)
+            // Only tokens that can start a number (digit or minus — not a bare `.`).
+            return Set(
+                numeric.filter { token in
+                    guard let text = backend.tokenText(token),
+                        let first = text.drop(while: { $0.isWhitespace }).first
+                    else { return false }
+                    return first.isNumber || first == "-"
+                }
+            )
+        case .ref(let typeName):
+            guard let referenced = schema.defs[typeName] else {
+                throw ConstrainedGenerationError.missingReference(typeName)
+            }
+            return try itemStartTokens(for: referenced)
+        case .anyOf(let variants):
+            var tokens = Set<Int>()
+            for variant in variants {
+                tokens.formUnion(try itemStartTokens(for: variant))
+            }
+            return tokens
+        }
     }
 
     private mutating func generateString(_ node: GenerationSchema.StringNode) async throws -> String {
@@ -516,13 +719,30 @@ struct ConstrainedJSONGenerator<Backend: TokenBackend> {
         return output
     }
 
-    private func shouldIncludeOptionalProperty(_ key: String, required: Set<String>) -> Bool {
-        if required.contains(key) { return true }
-        let minimumBudget = OptionalPropertyBudget.minimumBudget(totalTokenBudget: backend.totalTokenBudget)
-        guard backend.remainingTokens > minimumBudget else { return false }
-        let hash = key.utf8.reduce(0) { ($0 &* 31) &+ Int($1) }
-        let combined = hash ^ backend.totalTokenBudget
-        return combined % 2 == 0
+    /// Whether enough budget remains to *offer* more optional structure to the model
+    /// (object properties or array elements).
+    ///
+    /// This is a last-resort guard only. It does not pick which optionals appear or how
+    /// long an array is — those decisions are made by constrained sampling.
+    private func hasBudgetForOptionalStructure() -> Bool {
+        let minimumBudget = OptionalStructureBudget.minimumBudget(
+            totalTokenBudget: backend.totalTokenBudget
+        )
+        return backend.remainingTokens > minimumBudget
+    }
+
+    /// Parses a property-start fragment produced for object key selection.
+    ///
+    /// Expected shapes: `"key":` (first property) or `,"key":` (subsequent).
+    private func propertyKey(fromPropertyStart choice: String) -> String? {
+        var fragment = choice
+        if fragment.first == "," {
+            fragment.removeFirst()
+        }
+        guard fragment.first == "\"", fragment.hasSuffix("\":") else { return nil }
+        fragment.removeFirst()
+        fragment.removeLast(2)
+        return fragment
     }
 
     private func deterministicChoice(from candidates: [String]) -> String {

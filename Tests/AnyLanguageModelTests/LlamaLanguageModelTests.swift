@@ -17,6 +17,10 @@ import Testing
         @Test func initialization() {
             let customModel = LlamaLanguageModel(modelPath: "/path/to/model.gguf")
             #expect(customModel.modelPath == "/path/to/model.gguf")
+            #expect(customModel.gpuLayers == LlamaLanguageModel.defaultGPULayerCount)
+
+            let cpuOnlyModel = LlamaLanguageModel(modelPath: "/path/to/model.gguf", gpuLayers: 0)
+            #expect(cpuOnlyModel.gpuLayers == 0)
             #expect(customModel.contextSize == 2048)
             #expect(customModel.batchSize == 512)
             #expect(customModel.threads == Int32(ProcessInfo.processInfo.processorCount))
@@ -25,6 +29,64 @@ import Testing
             #expect(customModel.topP == 0.95)
             #expect(customModel.repeatPenalty == 1.1)
             #expect(customModel.repeatLastN == 64)
+        }
+
+        @Test func concurrentFirstRequests() async throws {
+            try await withThrowingTaskGroup(of: String.self) { group in
+                for _ in 0 ..< 2 {
+                    group.addTask {
+                        let session = LanguageModelSession(model: model)
+                        let response = try await session.respond(
+                            to: "Reply with a single word.",
+                            options: GenerationOptions(maximumResponseTokens: 16)
+                        )
+                        return response.content
+                    }
+                }
+
+                var responseCount = 0
+                for try await content in group {
+                    #expect(!content.isEmpty)
+                    responseCount += 1
+                }
+                #expect(responseCount == 2)
+            }
+        }
+
+        @Test func promptLongerThanBatchSize() async throws {
+            let session = LanguageModelSession(model: model)
+            var options = GenerationOptions(maximumResponseTokens: 16)
+            options[custom: LlamaLanguageModel.self] = .init(batchSize: 32)
+
+            let filler = Array(
+                repeating: "The quick brown fox jumps over the lazy dog.",
+                count: 30
+            ).joined(separator: " ")
+            let response = try await session.respond(
+                to: "\(filler)\n\nReply with a single word.",
+                options: options
+            )
+            #expect(!response.content.isEmpty)
+        }
+
+        @Test func reusesSessionContextAcrossTurns() async throws {
+            let session = LanguageModelSession(model: model)
+            var options = GenerationOptions(maximumResponseTokens: 24)
+            options[custom: LlamaLanguageModel.self] = .init(contextSize: 2048, batchSize: 512)
+
+            let first = try await session.respond(
+                to: "My favorite color is blue. Reply with OK.",
+                options: options
+            )
+            #expect(!first.content.isEmpty)
+            #expect(model.lastReusedTokenCount == 0)
+
+            let second = try await session.respond(
+                to: "What is my favorite color? Answer with one word.",
+                options: options
+            )
+            #expect(!second.content.isEmpty)
+            #expect(model.lastReusedTokenCount > 0)
         }
 
         @Test func customGenerationOptionsRoundTrip() {
@@ -45,7 +107,8 @@ import Testing
                 repeatLastN: 48,
                 frequencyPenalty: 0.05,
                 presencePenalty: 0.05,
-                mirostat: .v2(tau: 5.0, eta: 0.2)
+                mirostat: .v2(tau: 5.0, eta: 0.2),
+                assistantPrefill: "<think></think>"
             )
             options[custom: LlamaLanguageModel.self] = custom
 
@@ -62,6 +125,7 @@ import Testing
             #expect(retrieved?.frequencyPenalty == 0.05)
             #expect(retrieved?.presencePenalty == 0.05)
             #expect(retrieved?.mirostat == .v2(tau: 5.0, eta: 0.2))
+            #expect(retrieved?.assistantPrefill == "<think></think>")
         }
 
         @Test func customGenerationOptionsDefaults() {
@@ -403,3 +467,78 @@ import Testing
         }
     }
 #endif  // Llama
+
+#if Llama
+    @Suite(
+        "LlamaLanguageModel vision",
+        .serialized,
+        .enabled(
+            if: ProcessInfo.processInfo.environment["LLAMA_VISION_MODEL_PATH"] != nil
+                && ProcessInfo.processInfo.environment["LLAMA_VISION_MMPROJ_PATH"] != nil
+        )
+    )
+    struct LlamaLanguageModelVisionTests {
+        static let redSquarePNG = Data(
+            base64Encoded: "iVBORw0KGgoAAAANSUhEUgAAAGAAAABgCAIAAABt+uBvAAABC0lEQVR4nO3OMQ0AIAAEsfdvGhyw9gaS"
+                + "CujO9j34QZwfxPlBnB/E+UGcH8T5QZwfxPlBnB/E+UGcH8T5QZwfxPlBnB/E+UGcH8T5QZwfxPlBnB/E"
+                + "+UGcH8T5QZwfxPlBnB/E+UGcH8T5QZwfxPlBnB/E+UGcH8T5QZwfxPlBnB/E+UGcH8T5QZwfxPlBnB/E"
+                + "+UGcH8T5QZwfxPlBnB/E+UGcH8T5QZwfxPlBnB/E+UGcH8T5QZwfxPlBnB/E+UGcH8T5QZwfxPlBnB/E"
+                + "+UGcH8T5QZwfxPlBnB/E+UGcH8T5QZwfxPlBnB/E+UGcH8T5QZwfxPlBnB/E+UGcH8T5QZwfxPlBnB/E"
+                + "+UHcBWwZ3g5gacwjAAAAAElFTkSuQmCC"
+        )!
+
+        let model = LlamaLanguageModel(
+            modelPath: ProcessInfo.processInfo.environment["LLAMA_VISION_MODEL_PATH"]!,
+            mmprojPath: ProcessInfo.processInfo.environment["LLAMA_VISION_MMPROJ_PATH"]!
+        )
+
+        @Test func describesImageData() async throws {
+            let transcript = Transcript(entries: [
+                .prompt(
+                    Transcript.Prompt(segments: [
+                        .text(.init(content: "What is the dominant color of this image? Answer with one word.")),
+                        .image(.init(data: Self.redSquarePNG, mimeType: "image/png")),
+                    ])
+                )
+            ])
+            let session = LanguageModelSession(model: model, transcript: transcript)
+            let response = try await session.respond(to: "")
+            #expect(response.content.lowercased().contains("red"))
+        }
+
+        @Test func streamsImageDescription() async throws {
+            let transcript = Transcript(entries: [
+                .prompt(
+                    Transcript.Prompt(segments: [
+                        .text(.init(content: "What is the dominant color of this image? Answer with one word.")),
+                        .image(.init(data: Self.redSquarePNG, mimeType: "image/png")),
+                    ])
+                )
+            ])
+            let session = LanguageModelSession(model: model, transcript: transcript)
+            let stream = session.streamResponse(to: "")
+            var last = ""
+            for try await snapshot in stream {
+                last = snapshot.content
+            }
+            #expect(last.lowercased().contains("red"))
+        }
+
+        @Test func rejectsImagesWithoutProjector() async throws {
+            let textOnlyModel = LlamaLanguageModel(
+                modelPath: ProcessInfo.processInfo.environment["LLAMA_VISION_MODEL_PATH"]!
+            )
+            let transcript = Transcript(entries: [
+                .prompt(
+                    Transcript.Prompt(segments: [
+                        .image(.init(data: Self.redSquarePNG, mimeType: "image/png"))
+                    ])
+                )
+            ])
+            let session = LanguageModelSession(model: textOnlyModel, transcript: transcript)
+            await #expect(throws: LlamaLanguageModelError.unsupportedFeature) {
+                _ = try await session.respond(to: "")
+            }
+        }
+    }
+#endif

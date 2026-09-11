@@ -58,12 +58,14 @@ struct TranscriptTests {
     @Test func sessionRestoresInstructionsFromTranscript() throws {
         let instructions = "First\n\nSecond trailing spaces   "
         let transcript = Transcript(entries: [
-            .instructions(.init(
-                id: "instructions-id",
-                segments: [.text(.init(content: instructions))],
-                toolDefinitions: []
-            )),
-            .prompt(.init(segments: [.text(.init(content: "Hello"))]))
+            .instructions(
+                .init(
+                    id: "instructions-id",
+                    segments: [.text(.init(content: instructions))],
+                    toolDefinitions: []
+                )
+            ),
+            .prompt(.init(segments: [.text(.init(content: "Hello"))])),
         ])
 
         let session = LanguageModelSession(model: MockLanguageModel(), transcript: transcript)
@@ -134,5 +136,37 @@ struct TranscriptTests {
             parameters: secondInlineSchema
         )
         #expect(firstToolDefinition == secondToolDefinition)
+    }
+    @Test func toolCallOmitsProviderMetadataWhenAbsent() throws {
+        // Guards decoding of transcripts encoded before `providerMetadata` existed. Making the
+        // property non-optional breaks this: synthesized `Codable` demands a key for every
+        // non-optional property and never consults its default value.
+        let arguments = try GeneratedContent(json: #"{"city":"Cupertino"}"#)
+        let call = Transcript.ToolCall(id: "call-id", toolName: "getWeather", arguments: arguments)
+
+        let data = try JSONEncoder().encode(call)
+        var object = try #require(try JSONSerialization.jsonObject(with: data) as? [String: Any])
+        #expect(object["providerMetadata"] == nil)
+
+        object.removeValue(forKey: "providerMetadata")
+        let encodedBeforeTheFieldExisted = try JSONSerialization.data(withJSONObject: object)
+        let decoded = try JSONDecoder().decode(Transcript.ToolCall.self, from: encodedBeforeTheFieldExisted)
+        #expect(decoded.providerMetadata == nil)
+        #expect(decoded.toolName == "getWeather")
+    }
+
+    @Test func toolCallRoundTripsProviderMetadata() throws {
+        let arguments = try GeneratedContent(json: #"{"city":"Cupertino"}"#)
+        let call = Transcript.ToolCall(
+            id: "call-id",
+            toolName: "getWeather",
+            arguments: arguments,
+            providerMetadata: ["thoughtSignature": "opaque-signature"]
+        )
+
+        let data = try JSONEncoder().encode(call)
+        let decoded = try JSONDecoder().decode(Transcript.ToolCall.self, from: data)
+
+        #expect(decoded.providerMetadata == ["thoughtSignature": "opaque-signature"])
     }
 }

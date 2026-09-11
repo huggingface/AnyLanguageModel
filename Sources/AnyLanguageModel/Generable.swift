@@ -113,10 +113,17 @@ extension Bool: Generable {
 
     /// Creates an instance with the content.
     public init(_ content: GeneratedContent) throws {
-        guard case .bool(let value) = content.kind else {
+        switch content.kind {
+        case .bool(let value):
+            self = value
+        case .string(let text):
+            guard let value = Bool(coercing: text) else {
+                throw GeneratedContentConversionError.typeMismatch
+            }
+            self = value
+        default:
             throw GeneratedContentConversionError.typeMismatch
         }
-        self = value
     }
 
     /// An instance that represents the generated content.
@@ -163,10 +170,17 @@ extension Int: Generable {
 
     /// Creates an instance with the content.
     public init(_ content: GeneratedContent) throws {
-        guard case .number(let value) = content.kind else {
+        switch content.kind {
+        case .number(let value):
+            self = Int(value)
+        case .string(let text):
+            guard let value = Double(coercing: text), value == value.rounded() else {
+                throw GeneratedContentConversionError.typeMismatch
+            }
+            self = Int(value)
+        default:
             throw GeneratedContentConversionError.typeMismatch
         }
-        self = Int(value)
     }
 
     /// An instance that represents the generated content.
@@ -188,10 +202,17 @@ extension Float: Generable {
 
     /// Creates an instance with the content.
     public init(_ content: GeneratedContent) throws {
-        guard case .number(let value) = content.kind else {
+        switch content.kind {
+        case .number(let value):
+            self = Float(value)
+        case .string(let text):
+            guard let value = Double(coercing: text) else {
+                throw GeneratedContentConversionError.typeMismatch
+            }
+            self = Float(value)
+        default:
             throw GeneratedContentConversionError.typeMismatch
         }
-        self = Float(value)
     }
 
     /// An instance that represents the generated content.
@@ -213,10 +234,17 @@ extension Double: Generable {
 
     /// Creates an instance with the content.
     public init(_ content: GeneratedContent) throws {
-        guard case .number(let value) = content.kind else {
+        switch content.kind {
+        case .number(let value):
+            self = value
+        case .string(let text):
+            guard let value = Double(coercing: text) else {
+                throw GeneratedContentConversionError.typeMismatch
+            }
+            self = value
+        default:
             throw GeneratedContentConversionError.typeMismatch
         }
-        self = value
     }
 
     /// An instance that represents the generated content.
@@ -238,16 +266,48 @@ extension Decimal: Generable {
 
     /// Creates an instance with the content.
     public init(_ content: GeneratedContent) throws {
-        guard case .number(let value) = content.kind else {
+        switch content.kind {
+        case .number(let value):
+            self = Decimal(value)
+        case .string(let text):
+            guard let value = Double(coercing: text) else {
+                throw GeneratedContentConversionError.typeMismatch
+            }
+            self = Decimal(value)
+        default:
             throw GeneratedContentConversionError.typeMismatch
         }
-        self = Decimal(value)
     }
 
     /// An instance that represents the generated content.
     public var generatedContent: GeneratedContent {
         let doubleValue = (self as NSDecimalNumber).doubleValue
         return GeneratedContent(kind: .number(doubleValue))
+    }
+}
+
+// MARK: String Coercion
+
+/// Language models sometimes emit primitive values as JSON strings, most commonly in
+/// tool-call arguments where a chat template stringifies every argument value. The
+/// primitive initializers above accept such strings when they parse unambiguously as
+/// the target type, and throw ``GeneratedContentConversionError/typeMismatch`` otherwise.
+extension Bool {
+    fileprivate init?(coercing text: String) {
+        switch text.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
+        case "true":
+            self = true
+        case "false":
+            self = false
+        default:
+            return nil
+        }
+    }
+}
+
+extension Double {
+    fileprivate init?(coercing text: String) {
+        self.init(text.trimmingCharacters(in: .whitespacesAndNewlines))
     }
 }
 
