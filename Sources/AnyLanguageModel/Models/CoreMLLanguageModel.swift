@@ -79,7 +79,7 @@
             try validateNoImageSegments(in: session)
 
             if type != String.self {
-                let jsonString = try await generateStructuredJSON(
+                let (jsonString, usage) = try await generateStructuredJSON(
                     session: session,
                     prompt: prompt,
                     schema: type.generationSchema,
@@ -91,7 +91,8 @@
                 return LanguageModelSession.Response(
                     content: content,
                     rawContent: generatedContent,
-                    transcriptEntries: ArraySlice([])
+                    transcriptEntries: ArraySlice([]),
+                    usage: usage
                 )
             }
 
@@ -120,20 +121,17 @@
 
             // Strip the prompt at the token level to avoid issues with
             // normalization or whitespace differences in decoded strings
-            let assistantTokenSlice: ArraySlice<Int>
-            if outputTokens.count >= tokens.count {
-                assistantTokenSlice = outputTokens.dropFirst(tokens.count)
-            } else {
-                // Fallback: if the model did not echo the full prompt,
-                // treat the entire output as assistant tokens
-                assistantTokenSlice = outputTokens[outputTokens.indices]
-            }
+            var counts = LocalGenerationUsage(promptTokenCount: tokens.count)
+            let assistantTokenSlice = counts.generatedTokens(in: outputTokens)
+            counts.generatedTokenCount = assistantTokenSlice.count
+            let usage = counts.value
             let assistantText = tokenizer.decode(tokens: Array(assistantTokenSlice))
 
             return LanguageModelSession.Response(
                 content: assistantText as! Content,
                 rawContent: GeneratedContent(assistantText),
-                transcriptEntries: ArraySlice([])
+                transcriptEntries: ArraySlice([]),
+                usage: usage
             )
         }
 
@@ -144,14 +142,13 @@
             includeSchemaInPrompt: Bool,
             options: GenerationOptions
         ) -> sending LanguageModelSession.ResponseStream<Content> where Content: Generable {
-            // For now, only String is supported
             guard type == String.self else {
-                return LanguageModelSession.ResponseStream(
-                    stream: AsyncThrowingStream { continuation in
-                        continuation.finish(
-                            throwing: CoreMLLanguageModelError.structuredStreamingUnsupported
-                        )
-                    }
+                return streamStructuredResponse(
+                    within: session,
+                    to: prompt,
+                    generating: type,
+                    includeSchemaInPrompt: includeSchemaInPrompt,
+                    options: options
                 )
             }
 
@@ -187,43 +184,28 @@
 
                         await model.resetState()
 
-                        let promptTokenCount = tokens.count
-                        var accumulatedText = ""
+                        var tokenStream = LocalGenerationTokenStream(promptTokenCount: tokens.count)
 
-                        _ = await model.generate(
-                            config: generationConfig,
-                            tokens: tokens,
-                            model: model.callAsFunction
-                        ) { tokenIds in
-                            let assistantTokenSlice: ArraySlice<Int>
-                            if tokenIds.count >= promptTokenCount {
-                                assistantTokenSlice = tokenIds.dropFirst(promptTokenCount)
-                            } else {
-                                assistantTokenSlice = tokenIds[tokenIds.indices]
-                            }
-                            let assistantText = tokenizer.decode(tokens: Array(assistantTokenSlice))
-
-                            // Compute delta vs accumulated text and yield
-                            if assistantText.count >= accumulatedText.count,
-                                assistantText.hasPrefix(accumulatedText)
-                            {
-                                let startIdx = assistantText.index(
-                                    assistantText.startIndex,
-                                    offsetBy: accumulatedText.count
-                                )
-                                let delta = String(assistantText[startIdx...])
-                                accumulatedText += delta
-                            } else {
-                                accumulatedText = assistantText
-                            }
-
+                        func yieldTokens(_ tokenIDs: [Int]) {
+                            guard let update = tokenStream.update(tokenIDs, decode: { tokenizer.decode(tokens: $0) })
+                            else { return }
                             continuation.yield(
                                 .init(
-                                    content: (accumulatedText as! Content).asPartiallyGenerated(),
-                                    rawContent: GeneratedContent(accumulatedText)
+                                    content: (update.text as! Content).asPartiallyGenerated(),
+                                    rawContent: GeneratedContent(update.text),
+                                    usage: update.usage
                                 )
                             )
                         }
+
+                        let outputTokens = await model.generate(
+                            config: generationConfig,
+                            tokens: tokens,
+                            model: model.callAsFunction,
+                            callback: yieldTokens
+                        )
+                        // EOS or a zero-token generation may finish without a callback.
+                        yieldTokens(outputTokens)
 
                         continuation.finish()
                     } catch {
@@ -354,7 +336,7 @@
             schema: GenerationSchema,
             options: GenerationOptions,
             includeSchemaInPrompt: Bool
-        ) async throws -> String {
+        ) async throws -> (String, LanguageModelSession.Usage) {
             let maxTokens = options.maximumResponseTokens ?? 512
             var generationConfig = toStructuredGenerationConfig(options)
 
@@ -386,7 +368,13 @@
             )
             var generator = try ConstrainedJSONGenerator(backend: backend, schema: schema)
             let json = try await generator.generate()
-            return json
+            return (
+                json,
+                LocalGenerationUsage(
+                    promptTokenCount: promptTokens.count,
+                    generatedTokenCount: generator.generatedTokenCount
+                ).value
+            )
         }
 
         private func structuredPromptTokens(

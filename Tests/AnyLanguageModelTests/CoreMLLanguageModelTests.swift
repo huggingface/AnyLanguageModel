@@ -62,6 +62,20 @@ import Testing
         }
 
         @Test @available(macOS 15.0, iOS 18.0, tvOS 18.0, visionOS 2.0, watchOS 11.0, *)
+        func tokenUsageResponseStreamParity() async throws {
+            let model = try await getModel()
+            let options = GenerationOptions(sampling: .greedy, maximumResponseTokens: 8)
+            let session = LanguageModelSession(model: model)
+            let response = try await session.respond(to: "Say hello", options: options)
+            let streamed = try await session.streamResponse(to: "Say hello", options: options).collect()
+            #expect(response.usage.input.totalTokenCount > 0)
+            #expect(response.usage.input.cachedTokenCount == 0)
+            #expect(streamed.usage == response.usage)
+            #expect(streamed.content == response.content)
+            #expect(session.usage.totalTokenCount == 2 * response.usage.totalTokenCount)
+        }
+
+        @Test @available(macOS 15.0, iOS 18.0, tvOS 18.0, visionOS 2.0, watchOS 11.0, *)
         func withGenerationOptions() async throws {
             let model = try await getModel()
             let session = LanguageModelSession(model: model)

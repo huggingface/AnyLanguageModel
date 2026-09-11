@@ -830,25 +830,20 @@ import Foundation
             input.text.tokens.asArray(Int32.self)
         }
 
-        private func isCacheHit(
-            entry: SessionCacheEntry,
+        /// Returns the prefix that can actually be reused, or zero for a cache miss.
+        internal static func reusablePrefixTokenCount(
+            prefixTokens: [Int32],
+            prefillTokenCount: Int,
             currentTokens: [Int32],
-            signature: CacheConfigSignature,
-            lmInput: MLXLMCommon.LMInput
-        ) -> Bool {
-            guard lmInput.image == nil, lmInput.video == nil else {
-                return false
-            }
-            guard entry.cacheConfigSignature == signature else {
-                return false
-            }
-            guard entry.prefillTokenCount > 0, currentTokens.count > entry.prefillTokenCount else {
-                return false
-            }
-            guard entry.prefixTokens.count == entry.prefillTokenCount else {
-                return false
-            }
-            return currentTokens.starts(with: entry.prefixTokens)
+            configurationMatches: Bool,
+            hasMedia: Bool
+        ) -> Int {
+            guard !hasMedia, configurationMatches,
+                prefillTokenCount > 0, currentTokens.count > prefillTokenCount,
+                prefixTokens.count == prefillTokenCount,
+                currentTokens.starts(with: prefixTokens)
+            else { return 0 }
+            return prefillTokenCount
         }
 
         private func resolveCache(
@@ -856,19 +851,26 @@ import Foundation
             lmInput: MLXLMCommon.LMInput,
             generateParameters: MLXLMCommon.GenerateParameters,
             context: ModelContext
-        ) -> (cache: [MLXLMCommon.KVCache], input: MLXLMCommon.LMInput, fullTokens: [Int32]) {
+        ) -> (cache: [MLXLMCommon.KVCache], input: MLXLMCommon.LMInput, fullTokens: [Int32], cachedTokenCount: Int) {
             let signature = cacheSignature(from: generateParameters)
             let fullTokens = tokens(from: lmInput)
             let existingEntry = getSessionCache(for: session)
 
-            if let existingEntry,
-                isCacheHit(entry: existingEntry, currentTokens: fullTokens, signature: signature, lmInput: lmInput)
-            {
-                let cachedCount = existingEntry.prefillTokenCount
+            let cachedCount =
+                existingEntry.map { entry in
+                    Self.reusablePrefixTokenCount(
+                        prefixTokens: entry.prefixTokens,
+                        prefillTokenCount: entry.prefillTokenCount,
+                        currentTokens: fullTokens,
+                        configurationMatches: entry.cacheConfigSignature == signature,
+                        hasMedia: lmInput.image != nil || lmInput.video != nil
+                    )
+                } ?? 0
+            if let existingEntry, cachedCount > 0 {
                 let newTokens = lmInput.text.tokens[cachedCount...]
                 let newMask = lmInput.text.mask?[cachedCount...]
                 let partialText = MLXLMCommon.LMInput.Text(tokens: newTokens, mask: newMask)
-                return (existingEntry.kvCache, MLXLMCommon.LMInput(text: partialText), fullTokens)
+                return (existingEntry.kvCache, MLXLMCommon.LMInput(text: partialText), fullTokens, cachedCount)
             }
 
             if existingEntry != nil {
@@ -876,7 +878,7 @@ import Foundation
             }
 
             let newCache = context.model.newCache(parameters: generateParameters)
-            return (newCache, lmInput, fullTokens)
+            return (newCache, lmInput, fullTokens, 0)
         }
 
         private func storeSessionCache(
@@ -946,7 +948,7 @@ import Foundation
             defer { endGenerationScope(generationScope) }
 
             if type != String.self {
-                let jsonString = try await generateStructuredJSON(
+                let (jsonString, usage) = try await generateStructuredJSON(
                     context: context,
                     session: session,
                     prompt: prompt,
@@ -959,7 +961,8 @@ import Foundation
                 return LanguageModelSession.Response(
                     content: content,
                     rawContent: generatedContent,
-                    transcriptEntries: ArraySlice([])
+                    transcriptEntries: ArraySlice([]),
+                    usage: usage
                 )
             }
 
@@ -977,6 +980,7 @@ import Foundation
             // Build chat history from full transcript
             var chat = convertTranscriptToMLXChat(session: session, fallbackPrompt: prompt.description)
 
+            var usage = LanguageModelSession.Usage.zero
             var allTextChunks: [String] = []
             var allEntries: [Transcript.Entry] = []
             let maxToolIterations = 8
@@ -1015,8 +1019,14 @@ import Foundation
                     switch item {
                     case .chunk(let text):
                         chunks.append(text)
-                    case .info:
-                        break
+                    case .info(let info):
+                        usage.add(
+                            LocalGenerationUsage(
+                                promptTokenCount: lmInput.text.tokens.size,
+                                cachedTokenCount: resolved.cachedTokenCount,
+                                generatedTokenCount: info.generationTokenCount
+                            ).value
+                        )
                     case .toolCall(let call):
                         collectedToolCalls.append(call)
                     }
@@ -1065,7 +1075,8 @@ import Foundation
                         return LanguageModelSession.Response(
                             content: "" as! Content,
                             rawContent: GeneratedContent(""),
-                            transcriptEntries: ArraySlice(allEntries)
+                            transcriptEntries: ArraySlice(allEntries),
+                            usage: usage
                         )
                     case .invocations(let invocations):
                         if !invocations.isEmpty {
@@ -1094,7 +1105,8 @@ import Foundation
             return LanguageModelSession.Response(
                 content: text as! Content,
                 rawContent: GeneratedContent(text),
-                transcriptEntries: ArraySlice(allEntries)
+                transcriptEntries: ArraySlice(allEntries),
+                usage: usage
             )
         }
 
@@ -1106,7 +1118,13 @@ import Foundation
             options: GenerationOptions
         ) -> sending LanguageModelSession.ResponseStream<Content> where Content: Generable {
             guard type == String.self else {
-                fatalError("MLXLanguageModel streaming only supports String content")
+                return streamStructuredResponse(
+                    within: session,
+                    to: prompt,
+                    generating: type,
+                    includeSchemaInPrompt: includeSchemaInPrompt,
+                    options: options
+                )
             }
             guard Self.acquireGenerationSlot(for: session) else {
                 let error = Self.concurrentSessionError()
@@ -1165,6 +1183,7 @@ import Foundation
 
                         // Accumulators live outside the tool loop so streamed snapshots stay
                         // monotonic across rounds: text never shrinks, entries only grow.
+                        var usage = LanguageModelSession.Usage.zero
                         var accumulatedText = ""
                         var accumulatedEntries: [Transcript.Entry] = []
                         let maxToolIterations = 8
@@ -1180,7 +1199,8 @@ import Foundation
                                 .init(
                                     content: content,
                                     rawContent: raw,
-                                    transcriptEntries: ArraySlice(accumulatedEntries)
+                                    transcriptEntries: ArraySlice(accumulatedEntries),
+                                    usage: usage
                                 )
                             )
                         }
@@ -1220,8 +1240,15 @@ import Foundation
                                     yieldSnapshot()
                                 case .toolCall(let call):
                                     collectedToolCalls.append(call)
-                                case .info:
-                                    break
+                                case .info(let info):
+                                    usage.add(
+                                        LocalGenerationUsage(
+                                            promptTokenCount: lmInput.text.tokens.size,
+                                            cachedTokenCount: resolved.cachedTokenCount,
+                                            generatedTokenCount: info.generationTokenCount
+                                        ).value
+                                    )
+                                    yieldSnapshot()
                                 }
                             }
 
@@ -1800,7 +1827,7 @@ import Foundation
         schema: GenerationSchema,
         options: GenerationOptions,
         includeSchemaInPrompt: Bool
-    ) async throws -> String {
+    ) async throws -> (String, LanguageModelSession.Usage) {
         let maxTokens = options.maximumResponseTokens ?? 512
         let generateParameters = toStructuredGenerateParameters(options)
 
@@ -1834,7 +1861,13 @@ import Foundation
         // Ensure pending MLX operations complete before returning JSON.
         // This synchronization can be a performance cost if called frequently.
         Stream().synchronize()
-        return json
+        return (
+            json,
+            LocalGenerationUsage(
+                promptTokenCount: lmInput.text.tokens.size,
+                generatedTokenCount: generator.generatedTokenCount
+            ).value
+        )
     }
 
     /// Merges system prompts and schema instructions into a user message.

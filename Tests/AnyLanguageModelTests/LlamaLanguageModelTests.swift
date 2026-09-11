@@ -80,6 +80,9 @@ import Testing
             )
             #expect(!first.content.isEmpty)
             #expect(model.lastReusedTokenCount == 0)
+            #expect(first.usage.input.cachedTokenCount == 0)
+            #expect(first.usage.input.totalTokenCount == model.lastPrefillTokenCount)
+            #expect(first.usage.output.totalTokenCount > 0)
 
             let second = try await session.respond(
                 to: "What is my favorite color? Answer with one word.",
@@ -87,6 +90,14 @@ import Testing
             )
             #expect(!second.content.isEmpty)
             #expect(model.lastReusedTokenCount > 0)
+            #expect(second.usage.input.cachedTokenCount == model.lastReusedTokenCount)
+            #expect(second.usage.input.totalTokenCount == model.lastReusedTokenCount + model.lastPrefillTokenCount)
+            #expect(session.usage.totalTokenCount == first.usage.totalTokenCount + second.usage.totalTokenCount)
+
+            model.clearCachedContext()
+            let afterClear = try await session.respond(to: "Say OK.", options: options)
+            #expect(afterClear.usage.input.cachedTokenCount == 0)
+            #expect(afterClear.usage.input.totalTokenCount == model.lastPrefillTokenCount)
         }
 
         @Test func customGenerationOptionsRoundTrip() {
@@ -218,6 +229,20 @@ import Testing
 
             let response = try await session.respond(to: "What is 2+2?")
             #expect(!response.content.isEmpty)
+        }
+
+        @Test func tokenUsageResponseStreamParity() async throws {
+            var options = GenerationOptions(sampling: .greedy, maximumResponseTokens: 8)
+            options[custom: LlamaLanguageModel.self] = .init(seed: 42)
+            let response = try await LanguageModelSession(model: model).respond(to: "Say hello.", options: options)
+            let session = LanguageModelSession(model: model)
+            let streamed = try await session.streamResponse(to: "Say hello.", options: options).collect()
+            #expect(response.usage.input.totalTokenCount > 0)
+            #expect(response.usage.output.totalTokenCount > 0)
+            #expect(response.usage.input.cachedTokenCount == 0)
+            #expect(streamed.usage == response.usage)
+            #expect(streamed.content == response.content)
+            #expect(session.usage == streamed.usage)
         }
 
         @Test func streaming() async throws {
