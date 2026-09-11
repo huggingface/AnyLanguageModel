@@ -641,7 +641,9 @@
             return .init(arrayOf: itemsSchema, minimumElements: minItems, maximumElements: maxItems)
 
         case .reference(let name):
-            return .init(referenceTo: name)
+            let prefix = "#/$defs/"
+            let typeName = name.hasPrefix(prefix) ? String(name.dropFirst(prefix.count)) : name
+            return .init(referenceTo: typeName)
 
         case .allOf, .oneOf, .not, .null, .empty, .any:
             return .init(type: String.self)
