@@ -289,6 +289,38 @@ import Foundation
                 additionalContext?.mapValues { $0.toSendable() }
             }
 
+            /// Top-p (nucleus) sampling threshold.
+            ///
+            /// A non-`nil` value overrides nucleus sampling from `GenerationOptions.sampling`.
+            /// When this is `nil`, the nucleus sampling threshold is used if provided. If neither
+            /// supplies a threshold, regular generation uses `1.0` and structured generation uses `0.95`.
+            /// Set this to `1.0` to disable top-p sampling explicitly.
+            public var topP: Float?
+
+            /// Top-k sampling: restricts sampling to the `k` most likely tokens.
+            ///
+            /// A positive value restricts sampling to that many tokens. A non-`nil` value overrides
+            /// top-k sampling from `GenerationOptions.sampling`. When this is `nil`, the top-k count
+            /// is inherited if provided; if neither supplies a count, top-k sampling is disabled.
+            /// Set this to `0` to disable top-k sampling explicitly.
+            public var topK: Int?
+
+            /// Min-p sampling threshold, relative to the most likely token's probability.
+            ///
+            /// Set this to `nil` or `0` to disable min-p sampling.
+            public var minP: Float?
+
+            /// Penalty factor applied to recently generated tokens to reduce repetition.
+            ///
+            /// Set this to `nil` to use no penalty for regular generation or `1.1` for
+            /// structured generation. Set this to `1.0` to neutralize the penalty explicitly.
+            public var repetitionPenalty: Float?
+
+            /// Number of recent tokens considered by the repetition penalty.
+            ///
+            /// Set this to `nil` to use `20` for regular generation or `64` for structured generation.
+            public var repetitionContextSize: Int?
+
             /// Creates MLX-specific generation options.
             ///
             /// - Parameters:
@@ -297,14 +329,36 @@ import Foundation
             ///     template rendering context.
             ///   - userInputProcessing: Processing to apply to user media before input preparation.
             ///     Defaults to `nil`, which lets MLX use its default media handling.
+            ///   - topP: Top-p (nucleus) sampling override. Defaults to `nil`, which inherits the
+            ///     core nucleus threshold if provided. When neither supplies a threshold, regular
+            ///     generation uses `1.0` and structured generation uses `0.95`. Set to `1.0` to disable.
+            ///   - topK: Top-k sampling override. Positive values restrict sampling to that many
+            ///     tokens; `0` disables it. Defaults to `nil`, which inherits the core top-k count
+            ///     if provided. When neither supplies a count, top-k sampling is disabled.
+            ///   - minP: Min-p sampling threshold. Defaults to `nil` (disabled).
+            ///   - repetitionPenalty: Repetition penalty factor. Defaults to `nil`, which uses no
+            ///     penalty for regular generation or `1.1` for structured generation. Set to `1.0`
+            ///     to neutralize the penalty explicitly.
+            ///   - repetitionContextSize: Repetition-penalty token window. Defaults to `nil`
+            ///     (`20` for regular generation or `64` for structured generation).
             public init(
                 kvCache: KVCache,
                 userInputProcessing: UserInputProcessing?,
-                additionalContext: [String: AnyLanguageModel.JSONValue]?
+                additionalContext: [String: AnyLanguageModel.JSONValue]?,
+                topP: Float? = nil,
+                topK: Int? = nil,
+                minP: Float? = nil,
+                repetitionPenalty: Float? = nil,
+                repetitionContextSize: Int? = nil
             ) {
                 self.kvCache = kvCache
                 self.additionalContext = additionalContext
                 self.userInputProcessing = userInputProcessing
+                self.topP = topP
+                self.topK = topK
+                self.minP = minP
+                self.repetitionPenalty = repetitionPenalty
+                self.repetitionContextSize = repetitionContextSize
             }
 
             /// Default MLX generation options used when none are provided at runtime.
@@ -1301,34 +1355,65 @@ import Foundation
 
     // MARK: - Options Mapping
 
-    private func toGenerateParameters(_ options: GenerationOptions) -> MLXLMCommon.GenerateParameters {
+    /// Derives MLX sampler parameters from the core ``GenerationOptions/sampling`` (`SamplingMode`),
+    /// so `.sampling` acts as a unified sampling surface across backends (the same one Apple
+    /// FoundationModels consumes). Returns `nil` for any field the sampling mode doesn't express.
+    ///
+    /// Precedence at the call sites is custom-block → this (sampling) → existing default, so an
+    /// explicit `CustomGenerationOptions` value always wins. The `SamplingMode` seed is forwarded
+    /// to `MLXLMCommon.GenerateParameters` for reproducible sampling.
+    func samplingDerivedParameters(
+        from options: GenerationOptions
+    ) -> (topP: Float?, topK: Int?, greedyTemperature: Float?, seed: UInt64?) {
+        switch options.sampling?.mode {
+        case .greedy:
+            // Greedy = argmax; MLX realizes this with temperature 0.
+            return (topP: nil, topK: nil, greedyTemperature: 0, seed: nil)
+        case .topK(let k, let seed):
+            return (topP: nil, topK: k, greedyTemperature: nil, seed: seed)
+        case .nucleus(let threshold, let seed):
+            return (topP: Float(threshold), topK: nil, greedyTemperature: nil, seed: seed)
+        case nil:
+            return (topP: nil, topK: nil, greedyTemperature: nil, seed: nil)
+        }
+    }
+
+    func toGenerateParameters(_ options: GenerationOptions) -> MLXLMCommon.GenerateParameters {
         let custom = options[custom: MLXLanguageModel.self]
+        let derived = samplingDerivedParameters(from: options)
         return MLXLMCommon.GenerateParameters(
             maxTokens: options.maximumResponseTokens,
             maxKVSize: custom?.kvCache.maxSize,
             kvBits: custom?.kvCache.bits,
             kvGroupSize: custom?.kvCache.groupSize ?? 64,
             quantizedKVStart: custom?.kvCache.quantizedStart ?? 0,
-            temperature: Float(options.temperature ?? 0.6),
-            topP: 1.0,
-            repetitionPenalty: nil,
-            repetitionContextSize: 20
+            temperature: Float(derived.greedyTemperature.map(Double.init) ?? options.temperature ?? 0.6),
+            topP: custom?.topP ?? derived.topP ?? 1.0,
+            topK: custom?.topK ?? derived.topK ?? 0,
+            minP: custom?.minP ?? 0.0,
+            repetitionPenalty: custom?.repetitionPenalty,
+            repetitionContextSize: custom?.repetitionContextSize ?? 20,
+            seed: derived.seed
         )
     }
 
     /// Builds MLX parameters tuned for structured generation.
-    private func toStructuredGenerateParameters(_ options: GenerationOptions) -> MLXLMCommon.GenerateParameters {
+    func toStructuredGenerateParameters(_ options: GenerationOptions) -> MLXLMCommon.GenerateParameters {
         let custom = options[custom: MLXLanguageModel.self]
+        let derived = samplingDerivedParameters(from: options)
         return MLXLMCommon.GenerateParameters(
             maxTokens: options.maximumResponseTokens,
             maxKVSize: custom?.kvCache.maxSize,
             kvBits: custom?.kvCache.bits,
             kvGroupSize: custom?.kvCache.groupSize ?? 64,
             quantizedKVStart: custom?.kvCache.quantizedStart ?? 0,
-            temperature: Float(options.temperature ?? 0.2),
-            topP: 0.95,
-            repetitionPenalty: 1.1,
-            repetitionContextSize: 64
+            temperature: Float(derived.greedyTemperature.map(Double.init) ?? options.temperature ?? 0.2),
+            topP: custom?.topP ?? derived.topP ?? 0.95,
+            topK: custom?.topK ?? derived.topK ?? 0,
+            minP: custom?.minP ?? 0.0,
+            repetitionPenalty: custom?.repetitionPenalty ?? 1.1,
+            repetitionContextSize: custom?.repetitionContextSize ?? 64,
+            seed: derived.seed
         )
     }
 
@@ -1448,7 +1533,11 @@ import Foundation
             let encoder = JSONEncoder()
             let data = try encoder.encode(resolvedSchema)
             if let json = try JSONSerialization.jsonObject(with: data) as? [String: Any] {
-                parametersDict = try convertToSendableJSONObject(json)
+                // Inline nested `$ref`s (so nested objects keep their real type)
+                // before coercing any residual typeless/array types the chat
+                // template cannot render.
+                let inlined = resolveToolSchemaRefs(json)
+                parametersDict = try convertToSendableJSONObject(normalizeToolSchemaTypes(inlined))
             } else {
                 parametersDict = makeEmptyJSONSchemaObject()
             }

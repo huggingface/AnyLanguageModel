@@ -1000,6 +1000,169 @@ struct GeminiCustomOptionsTests {
             #expect(retrieved?.kvCache.quantizedStart == 256)
         }
 
+        // MARK: - SamplingMode → MLX derivation
+
+        @Test func samplingDerivationGreedy() {
+            let derived = samplingDerivedParameters(from: GenerationOptions(sampling: .greedy))
+            #expect(derived.topP == nil)
+            #expect(derived.topK == nil)
+            #expect(derived.greedyTemperature == 0)
+            #expect(derived.seed == nil)
+        }
+
+        @Test func samplingDerivationTopK() {
+            let derived = samplingDerivedParameters(from: GenerationOptions(sampling: .random(top: 40, seed: 7)))
+            #expect(derived.topK == 40)
+            #expect(derived.topP == nil)
+            #expect(derived.greedyTemperature == nil)
+            #expect(derived.seed == 7)
+        }
+
+        @Test func samplingDerivationNucleus() {
+            let derived = samplingDerivedParameters(
+                from: GenerationOptions(sampling: .random(probabilityThreshold: 0.9, seed: 42))
+            )
+            #expect(derived.topP == 0.9)
+            #expect(derived.topK == nil)
+            #expect(derived.greedyTemperature == nil)
+            #expect(derived.seed == 42)
+        }
+
+        @Test func samplingDerivationNil() {
+            let derived = samplingDerivedParameters(from: GenerationOptions())
+            #expect(derived.topP == nil)
+            #expect(derived.topK == nil)
+            #expect(derived.greedyTemperature == nil)
+            #expect(derived.seed == nil)
+        }
+
+        // MARK: - Mapping precedence (custom-wins → sampling-fills → default)
+
+        @Test(arguments: [false, true], [nil, 0, 7, UInt64.max] as [UInt64?])
+        func samplingSeedIsPreserved(structured: Bool, seed: UInt64?) {
+            for sampling: GenerationOptions.SamplingMode in [
+                .random(top: 12, seed: seed), .random(probabilityThreshold: 0.9, seed: seed),
+            ] {
+                var options = GenerationOptions(sampling: sampling)
+                let params = structured ? toStructuredGenerateParameters(options) : toGenerateParameters(options)
+                #expect(params.seed == seed)
+
+                options[custom: MLXLanguageModel.self] = .init(
+                    kvCache: .default,
+                    userInputProcessing: nil,
+                    additionalContext: nil,
+                    topP: 0.8,
+                    topK: 5
+                )
+                let customParams = structured ? toStructuredGenerateParameters(options) : toGenerateParameters(options)
+                #expect(customParams.seed == seed)
+            }
+        }
+
+        @Test func samplingFillsWhenNoCustomBlock() {
+            let params = toGenerateParameters(GenerationOptions(sampling: .random(top: 12)))
+            #expect(params.topK == 12)  // top-k now reaches MLX via sampling
+            #expect(params.topP == 1.0)  // untouched default
+        }
+
+        @Test func customBlockWinsOverSampling() {
+            var options = GenerationOptions(sampling: .random(probabilityThreshold: 0.9))
+            options[custom: MLXLanguageModel.self] = .init(
+                kvCache: .default,
+                userInputProcessing: nil,
+                additionalContext: nil,
+                topP: 0.3,
+                topK: 5
+            )
+            let params = toGenerateParameters(options)
+            #expect(params.topP == 0.3)  // custom wins over sampling's 0.9
+            #expect(params.topK == 5)  // custom wins (sampling expressed no top-k)
+        }
+
+        @Test(arguments: [false, true])
+        func greedyMapsToZeroTemperature(structured: Bool) {
+            let options = GenerationOptions(sampling: .greedy)
+            let params = structured ? toStructuredGenerateParameters(options) : toGenerateParameters(options)
+            #expect(params.temperature == 0)
+            #expect(params.seed == nil)
+        }
+
+        @Test(arguments: [false, true])
+        func greedyWinsOverExplicitTemperature(structured: Bool) {
+            let options = GenerationOptions(sampling: .greedy, temperature: 0.7)
+            let params = structured ? toStructuredGenerateParameters(options) : toGenerateParameters(options)
+            #expect(params.temperature == 0)
+        }
+
+        @Test(arguments: [false, true])
+        func explicitTemperatureIsPreservedWithoutGreedy(structured: Bool) {
+            for sampling: GenerationOptions.SamplingMode? in [
+                nil, .random(top: 12), .random(probabilityThreshold: 0.9),
+            ] {
+                let options = GenerationOptions(sampling: sampling, temperature: 0.7)
+                let params = structured ? toStructuredGenerateParameters(options) : toGenerateParameters(options)
+                #expect(params.temperature == Float(0.7))
+            }
+        }
+
+        // MARK: - Structured generation defaults and overrides
+
+        @Test(arguments: [false, true])
+        func structuredDefaultsArePreserved(withCustomBlock: Bool) {
+            var options = GenerationOptions()
+            if withCustomBlock {
+                options[custom: MLXLanguageModel.self] = .default
+            }
+            let params = toStructuredGenerateParameters(options)
+            #expect(params.temperature == Float(0.2))
+            #expect(params.topP == Float(0.95))
+            #expect(params.topK == 0)
+            #expect(params.minP == 0)
+            #expect(params.repetitionPenalty == Float(1.1))
+            #expect(params.repetitionContextSize == 64)
+        }
+
+        @Test(arguments: [false, true])
+        func structuredSamplingFillsUnsetCustomValues(withCustomBlock: Bool) {
+            var options = GenerationOptions(sampling: .random(probabilityThreshold: 0.8))
+            if withCustomBlock {
+                options[custom: MLXLanguageModel.self] = .default
+            }
+            let nucleusParams = toStructuredGenerateParameters(options)
+            #expect(nucleusParams.topP == Float(0.8))
+            #expect(nucleusParams.topK == 0)
+
+            options.sampling = .random(top: 12)
+            let topKParams = toStructuredGenerateParameters(options)
+            #expect(topKParams.topK == 12)
+            #expect(topKParams.topP == Float(0.95))
+        }
+
+        @Test(arguments: [
+            GenerationOptions.SamplingMode.random(top: 40),
+            GenerationOptions.SamplingMode.random(probabilityThreshold: 0.9),
+        ])
+        func structuredCustomValuesOverrideSamplingAndDefaults(sampling: GenerationOptions.SamplingMode) {
+            var options = GenerationOptions(sampling: sampling, temperature: 0.7)
+            options[custom: MLXLanguageModel.self] = .init(
+                kvCache: .default,
+                userInputProcessing: nil,
+                additionalContext: nil,
+                topP: 1.0,
+                topK: 0,
+                minP: 0.1,
+                repetitionPenalty: 1.0,
+                repetitionContextSize: 128
+            )
+            let params = toStructuredGenerateParameters(options)
+            #expect(params.temperature == Float(0.7))
+            #expect(params.topP == 1.0)
+            #expect(params.topK == 0)
+            #expect(params.minP == Float(0.1))
+            #expect(params.repetitionPenalty == 1.0)
+            #expect(params.repetitionContextSize == 128)
+        }
+
         @Test func codable() throws {
             let options = MLXLanguageModel.CustomGenerationOptions(
                 kvCache: .init(
