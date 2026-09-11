@@ -9,6 +9,7 @@ import JSONSchema
 ///
 /// Use this model to generate text using OpenAI's Chat Completions or Responses APIs.
 /// You can specify a custom base URL to work with OpenAI-compatible services.
+/// Chat Completions streaming usage is requested only for the official OpenAI endpoint.
 ///
 /// ```swift
 /// let model = OpenAILanguageModel(
@@ -784,7 +785,8 @@ public struct OpenAILanguageModel: LanguageModel {
                         tools: openAITools,
                         generating: type,
                         options: options,
-                        stream: true
+                        stream: true,
+                        includeUsage: baseURL.host == Self.defaultBaseURL.host
                     )
 
                     let task = Task { @Sendable in
@@ -845,7 +847,8 @@ private enum ChatCompletions {
         tools: [OpenAITool]?,
         generating type: Content.Type,
         options: GenerationOptions,
-        stream: Bool
+        stream: Bool,
+        includeUsage: Bool = false
     ) throws -> JSONValue {
         var body: [String: JSONValue] = [
             "model": .string(model),
@@ -853,7 +856,7 @@ private enum ChatCompletions {
             "stream": .bool(stream),
         ]
 
-        if stream {
+        if stream && includeUsage {
             body["stream_options"] = .object(["include_usage": .bool(true)])
         }
 

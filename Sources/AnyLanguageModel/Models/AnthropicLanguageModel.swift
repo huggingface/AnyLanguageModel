@@ -1340,17 +1340,29 @@ private struct AnthropicUsage: Codable, Sendable {
     let inputTokens: Int?
     let outputTokens: Int?
     let cacheReadInputTokens: Int?
+    let cacheCreationInputTokens: Int?
 
     enum CodingKeys: String, CodingKey {
         case inputTokens = "input_tokens"
         case outputTokens = "output_tokens"
         case cacheReadInputTokens = "cache_read_input_tokens"
+        case cacheCreationInputTokens = "cache_creation_input_tokens"
     }
 
     var reportedUsage: ReportedUsage? {
-        ReportedUsage(
-            input: .init(totalTokenCount: inputTokens, cachedTokenCount: cacheReadInputTokens),
-            output: .init(totalTokenCount: outputTokens)
+        // Anthropic reports uncached input, cache reads, and cache writes separately.
+        let inputCounts = [inputTokens, cacheReadInputTokens, cacheCreationInputTokens].compactMap { $0 }
+        var metadata: [String: GeneratedContent] = [:]
+        if let cacheCreationInputTokens {
+            metadata["cache_creation_input_tokens"] = GeneratedContent(cacheCreationInputTokens)
+        }
+        return ReportedUsage(
+            input: .init(
+                totalTokenCount: inputCounts.isEmpty ? nil : inputCounts.reduce(0, +),
+                cachedTokenCount: cacheReadInputTokens
+            ),
+            output: .init(totalTokenCount: outputTokens),
+            metadata: metadata
         ).normalized
     }
 }

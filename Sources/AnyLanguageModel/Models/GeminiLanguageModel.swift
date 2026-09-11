@@ -1037,19 +1037,21 @@ private struct GeminiCandidate: Codable, Sendable {
 
 private struct GeminiUsageMetadata: Codable, Sendable {
     let promptTokenCount: Int?
+    let cachedContentTokenCount: Int?
     let candidatesTokenCount: Int?
     let totalTokenCount: Int?
     let thoughtsTokenCount: Int?
 
     var reportedUsage: ReportedUsage? {
         ReportedUsage(
-            input: .init(totalTokenCount: promptTokenCount),
+            input: .init(totalTokenCount: promptTokenCount, cachedTokenCount: cachedContentTokenCount),
             output: .init(totalTokenCount: candidatesTokenCount, reasoningTokenCount: thoughtsTokenCount)
         ).normalized
     }
 
     enum CodingKeys: String, CodingKey {
         case promptTokenCount
+        case cachedContentTokenCount
         case candidatesTokenCount
         case totalTokenCount
         case thoughtsTokenCount

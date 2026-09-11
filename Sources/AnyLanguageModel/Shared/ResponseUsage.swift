@@ -26,9 +26,12 @@ struct ReportedUsage: Sendable {
 
     var output: Output
 
-    init(input: Input = .init(), output: Output = .init()) {
+    var metadata: [String: GeneratedContent]
+
+    init(input: Input = .init(), output: Output = .init(), metadata: [String: GeneratedContent] = [:]) {
         self.input = input
         self.output = output
+        self.metadata = metadata
     }
 
     /// Converts omitted wire counts to the public API's zero defaults.
@@ -38,19 +41,22 @@ struct ReportedUsage: Sendable {
             output: .init(
                 totalTokenCount: output.totalTokenCount ?? 0,
                 reasoningTokenCount: output.reasoningTokenCount ?? 0
-            )
+            ),
+            metadata: metadata
         )
     }
 
     var isEmpty: Bool {
         input.totalTokenCount == nil && input.cachedTokenCount == nil
             && output.totalTokenCount == nil && output.reasoningTokenCount == nil
+            && metadata.isEmpty
     }
 
     var normalized: Self? { isEmpty ? nil : self }
 
     /// Adds counts from separate requests,
     /// preserving fields that no request reported.
+    /// As with session usage, the latest value wins for each metadata key.
     mutating func add(_ other: Self?) {
         guard let other else { return }
         func sum(_ lhs: Int?, _ rhs: Int?) -> Int? {
@@ -61,6 +67,7 @@ struct ReportedUsage: Sendable {
         input.cachedTokenCount = sum(input.cachedTokenCount, other.input.cachedTokenCount)
         output.totalTokenCount = sum(output.totalTokenCount, other.output.totalTokenCount)
         output.reasoningTokenCount = sum(output.reasoningTokenCount, other.output.reasoningTokenCount)
+        metadata.merge(other.metadata) { _, latest in latest }
     }
 
     /// Applies cumulative streaming updates;
@@ -71,6 +78,7 @@ struct ReportedUsage: Sendable {
         input.cachedTokenCount = other.input.cachedTokenCount ?? input.cachedTokenCount
         output.totalTokenCount = other.output.totalTokenCount ?? output.totalTokenCount
         output.reasoningTokenCount = other.output.reasoningTokenCount ?? output.reasoningTokenCount
+        metadata.merge(other.metadata) { _, latest in latest }
     }
 }
 

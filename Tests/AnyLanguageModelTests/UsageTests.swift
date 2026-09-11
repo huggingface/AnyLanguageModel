@@ -52,6 +52,23 @@ struct UsageTests {
         #expect(partial.output.totalTokenCount == 5)
     }
 
+    @Test func reportedMetadataSurvivesNormalizationAndUpdates() {
+        var reported = ReportedUsage(metadata: ["cache_creation_input_tokens": GeneratedContent(10)])
+        #expect(!reported.isEmpty)
+        #expect(reported.normalized?.value.metadata["cache_creation_input_tokens"] == GeneratedContent(10))
+        #expect(reported.value.totalTokenCount == 0)
+
+        reported.merge(.init(output: .init(totalTokenCount: 7)))
+        #expect(reported.value.metadata["cache_creation_input_tokens"] == GeneratedContent(10))
+        reported.merge(.init(metadata: ["cache_creation_input_tokens": GeneratedContent(0)]))
+        #expect(reported.value.metadata["cache_creation_input_tokens"] == GeneratedContent(0))
+
+        reported.add(.init(metadata: ["cache_creation_input_tokens": GeneratedContent(5)]))
+        reported.add(.init(output: .init(totalTokenCount: 3)))
+        #expect(reported.value.metadata["cache_creation_input_tokens"] == GeneratedContent(5))
+        #expect(reported.value.output.totalTokenCount == 10)
+    }
+
     @Test func codableRoundTrip() throws {
         var withMetadata = usage
         withMetadata.metadata = ["service_tier": GeneratedContent("standard")]

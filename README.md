@@ -454,8 +454,9 @@ print("Session total:", session.usage.totalTokenCount)
 
 OpenAI (Chat Completions and Responses),
 Open Responses, Anthropic, Google Gemini, and Ollama report token usage.
-Counts follow each provider's definitions
-and include all tool rounds within a response.
+Counts follow each provider's definitions.
+For providers that support multi-round tool execution,
+response usage includes all tool rounds performed within that response.
 Usage and individual counts are non-optional;
 counts that a provider doesn't report default to zero.
 

@@ -6,7 +6,7 @@ import Testing
 #if canImport(Darwin) && !canImport(AsyncHTTPClient)
     @Suite("Provider token usage", .serialized)
     struct ProviderUsageTests {
-        enum Provider: CaseIterable, Sendable {
+        enum Provider: CaseIterable, Equatable, Sendable {
             case chat, responses, openResponses, anthropic, gemini, ollama
 
             func makeSession(tools: [any Tool] = []) -> LanguageModelSession {
@@ -55,7 +55,10 @@ import Testing
                         "cache_creation_input_tokens": 10,
                     ]
                 case .gemini:
-                    return ["promptTokenCount": 100, "candidatesTokenCount": 20, "thoughtsTokenCount": 5]
+                    return [
+                        "promptTokenCount": 100, "cachedContentTokenCount": 25,
+                        "candidatesTokenCount": 20, "thoughtsTokenCount": 5,
+                    ]
                 case .ollama:
                     return ["prompt_eval_count": 100, "eval_count": 20]
                 }
@@ -63,11 +66,15 @@ import Testing
 
             var expected: LanguageModelSession.Usage {
                 .init(
-                    input: .init(totalTokenCount: 100, cachedTokenCount: self == .gemini || self == .ollama ? 0 : 25),
+                    input: .init(
+                        totalTokenCount: self == .anthropic ? 135 : 100,
+                        cachedTokenCount: self == .ollama ? 0 : 25
+                    ),
                     output: .init(
                         totalTokenCount: 20,
                         reasoningTokenCount: self == .anthropic || self == .ollama ? 0 : 5
-                    )
+                    ),
+                    metadata: self == .anthropic ? ["cache_creation_input_tokens": 10] : [:]
                 )
             }
 
@@ -227,6 +234,37 @@ import Testing
             #expect(session.usage == provider.expected)
         }
 
+        @Test func customChatEndpointOmitsStreamOptions() async throws {
+            UsageURLProtocol.reset()
+            UsageURLProtocol.enqueue(json: try Provider.chat.stream(includeUsage: false))
+            let model = OpenAILanguageModel(
+                baseURL: URL(string: "https://example.com/v1")!,
+                apiKey: "test",
+                model: "test",
+                session: UsageURLProtocol.makeSession()
+            )
+            let response = try await LanguageModelSession(model: model).streamResponse(to: "Hi").collect()
+            #expect(response.content == "Hello")
+            #expect(response.usage == .zero)
+            let body = try #require(UsageURLProtocol.recordedBodies.first)
+            let json = try #require(JSONSerialization.jsonObject(with: body) as? [String: Any])
+            #expect(json["stream_options"] == nil)
+        }
+
+        @Test(arguments: ["input_tokens", "cache_read_input_tokens", "cache_creation_input_tokens"])
+        func partialAnthropicInputUsage(_ key: String) async throws {
+            UsageURLProtocol.reset()
+            UsageURLProtocol.enqueue(json: try Self.json(Provider.anthropic.response(counts: [key: 10])))
+            let response = try await Provider.anthropic.makeSession().respond(to: "Hi")
+            #expect(response.usage.input.totalTokenCount == 10)
+            #expect(response.usage.input.cachedTokenCount == (key == "cache_read_input_tokens" ? 10 : 0))
+            #expect(response.usage.output.totalTokenCount == 0)
+            #expect(
+                response.usage.metadata["cache_creation_input_tokens"]
+                    == (key == "cache_creation_input_tokens" ? GeneratedContent(10) : nil)
+            )
+        }
+
         @Generable
         struct Answer { var answer: String }
 
@@ -299,7 +337,7 @@ import Testing
             #expect(response.usage.input.totalTokenCount == 200)
             #expect(response.usage.output.totalTokenCount == 40)
             #expect(response.usage.output.reasoningTokenCount == 10)
-            #expect(response.usage.input.cachedTokenCount == (provider == .gemini ? 0 : 50))
+            #expect(response.usage.input.cachedTokenCount == 50)
             #expect(response.transcriptEntries.count == 2)
             #expect(UsageURLProtocol.recordedBodies.count == 2)
         }
