@@ -840,6 +840,100 @@ struct StructuredGenerationTests {
         return maps
     }
 
+    @Test func repeatedInitializationReusesAllTokenSets() throws {
+        var maps = numberTokenMaps()
+        maps.tokenToText[1000] = "<cache-reuse-eos>"
+        let backend = MockTokenBackend(
+            tokenToText: maps.tokenToText,
+            textToTokens: maps.textToTokens,
+            eosToken: 1000,
+            endTokens: [1000],
+            maximumTokens: 64
+        )
+        let schema = String.generationSchema
+        let cache = StructuredGenerationTokenCache()
+
+        _ = try ConstrainedJSONGenerator(backend: backend, schema: schema, tokenCache: cache)
+        let coldTextCalls = backend.capture.tokenTextCalls
+        let coldSpecialCalls = backend.capture.specialTokenCalls
+        #expect(coldTextCalls == backend.vocabSize)
+        #expect(coldSpecialCalls == backend.vocabSize)
+
+        _ = try ConstrainedJSONGenerator(backend: backend, schema: schema, tokenCache: cache)
+        #expect(backend.capture.tokenTextCalls == coldTextCalls)
+        #expect(backend.capture.specialTokenCalls == coldSpecialCalls)
+    }
+
+    @Test(arguments: ["0", "1", "2", "3", "4", "5", "6", "7", "8", "9", ".", "-"])
+    func numericTokenCachesDistinguishTokenMappings(numericText: String) async throws {
+        let numberNode = GenerationSchema.NumberNode(
+            description: nil,
+            minimum: nil,
+            maximum: nil,
+            integerOnly: numericText != "."
+        )
+        let schema = GenerationSchema.primitive(Double.self, node: .number(numberNode))
+        let output = numericText == "." ? "1.0" : numericText == "-" ? "-1" : numericText
+
+        // Both vocabularies have identical original samples. Moving every numeric
+        // token preserves even the ordered numeric sample texts. Each loaded
+        // tokenizer must own a separate cache.
+        for offset in [60, 80] {
+            var maps = baseTokenMaps()
+            maps.tokenToText = maps.tokenToText.filter { !$0.value.contains(where: { "0123456789-".contains($0) }) }
+            for (index, text) in ["0", "1", "2", "3", "4", "5", "6", "7", "8", "9", ".", "-"].enumerated() {
+                maps.tokenToText[offset + index] = text
+                maps.textToTokens[text] = [offset + index]
+            }
+            maps.tokenToText[200] = "<numeric-mapping-eos>"
+            let queue = output.flatMap { maps.textToTokens[String($0)] ?? [] } + [2]
+            let backend = MockTokenBackend(
+                tokenToText: maps.tokenToText,
+                textToTokens: maps.textToTokens,
+                eosToken: 200,
+                endTokens: [200],
+                maximumTokens: 64,
+                samplingQueue: queue
+            )
+            var generator = try ConstrainedJSONGenerator(
+                backend: backend,
+                schema: schema,
+                tokenCache: StructuredGenerationTokenCache()
+            )
+            #expect(try await generator.generate() == output)
+        }
+    }
+
+    @Test func numericTokenCachesDistinguishSpecialTokens() async throws {
+        var maps = numberTokenMaps()
+        maps.tokenToText[300] = "<numeric-special-eos>"
+        let numberNode = GenerationSchema.NumberNode(
+            description: nil,
+            minimum: nil,
+            maximum: nil,
+            integerOnly: true
+        )
+        let schema = GenerationSchema.primitive(Int.self, node: .number(numberNode))
+        var backend = MockTokenBackend(
+            tokenToText: maps.tokenToText,
+            textToTokens: maps.textToTokens,
+            specialTokens: [6],
+            eosToken: 300,
+            endTokens: [300],
+            maximumTokens: 64,
+            samplingQueue: [6, 2]
+        )
+        _ = try ConstrainedJSONGenerator(backend: backend, schema: schema, tokenCache: StructuredGenerationTokenCache())
+
+        backend.specialTokens = []
+        var generator = try ConstrainedJSONGenerator(
+            backend: backend,
+            schema: schema,
+            tokenCache: StructuredGenerationTokenCache()
+        )
+        #expect(try await generator.generate() == "1")
+    }
+
     @Test func decimalNumberEmitsStandaloneDot() async throws {
         // Qwen2.5-style tokenization of 473.00 is 4 7 3 . 0 0. Standalone `.` must be
         // in the decimal mask; otherwise the model cannot place the point and pads digits

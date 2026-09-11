@@ -26,6 +26,7 @@
 
         private let model: Models.LanguageModel
         private let tokenizer: any Tokenizer
+        private let tokenCache: StructuredGenerationTokenCache
         private let chatTemplateHandler: (@Sendable (Instructions?, Prompt) -> [Message])?
         private let toolsHandler: (@Sendable ([any Tool]) -> [ToolSpec])?
 
@@ -64,6 +65,7 @@
 
             // Load the tokenizer
             self.tokenizer = try await model.tokenizer
+            self.tokenCache = StructuredGenerationTokenCache()
 
             self.chatTemplateHandler = chatTemplateHandler
             self.toolsHandler = toolsHandler
@@ -384,7 +386,7 @@
                 maximumTokens: maxTokens,
                 endTokens: endTokens
             )
-            var generator = try ConstrainedJSONGenerator(backend: backend, schema: schema)
+            var generator = try ConstrainedJSONGenerator(backend: backend, schema: schema, tokenCache: tokenCache)
             let json = try await generator.generate()
             return json
         }

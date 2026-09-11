@@ -4,6 +4,8 @@ import Foundation
 
 final class MockTokenCapture {
     private(set) var tokens: [Int] = []
+    var tokenTextCalls = 0
+    var specialTokenCalls = 0
     var tokenToText: [Int: String]
 
     init(tokenToText: [Int: String]) {
@@ -63,11 +65,13 @@ struct MockTokenBackend: TokenBackend {
     }
 
     func tokenText(_ token: Int) -> String? {
-        tokenToText[token]
+        capture.tokenTextCalls += 1
+        return tokenToText[token]
     }
 
     func isSpecialToken(_ token: Int) -> Bool {
-        specialTokens.contains(token)
+        capture.specialTokenCalls += 1
+        return specialTokens.contains(token)
     }
 
     mutating func decode(_ token: Int) async throws {
