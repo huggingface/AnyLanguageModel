@@ -237,6 +237,85 @@ Your app can now import `AnyLanguageModel` with MLX support enabled.
 > For a working example of package traits in an Xcode app project,
 > see [chat-ui-swift](https://github.com/mattt/chat-ui-swift).
 
+## Troubleshooting
+
+### LiteRT-LM Checkout Fails with a Git LFS Smudge Error
+
+If Git LFS is installed and configured globally,
+a fresh dependency checkout may fail
+with this error from LiteRT-LM 0.17.0:
+
+```text
+error: 'litert-lm': Couldn’t check out revision ‘e9fd8c53ff968071774206163027dd84bedfe925’:
+    Downloading prebuilt/android_arm64/libGemmaModelConstraintProvider.so (20 MB)
+    Error downloading object: prebuilt/android_arm64/libGemmaModelConstraintProvider.so (2db0cfa): Smudge error: Error downloading prebuilt/android_arm64/libGemmaModelConstraintProvider.so (2db0cfa5d45391df18e6c8de4b1e5ffbe1882d3695c0a0b5e087e4e482e1d680): error transferring "2db0cfa5d45391df18e6c8de4b1e5ffbe1882d3695c0a0b5e087e4e482e1d680": [0] remote missing object 2db0cfa5d45391df18e6c8de4b1e5ffbe1882d3695c0a0b5e087e4e482e1d680
+```
+
+Git LFS tries to download a prebuilt Android library during checkout,
+but the referenced object is missing from the remote LFS storage.
+This can happen even when the `LiteRT` trait is disabled,
+because SwiftPM still resolves the package dependency.
+
+The failure occurs during dependency checkout,
+before compilation.
+It can affect `swift build`, `swift test`, `xcodebuild`,
+and package resolution in Xcode,
+blocking Build or Run.
+An existing successful checkout may hide the problem
+until dependencies are fetched again,
+for example after deleting `.build`
+or resetting Xcode's package caches.
+It doesn't affect an already-built app at runtime.
+
+To skip LFS downloads for a SwiftPM command,
+prefix it with `GIT_LFS_SKIP_SMUDGE=1`:
+
+```bash
+GIT_LFS_SKIP_SMUDGE=1 swift build
+GIT_LFS_SKIP_SMUDGE=1 swift test
+```
+
+For a clean build, use:
+
+```bash
+rm -rf .build && GIT_LFS_SKIP_SMUDGE=1 swift test
+```
+
+For `xcodebuild`,
+use the same prefix
+with your usual project or workspace and scheme arguments.
+For example,
+replacing `MyApp` with your project and scheme names:
+
+```bash
+GIT_LFS_SKIP_SMUDGE=1 xcodebuild -project MyApp.xcodeproj -scheme MyApp build
+```
+
+For Xcode's Build and Run actions,
+quit Xcode completely,
+then launch its executable from Terminal with the variable set:
+
+```bash
+GIT_LFS_SKIP_SMUDGE=1 /Applications/Xcode.app/Contents/MacOS/Xcode
+```
+
+Adjust the path
+if Xcode is installed under a different name or location,
+then open your project and retry package resolution or the build.
+Setting the variable in a terminal
+doesn't affect an already-running Xcode.
+Adding it to a scheme's Run environment variables won't help either:
+those variables apply to the launched app,
+after package resolution.
+
+LiteRT-LM's [Swift package manifest](https://github.com/google-ai-edge/LiteRT-LM/blob/e9fd8c53ff968071774206163027dd84bedfe925/Package.swift)
+downloads Apple XCFrameworks separately from release assets,
+so its Git LFS binaries aren't needed for SwiftPM builds.
+The repository's [CI workflow](.github/workflows/ci.yml)
+already uses this workaround.
+The environment variable applies only to the command and its subprocesses;
+it doesn't change your global Git LFS configuration.
+
 ## API Credentials and Security
 
 When using third-party language model providers like OpenAI, Anthropic, or Google Gemini,
