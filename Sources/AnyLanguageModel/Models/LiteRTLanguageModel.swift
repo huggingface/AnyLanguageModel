@@ -5,12 +5,12 @@ import Foundation
     import class HuggingFace.HubClient
     import enum HuggingFace.Repo
 
-    /// A language model that runs `.litertlm` models fully on-device via Google's
-    /// [LiteRT-LM](https://github.com/google-ai-edge/litert-lm) runtime.
+    /// A language model that runs `.litertlm` models fully on-device
+    /// via Google's [LiteRT-LM](https://github.com/google-ai-edge/litert-lm) runtime.
     ///
-    /// Use this model to run Gemma 4 (and other LiteRT-LM models) on iOS and macOS
-    /// with Metal GPU acceleration, including image understanding for models that
-    /// ship a vision tower.
+    /// Use this model to run Gemma 4 (and other LiteRT-LM models)
+    /// on iOS and macOS with Metal GPU acceleration,
+    /// including image understanding for models that ship a vision tower.
     ///
     /// ```swift
     /// let model = LiteRTLanguageModel(modelFileURL: modelURL)
@@ -19,16 +19,19 @@ import Foundation
     /// ```
     ///
     /// Hugging Face models are downloaded on first use and stored in the Hub cache.
-    /// Loading is lazy: the engine is brought up on the first
-    /// request (or when ``prewarm(for:promptPrefix:)`` is called).
+    /// Loading is lazy:
+    /// the engine is brought up on the first request
+    /// (or when ``prewarm(for:promptPrefix:)`` is called).
     ///
-    /// Structured generation is prompt-driven (the JSON schema is included in the
-    /// prompt and the response is parsed), and tool calling is supported for
+    /// Structured generation is prompt-driven
+    /// (the JSON schema is included in the prompt and the response is parsed),
+    /// and tool calling is supported for
     /// ``respond(within:to:generating:includeSchemaInPrompt:options:)``
     /// (not yet for streaming).
     public struct LiteRTLanguageModel: LanguageModel {
         /// The reason the model is unavailable.
-        /// This model is always available; loading errors surface when responding.
+        /// This model is always available;
+        /// loading errors surface when responding.
         public typealias UnavailableReason = Never
 
         private let engine: LazyEngine
@@ -37,10 +40,13 @@ import Foundation
         ///
         /// - Parameters:
         ///   - modelFileURL: File URL of an on-disk `.litertlm` model.
-        ///   - backend: Backend for text generation. Defaults to Metal GPU.
-        ///   - visionBackend: Backend for the vision encoder. Pass `.cpu()` for
-        ///     a model with image support; `nil` disables vision.
-        ///   - audioBackend: Backend for the audio encoder; `nil` disables audio.
+        ///   - backend: Backend for text generation.
+        ///     Defaults to Metal GPU.
+        ///   - visionBackend: Backend for the vision encoder.
+        ///     Pass `.cpu()` for a model with image support;
+        ///     `nil` disables vision.
+        ///   - audioBackend: Backend for the audio encoder;
+        ///     `nil` disables audio.
         ///   - maxTokens: Context (KV cache) budget.
         public init(
             modelFileURL: URL,
@@ -71,10 +77,14 @@ import Foundation
         /// - Parameters:
         ///   - huggingFaceRepo: The Hugging Face model repository identifier.
         ///   - fileName: The path to the `.litertlm` file within the repository.
-        ///   - revision: Git revision or branch. Defaults to `main`.
-        ///   - backend: Backend for text generation. Defaults to Metal GPU.
-        ///   - visionBackend: Backend for the vision encoder; `nil` disables vision.
-        ///   - audioBackend: Backend for the audio encoder; `nil` disables audio.
+        ///   - revision: Git revision or branch.
+        ///     Defaults to `main`.
+        ///   - backend: Backend for text generation.
+        ///     Defaults to Metal GPU.
+        ///   - visionBackend: Backend for the vision encoder;
+        ///     `nil` disables vision.
+        ///   - audioBackend: Backend for the audio encoder;
+        ///     `nil` disables audio.
         ///   - maxTokens: Context (KV cache) budget.
         ///   - hub: Optional Hub client for authentication and cache configuration.
         ///   - downloadProgress: Optional progress object for the model download.
@@ -286,7 +296,8 @@ import Foundation
     // MARK: - Engine Bring-Up
 
     /// Brings up the engine on first use and shares it across requests.
-    /// Engine bring-up loads multi-GB weights, so it must happen exactly once.
+    /// Engine bring-up loads multi-GB weights,
+    /// so it must happen exactly once.
     private actor LazyEngine {
         private var task: Task<Engine, any Error>?
         private let bringUp: @Sendable () async throws -> Engine
@@ -332,9 +343,9 @@ import Foundation
         var history: [Message]
         var prompt: Message
 
-        /// Extends the plan after a tool round-trip: the trigger prompt and the
-        /// model's tool-call text become history, and the tool result becomes the
-        /// new trigger.
+        /// Extends the plan after a tool round-trip:
+        /// the trigger prompt and the model's tool-call text become history,
+        /// and the tool result becomes the new trigger.
         func continuing(afterModelText text: String, toolOutput: Transcript.ToolOutput) -> GenerationPlan {
             var history = self.history
             history.append(prompt)
@@ -348,9 +359,10 @@ import Foundation
         }
     }
 
-    /// Splits the session transcript into a system message, prior turns, and the
-    /// message to generate from. The generation trigger is the last `.prompt` or
-    /// (in a tool round-trip) the last `.toolOutput` entry.
+    /// Splits the session transcript into a system message,
+    /// prior turns, and the message to generate from.
+    /// The generation trigger is the last `.prompt`
+    /// or (in a tool round-trip) the last `.toolOutput` entry.
     private func makePlan(
         from transcript: Transcript,
         fallbackPrompt: String,
@@ -411,8 +423,8 @@ import Foundation
         )
     }
 
-    /// Maps transcript segments to LiteRT content: text, structured content as
-    /// JSON text, and images.
+    /// Maps transcript segments to LiteRT content:
+    /// text, structured content as JSON text, and images.
     private func messageContents(of segments: [Transcript.Segment]) -> [Content] {
         var contents: [Content] = []
         for segment in segments {
@@ -528,7 +540,8 @@ import Foundation
         return lines.joined(separator: "\n")
     }
 
-    /// Parses a tool call from model output, if present and naming a known tool.
+    /// Parses a tool call from model output,
+    /// if present and naming a known tool.
     private func parseToolCall(
         from text: String,
         tools: [any Tool]

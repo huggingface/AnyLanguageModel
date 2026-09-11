@@ -39,8 +39,9 @@ import Testing
 
     /// Path to a local `.litertlm` file to test against
     /// (for example, gemma-4-E2B-it.litertlm).
-    /// These tests load multi-GB weights, so they only run when explicitly
-    /// requested via the `LITERT_TEST_MODEL` environment variable.
+    /// These tests load multi-GB weights,
+    /// so they only run when explicitly requested
+    /// via the `LITERT_TEST_MODEL` environment variable.
     private let liteRTTestModelPath = ProcessInfo.processInfo.environment["LITERT_TEST_MODEL"]
 
     private let shouldRunLiteRTTests = liteRTTestModelPath != nil
