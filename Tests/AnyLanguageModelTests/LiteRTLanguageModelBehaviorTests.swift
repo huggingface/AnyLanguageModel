@@ -8,6 +8,88 @@ import Testing
 
     @Suite("LiteRTLanguageModel behavior", .timeLimit(.minutes(1)))
     struct LiteRTLanguageModelBehaviorTests {
+        @Test(arguments: ["plain", "fenced", "prose"], [false, true])
+        func generatesArraysAndScalars(wrapper: String, streaming: Bool) async throws {
+            func check<Value: Generable & Equatable>(_ json: String, equals expected: Value) async throws {
+                let reply: String
+                switch wrapper {
+                case "fenced": reply = "```json\n\(json)\n```"
+                case "prose": reply = "The result is:\n\(json)\nThat is the answer."
+                default: reply = json
+                }
+                let conversation = StubLiteRTConversation(chunks: reply.map(String.init))
+                let runtime = StubLiteRTRuntime([conversation])
+                let session = LanguageModelSession(model: LiteRTLanguageModel(load: { runtime }))
+                if streaming {
+                    var values: [Value] = []
+                    for try await snapshot in session.streamResponse(to: "Generate", generating: Value.self) {
+                        values.append(try Value(snapshot.rawContent))
+                    }
+                    #expect(values == [expected])
+                } else {
+                    #expect(try await session.respond(to: "Generate", generating: Value.self).content == expected)
+                }
+                #expect(conversation.requests.withLock { $0.first?.text.contains("JSON value") } == true)
+            }
+            try await check(#"{"answer":"hello"}"#, equals: LiteRTTestAnswer(answer: "hello"))
+            try await check("[]", equals: [Int]())
+            try await check("[1,2,3]", equals: [1, 2, 3])
+            try await check("[[1,2],[],[3]]", equals: [[1, 2], [], [3]])
+            try await check("42", equals: 42)
+            try await check("-1.25e+2", equals: -125.0)
+            try await check("true", equals: true)
+            try await check("false", equals: false)
+            try await check(#"["a]b", "a\"b", "a\\b"]"#, equals: ["a]b", "a\"b", "a\\b"])
+        }
+
+        @Test(arguments: ["[1,", "[1:2]", "1e", "tru", "falsehood"], [false, true])
+        func rejectsIncompleteOrInvalidStructuredResponses(reply: String, streaming: Bool) async throws {
+            let runtime = StubLiteRTRuntime([StubLiteRTConversation(reply: reply)])
+            let session = LanguageModelSession(model: LiteRTLanguageModel(load: { runtime }))
+            await #expect {
+                if streaming {
+                    for try await _ in session.streamResponse(to: "Generate", generating: [Int].self) {
+                        Issue.record("Incomplete JSON must not produce a snapshot")
+                    }
+                } else {
+                    _ = try await session.respond(to: "Generate", generating: [Int].self)
+                }
+            } throws: { error in
+                guard case LanguageModelSession.GenerationError.decodingFailure = error else { return false }
+                return true
+            }
+        }
+
+        @Test(arguments: [false, true], [UInt64(123), UInt64(Int32.max) + 1, UInt64.max])
+        func preservesExplicitSamplingModesAndSeeds(streaming: Bool, seed: UInt64) async throws {
+            for sampling in [
+                GenerationOptions.SamplingMode.random(top: 10, seed: seed),
+                .random(probabilityThreshold: 0.8, seed: seed),
+            ] {
+                let runtime = StubLiteRTRuntime([StubLiteRTConversation(reply: "Hello")])
+                let session = LanguageModelSession(model: LiteRTLanguageModel(load: { runtime }))
+                let options = GenerationOptions(sampling: sampling, temperature: 0.7)
+                if streaming {
+                    for try await _ in session.streamResponse(to: "Hello", options: options) {}
+                } else {
+                    _ = try await session.respond(to: "Hello", options: options)
+                }
+                let config = try #require(runtime.configurations.withLock { $0.first?.sampler })
+                switch sampling.mode {
+                case .topK:
+                    #expect(config.topK == 10)
+                    #expect(config.topP == 1.0)
+                case .nucleus:
+                    #expect(config.topK == Int(Int32.max))
+                    #expect(config.topP == 0.8)
+                case .greedy: Issue.record("Unexpected sampling mode")
+                }
+                #expect(config.temperature == 0.7)
+                let expectedSeed: Int = seed == 123 ? 123 : (seed == UInt64.max ? -1 : Int(Int32.min))
+                #expect(config.seed == expectedSeed)
+            }
+        }
+
         @Test(arguments: [false, true])
         func forwardsResponseTokenLimit(streaming: Bool) async throws {
             let conversation = StubLiteRTConversation(reply: "Hello")
@@ -229,7 +311,7 @@ import Testing
     private let toolCall = #"{"tool_call":{"name":"lookup","arguments":{"query":"answer"}}}"#
 
     @Generable
-    private struct LiteRTTestAnswer {
+    private struct LiteRTTestAnswer: Equatable {
         var answer: String
     }
 
@@ -275,7 +357,14 @@ import Testing
     }
 
     private final class StubLiteRTRuntime: LiteRTRuntime {
+        struct Sampler: Sendable {
+            var topK: Int
+            var topP: Float
+            var temperature: Float
+            var seed: Int
+        }
         struct Configuration: Sendable {
+            var sampler: Sampler?
             var systemMessage: String?
             var history: [String]
         }
@@ -291,6 +380,9 @@ import Testing
                 let index = records.count
                 records.append(
                     Configuration(
+                        sampler: config.samplerConfig.map {
+                            Sampler(topK: $0.topK, topP: $0.topP, temperature: $0.temperature, seed: $0.seed)
+                        },
                         systemMessage: config.systemMessage?.toString,
                         history: config.initialMessages.map(\.toString)
                     )
@@ -308,7 +400,7 @@ import Testing
             var images: [Data]
             var maxOutputTokens: Int?
         }
-        let reply: String
+        let chunks: [String]
         let keepRunning: Bool
         let requests = Locked<[Request]>([])
         let cancelCount = Locked(0)
@@ -316,8 +408,12 @@ import Testing
         let started = LiteRTTestSignal()
         let cancelled = LiteRTTestSignal()
 
-        init(reply: String, keepRunning: Bool = false) {
-            self.reply = reply
+        convenience init(reply: String, keepRunning: Bool = false) {
+            self.init(chunks: [reply], keepRunning: keepRunning)
+        }
+
+        init(chunks: [String], keepRunning: Bool = false) {
+            self.chunks = chunks
             self.keepRunning = keepRunning
         }
 
@@ -335,7 +431,7 @@ import Testing
             }
             return AsyncThrowingStream { continuation in
                 self.continuation.withLock { $0 = continuation }
-                continuation.yield(Message(reply, role: .model))
+                for chunk in chunks { continuation.yield(Message(chunk, role: .model)) }
                 if !keepRunning { continuation.finish() }
                 Task { await started.signal() }
             }

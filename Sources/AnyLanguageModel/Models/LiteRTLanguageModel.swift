@@ -232,7 +232,11 @@ import Foundation
                 )
             }
 
-            let json = extractJSONObject(from: text) ?? text
+            guard let json = extractJSONValue(from: text) else {
+                throw LanguageModelSession.GenerationError.decodingFailure(
+                    .init(debugDescription: "LiteRT did not generate a complete JSON value.")
+                )
+            }
             let generatedContent = try GeneratedContent(json: json)
             let content = try type.init(generatedContent)
             return LanguageModelSession.Response(
@@ -279,6 +283,7 @@ import Foundation
                             )
 
                             var text = ""
+                            var lastJSON: String?
                             try await generateLiteRTResponse(
                                 conversation: conversation,
                                 prompt: plan.prompt,
@@ -294,10 +299,12 @@ import Foundation
                                             rawContent: GeneratedContent(text)
                                         )
                                     )
-                                } else if let json = extractJSONObject(from: text),
+                                } else if let json = extractJSONValue(from: text, isFinal: false),
+                                    json != lastJSON,
                                     let raw = try? GeneratedContent(json: json),
                                     let parsed = try? type.init(raw)
                                 {
+                                    lastJSON = json
                                     continuation.yield(
                                         .init(
                                             content: parsed.asPartiallyGenerated(),
@@ -310,6 +317,20 @@ import Foundation
                                 }
                             }
 
+                            if type != String.self {
+                                guard let json = extractJSONValue(from: text) else {
+                                    throw LanguageModelSession.GenerationError.decodingFailure(
+                                        .init(debugDescription: "LiteRT did not generate a complete JSON value.")
+                                    )
+                                }
+                                if json != lastJSON {
+                                    let raw = try GeneratedContent(json: json)
+                                    let parsed = try type.init(raw)
+                                    continuation.yield(
+                                        .init(content: parsed.asPartiallyGenerated(), rawContent: raw)
+                                    )
+                                }
+                            }
                             continuation.finish()
                         } catch {
                             continuation.finish(throwing: error)
@@ -408,7 +429,7 @@ import Foundation
                 if isTrigger, let schemaJSON, !schemaJSON.isEmpty {
                     contents.append(
                         .text(
-                            "\n\nRespond with ONLY a JSON object that conforms to this JSON schema. "
+                            "\n\nRespond with ONLY a JSON value that conforms to this JSON schema. "
                                 + "Output valid JSON and nothing else:\n\(schemaJSON)"
                         )
                     )
@@ -494,33 +515,68 @@ import Foundation
         return String(data: data, encoding: .utf8) ?? ""
     }
 
-    /// Extracts the first balanced JSON object from model text
-    /// (strips surrounding prose and code fences).
-    private func extractJSONObject(from text: String) -> String? {
-        guard let start = text.firstIndex(of: "{") else { return nil }
-        var depth = 0
-        var inString = false
-        var escaped = false
-        var index = start
-        while index < text.endIndex {
-            let character = text[index]
-            if inString {
-                if escaped {
-                    escaped = false
-                } else if character == "\\" {
-                    escaped = true
-                } else if character == "\"" {
-                    inString = false
-                }
-            } else if character == "\"" {
-                inString = true
-            } else if character == "{" {
-                depth += 1
-            } else if character == "}" {
-                depth -= 1
-                if depth == 0 { return String(text[start ... index]) }
+    /// Extracts the first complete JSON value from model text,
+    /// stripping surrounding prose and code fences.
+    /// Scalars at the end of a stream must wait for the next delimiter or completion,
+    /// because another chunk can extend a number or literal.
+    private func extractJSONValue(from text: String, isFinal: Bool = true) -> String? {
+        var start = text.startIndex
+        while start < text.endIndex {
+            let first = text[start]
+            let isContainer = first == "{" || first == "["
+            let isString = first == "\""
+            let isBoundary =
+                start == text.startIndex
+                || !(text[text.index(before: start)].isLetter
+                    || text[text.index(before: start)].isNumber
+                    || text[text.index(before: start)] == ".")
+            guard
+                isContainer || isString
+                    || (isBoundary && "-0123456789tfn".contains(first))
+            else {
+                start = text.index(after: start)
+                continue
             }
-            index = text.index(after: index)
+
+            var end = start
+            if isContainer || isString {
+                var depth = 0
+                var inString = false
+                var escaped = false
+                repeat {
+                    let character = text[end]
+                    if inString {
+                        if escaped {
+                            escaped = false
+                        } else if character == "\\" {
+                            escaped = true
+                        } else if character == "\"" {
+                            inString = false
+                        }
+                    } else if character == "\"" {
+                        inString = true
+                    } else if character == "{" || character == "[" {
+                        depth += 1
+                    } else if character == "}" || character == "]" {
+                        depth -= 1
+                    }
+                    end = text.index(after: end)
+                } while end < text.endIndex && (inString || depth > 0)
+                guard !inString, depth == 0 else { return nil }
+            } else {
+                while end < text.endIndex,
+                    text[end].isLetter || text[end].isNumber || ".+-".contains(text[end])
+                {
+                    end = text.index(after: end)
+                }
+                if end == text.endIndex && !isFinal { return nil }
+            }
+
+            let candidate = String(text[start ..< end])
+            if (try? JSONSerialization.jsonObject(with: Data(candidate.utf8), options: .fragmentsAllowed)) != nil {
+                return candidate
+            }
+            start = end
         }
         return nil
     }
@@ -530,6 +586,7 @@ import Foundation
     private func makeSampler(for options: GenerationOptions, structured: Bool) -> SamplerConfig? {
         var topK = 40
         var topP = 0.95
+        var seed: UInt64 = 0
         // Lower default temperature for structured / tool generation
         // (more reliable JSON).
         var temperature = structured ? 0.0 : 0.8
@@ -540,13 +597,25 @@ import Foundation
             switch sampling.mode {
             case .greedy:
                 temperature = 0.0
-            case .topK(let k, _):
-                topK = k
-            case .nucleus(let probabilityThreshold, _):
+            case .topK(let k, let randomSeed):
+                topK = min(k, Int(Int32.max))
+                topP = 1.0
+                seed = randomSeed ?? 0
+            case .nucleus(let probabilityThreshold, let randomSeed):
+                // LiteRT clamps top-k to the vocabulary size.
+                topK = Int(Int32.max)
                 topP = probabilityThreshold
+                seed = randomSeed ?? 0
             }
         }
-        return try? SamplerConfig(topK: topK, topP: Float(topP), temperature: Float(temperature))
+        // The Swift wrapper converts seeds to the runtime's signed 32-bit representation.
+        // Preserve the low 32 bits without trapping on larger UInt64 values.
+        return try? SamplerConfig(
+            topK: topK,
+            topP: Float(topP),
+            temperature: Float(temperature),
+            seed: Int(Int32(truncatingIfNeeded: seed))
+        )
     }
 
     // MARK: - Tool Calling
@@ -574,7 +643,8 @@ import Foundation
         from text: String,
         tools: [any Tool]
     ) -> (name: String, arguments: String)? {
-        guard let json = extractJSONObject(from: text),
+        guard let start = text.firstIndex(of: "{"),
+            let json = extractJSONValue(from: String(text[start...])),
             let data = json.data(using: .utf8),
             let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
             let call = object["tool_call"] as? [String: Any],
