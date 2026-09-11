@@ -252,7 +252,13 @@ error: 'litert-lm': Couldn’t check out revision ‘e9fd8c53ff96807177420616302
 ```
 
 Git LFS tries to download a prebuilt Android library during checkout,
-but the referenced object is missing from the remote LFS storage.
+but the referenced object is missing from the LFS remote used by that checkout.
+SwiftPM creates dependency checkouts from a local repository mirror,
+which Git LFS can treat as its remote
+instead of the original GitHub repository.
+That mirror may lack LFS objects required by the selected version,
+even when those objects are available on GitHub.
+See the [upstream investigation](https://github.com/google-ai-edge/LiteRT-LM/issues/2407#issuecomment-5265465876).
 This can happen even when the `LiteRT` trait is disabled,
 because SwiftPM still resolves the package dependency.
 
