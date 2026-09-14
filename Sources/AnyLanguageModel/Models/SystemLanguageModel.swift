@@ -430,11 +430,19 @@
                 sampling = nil
             }
 
-            return FoundationModels.GenerationOptions(
-                sampling: sampling,
-                temperature: temperature,
-                maximumResponseTokens: maximumResponseTokens
-            )
+            #if compiler(>=6.4) && !os(tvOS) && !os(watchOS)
+                return FoundationModels.GenerationOptions(
+                    samplingMode: sampling,
+                    temperature: temperature,
+                    maximumResponseTokens: maximumResponseTokens
+                )
+            #else
+                return FoundationModels.GenerationOptions(
+                    sampling: sampling,
+                    temperature: temperature,
+                    maximumResponseTokens: maximumResponseTokens
+                )
+            #endif
         }
     }
 
