@@ -1163,11 +1163,7 @@ enum OpenResponsesLanguageModelError: LocalizedError, Sendable {
 
 private extension GenerationSchema {
     func toJSONValueForOpenResponsesStrictMode() throws -> JSONValue {
-        let resolved = withResolvedRoot() ?? self
-        let encoder = JSONEncoder()
-        encoder.userInfo[GenerationSchema.omitAdditionalPropertiesKey] = false
-        let data = try encoder.encode(resolved)
-        let jsonSchema = try JSONDecoder().decode(JSONSchema.self, from: data)
+        let jsonSchema = try inlinedJSONSchema(omitAdditionalProperties: false)
         var value = try JSONValue(jsonSchema)
         if case .object(var obj) = value {
             obj["additionalProperties"] = .bool(false)

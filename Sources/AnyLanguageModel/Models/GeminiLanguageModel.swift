@@ -545,11 +545,7 @@ public struct GeminiLanguageModel: LanguageModel {
 }
 
 private func convertSchemaToGeminiFormat(_ schema: GenerationSchema) throws -> JSONSchema {
-    let resolvedSchema = schema.withResolvedRoot() ?? schema
-    let encoder = JSONEncoder()
-    encoder.userInfo[GenerationSchema.omitAdditionalPropertiesKey] = true
-    let data = try encoder.encode(resolvedSchema)
-    return try JSONDecoder().decode(JSONSchema.self, from: data)
+    try schema.inlinedJSONSchema(omitAdditionalProperties: true)
 }
 
 private func createGenerateContentParams<Content: Generable>(

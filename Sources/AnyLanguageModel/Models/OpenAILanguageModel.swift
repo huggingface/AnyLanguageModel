@@ -1926,12 +1926,7 @@ private extension GenerationSchema {
     /// 1. `additionalProperties: false` at the root
     /// 2. All properties (including optional ones) listed in `required`
     func toJSONValueForOpenAIStrictMode() throws -> JSONValue {
-        let resolvedSchema = self.withResolvedRoot() ?? self
-
-        let encoder = JSONEncoder()
-        encoder.userInfo[GenerationSchema.omitAdditionalPropertiesKey] = false
-        let schemaData = try encoder.encode(resolvedSchema)
-        let jsonSchema = try JSONDecoder().decode(JSONSchema.self, from: schemaData)
+        let jsonSchema = try inlinedJSONSchema(omitAdditionalProperties: false)
         var jsonSchemaValue = try JSONValue(jsonSchema)
 
         if case .object(var schemaObj) = jsonSchemaValue {

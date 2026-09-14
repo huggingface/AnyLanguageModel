@@ -468,9 +468,7 @@ private func convertToolToOllamaFormat(_ tool: any Tool) throws -> [String: JSON
 }
 
 private func convertSchemaToOllamaFormat(_ schema: GenerationSchema) throws -> JSONSchema {
-    let resolvedSchema = schema.withResolvedRoot() ?? schema
-    let data = try JSONEncoder().encode(resolvedSchema)
-    return try JSONDecoder().decode(JSONSchema.self, from: data)
+    try schema.inlinedJSONSchema()
 }
 
 private func toGeneratedContent(_ value: JSONValue?) throws -> GeneratedContent {
