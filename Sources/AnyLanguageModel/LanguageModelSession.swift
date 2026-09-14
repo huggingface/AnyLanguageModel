@@ -186,7 +186,8 @@ public final class LanguageModelSession: @unchecked Sendable {
                         let responseEntry = Transcript.Entry.response(
                             Transcript.Response(
                                 assetIDs: [],
-                                segments: [.text(.init(content: textContent))]
+                                segments: [.text(.init(content: textContent))],
+                                providerMetadata: lastSnapshot.providerMetadata
                             )
                         )
                         session.withMutation(keyPath: \.transcript) {
@@ -342,6 +343,8 @@ public final class LanguageModelSession: @unchecked Sendable {
         /// with zero counts for values the provider does not report.
         public let usage: Usage
 
+        internal let providerMetadata: [String: String]?
+
         /// Creates a response value from generated content and transcript entries.
         /// - Parameters:
         ///   - content: The decoded response content.
@@ -357,10 +360,30 @@ public final class LanguageModelSession: @unchecked Sendable {
                 output: .init(totalTokenCount: 0, reasoningTokenCount: 0)
             )
         ) {
+            self.init(
+                content: content,
+                rawContent: rawContent,
+                transcriptEntries: transcriptEntries,
+                usage: usage,
+                providerMetadata: nil
+            )
+        }
+
+        internal init(
+            content: Content,
+            rawContent: GeneratedContent,
+            transcriptEntries: ArraySlice<Transcript.Entry>,
+            usage: Usage = .init(
+                input: .init(totalTokenCount: 0, cachedTokenCount: 0),
+                output: .init(totalTokenCount: 0, reasoningTokenCount: 0)
+            ),
+            providerMetadata: [String: String]?
+        ) {
             self.content = content
             self.rawContent = rawContent
             self.transcriptEntries = transcriptEntries
             self.usage = usage
+            self.providerMetadata = providerMetadata
         }
     }
 
@@ -405,7 +428,8 @@ public final class LanguageModelSession: @unchecked Sendable {
             let responseEntry = Transcript.Entry.response(
                 Transcript.Response(
                     assetIDs: [],
-                    segments: [.text(.init(content: textContent))]
+                    segments: [.text(.init(content: textContent))],
+                    providerMetadata: response.providerMetadata
                 )
             )
 
@@ -759,7 +783,8 @@ extension LanguageModelSession {
             let responseEntry = Transcript.Entry.response(
                 Transcript.Response(
                     assetIDs: [],
-                    segments: [.text(.init(content: textContent))]
+                    segments: [.text(.init(content: textContent))],
+                    providerMetadata: response.providerMetadata
                 )
             )
 
@@ -1020,6 +1045,8 @@ extension LanguageModelSession {
             /// with zero counts for values the provider does not report.
             public var usage: Usage
 
+            internal var providerMetadata: [String: String]?
+
             /// Creates a snapshot from partially generated content and raw content.
             /// - Parameters:
             ///   - content: The partially generated content.
@@ -1035,10 +1062,30 @@ extension LanguageModelSession {
                     output: .init(totalTokenCount: 0, reasoningTokenCount: 0)
                 )
             ) {
+                self.init(
+                    content: content,
+                    rawContent: rawContent,
+                    transcriptEntries: transcriptEntries,
+                    usage: usage,
+                    providerMetadata: nil
+                )
+            }
+
+            internal init(
+                content: Content.PartiallyGenerated,
+                rawContent: GeneratedContent,
+                transcriptEntries: ArraySlice<Transcript.Entry> = [],
+                usage: Usage = .init(
+                    input: .init(totalTokenCount: 0, cachedTokenCount: 0),
+                    output: .init(totalTokenCount: 0, reasoningTokenCount: 0)
+                ),
+                providerMetadata: [String: String]?
+            ) {
                 self.content = content
                 self.rawContent = rawContent
                 self.transcriptEntries = transcriptEntries
                 self.usage = usage
+                self.providerMetadata = providerMetadata
             }
         }
     }
@@ -1102,7 +1149,8 @@ extension LanguageModelSession.ResponseStream: AsyncSequence {
                     content: finalContent,
                     rawContent: last.rawContent,
                     transcriptEntries: last.transcriptEntries,
-                    usage: last.usage
+                    usage: last.usage,
+                    providerMetadata: last.providerMetadata
                 )
             }
         }
@@ -1118,7 +1166,8 @@ extension LanguageModelSession.ResponseStream: AsyncSequence {
                 content: finalContent,
                 rawContent: fallbackSnapshot.rawContent,
                 transcriptEntries: fallbackSnapshot.transcriptEntries,
-                usage: fallbackSnapshot.usage
+                usage: fallbackSnapshot.usage,
+                providerMetadata: fallbackSnapshot.providerMetadata
             )
         }
 
