@@ -386,7 +386,7 @@ extension GeneratedContent {
 
 // MARK: - GeneratedContentError
 
-public enum GeneratedContentError: Error {
+public enum GeneratedContentError: Error, Hashable {
     case propertyNotFound(String)
     case typeMismatch
     case neverCannotBeInstantiated
