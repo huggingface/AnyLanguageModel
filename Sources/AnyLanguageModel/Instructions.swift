@@ -18,7 +18,7 @@
 /// Apple trains the model to obey instructions over any commands it receives in prompts, so don't include
 /// untrusted content in instructions. For more on how instructions impact generation quality and safety,
 /// see <doc:improving-safety-from-generative-model-output>.
-public struct Instructions {
+public struct Instructions: Sendable {
     private let content: String
 
     /// Creates an instance with the content you specify.

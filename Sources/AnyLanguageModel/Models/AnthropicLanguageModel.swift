@@ -757,7 +757,7 @@ private func emptyResponseContent<Content: Generable>(
         return (content, nullContent)
     }
 
-    throw GeneratedContentConversionError.typeMismatch
+    throw GeneratedContentError.typeMismatch
 }
 
 private func partialSnapshot<Content: Generable>(

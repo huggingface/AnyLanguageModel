@@ -11,7 +11,7 @@ where Element: ConvertibleFromGeneratedContent {
     /// Creates an instance with the content.
     public init(_ content: GeneratedContent) throws {
         guard case .array(let elements) = content.kind else {
-            throw GeneratedContentConversionError.typeMismatch
+            throw GeneratedContentError.typeMismatch
         }
         self = try elements.map { try Element($0) }
     }

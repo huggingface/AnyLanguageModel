@@ -24,16 +24,16 @@ struct PrimitiveStringCoercionTests {
     }
 
     @Test func rejectsUnparseableStrings() {
-        #expect(throws: GeneratedContentConversionError.self) {
+        #expect(throws: GeneratedContentError.self) {
             try Int(GeneratedContent(kind: .string("five")))
         }
-        #expect(throws: GeneratedContentConversionError.self) {
+        #expect(throws: GeneratedContentError.self) {
             try Int(GeneratedContent(kind: .string("5.5")))
         }
-        #expect(throws: GeneratedContentConversionError.self) {
+        #expect(throws: GeneratedContentError.self) {
             try Bool(GeneratedContent(kind: .string("yes")))
         }
-        #expect(throws: GeneratedContentConversionError.self) {
+        #expect(throws: GeneratedContentError.self) {
             try Double(GeneratedContent(kind: .string("")))
         }
     }

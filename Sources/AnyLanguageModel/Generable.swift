@@ -34,10 +34,9 @@ public protocol Generable: ConvertibleFromGeneratedContent, ConvertibleToGenerat
 
 // MARK: - Error
 
-public enum GeneratedContentConversionError: Error {
-    case typeMismatch
-    case neverCannotBeInstantiated
-}
+/// Errors from converting generated content are ``GeneratedContentError``.
+@available(*, deprecated, renamed: "GeneratedContentError")
+public typealias GeneratedContentConversionError = GeneratedContentError
 
 // MARK: - Macros
 
@@ -118,11 +117,11 @@ extension Bool: Generable {
             self = value
         case .string(let text):
             guard let value = Bool(coercing: text) else {
-                throw GeneratedContentConversionError.typeMismatch
+                throw GeneratedContentError.typeMismatch
             }
             self = value
         default:
-            throw GeneratedContentConversionError.typeMismatch
+            throw GeneratedContentError.typeMismatch
         }
     }
 
@@ -146,7 +145,7 @@ extension String: Generable {
     /// Creates an instance with the content.
     public init(_ content: GeneratedContent) throws {
         guard case .string(let value) = content.kind else {
-            throw GeneratedContentConversionError.typeMismatch
+            throw GeneratedContentError.typeMismatch
         }
         self = value
     }
@@ -175,11 +174,11 @@ extension Int: Generable {
             self = Int(value)
         case .string(let text):
             guard let value = Double(coercing: text), value == value.rounded() else {
-                throw GeneratedContentConversionError.typeMismatch
+                throw GeneratedContentError.typeMismatch
             }
             self = Int(value)
         default:
-            throw GeneratedContentConversionError.typeMismatch
+            throw GeneratedContentError.typeMismatch
         }
     }
 
@@ -207,11 +206,11 @@ extension Float: Generable {
             self = Float(value)
         case .string(let text):
             guard let value = Double(coercing: text) else {
-                throw GeneratedContentConversionError.typeMismatch
+                throw GeneratedContentError.typeMismatch
             }
             self = Float(value)
         default:
-            throw GeneratedContentConversionError.typeMismatch
+            throw GeneratedContentError.typeMismatch
         }
     }
 
@@ -239,11 +238,11 @@ extension Double: Generable {
             self = value
         case .string(let text):
             guard let value = Double(coercing: text) else {
-                throw GeneratedContentConversionError.typeMismatch
+                throw GeneratedContentError.typeMismatch
             }
             self = value
         default:
-            throw GeneratedContentConversionError.typeMismatch
+            throw GeneratedContentError.typeMismatch
         }
     }
 
@@ -271,11 +270,11 @@ extension Decimal: Generable {
             self = Decimal(value)
         case .string(let text):
             guard let value = Double(coercing: text) else {
-                throw GeneratedContentConversionError.typeMismatch
+                throw GeneratedContentError.typeMismatch
             }
             self = Decimal(value)
         default:
-            throw GeneratedContentConversionError.typeMismatch
+            throw GeneratedContentError.typeMismatch
         }
     }
 
@@ -291,7 +290,7 @@ extension Decimal: Generable {
 /// Language models sometimes emit primitive values as JSON strings, most commonly in
 /// tool-call arguments where a chat template stringifies every argument value. The
 /// primitive initializers above accept such strings when they parse unambiguously as
-/// the target type, and throw ``GeneratedContentConversionError/typeMismatch`` otherwise.
+/// the target type, and throw ``GeneratedContentError/typeMismatch`` otherwise.
 extension Bool {
     fileprivate init?(coercing text: String) {
         switch text.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
@@ -346,7 +345,7 @@ extension Never: Generable {
 
     /// Creates an instance with the content.
     public init(_ content: GeneratedContent) throws {
-        throw GeneratedContentConversionError.neverCannotBeInstantiated
+        throw GeneratedContentError.neverCannotBeInstantiated
     }
 
     /// An instance that represents the generated content.
