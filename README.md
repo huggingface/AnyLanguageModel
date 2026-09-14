@@ -549,7 +549,7 @@ let response = try await session.respond {
 ```
 
 You can tune MLX request behavior per call with model-specific options,
-including KV-cache settings and optional media preprocessing:
+including sampling, KV-cache settings, and optional media preprocessing:
 
 ```swift
 var options = GenerationOptions(temperature: 0.7)
@@ -568,6 +568,12 @@ mlxOptions.additionalContext = [
     "turn_count": .int(3),
     "verbose": .bool(true),
 ]
+// Override the sampler. Unset fields inherit from GenerationOptions.sampling.
+mlxOptions.topP = 0.9
+mlxOptions.topK = 40
+mlxOptions.minP = 0.05
+mlxOptions.repetitionPenalty = 1.1
+mlxOptions.repetitionContextSize = 64
 options[custom: MLXLanguageModel.self] = mlxOptions
 
 let response = try await session.respond(
@@ -584,6 +590,11 @@ By default, images are passed through without an explicit resize override
 
 You can also set `additionalContext` to provide extra JSON template variables
 for model-specific chat templates.
+
+The sampling fields (`topP`, `topK`, `minP`, `repetitionPenalty`, `repetitionContextSize`)
+override the matching values from `GenerationOptions.sampling`.
+Leave them `nil` to inherit those values,
+or to use MLX's defaults when neither is set.
 
 GPU cache behavior can be configured when creating the model:
 
@@ -661,7 +672,8 @@ options[custom: LlamaLanguageModel.self] = .init(
     repeatLastN: 128,         // Number of tokens to consider for repeat penalty
     frequencyPenalty: 0.1,    // Frequency-based penalty
     presencePenalty: 0.1,     // Presence-based penalty
-    mirostat: .v2(tau: 5.0, eta: 0.1)  // Adaptive perplexity control
+    mirostat: .v2(tau: 5.0, eta: 0.1),  // Adaptive perplexity control
+    assistantPrefill: "<think></think>"  // Text the response continues from
 )
 
 let response = try await session.respond(
