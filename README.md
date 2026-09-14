@@ -70,6 +70,7 @@ session.toolExecutionDelegate = ToolExecutionObserver()
 ### Supported Providers
 
 - [x] [Apple Foundation Models](https://developer.apple.com/documentation/FoundationModels)
+- [x] Apple [Private Cloud Compute](https://developer.apple.com/documentation/FoundationModels/PrivateCloudComputeLanguageModel) and any [`FoundationModels.LanguageModel`](https://developer.apple.com/documentation/FoundationModels/LanguageModel) conformer, including [Core AI](https://github.com/apple/coreai-models) models (OS 27)
 - [x] [Core ML](https://developer.apple.com/documentation/coreml) models
 - [x] [MLX](https://github.com/ml-explore/mlx-swift) models
 - [x] [llama.cpp](https://github.com/ggml-org/llama.cpp) (GGUF models)
@@ -513,6 +514,56 @@ let response = try await session.respond {
     Prompt("Explain quantum computing in one sentence")
 }
 ```
+
+### Apple Private Cloud Compute
+
+Uses Apple's [Private Cloud Compute model](https://developer.apple.com/documentation/FoundationModels/PrivateCloudComputeLanguageModel),
+a larger server-hosted model behind the same privacy architecture as the on-device one
+(requires macOS 27 / iOS 27 or later and the Private Cloud Compute entitlement).
+
+```swift
+let model = PrivateCloudComputeLanguageModel.default
+let session = LanguageModelSession(model: model)
+
+let response = try await session.respond {
+    Prompt("Summarize the attached report in three bullet points")
+}
+```
+
+### Any Foundation Models Conformer
+
+On OS 27, Foundation Models accepts any type that conforms to its `LanguageModel` protocol.
+`FoundationLanguageModel` wraps such a model so it works with everything in this package.
+Construct the model yourself, or hand the wrapper an async factory so an expensive load
+happens on the first request and you control when it is released.
+
+```swift
+let model = FoundationLanguageModel {
+    try await MyModel(resourcesAt: url)
+}
+let session = LanguageModelSession(model: model)
+
+let response = try await session.respond(to: "Hello")
+await model.unload()
+```
+
+#### Core AI Models
+
+Apple's [coreai-models](https://github.com/apple/coreai-models) package exports language
+models for the Core AI engine, and its `CoreAILanguageModel` conforms to the Foundation Models
+protocol. Add the `CoreAILM` product from that package to your app and wrap the model:
+
+```swift
+import CoreAILanguageModels
+
+let model = FoundationLanguageModel {
+    try await CoreAILanguageModels.CoreAILanguageModel(resourcesAt: resourcesURL)
+}
+let session = LanguageModelSession(model: model)
+```
+
+The package declares a platform floor of OS 27. Apps with an earlier deployment target can
+build it as an XCFramework and link it weakly, guarding every use with an availability check.
 
 ### Core ML
 
