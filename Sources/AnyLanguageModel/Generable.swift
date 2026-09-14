@@ -326,10 +326,13 @@ extension Array: Generable where Element: Generable {
             minItems: nil,
             maxItems: nil
         )
-        return GenerationSchema.primitive(
+        var schema = GenerationSchema.primitive(
             [Element].self,
             node: .array(arrayNode)
         )
+        // Array items can reference the element type and its nested dependencies.
+        schema.defs = elementSchema.defs
+        return schema
     }
 }
 

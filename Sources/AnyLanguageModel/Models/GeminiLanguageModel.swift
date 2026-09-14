@@ -285,6 +285,7 @@ public struct GeminiLanguageModel: LanguageModel {
         // The entries this call adds, which is what the response reports. `transcript` keeps the
         // full conversation because each iteration rebuilds the request from it.
         var entries: [Transcript.Entry] = []
+        var usage = ReportedUsage()
 
         // Multi-turn conversation loop for tool calling
         while true {
@@ -306,10 +307,13 @@ public struct GeminiLanguageModel: LanguageModel {
                 body: body
             )
 
+            usage.add(response.usageMetadata?.reportedUsage)
+
             guard let firstCandidate = response.candidates.first else {
                 throw GeminiError.noCandidate
             }
 
+            let providerMetadata = try textPartMetadata(firstCandidate.content.parts ?? [])
             let functionCalls: [GeminiFunctionCall] =
                 firstCandidate.content.parts?.compactMap { part in
                     if case .functionCall(let call) = part { return call }
@@ -322,18 +326,19 @@ public struct GeminiLanguageModel: LanguageModel {
                 switch resolution {
                 case .stop(let calls):
                     if !calls.isEmpty {
-                        entries.append(.toolCalls(Transcript.ToolCalls(calls)))
+                        entries.append(.toolCalls(Transcript.ToolCalls(calls, providerMetadata: providerMetadata)))
                     }
                     let empty = try emptyResponseContent(for: type)
                     return LanguageModelSession.Response(
                         content: empty.content,
                         rawContent: empty.rawContent,
-                        transcriptEntries: ArraySlice(entries)
+                        transcriptEntries: ArraySlice(entries),
+                        usage: usage.value
                     )
                 case .invocations(let invocations):
                     if !invocations.isEmpty {
                         let calls = Transcript.Entry.toolCalls(
-                            Transcript.ToolCalls(invocations.map(\.call))
+                            Transcript.ToolCalls(invocations.map(\.call), providerMetadata: providerMetadata)
                         )
                         transcript.append(calls)
                         entries.append(calls)
@@ -362,7 +367,9 @@ public struct GeminiLanguageModel: LanguageModel {
                     return LanguageModelSession.Response(
                         content: text as! Content,
                         rawContent: GeneratedContent(text),
-                        transcriptEntries: ArraySlice(entries)
+                        transcriptEntries: ArraySlice(entries),
+                        usage: usage.value,
+                        providerMetadata: providerMetadata
                     )
                 }
 
@@ -371,7 +378,9 @@ public struct GeminiLanguageModel: LanguageModel {
                 return LanguageModelSession.Response(
                     content: content,
                     rawContent: generatedContent,
-                    transcriptEntries: ArraySlice(entries)
+                    transcriptEntries: ArraySlice(entries),
+                    usage: usage.value,
+                    providerMetadata: providerMetadata
                 )
             }
         }
@@ -426,38 +435,59 @@ public struct GeminiLanguageModel: LanguageModel {
                         )
 
                     var accumulatedText = ""
+                    var accumulatedParts: [GeminiPart] = []
+                    var usage = ReportedUsage()
+
+                    func snapshot() throws -> LanguageModelSession.ResponseStream<Content>.Snapshot? {
+                        var raw: GeneratedContent
+                        let content: Content.PartiallyGenerated?
+
+                        if type == String.self {
+                            raw = GeneratedContent(accumulatedText)
+                            content = (accumulatedText as! Content).asPartiallyGenerated()
+                        } else {
+                            raw =
+                                (try? GeneratedContent(json: accumulatedText))
+                                ?? GeneratedContent(accumulatedText)
+                            if let parsed = try? type.init(raw) {
+                                content = parsed.asPartiallyGenerated()
+                            } else {
+                                // Skip invalid partial JSON until it parses cleanly.
+                                content = nil
+                            }
+                        }
+
+                        guard let content else { return nil }
+                        return .init(
+                            content: content,
+                            rawContent: raw,
+                            usage: usage.value,
+                            providerMetadata: try textPartMetadata(accumulatedParts)
+                        )
+                    }
 
                     for try await chunk in stream {
-                        guard let candidate = chunk.candidates.first else { continue }
+                        let chunkUsage = chunk.usageMetadata?.reportedUsage
+                        usage.merge(chunkUsage)
 
-                        if let parts = candidate.content.parts {
+                        var yieldedText = false
+                        if let parts = chunk.candidates.first?.content.parts {
                             for part in parts {
                                 if case .text(let textPart) = part {
                                     accumulatedText += textPart.text
+                                    accumulatedParts.append(part)
 
-                                    var raw: GeneratedContent
-                                    let content: Content.PartiallyGenerated?
-
-                                    if type == String.self {
-                                        raw = GeneratedContent(accumulatedText)
-                                        content = (accumulatedText as! Content).asPartiallyGenerated()
-                                    } else {
-                                        raw =
-                                            (try? GeneratedContent(json: accumulatedText))
-                                            ?? GeneratedContent(accumulatedText)
-                                        if let parsed = try? type.init(raw) {
-                                            content = parsed.asPartiallyGenerated()
-                                        } else {
-                                            // Skip invalid partial JSON until it parses cleanly.
-                                            content = nil
-                                        }
-                                    }
-
-                                    if let content {
-                                        continuation.yield(.init(content: content, rawContent: raw))
+                                    if let snapshot = try snapshot() {
+                                        continuation.yield(snapshot)
+                                        yieldedText = true
                                     }
                                 }
                             }
+                        }
+
+                        // A chunk that only reports usage still updates the counts.
+                        if chunkUsage != nil, !yieldedText, let snapshot = try snapshot() {
+                            continuation.yield(snapshot)
                         }
                     }
 
@@ -734,7 +764,7 @@ private func toGeneratedContent(_ value: [String: JSONValue]?) throws -> Generat
 }
 
 private func fromGeneratedContent(_ content: GeneratedContent) throws -> [String: JSONValue] {
-    let data = try JSONEncoder().encode(content)
+    let data = Data(content.jsonString.utf8)
     let jsonValue = try JSONDecoder().decode(JSONValue.self, from: data)
 
     guard case .object(let dict) = jsonValue else {
@@ -790,7 +820,8 @@ extension Transcript {
                 messages.append(
                     .init(
                         role: .model,
-                        parts: convertSegmentsToGeminiParts(response.segments)
+                        parts: restoreTextParts(from: response.providerMetadata)
+                            ?? convertSegmentsToGeminiParts(response.segments)
                     )
                 )
             case .toolCalls(let toolCalls):
@@ -808,7 +839,8 @@ extension Transcript {
                 messages.append(
                     .init(
                         role: .model,
-                        parts: functionCallParts
+                        parts: restoreTextParts(from: toolCalls.providerMetadata, around: functionCallParts)
+                            ?? functionCallParts
                     )
                 )
             case .toolOutput(let toolOutput):
@@ -901,6 +933,7 @@ private enum GeminiPart: Codable, Sendable {
         case functionCall
         case functionResponse
         case thoughtSignature
+        case thought
         case inlineData
         case fileData
     }
@@ -910,7 +943,13 @@ private enum GeminiPart: Codable, Sendable {
 
         if container.contains(.text) {
             let text = try container.decode(String.self, forKey: .text)
-            self = .text(GeminiTextPart(text: text))
+            self = .text(
+                GeminiTextPart(
+                    text: text,
+                    thoughtSignature: try container.decodeIfPresent(String.self, forKey: .thoughtSignature),
+                    thought: try container.decodeIfPresent(Bool.self, forKey: .thought)
+                )
+            )
         } else if container.contains(.functionCall) {
             // `thoughtSignature` is a sibling of `functionCall` within the part, not a member of it.
             // Thinking models require it to be echoed back verbatim, so it travels with the call.
@@ -923,6 +962,14 @@ private enum GeminiPart: Codable, Sendable {
             self = .inlineData(try container.decode(GeminiInlineData.self, forKey: .inlineData))
         } else if container.contains(.fileData) {
             self = .fileData(try container.decode(GeminiFileData.self, forKey: .fileData))
+        } else if container.contains(.thoughtSignature) {
+            // Streaming may deliver a signature in a final part without text.
+            self = .text(
+                GeminiTextPart(
+                    text: "",
+                    thoughtSignature: try container.decode(String.self, forKey: .thoughtSignature)
+                )
+            )
         } else {
             throw DecodingError.dataCorrupted(
                 DecodingError.Context(
@@ -938,6 +985,8 @@ private enum GeminiPart: Codable, Sendable {
         switch self {
         case .text(let part):
             try container.encode(part.text, forKey: .text)
+            try container.encodeIfPresent(part.thoughtSignature, forKey: .thoughtSignature)
+            try container.encodeIfPresent(part.thought, forKey: .thought)
         case .functionCall(let call):
             try container.encode(call, forKey: .functionCall)
             try container.encodeIfPresent(call.thoughtSignature, forKey: .thoughtSignature)
@@ -953,6 +1002,43 @@ private enum GeminiPart: Codable, Sendable {
 
 private struct GeminiTextPart: Codable, Sendable {
     let text: String
+    var thoughtSignature: String? = nil
+    var thought: Bool? = nil
+}
+
+private let textPartsMetadataKey = "gemini.textParts"
+
+private struct GeminiTextHistoryPart: Codable {
+    let index: Int
+    let part: GeminiTextPart
+}
+
+// Keep signed text on its original part,
+// including unsigned siblings and their order relative to function calls.
+// Call arguments remain in the transcript's semantic representation.
+private func textPartMetadata(_ parts: [GeminiPart]) throws -> [String: String]? {
+    let textParts = parts.enumerated().compactMap { index, part -> GeminiTextHistoryPart? in
+        guard case .text(let text) = part else { return nil }
+        return GeminiTextHistoryPart(index: index, part: text)
+    }
+    guard textParts.contains(where: { $0.part.thoughtSignature != nil }) else { return nil }
+    let data = try JSONEncoder().encode(textParts)
+    return [textPartsMetadataKey: String(decoding: data, as: UTF8.self)]
+}
+
+private func restoreTextParts(
+    from metadata: [String: String]?,
+    around functionCalls: [GeminiPart] = []
+) -> [GeminiPart]? {
+    guard let json = metadata?[textPartsMetadataKey],
+        let textParts = try? JSONDecoder().decode([GeminiTextHistoryPart].self, from: Data(json.utf8))
+    else { return nil }
+    var parts = functionCalls
+    for text in textParts {
+        guard (0 ... parts.count).contains(text.index) else { return nil }
+        parts.insert(.text(text.part), at: text.index)
+    }
+    return parts
 }
 
 private struct GeminiInlineData: Codable, Sendable {
@@ -1025,11 +1111,12 @@ private struct GeminiFunctionResponse: Codable, Sendable {
 }
 
 private struct GeminiGenerateContentResponse: Codable, Sendable {
-    let candidates: [GeminiCandidate]
+    var candidates: [GeminiCandidate] { decodedCandidates ?? [] }
+    private let decodedCandidates: [GeminiCandidate]?
     let usageMetadata: GeminiUsageMetadata?
 
     enum CodingKeys: String, CodingKey {
-        case candidates
+        case decodedCandidates = "candidates"
         case usageMetadata = "usageMetadata"
     }
 }
@@ -1046,12 +1133,34 @@ private struct GeminiCandidate: Codable, Sendable {
 
 private struct GeminiUsageMetadata: Codable, Sendable {
     let promptTokenCount: Int?
+    let toolUsePromptTokenCount: Int?
+    let cachedContentTokenCount: Int?
     let candidatesTokenCount: Int?
     let totalTokenCount: Int?
     let thoughtsTokenCount: Int?
 
+    var reportedUsage: ReportedUsage? {
+        func sum(_ lhs: Int?, _ rhs: Int?) -> Int? {
+            guard lhs != nil || rhs != nil else { return nil }
+            return (lhs ?? 0) + (rhs ?? 0)
+        }
+        // Gemini reports tool-use prompts and reasoning separately from the main counts.
+        return ReportedUsage(
+            input: .init(
+                totalTokenCount: sum(promptTokenCount, toolUsePromptTokenCount),
+                cachedTokenCount: cachedContentTokenCount
+            ),
+            output: .init(
+                totalTokenCount: sum(candidatesTokenCount, thoughtsTokenCount),
+                reasoningTokenCount: thoughtsTokenCount
+            )
+        ).normalized
+    }
+
     enum CodingKeys: String, CodingKey {
         case promptTokenCount
+        case toolUsePromptTokenCount
+        case cachedContentTokenCount
         case candidatesTokenCount
         case totalTokenCount
         case thoughtsTokenCount

@@ -1,4 +1,5 @@
 import Testing
+import Foundation
 
 @testable import AnyLanguageModel
 
@@ -194,11 +195,17 @@ import Testing
         }
 
         @available(macOS 26.0, iOS 26.0, watchOS 26.0, tvOS 26.0, visionOS 26.0, *)
-        @Test func convertReferenceSchema() {
-            let schema: JSONSchema = .reference("SomeType")
-            // Reference schemas need the referenced type in dependencies
-            // This test just verifies the conversion doesn't crash
-            _ = convertToDynamicSchema(schema)
+        @Test(arguments: ["SomeType", "#/$defs/SomeType"])
+        func convertReferenceSchema(reference: String) throws {
+            let schema: JSONSchema = .reference(reference)
+            let dependency = FoundationModels.DynamicGenerationSchema(
+                name: "SomeType",
+                properties: [.init(name: "value", schema: .init(type: String.self))]
+            )
+            _ = try FoundationModels.GenerationSchema(
+                root: convertToDynamicSchema(schema),
+                dependencies: [dependency]
+            )
         }
 
         @available(macOS 26.0, iOS 26.0, watchOS 26.0, tvOS 26.0, visionOS 26.0, *)
@@ -346,6 +353,16 @@ import Testing
         }
 
         // MARK: - Integration with AnyLanguageModel.GenerationSchema
+
+        @available(macOS 26.0, iOS 26.0, watchOS 26.0, tvOS 26.0, visionOS 26.0, *)
+        @Test func convertSchemaWithGenerableArrayProperty() throws {
+            let schema = FoundationModels.GenerationSchema(ArrayGenerationSchemaTests.Response.generationSchema)
+            let data = try JSONEncoder().encode(schema)
+            let json = try #require(JSONSerialization.jsonObject(with: data) as? [String: Any])
+            let properties = try #require(json["properties"] as? [String: Any])
+            #expect(properties["title"] != nil)
+            #expect(properties["items"] != nil)
+        }
 
         @available(macOS 26.0, iOS 26.0, watchOS 26.0, tvOS 26.0, visionOS 26.0, *)
         @Test func convertFromAnyLanguageModelGenerationSchema() {

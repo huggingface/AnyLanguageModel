@@ -433,6 +433,7 @@ public struct AnthropicLanguageModel: LanguageModel {
         )
 
         var entries: [Transcript.Entry] = []
+        let usage = message.usage?.reportedUsage?.value ?? .zero
 
         // Handle tool calls, if present
         let toolUses: [AnthropicToolUse] = message.content.compactMap { block in
@@ -451,7 +452,8 @@ public struct AnthropicLanguageModel: LanguageModel {
                 return LanguageModelSession.Response(
                     content: empty.content,
                     rawContent: empty.rawContent,
-                    transcriptEntries: ArraySlice(entries)
+                    transcriptEntries: ArraySlice(entries),
+                    usage: usage
                 )
             case .invocations(let invocations):
                 if !invocations.isEmpty {
@@ -474,7 +476,8 @@ public struct AnthropicLanguageModel: LanguageModel {
             return LanguageModelSession.Response(
                 content: text as! Content,
                 rawContent: GeneratedContent(text),
-                transcriptEntries: ArraySlice(entries)
+                transcriptEntries: ArraySlice(entries),
+                usage: usage
             )
         }
 
@@ -483,7 +486,8 @@ public struct AnthropicLanguageModel: LanguageModel {
         return LanguageModelSession.Response(
             content: content,
             rawContent: rawContent,
-            transcriptEntries: ArraySlice(entries)
+            transcriptEntries: ArraySlice(entries),
+            usage: usage
         )
     }
 
@@ -532,6 +536,8 @@ public struct AnthropicLanguageModel: LanguageModel {
                         )
 
                     var accumulatedText = ""
+                    var usage = ReportedUsage()
+                    var lastSnapshot: LanguageModelSession.ResponseStream<Content>.Snapshot?
                     let expectsStructuredResponse = type != String.self
 
                     for try await event in events {
@@ -541,22 +547,55 @@ public struct AnthropicLanguageModel: LanguageModel {
                                 accumulatedText += textDelta.text
 
                                 if expectsStructuredResponse {
-                                    if let snapshot: LanguageModelSession.ResponseStream<Content>.Snapshot =
+                                    if var snapshot: LanguageModelSession.ResponseStream<Content>.Snapshot =
                                         try? partialSnapshot(from: accumulatedText)
                                     {
+                                        snapshot.usage = usage.value
+                                        lastSnapshot = snapshot
                                         continuation.yield(snapshot)
                                     }
                                 } else {
                                     let raw = GeneratedContent(accumulatedText)
                                     let content: Content.PartiallyGenerated = (accumulatedText as! Content)
                                         .asPartiallyGenerated()
-                                    continuation.yield(.init(content: content, rawContent: raw))
+                                    let snapshot = LanguageModelSession.ResponseStream<Content>.Snapshot(
+                                        content: content,
+                                        rawContent: raw,
+                                        usage: usage.value
+                                    )
+                                    lastSnapshot = snapshot
+                                    continuation.yield(snapshot)
+                                }
+                            }
+                        case .messageStart(let start):
+                            usage.merge(start.message.usage?.reportedUsage)
+                        case .messageDelta(let delta):
+                            usage.merge(delta.usage?.reportedUsage)
+                            if delta.usage?.reportedUsage != nil {
+                                if var snapshot = lastSnapshot {
+                                    snapshot.usage = usage.value
+                                    lastSnapshot = snapshot
+                                    continuation.yield(snapshot)
+                                } else if let snapshot = LanguageModelSession.ResponseStream<Content>.Snapshot(
+                                    text: accumulatedText,
+                                    usage: usage.value
+                                ) {
+                                    lastSnapshot = snapshot
+                                    continuation.yield(snapshot)
                                 }
                             }
                         case .messageStop:
+                            if lastSnapshot == nil, !usage.isEmpty,
+                                let snapshot = LanguageModelSession.ResponseStream<Content>.Snapshot(
+                                    text: accumulatedText,
+                                    usage: usage.value
+                                )
+                            {
+                                continuation.yield(snapshot)
+                            }
                             continuation.finish()
                             return
-                        case .messageStart, .contentBlockStart, .contentBlockStop, .messageDelta, .ping, .ignored:
+                        case .contentBlockStart, .contentBlockStop, .ping, .ignored:
                             break
                         }
                     }
@@ -1101,9 +1140,10 @@ private struct AnthropicMessageResponse: Codable, Sendable {
     let content: [AnthropicContent]
     let model: String
     let stopReason: StopReason?
+    let usage: AnthropicUsage?
 
     enum CodingKeys: String, CodingKey {
-        case id, type, role, content, model
+        case id, type, role, content, model, usage
         case stopReason = "stop_reason"
     }
 
@@ -1280,6 +1320,7 @@ private enum AnthropicStreamEvent: Codable, Sendable {
     }
 
     struct MessageDeltaEvent: Codable, Sendable {
+        let usage: AnthropicUsage?
         let type: String
         let delta: Delta
 
@@ -1292,5 +1333,36 @@ private enum AnthropicStreamEvent: Codable, Sendable {
                 case stopSequence = "stop_sequence"
             }
         }
+    }
+}
+
+private struct AnthropicUsage: Codable, Sendable {
+    let inputTokens: Int?
+    let outputTokens: Int?
+    let cacheReadInputTokens: Int?
+    let cacheCreationInputTokens: Int?
+
+    enum CodingKeys: String, CodingKey {
+        case inputTokens = "input_tokens"
+        case outputTokens = "output_tokens"
+        case cacheReadInputTokens = "cache_read_input_tokens"
+        case cacheCreationInputTokens = "cache_creation_input_tokens"
+    }
+
+    var reportedUsage: ReportedUsage? {
+        // Anthropic reports uncached input, cache reads, and cache writes separately.
+        let inputCounts = [inputTokens, cacheReadInputTokens, cacheCreationInputTokens].compactMap { $0 }
+        var metadata: [String: GeneratedContent] = [:]
+        if let cacheCreationInputTokens {
+            metadata["cache_creation_input_tokens"] = GeneratedContent(cacheCreationInputTokens)
+        }
+        return ReportedUsage(
+            input: .init(
+                totalTokenCount: inputCounts.isEmpty ? nil : inputCounts.reduce(0, +),
+                cachedTokenCount: cacheReadInputTokens
+            ),
+            output: .init(totalTokenCount: outputTokens),
+            metadata: metadata
+        ).normalized
     }
 }

@@ -434,6 +434,66 @@ actor ToolExecutionObserver: ToolExecutionDelegate {
 session.toolExecutionDelegate = ToolExecutionObserver()
 ```
 
+### Token Usage
+
+Inspect token counts with `response.usage`
+and track accumulated usage with `session.usage`:
+
+```swift
+let session = LanguageModelSession(model: model)
+let response = try await session.respond(to: "Explain how rainbows form.")
+let usage = response.usage
+
+print("Input tokens:", usage.input.totalTokenCount)
+print("Cached input tokens:", usage.input.cachedTokenCount)
+print("Output tokens:", usage.output.totalTokenCount)
+print("Reasoning tokens:", usage.output.reasoningTokenCount)
+print("Total tokens:", usage.totalTokenCount)
+print("Session total:", session.usage.totalTokenCount)
+```
+
+OpenAI (Chat Completions and Responses),
+Open Responses, Anthropic, Google Gemini, Ollama,
+MLX, llama.cpp, and Core ML report token usage.
+Counts follow each provider's definitions.
+For providers that support multi-round tool execution,
+response usage includes all tool rounds performed within that response.
+Usage and individual counts are non-optional;
+counts that a provider doesn't report default to zero.
+
+Streaming snapshots carry the latest reported counts,
+which may arrive after the last text update.
+MLX and llama.cpp report totals after each generation round;
+Core ML updates counts as token sequences arrive
+and reconciles them with the final returned sequence.
+Local adapters count prepared prompt tokens and generated tokens,
+including tool-call output and forced JSON syntax for structured generation.
+MLX and llama.cpp include reused prompt tokens in the input total
+and report the prefix actually reused as cached input.
+Core ML reports zero cached tokens because it resets model state.
+Multimodal counts follow the runtime's prepared input definition:
+llama.cpp includes native image-chunk tokens,
+and MLX uses its prepared input-token count without estimating extra image costs.
+Structured streams from MLX, llama.cpp, and Core ML
+yield one completed snapshot with usage.
+`collect()` preserves the final snapshot's usage.
+Session usage increases as responses and snapshots report counts,
+without counting the same tokens more than once.
+Reported counts remain included if a stream later fails.
+A session restored from a transcript starts with zero accumulated usage.
+
+Models can provide additional statistics in `usage.metadata`,
+a dictionary of `GeneratedContent` values.
+The initializer accepts values that conform to `ConvertibleToGeneratedContent`.
+When accumulating session usage,
+the latest value is kept for each metadata key.
+
+> [!NOTE]
+> Token usage extends the Foundation Models 26 API
+> and follows the documented
+> [Foundation Models 27 usage API](https://developer.apple.com/documentation/foundationmodels/languagemodelsession/usage-swift.struct).
+> `Codable` and `Equatable` support are AnyLanguageModel extensions.
+
 ## Providers
 
 ### Apple Foundation Models

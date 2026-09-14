@@ -149,6 +149,32 @@ struct StructuredGenerationTests {
         var generator = try ConstrainedJSONGenerator(backend: backend, schema: schema)
         let result = try await generator.generate()
         #expect(result == "\"\"")
+        #expect(generator.generatedTokenCount == 2)
+    }
+
+    @Test func usageCountsConsumedBudgetWhenForcedSyntaxExhaustsIt() async throws {
+        let maps = baseTokenMaps()
+        let schema = GenerationSchema.primitive(
+            String.self,
+            node: .string(.init(description: nil, pattern: nil, enumChoices: ["ab"]))
+        )
+        let backend = MockTokenBackend(
+            tokenToText: maps.tokenToText,
+            textToTokens: maps.textToTokens,
+            eosToken: 50,
+            endTokens: [50],
+            maximumTokens: 3
+        )
+        var generator = try ConstrainedJSONGenerator(backend: backend, schema: schema)
+        #expect(generator.generatedTokenCount == 0)
+        do {
+            _ = try await generator.generate()
+            Issue.record("Expected token budget exhaustion")
+        } catch ConstrainedGenerationError.tokenBudgetExceeded {
+            // The failed closing quote consumes no additional token.
+        }
+        #expect(generator.generatedTokenCount == 3)
+        #expect(backend.capture.decodedText == #""ab"#)
     }
 
     @Test func prefixEnumSelectsLongerCandidateDeterministically() async throws {
@@ -171,6 +197,7 @@ struct StructuredGenerationTests {
         var generator = try ConstrainedJSONGenerator(backend: backend, schema: schema)
         let result = try await generator.generate()
         #expect(result == "\"ab\"")
+        #expect(generator.generatedTokenCount == 4)
     }
 
     @Test func eosStopsGenerationAndReturnsPartialOutput() async throws {
@@ -195,6 +222,7 @@ struct StructuredGenerationTests {
         var generator = try ConstrainedJSONGenerator(backend: backend, schema: schema)
         let result = try await generator.generate()
         #expect(result == "\"a")
+        #expect(generator.generatedTokenCount == 2)
     }
 
     @Test func multiTokenStructuralEncodingThrows() throws {
@@ -673,6 +701,8 @@ struct StructuredGenerationTests {
     ) {
         // Structural + single-letter keys so `"x":` / `,"y":` tokenize without collisions.
         var maps = baseTokenMaps()
+        maps.tokenToText[15] = "{"
+        maps.textToTokens["{"] = [15]
         let quote = 0
         let comma = 1
         let colon = 4
@@ -805,6 +835,8 @@ struct StructuredGenerationTests {
         var generator = try ConstrainedJSONGenerator(backend: backend, schema: schema)
         let result = try await generator.generate()
         #expect(result == #"{"x":"a"}"#)
+        #expect(generator.generatedTokenCount == backend.capture.tokens.count)
+        #expect(generator.generatedTokenCount == 9)
     }
 
     @Test func emptyObjectWhenModelClosesImmediately() async throws {
@@ -825,6 +857,7 @@ struct StructuredGenerationTests {
         var generator = try ConstrainedJSONGenerator(backend: backend, schema: schema)
         let result = try await generator.generate()
         #expect(result == "{}")
+        #expect(generator.generatedTokenCount == 2)
     }
 
     // MARK: - Decimal / number token mask

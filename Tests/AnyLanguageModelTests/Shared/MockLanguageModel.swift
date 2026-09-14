@@ -5,6 +5,7 @@ struct MockLanguageModel: LanguageModel {
         case custom(String)
     }
 
+    var usage: LanguageModelSession.Usage = .zero
     var availabilityProvider: @Sendable () -> Availability<UnavailableReason>
     var responseProvider: @Sendable (Prompt, GenerationOptions) async throws -> String
 
@@ -39,7 +40,8 @@ struct MockLanguageModel: LanguageModel {
         return LanguageModelSession.Response(
             content: text as! Content,
             rawContent: GeneratedContent(text),
-            transcriptEntries: []
+            transcriptEntries: [],
+            usage: usage
         )
     }
 
@@ -65,7 +67,8 @@ struct MockLanguageModel: LanguageModel {
                     let generatedContent = GeneratedContent(text)
                     let snapshot = LanguageModelSession.ResponseStream<Content>.Snapshot(
                         content: (text as! Content).asPartiallyGenerated(),
-                        rawContent: generatedContent
+                        rawContent: generatedContent,
+                        usage: usage
                     )
                     continuation.yield(snapshot)
                     continuation.finish()

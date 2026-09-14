@@ -664,7 +664,7 @@ import Foundation
             maxTokens: Int,
             options: ResolvedGenerationOptions,
             onToken: (String) -> Bool
-        ) throws {
+        ) throws -> LanguageModelSession.Usage {
             guard let model = self.model, let vocab = llama_model_get_vocab(model) else {
                 throw LlamaLanguageModelError.contextInitializationFailed
             }
@@ -677,7 +677,7 @@ import Foundation
             if llama_model_has_encoder(model) {
                 let context = try makeFreshContext(options: options)
                 defer { llama_free(context) }
-                try performTokenGeneration(
+                return try performTokenGeneration(
                     context: context,
                     vocab: vocab,
                     promptTokens: promptTokens,
@@ -686,7 +686,6 @@ import Foundation
                     options: options,
                     onToken: onToken
                 )
-                return
             }
 
             let (context, startIndex) = try acquireSessionContext(
@@ -699,7 +698,7 @@ import Foundation
             llama_set_n_threads(context, options.threads, options.threads)
 
             do {
-                try performTokenGeneration(
+                return try performTokenGeneration(
                     context: context,
                     vocab: vocab,
                     promptTokens: promptTokens,
@@ -974,6 +973,7 @@ import Foundation
                 var previousToolCallSignature: String?
                 var allEntries: [Transcript.Entry] = []
                 var text = ""
+                var usage = LanguageModelSession.Usage.zero
 
                 generationLoop: while true {
                     var promptImages: [Data] = []
@@ -998,8 +998,9 @@ import Foundation
                         return true
                     }
 
+                    let roundUsage: LanguageModelSession.Usage
                     if promptImages.isEmpty {
-                        try generateChatText(
+                        roundUsage = try generateChatText(
                             session: session,
                             prompt: fullPrompt,
                             maxTokens: maxTokens,
@@ -1010,7 +1011,7 @@ import Foundation
                         discardCachedSessionContext()
                         let context = try makeFreshContext(options: runtimeOptions)
                         defer { llama_free(context) }
-                        try performMultimodalGeneration(
+                        roundUsage = try performMultimodalGeneration(
                             context: context,
                             prompt: fullPrompt,
                             images: promptImages,
@@ -1019,6 +1020,8 @@ import Foundation
                             onToken: collectToken
                         )
                     }
+
+                    usage.add(roundUsage)
 
                     guard let format = toolContext?.format else {
                         text = outputFormat.streamingVisibleText(
@@ -1062,7 +1065,8 @@ import Foundation
                         return LanguageModelSession.Response(
                             content: "" as! Content,
                             rawContent: GeneratedContent(""),
-                            transcriptEntries: ArraySlice(allEntries)
+                            transcriptEntries: ArraySlice(allEntries),
+                            usage: usage
                         )
                     case .invocations(let invocations):
                         guard !invocations.isEmpty else {
@@ -1084,7 +1088,8 @@ import Foundation
                 return LanguageModelSession.Response(
                     content: text as! Content,
                     rawContent: GeneratedContent(text),
-                    transcriptEntries: ArraySlice(allEntries)
+                    transcriptEntries: ArraySlice(allEntries),
+                    usage: usage
                 )
             } else {
                 var promptImages: [Data] = []
@@ -1114,7 +1119,7 @@ import Foundation
                 let context = try makeFreshContext(options: runtimeOptions)
                 defer { llama_free(context) }
                 let maxTokens = structuredOptions.maximumResponseTokens ?? 512
-                let jsonString = try await generateStructuredJSON(
+                let (jsonString, usage) = try await generateStructuredJSON(
                     context: context,
                     prompt: fullPrompt,
                     schema: type.generationSchema,
@@ -1126,7 +1131,8 @@ import Foundation
                 return LanguageModelSession.Response(
                     content: content,
                     rawContent: generatedContent,
-                    transcriptEntries: ArraySlice([])
+                    transcriptEntries: ArraySlice([]),
+                    usage: usage
                 )
             }
         }
@@ -1138,9 +1144,14 @@ import Foundation
             includeSchemaInPrompt: Bool,
             options: GenerationOptions
         ) -> sending LanguageModelSession.ResponseStream<Content> where Content: Generable {
-            // For now, only String is supported
             guard type == String.self else {
-                fatalError("LlamaLanguageModel only supports generating String content")
+                return streamStructuredResponse(
+                    within: session,
+                    to: prompt,
+                    generating: type,
+                    includeSchemaInPrompt: includeSchemaInPrompt,
+                    options: options
+                )
             }
 
             if mmprojPath == nil {
@@ -1170,6 +1181,7 @@ import Foundation
                             var previousToolCallSignature: String?
                             var accumulatedEntries: [Transcript.Entry] = []
                             var emittedBase = ""
+                            var usage = LanguageModelSession.Usage.zero
                             var lastYieldedText: String?
                             let imageMarker =
                                 self.mtmdContext != nil ? String(cString: mtmd_default_marker()) : nil
@@ -1179,7 +1191,8 @@ import Foundation
                                 let snapshot = LanguageModelSession.ResponseStream<Content>.Snapshot(
                                     content: (text as! Content).asPartiallyGenerated(),
                                     rawContent: GeneratedContent(text),
-                                    transcriptEntries: ArraySlice(accumulatedEntries)
+                                    transcriptEntries: ArraySlice(accumulatedEntries),
+                                    usage: usage
                                 )
                                 continuation.yield(snapshot)
                             }
@@ -1216,8 +1229,9 @@ import Foundation
                                     return true
                                 }
 
+                                let roundUsage: LanguageModelSession.Usage
                                 if promptImages.isEmpty {
-                                    try self.generateChatText(
+                                    roundUsage = try self.generateChatText(
                                         session: session,
                                         prompt: fullPrompt,
                                         maxTokens: maxTokens,
@@ -1228,7 +1242,7 @@ import Foundation
                                     self.discardCachedSessionContext()
                                     let context = try self.makeFreshContext(options: runtimeOptions)
                                     defer { llama_free(context) }
-                                    try self.performMultimodalGeneration(
+                                    roundUsage = try self.performMultimodalGeneration(
                                         context: context,
                                         prompt: fullPrompt,
                                         images: promptImages,
@@ -1237,6 +1251,10 @@ import Foundation
                                         onToken: collectToken
                                     )
                                 }
+
+                                usage.add(roundUsage)
+                                // Publish counts before tool execution, which may stop or fail.
+                                yieldSnapshot(lastYieldedText ?? emittedBase)
 
                                 if Task.isCancelled {
                                     break generationLoop
@@ -1528,7 +1546,7 @@ import Foundation
             schema: GenerationSchema,
             maxTokens: Int,
             options: ResolvedGenerationOptions
-        ) async throws -> String {
+        ) async throws -> (String, LanguageModelSession.Usage) {
             guard let vocab = llama_model_get_vocab(model!) else {
                 throw LlamaLanguageModelError.contextInitializationFailed
             }
@@ -1591,7 +1609,14 @@ import Foundation
                 tokenToTextFn: { [self] token in self.tokenToText(vocab: vocab, token: llama_token(token)) }
             )
             var generator = try ConstrainedJSONGenerator(backend: backend, schema: schema, tokenCache: tokenCache)
-            return try await generator.generate()
+            let json = try await generator.generate()
+            return (
+                json,
+                LocalGenerationUsage(
+                    promptTokenCount: promptTokens.count,
+                    generatedTokenCount: generator.generatedTokenCount
+                ).value
+            )
         }
 
         private struct LlamaTokenBackend: TokenBackend {
@@ -1760,7 +1785,7 @@ import Foundation
             maxTokens: Int,
             options: ResolvedGenerationOptions,
             onToken: (String) -> Bool
-        ) throws {
+        ) throws -> LanguageModelSession.Usage {
             guard let model = self.model else {
                 throw LlamaLanguageModelError.modelLoadFailed
             }
@@ -1820,6 +1845,10 @@ import Foundation
             // Track position - for encoder-decoder models, we start from position 1 (after decoder start token)
             // For decoder-only models, we continue from the end of the prompt
             var n_cur: Int32 = hasEncoder ? 1 : Int32(promptTokens.count)
+            var counts = LocalGenerationUsage(
+                promptTokenCount: promptTokens.count,
+                cachedTokenCount: startIndex
+            )
             var decodedTokens = promptTokens
 
             for _ in 0 ..< maxTokens {
@@ -1832,7 +1861,7 @@ import Foundation
                 llama_sampler_accept(sampler, nextToken)
 
                 // Check for end of sequence
-                if llama_vocab_is_eog(vocab, nextToken) {
+                if !counts.acceptToken(isEndOfGeneration: llama_vocab_is_eog(vocab, nextToken)) {
                     break
                 }
 
@@ -1863,6 +1892,15 @@ import Foundation
             }
 
             recordCachedTokens(decodedTokens, context: context)
+            return counts.value
+        }
+
+        /// Count native chunks, including images; their positional spans are not token counts.
+        internal static func multimodalPromptTokenCount(
+            chunkCount: Int,
+            tokenCountAtIndex: (Int) -> Int
+        ) -> Int {
+            (0 ..< chunkCount).reduce(0) { $0 + tokenCountAtIndex($1) }
         }
 
         /// Evaluates a marker-annotated multimodal prompt through the projector,
@@ -1874,13 +1912,14 @@ import Foundation
             maxTokens: Int,
             options: ResolvedGenerationOptions,
             onToken: (String) -> Bool
-        ) throws {
+        ) throws -> LanguageModelSession.Usage {
             guard let mtmdContext, let model = self.model,
                 let vocab = llama_model_get_vocab(model)
             else {
                 throw LlamaLanguageModelError.contextInitializationFailed
             }
 
+            var promptTokenCount = 0
             var pastPosition: llama_pos = 0
             try projectorLocked {
                 var bitmaps: [OpaquePointer?] = []
@@ -1935,6 +1974,11 @@ import Foundation
                     throw LlamaLanguageModelError.tokenizationFailed
                 }
 
+                // Multimodal token counts can differ from positional offsets (e.g. M-RoPE).
+                promptTokenCount = Self.multimodalPromptTokenCount(chunkCount: mtmd_input_chunks_size(chunks)) {
+                    Int(mtmd_input_chunk_get_n_tokens(mtmd_input_chunks_get(chunks, $0)))
+                }
+
                 let evalResult = mtmd_helper_eval_chunks(
                     mtmdContext,
                     context,
@@ -1975,6 +2019,7 @@ import Foundation
 
             var n_cur: Int32 = Int32(pastPosition)
             var sampleIndex: Int32 = -1
+            var counts = LocalGenerationUsage(promptTokenCount: promptTokenCount)
 
             for _ in 0 ..< maxTokens {
                 if Task.isCancelled {
@@ -1984,7 +2029,7 @@ import Foundation
                 let nextToken = llama_sampler_sample(samplerPtr, context, sampleIndex)
                 llama_sampler_accept(samplerPtr, nextToken)
 
-                if llama_vocab_is_eog(vocab, nextToken) {
+                if !counts.acceptToken(isEndOfGeneration: llama_vocab_is_eog(vocab, nextToken)) {
                     break
                 }
 
@@ -2010,6 +2055,7 @@ import Foundation
                 }
                 sampleIndex = 0
             }
+            return counts.value
         }
 
         // MARK: - Image Validation
