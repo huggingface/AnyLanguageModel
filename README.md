@@ -98,7 +98,7 @@ Add this package to your `Package.swift`:
 
 ```swift
 dependencies: [
-    .package(url: "https://github.com/huggingface/AnyLanguageModel", from: "0.11.0")
+    .package(url: "https://github.com/huggingface/AnyLanguageModel", from: "0.12.0")
 ]
 ```
 
@@ -126,7 +126,7 @@ To enable specific traits, specify them in your package's dependencies:
 dependencies: [
     .package(
         url: "https://github.com/huggingface/AnyLanguageModel.git",
-        from: "0.11.0",
+        from: "0.12.0",
         traits: ["CoreML", "MLX"] // Enable CoreML and MLX support
     )
 ]
@@ -143,7 +143,7 @@ dependencies: [
 > dependencies: [
 >     .package(
 >         url: "https://github.com/huggingface/AnyLanguageModel.git",
->         from: "0.11.0",
+>         from: "0.12.0",
 >         traits: ["CoreML", "MLX", "Llama"]
 >     ),
 >     .package(url: "https://github.com/huggingface/swift-transformers", from: "1.0.0"), // CoreML
@@ -316,8 +316,9 @@ All on-device models — Apple Foundation Models, Core ML, MLX, and llama.cpp �
 support guided generation,
 letting you request strongly typed outputs using `@Generable` and `@Guide`
 instead of parsing raw strings.
-Cloud providers (OpenAI, Open Responses, Anthropic, and Gemini)
-also support guided generation.
+Ollama and the cloud providers (OpenAI, Open Responses, Anthropic, and Gemini)
+also support guided generation,
+including nested `@Generable` types and arrays of them.
 For more details, see
 [Generating Swift data structures with guided generation](https://developer.apple.com/documentation/foundationmodels/generating-swift-data-structures-with-guided-generation).
 
@@ -362,10 +363,10 @@ Image support varies by provider:
 
 | Provider                | Image Inputs    |
 | ----------------------- | :-------------: |
-| Apple Foundation Models | —               |
+| Apple Foundation Models | OS 27+          |
 | Core ML                 | —               |
 | MLX                     | model-dependent |
-| llama.cpp               | —               |
+| llama.cpp               | model-dependent |
 | Ollama                  | model-dependent |
 | OpenAI                  | yes             |
 | Open Responses          | yes             |
@@ -375,10 +376,13 @@ Image support varies by provider:
 For MLX and Ollama,
 use a vision-capable model 
 (for example, a VLM or `-vl` variant).
+For llama.cpp,
+pass the model's multimodal projector with `mmprojPath:`.
 
 ### Tool Calling
 
-Tool calling is supported by all providers except llama.cpp.
+Tool calling is supported by all providers.
+For llama.cpp, it depends on the model's chat format.
 Define tools using the `Tool` protocol and pass them when creating a session:
 
 ```swift
@@ -529,7 +533,7 @@ Enable the trait in Package.swift:
 ```swift
 .package(
     url: "https://github.com/huggingface/AnyLanguageModel.git",
-    from: "0.11.0",
+    from: "0.12.0",
     traits: ["CoreML"]
 )
 ```
@@ -615,7 +619,7 @@ Enable the trait in Package.swift:
 ```swift
 .package(
     url: "https://github.com/huggingface/AnyLanguageModel.git",
-    from: "0.11.0",
+    from: "0.12.0",
     traits: ["MLX"]
 )
 ```
@@ -639,7 +643,7 @@ Enable the trait in Package.swift:
 ```swift
 .package(
     url: "https://github.com/huggingface/AnyLanguageModel.git",
-    from: "0.11.0",
+    from: "0.12.0",
     traits: ["Llama"]
 )
 ```
