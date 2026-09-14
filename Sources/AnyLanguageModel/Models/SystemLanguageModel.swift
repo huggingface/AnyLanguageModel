@@ -1,8 +1,6 @@
 #if canImport(FoundationModels)
-    import CoreGraphics
     import FoundationModels
     import Foundation
-    import ImageIO
     import PartialJSONDecoder
 
     import JSONSchema
@@ -820,6 +818,9 @@
     }
 
     #if compiler(>=6.4) && !os(tvOS)
+        import CoreGraphics
+        import ImageIO
+
         @available(macOS 27.0, iOS 27.0, visionOS 27.0, watchOS 27.0, *)
         extension FoundationModels.Transcript.ImageAttachment {
             fileprivate init?(_ imageSegment: Transcript.ImageSegment) {
