@@ -57,10 +57,14 @@
             self.systemModel = FoundationModels.SystemLanguageModel(adapter: adapter, guardrails: guardrails)
         }
 
-        /// The size of the context window in tokens.
-        nonisolated public var contextSize: Int {
-            systemModel.contextSize
-        }
+        #if compiler(>=6.3) && !os(tvOS) && !os(watchOS)
+            /// The size of the context window in tokens.
+            /// The underlying property is back-deployed to OS 26.0
+            /// but only declared in the 26.4 SDK and later.
+            nonisolated public var contextSize: Int {
+                systemModel.contextSize
+            }
+        #endif
 
         /// Whether the model accepts image input.
         nonisolated public var supportsImageInput: Bool {
