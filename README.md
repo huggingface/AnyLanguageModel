@@ -534,8 +534,10 @@ let response = try await session.respond {
 
 On OS 27, Foundation Models accepts any type that conforms to its `LanguageModel` protocol.
 `FoundationLanguageModel` wraps such a model so it works with everything in this package.
-Construct the model yourself, or hand the wrapper an async factory so an expensive load
-happens on the first request and you control when it is released.
+Construct the model yourself,
+or hand the wrapper an async factory
+so an expensive load happens on the first request
+and you control when it is released.
 
 ```swift
 let model = FoundationLanguageModel {
@@ -549,9 +551,10 @@ await model.unload()
 
 #### Core AI Models
 
-Apple's [coreai-models](https://github.com/apple/coreai-models) package exports language
-models for the Core AI engine, and its `CoreAILanguageModel` conforms to the Foundation Models
-protocol. Add the `CoreAILM` product from that package to your app and wrap the model:
+Apple's [coreai-models](https://github.com/apple/coreai-models) package
+exports language models for the Core AI engine,
+and its `CoreAILanguageModel` conforms to the Foundation Models protocol.
+Add the `CoreAILM` product from that package to your app and wrap the model:
 
 ```swift
 import CoreAILanguageModels
@@ -562,15 +565,14 @@ let model = FoundationLanguageModel {
 let session = LanguageModelSession(model: model)
 ```
 
-The package declares a platform floor of OS 27, and Swift Package Manager will not add it to
-an app with an earlier deployment target. Binary targets are exempt from that check, so such
-an app can build the package as XCFrameworks instead. The community recipe at
-[coreai-models-xcframework](https://github.com/james-333i/coreai-models-xcframework) compiles
-an unmodified upstream checkout for iOS 27 with library evolution, lowers the minimum OS
-recorded in the objects so the app links, and ships an empty simulator slice. It is not
-supported here and comes with real caveats: the script edits Apple's manifest by text
-matching, the frameworks must be rebuilt after every Xcode update, and anything that reaches
-the modules outside an availability check crashes on earlier systems.
+`coreai-models` requires a deployment target of OS 27,
+so you can add it only to an app that already requires OS 27.
+If your app supports earlier releases,
+[coreai-models-xcframework](https://github.com/james-333i/coreai-models-xcframework)
+is a community recipe for shipping the package as prebuilt frameworks
+with the minimum OS lowered.
+The recipe isn't maintained here,
+and its README covers what can break.
 
 ### Core ML
 
