@@ -562,8 +562,15 @@ let model = FoundationLanguageModel {
 let session = LanguageModelSession(model: model)
 ```
 
-The package declares a platform floor of OS 27. Apps with an earlier deployment target can
-build it as an XCFramework and link it weakly, guarding every use with an availability check.
+The package declares a platform floor of OS 27, and Swift Package Manager will not add it to
+an app with an earlier deployment target. Binary targets are exempt from that check, so such
+an app can build the package as XCFrameworks instead. The community recipe at
+[coreai-models-xcframework](https://github.com/james-333i/coreai-models-xcframework) compiles
+an unmodified upstream checkout for iOS 27 with library evolution, lowers the minimum OS
+recorded in the objects so the app links, and ships an empty simulator slice. It is not
+supported here and comes with real caveats: the script edits Apple's manifest by text
+matching, the frameworks must be rebuilt after every Xcode update, and anything that reaches
+the modules outside an availability check crashes on earlier systems.
 
 ### Core ML
 
