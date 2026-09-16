@@ -122,6 +122,41 @@
             includeSchemaInPrompt: Bool,
             options: GenerationOptions
         ) async throws -> LanguageModelSession.Response<Content> where Content: Generable {
+            try await respond(
+                within: session,
+                to: prompt,
+                generating: type,
+                schema: type.generationSchema,
+                includeSchemaInPrompt: includeSchemaInPrompt,
+                options: options
+            )
+        }
+
+        nonisolated public func respond(
+            within session: LanguageModelSession,
+            to prompt: Prompt,
+            schema: GenerationSchema,
+            includeSchemaInPrompt: Bool,
+            options: GenerationOptions
+        ) async throws -> LanguageModelSession.Response<GeneratedContent> {
+            try await respond(
+                within: session,
+                to: prompt,
+                generating: GeneratedContent.self,
+                schema: schema,
+                includeSchemaInPrompt: includeSchemaInPrompt,
+                options: options
+            )
+        }
+
+        nonisolated private func respond<Content>(
+            within session: LanguageModelSession,
+            to prompt: Prompt,
+            generating type: Content.Type,
+            schema: GenerationSchema,
+            includeSchemaInPrompt: Bool,
+            options: GenerationOptions
+        ) async throws -> LanguageModelSession.Response<Content> where Content: Generable {
             let fmTools = session.tools.toFoundationModels()
             let fmTranscript = fmTranscriptDroppingDuplicatePrompt(session.transcript, prompt: prompt)
                 .toFoundationModels(
@@ -135,6 +170,7 @@
                 fmPrompt: prompt.toFoundationModels(),
                 fmOptions: options.toFoundationModels(),
                 type: type,
+                schema: schema,
                 includeSchemaInPrompt: includeSchemaInPrompt
             )
         }
@@ -143,6 +179,41 @@
             within session: LanguageModelSession,
             to prompt: Prompt,
             generating type: Content.Type,
+            includeSchemaInPrompt: Bool,
+            options: GenerationOptions
+        ) -> sending LanguageModelSession.ResponseStream<Content> where Content: Generable {
+            streamResponse(
+                within: session,
+                to: prompt,
+                generating: type,
+                schema: type.generationSchema,
+                includeSchemaInPrompt: includeSchemaInPrompt,
+                options: options
+            )
+        }
+
+        nonisolated public func streamResponse(
+            within session: LanguageModelSession,
+            to prompt: Prompt,
+            schema: GenerationSchema,
+            includeSchemaInPrompt: Bool,
+            options: GenerationOptions
+        ) -> sending LanguageModelSession.ResponseStream<GeneratedContent> {
+            streamResponse(
+                within: session,
+                to: prompt,
+                generating: GeneratedContent.self,
+                schema: schema,
+                includeSchemaInPrompt: includeSchemaInPrompt,
+                options: options
+            )
+        }
+
+        nonisolated private func streamResponse<Content>(
+            within session: LanguageModelSession,
+            to prompt: Prompt,
+            generating type: Content.Type,
+            schema: GenerationSchema,
             includeSchemaInPrompt: Bool,
             options: GenerationOptions
         ) -> sending LanguageModelSession.ResponseStream<Content> where Content: Generable {
@@ -159,6 +230,7 @@
                 fmPrompt: prompt.toFoundationModels(),
                 fmOptions: options.toFoundationModels(),
                 type: type,
+                schema: schema,
                 includeSchemaInPrompt: includeSchemaInPrompt
             )
         }

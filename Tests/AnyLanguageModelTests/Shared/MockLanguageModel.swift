@@ -5,6 +5,14 @@ struct MockLanguageModel: LanguageModel {
         case custom(String)
     }
 
+    struct Request: Sendable {
+        let schema: GenerationSchema
+        let includeSchemaInPrompt: Bool
+        let options: GenerationOptions
+    }
+
+    let requests = Locked<[Request]>([])
+
     var usage: LanguageModelSession.Usage = .zero
     var availabilityProvider: @Sendable () -> Availability<UnavailableReason>
     var responseProvider: @Sendable (Prompt, GenerationOptions) async throws -> String
@@ -29,17 +37,52 @@ struct MockLanguageModel: LanguageModel {
         includeSchemaInPrompt: Bool,
         options: GenerationOptions
     ) async throws -> LanguageModelSession.Response<Content> where Content: Generable {
-        // For now, only String is supported
-        guard type == String.self else {
-            fatalError("MockLanguageModel only supports generating String content")
+        try await respond(
+            within: session,
+            to: prompt,
+            generating: type,
+            schema: type.generationSchema,
+            includeSchemaInPrompt: includeSchemaInPrompt,
+            options: options
+        )
+    }
+
+    func respond(
+        within session: LanguageModelSession,
+        to prompt: Prompt,
+        schema: GenerationSchema,
+        includeSchemaInPrompt: Bool,
+        options: GenerationOptions
+    ) async throws -> LanguageModelSession.Response<GeneratedContent> {
+        try await respond(
+            within: session,
+            to: prompt,
+            generating: GeneratedContent.self,
+            schema: schema,
+            includeSchemaInPrompt: includeSchemaInPrompt,
+            options: options
+        )
+    }
+
+    private func respond<Content>(
+        within session: LanguageModelSession,
+        to prompt: Prompt,
+        generating type: Content.Type,
+        schema: GenerationSchema,
+        includeSchemaInPrompt: Bool,
+        options: GenerationOptions
+    ) async throws -> LanguageModelSession.Response<Content> where Content: Generable {
+        requests.withLock {
+            $0.append(Request(schema: schema, includeSchemaInPrompt: includeSchemaInPrompt, options: options))
         }
 
         let promptWithInstructions = Prompt("Instructions: \(session.instructions?.description ?? "N/A")\n\(prompt)")
         let text = try await responseProvider(promptWithInstructions, options)
 
+        let rawContent = try type == String.self ? GeneratedContent(text) : GeneratedContent(json: text)
         return LanguageModelSession.Response(
-            content: text as! Content,
-            rawContent: GeneratedContent(text),
+            content: try Content(rawContent),
+            rawContent: rawContent,
             transcriptEntries: [],
             usage: usage
         )
@@ -52,9 +95,43 @@ struct MockLanguageModel: LanguageModel {
         includeSchemaInPrompt: Bool,
         options: GenerationOptions
     ) -> sending LanguageModelSession.ResponseStream<Content> where Content: Generable {
-        // For now, only String is supported
-        guard type == String.self else {
-            fatalError("MockLanguageModel only supports generating String content")
+        streamResponse(
+            within: session,
+            to: prompt,
+            generating: type,
+            schema: type.generationSchema,
+            includeSchemaInPrompt: includeSchemaInPrompt,
+            options: options
+        )
+    }
+
+    func streamResponse(
+        within session: LanguageModelSession,
+        to prompt: Prompt,
+        schema: GenerationSchema,
+        includeSchemaInPrompt: Bool,
+        options: GenerationOptions
+    ) -> sending LanguageModelSession.ResponseStream<GeneratedContent> {
+        streamResponse(
+            within: session,
+            to: prompt,
+            generating: GeneratedContent.self,
+            schema: schema,
+            includeSchemaInPrompt: includeSchemaInPrompt,
+            options: options
+        )
+    }
+
+    private func streamResponse<Content>(
+        within session: LanguageModelSession,
+        to prompt: Prompt,
+        generating type: Content.Type,
+        schema: GenerationSchema,
+        includeSchemaInPrompt: Bool,
+        options: GenerationOptions
+    ) -> sending LanguageModelSession.ResponseStream<Content> where Content: Generable {
+        requests.withLock {
+            $0.append(Request(schema: schema, includeSchemaInPrompt: includeSchemaInPrompt, options: options))
         }
 
         let promptWithInstructions = Prompt("Instructions: \(session.instructions?.description ?? "N/A")\n\(prompt)")
@@ -64,9 +141,10 @@ struct MockLanguageModel: LanguageModel {
             Task {
                 do {
                     let text = try await responseProvider(promptWithInstructions, options)
-                    let generatedContent = GeneratedContent(text)
+                    let generatedContent =
+                        try type == String.self ? GeneratedContent(text) : GeneratedContent(json: text)
                     let snapshot = LanguageModelSession.ResponseStream<Content>.Snapshot(
-                        content: (text as! Content).asPartiallyGenerated(),
+                        content: try Content(generatedContent).asPartiallyGenerated(),
                         rawContent: generatedContent,
                         usage: usage
                     )

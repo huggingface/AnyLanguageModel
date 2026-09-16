@@ -266,6 +266,41 @@ public struct GeminiLanguageModel: LanguageModel {
         includeSchemaInPrompt: Bool,
         options: GenerationOptions
     ) async throws -> LanguageModelSession.Response<Content> where Content: Generable {
+        try await respond(
+            within: session,
+            to: prompt,
+            generating: type,
+            schema: type.generationSchema,
+            includeSchemaInPrompt: includeSchemaInPrompt,
+            options: options
+        )
+    }
+
+    public func respond(
+        within session: LanguageModelSession,
+        to prompt: Prompt,
+        schema: GenerationSchema,
+        includeSchemaInPrompt: Bool,
+        options: GenerationOptions
+    ) async throws -> LanguageModelSession.Response<GeneratedContent> {
+        try await respond(
+            within: session,
+            to: prompt,
+            generating: GeneratedContent.self,
+            schema: schema,
+            includeSchemaInPrompt: includeSchemaInPrompt,
+            options: options
+        )
+    }
+
+    private func respond<Content>(
+        within session: LanguageModelSession,
+        to prompt: Prompt,
+        generating type: Content.Type,
+        schema: GenerationSchema,
+        includeSchemaInPrompt: Bool,
+        options: GenerationOptions
+    ) async throws -> LanguageModelSession.Response<Content> where Content: Generable {
         // Extract effective configuration from custom options or fall back to model defaults
         let customOptions = options[custom: GeminiLanguageModel.self]
         let effectiveThinking = customOptions?.thinking ?? _thinking
@@ -293,6 +328,7 @@ public struct GeminiLanguageModel: LanguageModel {
                 contents: transcript.toGeminiContent(),
                 tools: geminiTools,
                 generating: type,
+                schema: schema,
                 options: options,
                 thinking: effectiveThinking,
                 jsonMode: effectiveJsonMode
@@ -393,6 +429,41 @@ public struct GeminiLanguageModel: LanguageModel {
         includeSchemaInPrompt: Bool,
         options: GenerationOptions
     ) -> sending LanguageModelSession.ResponseStream<Content> where Content: Generable {
+        streamResponse(
+            within: session,
+            to: prompt,
+            generating: type,
+            schema: type.generationSchema,
+            includeSchemaInPrompt: includeSchemaInPrompt,
+            options: options
+        )
+    }
+
+    public func streamResponse(
+        within session: LanguageModelSession,
+        to prompt: Prompt,
+        schema: GenerationSchema,
+        includeSchemaInPrompt: Bool,
+        options: GenerationOptions
+    ) -> sending LanguageModelSession.ResponseStream<GeneratedContent> {
+        streamResponse(
+            within: session,
+            to: prompt,
+            generating: GeneratedContent.self,
+            schema: schema,
+            includeSchemaInPrompt: includeSchemaInPrompt,
+            options: options
+        )
+    }
+
+    private func streamResponse<Content>(
+        within session: LanguageModelSession,
+        to prompt: Prompt,
+        generating type: Content.Type,
+        schema: GenerationSchema,
+        includeSchemaInPrompt: Bool,
+        options: GenerationOptions
+    ) -> sending LanguageModelSession.ResponseStream<Content> where Content: Generable {
         // Extract effective configuration from custom options or fall back to model defaults
         let customOptions = options[custom: GeminiLanguageModel.self]
         let effectiveThinking = customOptions?.thinking ?? _thinking
@@ -418,6 +489,7 @@ public struct GeminiLanguageModel: LanguageModel {
                         contents: session.transcript.toGeminiContent(),
                         tools: geminiTools,
                         generating: type,
+                        schema: schema,
                         options: options,
                         thinking: effectiveThinking,
                         jsonMode: effectiveJsonMode
@@ -552,6 +624,7 @@ private func createGenerateContentParams<Content: Generable>(
     contents: [GeminiContent],
     tools: [GeminiTool]?,
     generating type: Content.Type,
+    schema: GenerationSchema,
     options: GenerationOptions,
     thinking: GeminiLanguageModel.CustomGenerationOptions.Thinking,
     jsonMode: GeminiLanguageModel.CustomGenerationOptions.JSONMode?
@@ -595,7 +668,7 @@ private func createGenerateContentParams<Content: Generable>(
     generationConfig["thinkingConfig"] = .object(thinkingConfig)
 
     if type != String.self {
-        let schema = try convertSchemaToGeminiFormat(type.generationSchema)
+        let schema = try convertSchemaToGeminiFormat(schema)
         generationConfig["responseMimeType"] = .string("application/json")
         generationConfig["responseSchema"] = try JSONValue(schema)
     } else if let jsonMode {

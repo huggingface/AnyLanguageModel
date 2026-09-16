@@ -397,12 +397,48 @@ public struct OpenResponsesLanguageModel: LanguageModel {
         includeSchemaInPrompt: Bool,
         options: GenerationOptions
     ) async throws -> LanguageModelSession.Response<Content> where Content: Generable {
+        try await respond(
+            within: session,
+            to: prompt,
+            generating: type,
+            schema: type.generationSchema,
+            includeSchemaInPrompt: includeSchemaInPrompt,
+            options: options
+        )
+    }
+
+    public func respond(
+        within session: LanguageModelSession,
+        to prompt: Prompt,
+        schema: GenerationSchema,
+        includeSchemaInPrompt: Bool,
+        options: GenerationOptions
+    ) async throws -> LanguageModelSession.Response<GeneratedContent> {
+        try await respond(
+            within: session,
+            to: prompt,
+            generating: GeneratedContent.self,
+            schema: schema,
+            includeSchemaInPrompt: includeSchemaInPrompt,
+            options: options
+        )
+    }
+
+    private func respond<Content>(
+        within session: LanguageModelSession,
+        to prompt: Prompt,
+        generating type: Content.Type,
+        schema: GenerationSchema,
+        includeSchemaInPrompt: Bool,
+        options: GenerationOptions
+    ) async throws -> LanguageModelSession.Response<Content> where Content: Generable {
         let tools: [OpenResponsesTool]? =
             session.tools.isEmpty ? nil : session.tools.map { convertToolToOpenResponsesFormat($0) }
         return try await respondWithOpenResponses(
             messages: session.transcript.toOpenResponsesMessages(),
             tools: tools,
             generating: type,
+            schema: schema,
             options: options,
             session: session
         )
@@ -412,6 +448,41 @@ public struct OpenResponsesLanguageModel: LanguageModel {
         within session: LanguageModelSession,
         to prompt: Prompt,
         generating type: Content.Type,
+        includeSchemaInPrompt: Bool,
+        options: GenerationOptions
+    ) -> sending LanguageModelSession.ResponseStream<Content> where Content: Generable {
+        streamResponse(
+            within: session,
+            to: prompt,
+            generating: type,
+            schema: type.generationSchema,
+            includeSchemaInPrompt: includeSchemaInPrompt,
+            options: options
+        )
+    }
+
+    public func streamResponse(
+        within session: LanguageModelSession,
+        to prompt: Prompt,
+        schema: GenerationSchema,
+        includeSchemaInPrompt: Bool,
+        options: GenerationOptions
+    ) -> sending LanguageModelSession.ResponseStream<GeneratedContent> {
+        streamResponse(
+            within: session,
+            to: prompt,
+            generating: GeneratedContent.self,
+            schema: schema,
+            includeSchemaInPrompt: includeSchemaInPrompt,
+            options: options
+        )
+    }
+
+    private func streamResponse<Content>(
+        within session: LanguageModelSession,
+        to prompt: Prompt,
+        generating type: Content.Type,
+        schema: GenerationSchema,
         includeSchemaInPrompt: Bool,
         options: GenerationOptions
     ) -> sending LanguageModelSession.ResponseStream<Content> where Content: Generable {
@@ -426,6 +497,7 @@ public struct OpenResponsesLanguageModel: LanguageModel {
                     messages: session.transcript.toOpenResponsesMessages(),
                     tools: tools,
                     generating: type,
+                    schema: schema,
                     options: options,
                     stream: true
                 )
@@ -486,6 +558,7 @@ public struct OpenResponsesLanguageModel: LanguageModel {
         messages: [OpenResponsesMessage],
         tools: [OpenResponsesTool]?,
         generating type: Content.Type,
+        schema: GenerationSchema,
         options: GenerationOptions,
         session: LanguageModelSession
     ) async throws -> LanguageModelSession.Response<Content> where Content: Generable {
@@ -502,6 +575,7 @@ public struct OpenResponsesLanguageModel: LanguageModel {
                 messages: messages,
                 tools: tools,
                 generating: type,
+                schema: schema,
                 options: options,
                 stream: false
             )
@@ -598,6 +672,7 @@ private enum OpenResponsesAPI {
         messages: [OpenResponsesMessage],
         tools: [OpenResponsesTool]?,
         generating type: Content.Type,
+        schema: GenerationSchema,
         options: GenerationOptions,
         stream: Bool
     ) throws -> JSONValue {
@@ -683,7 +758,7 @@ private enum OpenResponsesAPI {
         }
 
         if type != String.self {
-            let schemaValue = try type.generationSchema.toJSONValueForOpenResponsesStrictMode()
+            let schemaValue = try schema.toJSONValueForOpenResponsesStrictMode()
             body["text"] = .object([
                 "format": .object([
                     "type": .string("json_schema"),

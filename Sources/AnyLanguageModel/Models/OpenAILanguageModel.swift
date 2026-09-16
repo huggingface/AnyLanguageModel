@@ -430,6 +430,41 @@ public struct OpenAILanguageModel: LanguageModel {
         includeSchemaInPrompt: Bool,
         options: GenerationOptions
     ) async throws -> LanguageModelSession.Response<Content> where Content: Generable {
+        try await respond(
+            within: session,
+            to: prompt,
+            generating: type,
+            schema: type.generationSchema,
+            includeSchemaInPrompt: includeSchemaInPrompt,
+            options: options
+        )
+    }
+
+    public func respond(
+        within session: LanguageModelSession,
+        to prompt: Prompt,
+        schema: GenerationSchema,
+        includeSchemaInPrompt: Bool,
+        options: GenerationOptions
+    ) async throws -> LanguageModelSession.Response<GeneratedContent> {
+        try await respond(
+            within: session,
+            to: prompt,
+            generating: GeneratedContent.self,
+            schema: schema,
+            includeSchemaInPrompt: includeSchemaInPrompt,
+            options: options
+        )
+    }
+
+    private func respond<Content>(
+        within session: LanguageModelSession,
+        to prompt: Prompt,
+        generating type: Content.Type,
+        schema: GenerationSchema,
+        includeSchemaInPrompt: Bool,
+        options: GenerationOptions
+    ) async throws -> LanguageModelSession.Response<Content> where Content: Generable {
         // Convert tools if any are available in the session
         let openAITools: [OpenAITool]? = {
             guard !session.tools.isEmpty else { return nil }
@@ -447,6 +482,7 @@ public struct OpenAILanguageModel: LanguageModel {
                 messages: session.transcript.toOpenAIMessages(),
                 tools: openAITools,
                 generating: type,
+                schema: schema,
                 options: options,
                 session: session
             )
@@ -455,6 +491,7 @@ public struct OpenAILanguageModel: LanguageModel {
                 messages: session.transcript.toOpenAIMessages(),
                 tools: openAITools,
                 generating: type,
+                schema: schema,
                 options: options,
                 session: session
             )
@@ -465,6 +502,7 @@ public struct OpenAILanguageModel: LanguageModel {
         messages: [OpenAIMessage],
         tools: [OpenAITool]?,
         generating type: Content.Type,
+        schema: GenerationSchema,
         options: GenerationOptions,
         session: LanguageModelSession
     ) async throws -> LanguageModelSession.Response<Content> where Content: Generable {
@@ -481,6 +519,7 @@ public struct OpenAILanguageModel: LanguageModel {
                 messages: messages,
                 tools: tools,
                 generating: type,
+                schema: schema,
                 options: options,
                 stream: false
             )
@@ -577,6 +616,7 @@ public struct OpenAILanguageModel: LanguageModel {
         messages: [OpenAIMessage],
         tools: [OpenAITool]?,
         generating type: Content.Type,
+        schema: GenerationSchema,
         options: GenerationOptions,
         session: LanguageModelSession
     ) async throws -> LanguageModelSession.Response<Content> where Content: Generable {
@@ -595,6 +635,7 @@ public struct OpenAILanguageModel: LanguageModel {
                 messages: messages,
                 tools: tools,
                 generating: type,
+                schema: schema,
                 options: options,
                 stream: false
             )
@@ -686,6 +727,41 @@ public struct OpenAILanguageModel: LanguageModel {
         includeSchemaInPrompt: Bool,
         options: GenerationOptions
     ) -> sending LanguageModelSession.ResponseStream<Content> where Content: Generable {
+        streamResponse(
+            within: session,
+            to: prompt,
+            generating: type,
+            schema: type.generationSchema,
+            includeSchemaInPrompt: includeSchemaInPrompt,
+            options: options
+        )
+    }
+
+    public func streamResponse(
+        within session: LanguageModelSession,
+        to prompt: Prompt,
+        schema: GenerationSchema,
+        includeSchemaInPrompt: Bool,
+        options: GenerationOptions
+    ) -> sending LanguageModelSession.ResponseStream<GeneratedContent> {
+        streamResponse(
+            within: session,
+            to: prompt,
+            generating: GeneratedContent.self,
+            schema: schema,
+            includeSchemaInPrompt: includeSchemaInPrompt,
+            options: options
+        )
+    }
+
+    private func streamResponse<Content>(
+        within session: LanguageModelSession,
+        to prompt: Prompt,
+        generating type: Content.Type,
+        schema: GenerationSchema,
+        includeSchemaInPrompt: Bool,
+        options: GenerationOptions
+    ) -> sending LanguageModelSession.ResponseStream<Content> where Content: Generable {
         // Convert tools if any are available in the session
         let openAITools: [OpenAITool]? = {
             guard !session.tools.isEmpty else { return nil }
@@ -709,6 +785,7 @@ public struct OpenAILanguageModel: LanguageModel {
                         messages: session.transcript.toOpenAIMessages(),
                         tools: openAITools,
                         generating: type,
+                        schema: schema,
                         options: options,
                         stream: true
                     )
@@ -784,6 +861,7 @@ public struct OpenAILanguageModel: LanguageModel {
                         messages: session.transcript.toOpenAIMessages(),
                         tools: openAITools,
                         generating: type,
+                        schema: schema,
                         options: options,
                         stream: true,
                         includeUsage: baseURL.host == Self.defaultBaseURL.host
@@ -846,6 +924,7 @@ private enum ChatCompletions {
         messages: [OpenAIMessage],
         tools: [OpenAITool]?,
         generating type: Content.Type,
+        schema: GenerationSchema,
         options: GenerationOptions,
         stream: Bool,
         includeUsage: Bool = false
@@ -865,7 +944,7 @@ private enum ChatCompletions {
         }
 
         if type != String.self {
-            let jsonSchemaValue = try type.generationSchema.toJSONValueForOpenAIStrictMode()
+            let jsonSchemaValue = try schema.toJSONValueForOpenAIStrictMode()
             body["response_format"] = .object([
                 "type": .string("json_schema"),
                 "json_schema": .object([
@@ -1001,6 +1080,7 @@ private enum Responses {
         messages: [OpenAIMessage],
         tools: [OpenAITool]?,
         generating type: Content.Type,
+        schema: GenerationSchema,
         options: GenerationOptions,
         stream: Bool
     ) throws -> JSONValue {
@@ -1124,7 +1204,7 @@ private enum Responses {
         }
 
         if type != String.self {
-            let jsonSchemaValue = try type.generationSchema.toJSONValueForOpenAIStrictMode()
+            let jsonSchemaValue = try schema.toJSONValueForOpenAIStrictMode()
             body["text"] = .object([
                 "format": .object([
                     "type": .string("json_schema"),

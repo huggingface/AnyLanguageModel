@@ -72,6 +72,22 @@
             )
         }
 
+        public func respond(
+            within session: LanguageModelSession,
+            to prompt: Prompt,
+            schema: GenerationSchema,
+            includeSchemaInPrompt: Bool,
+            options: GenerationOptions
+        ) async throws -> LanguageModelSession.Response<GeneratedContent> {
+            try await wrapped.respond(
+                within: session,
+                to: prompt,
+                schema: schema,
+                includeSchemaInPrompt: includeSchemaInPrompt,
+                options: options
+            )
+        }
+
         public func streamResponse<Content>(
             within session: LanguageModelSession,
             to prompt: Prompt,
@@ -83,6 +99,22 @@
                 within: session,
                 to: prompt,
                 generating: type,
+                includeSchemaInPrompt: includeSchemaInPrompt,
+                options: options
+            )
+        }
+
+        public func streamResponse(
+            within session: LanguageModelSession,
+            to prompt: Prompt,
+            schema: GenerationSchema,
+            includeSchemaInPrompt: Bool,
+            options: GenerationOptions
+        ) -> sending LanguageModelSession.ResponseStream<GeneratedContent> {
+            wrapped.streamResponse(
+                within: session,
+                to: prompt,
+                schema: schema,
                 includeSchemaInPrompt: includeSchemaInPrompt,
                 options: options
             )

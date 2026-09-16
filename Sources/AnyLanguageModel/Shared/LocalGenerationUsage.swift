@@ -61,17 +61,26 @@ extension LanguageModel {
         includeSchemaInPrompt: Bool,
         options: GenerationOptions
     ) -> LanguageModelSession.ResponseStream<Content> {
+        streamStructuredResponse {
+            try await respond(
+                within: session,
+                to: prompt,
+                generating: type,
+                includeSchemaInPrompt: includeSchemaInPrompt,
+                options: options
+            )
+        }
+    }
+
+    /// Converts a complete response into one snapshot without changing its schema.
+    func streamStructuredResponse<Content: Generable>(
+        generate: @escaping @Sendable () async throws -> LanguageModelSession.Response<Content>
+    ) -> LanguageModelSession.ResponseStream<Content> {
         .init(
             stream: AsyncThrowingStream { continuation in
                 let task = Task {
                     do {
-                        let response = try await respond(
-                            within: session,
-                            to: prompt,
-                            generating: type,
-                            includeSchemaInPrompt: includeSchemaInPrompt,
-                            options: options
-                        )
+                        let response = try await generate()
                         continuation.yield(
                             .init(
                                 content: response.content.asPartiallyGenerated(),

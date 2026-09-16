@@ -1,8 +1,16 @@
+import Foundation
 import Testing
 @testable import AnyLanguageModel
 
 #if canImport(FoundationModels) && compiler(>=6.4) && !os(tvOS)
     import FoundationModels
+
+    private let isFoundationLanguageModelAvailable = {
+        if #available(macOS 27.0, iOS 27.0, visionOS 27.0, watchOS 27.0, *) {
+            return FoundationModels.SystemLanguageModel.default.isAvailable
+        }
+        return false
+    }()
 
     @Suite("FoundationLanguageModel")
     struct FoundationLanguageModelTests {
@@ -10,6 +18,31 @@ import Testing
         private actor Counter {
             private(set) var count = 0
             func increment() { count += 1 }
+        }
+
+        @Test(
+            .enabled(if: ProcessInfo.processInfo.environment["CI"] == nil),
+            .enabled(if: isFoundationLanguageModelAvailable),
+            arguments: [false, true]
+        )
+        func dynamicSchemaOnDevice(_ streaming: Bool) async throws {
+            guard #available(macOS 27.0, iOS 27.0, visionOS 27.0, watchOS 27.0, *) else { return }
+            let model = FoundationLanguageModel(FoundationModels.SystemLanguageModel.default)
+            let session = AnyLanguageModel.LanguageModelSession(model: model)
+            let schema = try SchemaResponseTests.schema()
+            let prompt = "What is the capital of France? Put the city name in answer."
+            let content: AnyLanguageModel.GeneratedContent
+            if streaming {
+                var last: AnyLanguageModel.GeneratedContent?
+                for try await snapshot in session.streamResponse(to: prompt, schema: schema) {
+                    last = snapshot.content
+                }
+                content = try #require(last)
+            } else {
+                content = try await session.respond(to: prompt, schema: schema).content
+            }
+            let answer = try SchemaResponseTests.Answer(content)
+            #expect(answer.answer.contains("Paris"))
         }
 
         @Test func factoryRunsOnFirstLoadOnly() async throws {

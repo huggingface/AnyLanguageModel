@@ -91,6 +91,41 @@
             includeSchemaInPrompt: Bool,
             options: GenerationOptions
         ) async throws -> LanguageModelSession.Response<Content> where Content: Generable {
+            try await respond(
+                within: session,
+                to: prompt,
+                generating: type,
+                schema: type.generationSchema,
+                includeSchemaInPrompt: includeSchemaInPrompt,
+                options: options
+            )
+        }
+
+        nonisolated public func respond(
+            within session: LanguageModelSession,
+            to prompt: Prompt,
+            schema: GenerationSchema,
+            includeSchemaInPrompt: Bool,
+            options: GenerationOptions
+        ) async throws -> LanguageModelSession.Response<GeneratedContent> {
+            try await respond(
+                within: session,
+                to: prompt,
+                generating: GeneratedContent.self,
+                schema: schema,
+                includeSchemaInPrompt: includeSchemaInPrompt,
+                options: options
+            )
+        }
+
+        nonisolated private func respond<Content>(
+            within session: LanguageModelSession,
+            to prompt: Prompt,
+            generating type: Content.Type,
+            schema: GenerationSchema,
+            includeSchemaInPrompt: Bool,
+            options: GenerationOptions
+        ) async throws -> LanguageModelSession.Response<Content> where Content: Generable {
             let fmPrompt = prompt.toFoundationModels()
             let fmOptions = options.toFoundationModels()
 
@@ -110,6 +145,7 @@
                 fmPrompt: fmPrompt,
                 fmOptions: fmOptions,
                 type: type,
+                schema: schema,
                 includeSchemaInPrompt: includeSchemaInPrompt
             )
         }
@@ -118,6 +154,41 @@
             within session: LanguageModelSession,
             to prompt: Prompt,
             generating type: Content.Type,
+            includeSchemaInPrompt: Bool,
+            options: GenerationOptions
+        ) -> sending LanguageModelSession.ResponseStream<Content> where Content: Generable {
+            streamResponse(
+                within: session,
+                to: prompt,
+                generating: type,
+                schema: type.generationSchema,
+                includeSchemaInPrompt: includeSchemaInPrompt,
+                options: options
+            )
+        }
+
+        nonisolated public func streamResponse(
+            within session: LanguageModelSession,
+            to prompt: Prompt,
+            schema: GenerationSchema,
+            includeSchemaInPrompt: Bool,
+            options: GenerationOptions
+        ) -> sending LanguageModelSession.ResponseStream<GeneratedContent> {
+            streamResponse(
+                within: session,
+                to: prompt,
+                generating: GeneratedContent.self,
+                schema: schema,
+                includeSchemaInPrompt: includeSchemaInPrompt,
+                options: options
+            )
+        }
+
+        nonisolated private func streamResponse<Content>(
+            within session: LanguageModelSession,
+            to prompt: Prompt,
+            generating type: Content.Type,
+            schema: GenerationSchema,
             includeSchemaInPrompt: Bool,
             options: GenerationOptions
         ) -> sending LanguageModelSession.ResponseStream<Content> where Content: Generable {
@@ -140,6 +211,7 @@
                 fmPrompt: fmPrompt,
                 fmOptions: fmOptions,
                 type: type,
+                schema: schema,
                 includeSchemaInPrompt: includeSchemaInPrompt
             )
         }
@@ -655,6 +727,7 @@
         fmPrompt: FoundationModels.Prompt,
         fmOptions: FoundationModels.GenerationOptions,
         type: Content.Type,
+        schema: GenerationSchema,
         includeSchemaInPrompt: Bool
     ) async throws -> LanguageModelSession.Response<Content> where Content: Generable {
         let fmSession = try await makeSession()
@@ -668,10 +741,10 @@
             )
         } else {
             // For non-String types, use schema-based generation
-            let schema = FoundationModels.GenerationSchema(type.generationSchema)
+            let fmSchema = FoundationModels.GenerationSchema(schema)
             let fmResponse = try await fmSession.respond(
                 to: fmPrompt,
-                schema: schema,
+                schema: fmSchema,
                 includeSchemaInPrompt: includeSchemaInPrompt,
                 options: fmOptions
             )
@@ -681,7 +754,7 @@
                 if let jsonValue = try? JSONValue(normalizedRaw),
                     case .array(let values) = jsonValue,
                     values.isEmpty,
-                    let placeholder = placeholderContent(for: type)
+                    let placeholder = placeholderContent(for: type, schema: schema)
                 {
                     return LanguageModelSession.Response(
                         content: placeholder.content,
@@ -710,7 +783,7 @@
                 {
                     return finalize(content: content)
                 }
-                if let placeholder = placeholderContent(for: type) {
+                if let placeholder = placeholderContent(for: type, schema: schema) {
                     return finalize(content: placeholder.content)
                 }
                 throw error
@@ -724,6 +797,7 @@
         fmPrompt: FoundationModels.Prompt,
         fmOptions: FoundationModels.GenerationOptions,
         type: Content.Type,
+        schema: GenerationSchema,
         includeSchemaInPrompt: Bool
     ) -> LanguageModelSession.ResponseStream<Content> where Content: Generable {
         let stream: AsyncThrowingStream<LanguageModelSession.ResponseStream<Content>.Snapshot, Error> =
@@ -783,11 +857,11 @@
                 }
 
                 func processStructuredStream(_ fmSession: FoundationModels.LanguageModelSession) async {
-                    let schema = FoundationModels.GenerationSchema(type.generationSchema)
+                    let fmSchema = FoundationModels.GenerationSchema(schema)
                     let partialDecoder = PartialJSONDecoder()
                     let fmStream = fmSession.streamResponse(
                         to: fmPrompt,
-                        schema: schema,
+                        schema: fmSchema,
                         includeSchemaInPrompt: includeSchemaInPrompt,
                         options: fmOptions
                     )
@@ -825,14 +899,14 @@
                                     }
                                 }
                             }
-                            if !didYield, let placeholder = placeholderPartialContent(for: type) {
+                            if !didYield, let placeholder = placeholderPartialContent(for: type, schema: schema) {
                                 continuation.yield(
                                     .init(content: placeholder.content, rawContent: placeholder.rawContent)
                                 )
                             }
                             continuation.finish()
                         } catch {
-                            if !didYield, let placeholder = placeholderPartialContent(for: type) {
+                            if !didYield, let placeholder = placeholderPartialContent(for: type, schema: schema) {
                                 continuation.yield(
                                     .init(content: placeholder.content, rawContent: placeholder.rawContent)
                                 )
@@ -871,7 +945,7 @@
                                 didYield = true
                             }
                         }
-                        if !didYield, let placeholder = placeholderPartialContent(for: type) {
+                        if !didYield, let placeholder = placeholderPartialContent(for: type, schema: schema) {
                             continuation.yield(
                                 .init(content: placeholder.content, rawContent: placeholder.rawContent)
                             )
@@ -910,9 +984,9 @@
 
     /// Generates minimal partial content when structured output is missing or invalid.
     private func placeholderPartialContent<Content: Generable>(
-        for type: Content.Type
+        for type: Content.Type,
+        schema: GenerationSchema
     ) -> (content: Content.PartiallyGenerated, rawContent: GeneratedContent)? {
-        let schema = type.generationSchema
         let resolved = schema.withResolvedRoot() ?? schema
         let raw = placeholderGeneratedContent(from: resolved.root, defs: resolved.defs)
 
@@ -927,9 +1001,9 @@
 
     /// Generates minimal full content when structured output is missing or invalid.
     private func placeholderContent<Content: Generable>(
-        for type: Content.Type
+        for type: Content.Type,
+        schema: GenerationSchema
     ) -> (content: Content, rawContent: GeneratedContent)? {
-        let schema = type.generationSchema
         let resolved = schema.withResolvedRoot() ?? schema
         let raw = placeholderGeneratedContent(from: resolved.root, defs: resolved.defs)
 

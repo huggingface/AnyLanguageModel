@@ -394,26 +394,41 @@ public final class LanguageModelSession: @unchecked Sendable {
         includeSchemaInPrompt: Bool = true,
         options: GenerationOptions = GenerationOptions()
     ) async throws -> Response<Content> where Content: Generable {
-        try await wrapRespond {
-            // Add prompt to transcript
-            let promptEntry = Transcript.Entry.prompt(
-                Transcript.Prompt(
-                    segments: [.text(.init(content: prompt.description))],
-                    options: options,
-                    responseFormat: nil
-                )
-            )
-            withMutation(keyPath: \.transcript) {
-                state.withLock { $0.transcript.append(promptEntry) }
-            }
-
-            let response = try await model.respond(
+        try await respond(
+            to: prompt,
+            responseFormat: type == String.self ? nil : .init(type: type),
+            options: options
+        ) {
+            try await model.respond(
                 within: self,
                 to: prompt,
                 generating: type,
                 includeSchemaInPrompt: includeSchemaInPrompt,
                 options: options
             )
+        }
+    }
+
+    nonisolated private func respond<Content: Generable>(
+        to prompt: Prompt,
+        responseFormat: Transcript.ResponseFormat?,
+        options: GenerationOptions,
+        generate: () async throws -> Response<Content>
+    ) async throws -> Response<Content> {
+        try await wrapRespond {
+            // Add prompt to transcript
+            let promptEntry = Transcript.Entry.prompt(
+                Transcript.Prompt(
+                    segments: [.text(.init(content: prompt.description))],
+                    options: options,
+                    responseFormat: responseFormat
+                )
+            )
+            withMutation(keyPath: \.transcript) {
+                state.withLock { $0.transcript.append(promptEntry) }
+            }
+
+            let response = try await generate()
 
             recordUsage(response.usage)
 
@@ -456,7 +471,7 @@ public final class LanguageModelSession: @unchecked Sendable {
             Transcript.Prompt(
                 segments: [.text(.init(content: prompt.description))],
                 options: options,
-                responseFormat: nil
+                responseFormat: type == String.self ? nil : .init(type: type)
             )
         )
         withMutation(keyPath: \.transcript) {
@@ -538,6 +553,8 @@ extension LanguageModelSession {
 // MARK: - GeneratedContent with Schema Convenience Methods
 
 extension LanguageModelSession {
+    /// Generates content that conforms to the supplied schema.
+    /// Provider restrictions still apply; OpenAI strict mode requires an object root.
     @discardableResult
     nonisolated public func respond(
         to prompt: Prompt,
@@ -545,14 +562,19 @@ extension LanguageModelSession {
         includeSchemaInPrompt: Bool = true,
         options: GenerationOptions = GenerationOptions()
     ) async throws -> Response<GeneratedContent> {
-        try await respond(
-            to: prompt,
-            generating: GeneratedContent.self,
-            includeSchemaInPrompt: includeSchemaInPrompt,
-            options: options
-        )
+        try await respond(to: prompt, responseFormat: .init(schema: schema), options: options) {
+            try await model.respond(
+                within: self,
+                to: prompt,
+                schema: schema,
+                includeSchemaInPrompt: includeSchemaInPrompt,
+                options: options
+            )
+        }
     }
 
+    /// Generates content that conforms to the supplied schema.
+    /// Provider restrictions still apply; OpenAI strict mode requires an object root.
     @discardableResult
     nonisolated public func respond(
         to prompt: String,
@@ -568,6 +590,8 @@ extension LanguageModelSession {
         )
     }
 
+    /// Generates content that conforms to the supplied schema.
+    /// Provider restrictions still apply; OpenAI strict mode requires an object root.
     @discardableResult
     nonisolated public func respond(
         schema: GenerationSchema,
@@ -583,20 +607,39 @@ extension LanguageModelSession {
         )
     }
 
+    /// Streams content that conforms to the supplied schema.
+    /// Provider restrictions still apply; OpenAI strict mode requires an object root.
     nonisolated public func streamResponse(
         to prompt: Prompt,
         schema: GenerationSchema,
         includeSchemaInPrompt: Bool = true,
         options: GenerationOptions = GenerationOptions()
     ) -> sending ResponseStream<GeneratedContent> {
-        streamResponse(
-            to: prompt,
-            generating: GeneratedContent.self,
-            includeSchemaInPrompt: includeSchemaInPrompt,
-            options: options
+        let promptEntry = Transcript.Entry.prompt(
+            Transcript.Prompt(
+                segments: [.text(.init(content: prompt.description))],
+                options: options,
+                responseFormat: .init(schema: schema)
+            )
+        )
+        withMutation(keyPath: \.transcript) {
+            state.withLock { $0.transcript.append(promptEntry) }
+        }
+
+        return wrapStream(
+            model.streamResponse(
+                within: self,
+                to: prompt,
+                schema: schema,
+                includeSchemaInPrompt: includeSchemaInPrompt,
+                options: options
+            ),
+            promptEntry: promptEntry
         )
     }
 
+    /// Streams content that conforms to the supplied schema.
+    /// Provider restrictions still apply; OpenAI strict mode requires an object root.
     nonisolated public func streamResponse(
         to prompt: String,
         schema: GenerationSchema,
@@ -611,6 +654,8 @@ extension LanguageModelSession {
         )
     }
 
+    /// Streams content that conforms to the supplied schema.
+    /// Provider restrictions still apply; OpenAI strict mode requires an object root.
     nonisolated public func streamResponse(
         schema: GenerationSchema,
         includeSchemaInPrompt: Bool = true,
@@ -752,7 +797,7 @@ extension LanguageModelSession {
                 Transcript.Prompt(
                     segments: segments,
                     options: options,
-                    responseFormat: nil
+                    responseFormat: type == String.self ? nil : .init(type: type)
                 )
             )
             withMutation(keyPath: \.transcript) {
@@ -861,7 +906,7 @@ extension LanguageModelSession {
             Transcript.Prompt(
                 segments: segments,
                 options: options,
-                responseFormat: nil
+                responseFormat: type == String.self ? nil : .init(type: type)
             )
         )
         withMutation(keyPath: \.transcript) {

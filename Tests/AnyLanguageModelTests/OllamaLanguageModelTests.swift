@@ -97,6 +97,32 @@ struct OllamaLanguageModelTests {
         #expect(!(snapshots.last!.content.summary ?? "").isEmpty)
     }
 
+    @Test func dynamicSchemaResponse() async throws {
+        let session = LanguageModelSession(model: model)
+        let response = try await session.respond(
+            to: "What is the capital of France? Put the city name in answer. /no_think",
+            schema: SchemaResponseTests.schema()
+        )
+        let answer = try SchemaResponseTests.Answer(response.content)
+        #expect(answer.answer.contains("Paris"))
+    }
+
+    @Test func dynamicSchemaStreaming() async throws {
+        let session = LanguageModelSession(model: model)
+        let stream = session.streamResponse(
+            to: "What is the capital of France? Put the city name in answer. /no_think",
+            schema: try SchemaResponseTests.schema()
+        )
+        var snapshots: [GeneratedContent] = []
+        for try await snapshot in stream {
+            snapshots.append(snapshot.content)
+        }
+        #expect(!snapshots.isEmpty)
+        let content = try #require(snapshots.last)
+        let answer = try SchemaResponseTests.Answer(content)
+        #expect(answer.answer.contains("Paris"))
+    }
+
     @Test func withGenerationOptions() async throws {
         let session = LanguageModelSession(model: model)
 

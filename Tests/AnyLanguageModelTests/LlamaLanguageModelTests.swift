@@ -418,6 +418,21 @@ import Testing
             }
         }
 
+        @Test(arguments: [false, true])
+        func dynamicSchemaGeneration(_ streaming: Bool) async throws {
+            let session = LanguageModelSession(model: model)
+            let schema = try SchemaResponseTests.schema()
+            let prompt = "What is the capital of France? Put the city name in answer. /no_think"
+            let options = GenerationOptions(maximumResponseTokens: 128)
+            let response =
+                try await streaming
+                ? session.streamResponse(to: prompt, schema: schema, options: options).collect()
+                : session.respond(to: prompt, schema: schema, options: options)
+            let answer = try SchemaResponseTests.Answer(response.content)
+            #expect(!answer.answer.isEmpty)
+            #expect(response.usage.output.totalTokenCount > 0)
+        }
+
         @Test func structuredGenerationBasicStruct() async throws {
             let session = LanguageModelSession(
                 model: model,

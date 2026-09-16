@@ -954,6 +954,41 @@ import Foundation
             includeSchemaInPrompt: Bool,
             options: GenerationOptions
         ) async throws -> LanguageModelSession.Response<Content> where Content: Generable {
+            try await respond(
+                within: session,
+                to: prompt,
+                generating: type,
+                schema: type.generationSchema,
+                includeSchemaInPrompt: includeSchemaInPrompt,
+                options: options
+            )
+        }
+
+        public func respond(
+            within session: LanguageModelSession,
+            to prompt: Prompt,
+            schema: GenerationSchema,
+            includeSchemaInPrompt: Bool,
+            options: GenerationOptions
+        ) async throws -> LanguageModelSession.Response<GeneratedContent> {
+            try await respond(
+                within: session,
+                to: prompt,
+                generating: GeneratedContent.self,
+                schema: schema,
+                includeSchemaInPrompt: includeSchemaInPrompt,
+                options: options
+            )
+        }
+
+        private func respond<Content>(
+            within session: LanguageModelSession,
+            to prompt: Prompt,
+            generating type: Content.Type,
+            schema: GenerationSchema,
+            includeSchemaInPrompt: Bool,
+            options: GenerationOptions
+        ) async throws -> LanguageModelSession.Response<Content> where Content: Generable {
             if mmprojPath == nil {
                 try validateNoImageSegments(in: session)
             }
@@ -1097,7 +1132,7 @@ import Foundation
                 if includeSchemaInPrompt {
                     fullPrompt = try formatPrompt(
                         for: session,
-                        extraSystemMessage: schemaPrompt(for: type.generationSchema),
+                        extraSystemMessage: schemaPrompt(for: schema),
                         assistantPrefill: runtimeOptions.assistantPrefill,
                         imageMarker: imageMarker,
                         images: &promptImages
@@ -1122,7 +1157,7 @@ import Foundation
                 let (jsonString, usage) = try await generateStructuredJSON(
                     context: context,
                     prompt: fullPrompt,
-                    schema: type.generationSchema,
+                    schema: schema,
                     maxTokens: maxTokens,
                     options: structuredOptions
                 )
@@ -1144,14 +1179,52 @@ import Foundation
             includeSchemaInPrompt: Bool,
             options: GenerationOptions
         ) -> sending LanguageModelSession.ResponseStream<Content> where Content: Generable {
+            streamResponse(
+                within: session,
+                to: prompt,
+                generating: type,
+                schema: type.generationSchema,
+                includeSchemaInPrompt: includeSchemaInPrompt,
+                options: options
+            )
+        }
+
+        public func streamResponse(
+            within session: LanguageModelSession,
+            to prompt: Prompt,
+            schema: GenerationSchema,
+            includeSchemaInPrompt: Bool,
+            options: GenerationOptions
+        ) -> sending LanguageModelSession.ResponseStream<GeneratedContent> {
+            streamResponse(
+                within: session,
+                to: prompt,
+                generating: GeneratedContent.self,
+                schema: schema,
+                includeSchemaInPrompt: includeSchemaInPrompt,
+                options: options
+            )
+        }
+
+        private func streamResponse<Content>(
+            within session: LanguageModelSession,
+            to prompt: Prompt,
+            generating type: Content.Type,
+            schema: GenerationSchema,
+            includeSchemaInPrompt: Bool,
+            options: GenerationOptions
+        ) -> sending LanguageModelSession.ResponseStream<Content> where Content: Generable {
             guard type == String.self else {
-                return streamStructuredResponse(
-                    within: session,
-                    to: prompt,
-                    generating: type,
-                    includeSchemaInPrompt: includeSchemaInPrompt,
-                    options: options
-                )
+                return streamStructuredResponse {
+                    try await self.respond(
+                        within: session,
+                        to: prompt,
+                        generating: type,
+                        schema: schema,
+                        includeSchemaInPrompt: includeSchemaInPrompt,
+                        options: options
+                    )
+                }
             }
 
             if mmprojPath == nil {

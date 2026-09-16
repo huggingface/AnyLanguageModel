@@ -33,6 +33,30 @@ public protocol LanguageModel: Sendable {
         options: GenerationOptions
     ) -> sending LanguageModelSession.ResponseStream<Content> where Content: Generable
 
+    /// Generates content using the supplied schema.
+    ///
+    /// Providers that only implement the generic requirements use their existing
+    /// `GeneratedContent` behavior until they implement this requirement.
+    func respond(
+        within session: LanguageModelSession,
+        to prompt: Prompt,
+        schema: GenerationSchema,
+        includeSchemaInPrompt: Bool,
+        options: GenerationOptions
+    ) async throws -> LanguageModelSession.Response<GeneratedContent>
+
+    /// Streams content using the supplied schema.
+    ///
+    /// Providers that only implement the generic requirements use their existing
+    /// `GeneratedContent` behavior until they implement this requirement.
+    func streamResponse(
+        within session: LanguageModelSession,
+        to prompt: Prompt,
+        schema: GenerationSchema,
+        includeSchemaInPrompt: Bool,
+        options: GenerationOptions
+    ) -> sending LanguageModelSession.ResponseStream<GeneratedContent>
+
     func logFeedbackAttachment(
         within session: LanguageModelSession,
         sentiment: LanguageModelFeedback.Sentiment?,
@@ -44,6 +68,38 @@ public protocol LanguageModel: Sendable {
 // MARK: - Default Implementation
 
 extension LanguageModel {
+    public func respond(
+        within session: LanguageModelSession,
+        to prompt: Prompt,
+        schema: GenerationSchema,
+        includeSchemaInPrompt: Bool,
+        options: GenerationOptions
+    ) async throws -> LanguageModelSession.Response<GeneratedContent> {
+        try await respond(
+            within: session,
+            to: prompt,
+            generating: GeneratedContent.self,
+            includeSchemaInPrompt: includeSchemaInPrompt,
+            options: options
+        )
+    }
+
+    public func streamResponse(
+        within session: LanguageModelSession,
+        to prompt: Prompt,
+        schema: GenerationSchema,
+        includeSchemaInPrompt: Bool,
+        options: GenerationOptions
+    ) -> sending LanguageModelSession.ResponseStream<GeneratedContent> {
+        streamResponse(
+            within: session,
+            to: prompt,
+            generating: GeneratedContent.self,
+            includeSchemaInPrompt: includeSchemaInPrompt,
+            options: options
+        )
+    }
+
     public var isAvailable: Bool {
         if case .available = availability {
             return true
