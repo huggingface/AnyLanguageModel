@@ -30,6 +30,12 @@
         private let makeModel: @Sendable () async throws -> Model
         private var model: Model?
 
+        /// The factory run in progress, if any.
+        /// The actor suspends while the factory runs,
+        /// so concurrent first requests share this task
+        /// instead of each constructing a model.
+        private var loadTask: Task<Model, Error>?
+
         /// Creates a language model around an already constructed model.
         ///
         /// - Parameter model: The Foundation Models conformer to use for generation.
@@ -62,7 +68,12 @@
         }
 
         /// Releases the underlying model. The next request constructs it again.
+        ///
+        /// A factory still running when this is called is cancelled,
+        /// and its result is discarded.
         public func unload() {
+            loadTask?.cancel()
+            loadTask = nil
             model = nil
         }
 
@@ -70,9 +81,25 @@
             if let model {
                 return model
             }
-            let model = try await makeModel()
-            self.model = model
-            return model
+            if let loadTask {
+                return try await loadTask.value
+            }
+            let task = Task { try await makeModel() }
+            loadTask = task
+            do {
+                let model = try await task.value
+                // Publish only if unload() did not run while the factory was in flight.
+                if loadTask == task {
+                    self.model = model
+                    loadTask = nil
+                }
+                return model
+            } catch {
+                if loadTask == task {
+                    loadTask = nil
+                }
+                throw error
+            }
         }
 
         private func makeSession(
