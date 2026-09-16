@@ -1,16 +1,16 @@
 import Testing
 
-#if canImport(FoundationModels)
+#if canImport(FoundationModels) && !os(watchOS)
     import FoundationModels
 
     private let isFoundationModelsSystemLanguageModelAvailable: Bool = {
-        if #available(macOS 26.0, iOS 26.0, watchOS 26.0, tvOS 26.0, visionOS 26.0, *) {
+        if #available(macOS 26.0, iOS 26.0, tvOS 26.0, visionOS 26.0, *) {
             return SystemLanguageModel.default.isAvailable
         }
         return false
     }()
 
-    @available(macOS 26.0, iOS 26.0, watchOS 26.0, tvOS 26.0, visionOS 26.0, *)
+    @available(macOS 26.0, iOS 26.0, tvOS 26.0, visionOS 26.0, *)
     @Test(
         "FoundationModels Drop-In Compatibility",
         .enabled(if: isFoundationModelsSystemLanguageModelAvailable)

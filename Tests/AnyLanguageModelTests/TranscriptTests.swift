@@ -55,6 +55,30 @@ struct TranscriptTests {
         #expect(Transcript.Segment.image(image).id == "image-id")
     }
 
+    #if canImport(FoundationModels)
+        @available(macOS 26.0, iOS 26.0, watchOS 27.0, tvOS 26.0, visionOS 26.0, *)
+        @Test func bridgesStructuredSegmentToFoundationModels() throws {
+            let content = try GeneratedContent(json: #"{"name":"Ana"}"#)
+            let segments: [Transcript.Segment] = [
+                .structure(.init(id: "person-id", source: "Person", content: content))
+            ]
+
+            let converted = segments.toFoundationModels()
+            #expect(converted.count == 1)
+            guard case .structure(let segment) = try #require(converted.first) else {
+                Issue.record("Expected a structured segment")
+                return
+            }
+            #expect(segment.id == "person-id")
+            #if os(watchOS)
+                #expect(segment.schemaName == "Person")
+            #else
+                #expect(segment.source == "Person")
+            #endif
+            #expect(try GeneratedContent(segment.content) == content)
+        }
+    #endif
+
     @Test func sessionRestoresInstructionsFromTranscript() throws {
         let instructions = "First\n\nSecond trailing spaces   "
         let transcript = Transcript(entries: [

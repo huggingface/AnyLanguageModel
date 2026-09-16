@@ -13,7 +13,8 @@
     /// ```swift
     /// let model = SystemLanguageModel()
     /// ```
-    @available(macOS 26.0, iOS 26.0, watchOS 26.0, tvOS 26.0, visionOS 26.0, *)
+    @available(macOS 26.0, iOS 26.0, tvOS 26.0, visionOS 26.0, *)
+    @available(watchOS, unavailable)
     public actor SystemLanguageModel: LanguageModel {
         /// The reason the model is unavailable.
         public typealias UnavailableReason = FoundationModels.SystemLanguageModel.Availability.UnavailableReason
@@ -21,6 +22,7 @@
         let systemModel: FoundationModels.SystemLanguageModel
 
         /// The default system language model.
+        @available(watchOS, unavailable)
         public static var `default`: SystemLanguageModel {
             SystemLanguageModel()
         }
@@ -243,7 +245,7 @@
 
     // MARK: - Helpers
 
-    @available(macOS 26.0, iOS 26.0, watchOS 26.0, tvOS 26.0, visionOS 26.0, *)
+    @available(macOS 26.0, iOS 26.0, watchOS 27.0, tvOS 26.0, visionOS 26.0, *)
     func fmTranscriptDroppingDuplicatePrompt(_ transcript: Transcript, prompt: Prompt) -> Transcript {
         guard let lastEntry = transcript.last, case .prompt(let lastPrompt) = lastEntry else {
             return transcript
@@ -258,21 +260,21 @@
         return Transcript(entries: transcript.dropLast())
     }
 
-    @available(macOS 26.0, iOS 26.0, watchOS 26.0, tvOS 26.0, visionOS 26.0, *)
+    @available(macOS 26.0, iOS 26.0, watchOS 27.0, tvOS 26.0, visionOS 26.0, *)
     extension Prompt {
         func toFoundationModels() -> FoundationModels.Prompt {
             FoundationModels.Prompt(self.description)
         }
     }
 
-    @available(macOS 26.0, iOS 26.0, watchOS 26.0, tvOS 26.0, visionOS 26.0, *)
+    @available(macOS 26.0, iOS 26.0, watchOS 27.0, tvOS 26.0, visionOS 26.0, *)
     extension Instructions {
         func toFoundationModels() -> FoundationModels.Instructions {
             FoundationModels.Instructions(self.description)
         }
     }
 
-    @available(macOS 26.0, iOS 26.0, watchOS 26.0, tvOS 26.0, visionOS 26.0, *)
+    @available(macOS 26.0, iOS 26.0, watchOS 27.0, tvOS 26.0, visionOS 26.0, *)
     extension GenerationOptions {
         func toFoundationModels() -> FoundationModels.GenerationOptions {
             let sampling: FoundationModels.GenerationOptions.SamplingMode?
@@ -287,7 +289,7 @@
                 sampling = nil
             }
 
-            #if compiler(>=6.4) && !os(tvOS) && !os(watchOS)
+            #if compiler(>=6.4) && !os(tvOS)
                 return FoundationModels.GenerationOptions(
                     samplingMode: sampling,
                     temperature: temperature,
@@ -303,7 +305,7 @@
         }
     }
 
-    @available(macOS 26.0, iOS 26.0, watchOS 26.0, tvOS 26.0, visionOS 26.0, *)
+    @available(macOS 26.0, iOS 26.0, watchOS 27.0, tvOS 26.0, visionOS 26.0, *)
     extension LanguageModelFeedback.Sentiment {
         func toFoundationModels() -> FoundationModels.LanguageModelFeedback.Sentiment {
             switch self {
@@ -314,7 +316,7 @@
         }
     }
 
-    @available(macOS 26.0, iOS 26.0, watchOS 26.0, tvOS 26.0, visionOS 26.0, *)
+    @available(macOS 26.0, iOS 26.0, watchOS 27.0, tvOS 26.0, visionOS 26.0, *)
     extension LanguageModelFeedback.Issue {
         func toFoundationModels() -> FoundationModels.LanguageModelFeedback.Issue {
             FoundationModels.LanguageModelFeedback.Issue(
@@ -324,7 +326,7 @@
         }
     }
 
-    @available(macOS 26.0, iOS 26.0, watchOS 26.0, tvOS 26.0, visionOS 26.0, *)
+    @available(macOS 26.0, iOS 26.0, watchOS 27.0, tvOS 26.0, visionOS 26.0, *)
     extension LanguageModelFeedback.Issue.Category {
         func toFoundationModels() -> FoundationModels.LanguageModelFeedback.Issue.Category {
             switch self {
@@ -340,7 +342,7 @@
         }
     }
 
-    @available(macOS 26.0, iOS 26.0, watchOS 26.0, tvOS 26.0, visionOS 26.0, *)
+    @available(macOS 26.0, iOS 26.0, watchOS 27.0, tvOS 26.0, visionOS 26.0, *)
     extension Array where Element == (any Tool) {
         func toFoundationModels() -> [any FoundationModels.Tool] {
             map { AnyToolWrapper($0) }
@@ -348,7 +350,7 @@
     }
 
     /// A type-erased wrapper that bridges any `Tool` to `FoundationModels.Tool`.
-    @available(macOS 26.0, iOS 26.0, watchOS 26.0, tvOS 26.0, visionOS 26.0, *)
+    @available(macOS 26.0, iOS 26.0, watchOS 27.0, tvOS 26.0, visionOS 26.0, *)
     private struct AnyToolWrapper: FoundationModels.Tool {
         typealias Arguments = FoundationModels.GeneratedContent
         typealias Output = String
@@ -374,7 +376,7 @@
         }
     }
 
-    @available(macOS 26.0, iOS 26.0, watchOS 26.0, tvOS 26.0, visionOS 26.0, *)
+    @available(macOS 26.0, iOS 26.0, watchOS 27.0, tvOS 26.0, visionOS 26.0, *)
     extension FoundationModels.GenerationSchema {
         internal init(_ content: AnyLanguageModel.GenerationSchema) {
             let resolvedSchema = content.withResolvedRoot() ?? content
@@ -421,21 +423,21 @@
         }
     }
 
-    @available(macOS 26.0, iOS 26.0, watchOS 26.0, tvOS 26.0, visionOS 26.0, *)
+    @available(macOS 26.0, iOS 26.0, watchOS 27.0, tvOS 26.0, visionOS 26.0, *)
     extension FoundationModels.GeneratedContent {
         internal init(_ content: AnyLanguageModel.GeneratedContent) throws {
             try self.init(json: content.jsonString)
         }
     }
 
-    @available(macOS 26.0, iOS 26.0, watchOS 26.0, tvOS 26.0, visionOS 26.0, *)
+    @available(macOS 26.0, iOS 26.0, watchOS 27.0, tvOS 26.0, visionOS 26.0, *)
     extension AnyLanguageModel.GeneratedContent {
         internal init(_ content: FoundationModels.GeneratedContent) throws {
             try self.init(json: content.jsonString)
         }
     }
 
-    @available(macOS 26.0, iOS 26.0, watchOS 26.0, tvOS 26.0, visionOS 26.0, *)
+    @available(macOS 26.0, iOS 26.0, watchOS 27.0, tvOS 26.0, visionOS 26.0, *)
     extension Tool {
         fileprivate func callFunction(arguments: FoundationModels.GeneratedContent) async throws
             -> any PromptRepresentable
@@ -445,7 +447,7 @@
         }
     }
 
-    @available(macOS 26.0, iOS 26.0, watchOS 26.0, tvOS 26.0, visionOS 26.0, *)
+    @available(macOS 26.0, iOS 26.0, watchOS 27.0, tvOS 26.0, visionOS 26.0, *)
     func convertToDynamicSchema(
         _ jsonSchema: JSONSchema,
         name: String? = nil
@@ -534,7 +536,7 @@
         }
     }
 
-    @available(macOS 26.0, iOS 26.0, watchOS 26.0, tvOS 26.0, visionOS 26.0, *)
+    @available(macOS 26.0, iOS 26.0, watchOS 27.0, tvOS 26.0, visionOS 26.0, *)
     func convertToProperty(
         key: String,
         schema: JSONSchema,
@@ -550,7 +552,7 @@
 
     /// Converts a JSON constant value to a DynamicGenerationSchema.
     /// Only handles scalar types (int, double, string); returns nil for null, object, bool, and array.
-    @available(macOS 26.0, iOS 26.0, watchOS 26.0, tvOS 26.0, visionOS 26.0, *)
+    @available(macOS 26.0, iOS 26.0, watchOS 27.0, tvOS 26.0, visionOS 26.0, *)
     func convertConstToSchema(_ value: JSONValue) -> FoundationModels.DynamicGenerationSchema? {
         switch value {
         case .int(let intValue):
@@ -564,7 +566,7 @@
         }
     }
 
-    @available(macOS 26.0, iOS 26.0, watchOS 26.0, tvOS 26.0, visionOS 26.0, *)
+    @available(macOS 26.0, iOS 26.0, watchOS 27.0, tvOS 26.0, visionOS 26.0, *)
     extension Transcript {
         func toFoundationModels(
             instructions: AnyLanguageModel.Instructions?,
@@ -644,7 +646,7 @@
         }
     }
 
-    @available(macOS 26.0, iOS 26.0, watchOS 26.0, tvOS 26.0, visionOS 26.0, *)
+    @available(macOS 26.0, iOS 26.0, watchOS 27.0, tvOS 26.0, visionOS 26.0, *)
     extension Array where Element == Transcript.Segment {
         func toFoundationModels() -> [FoundationModels.Transcript.Segment] {
             compactMap { segment -> FoundationModels.Transcript.Segment? in
@@ -655,13 +657,23 @@
                     guard let fmContent = try? FoundationModels.GeneratedContent(structuredSegment.content) else {
                         return nil
                     }
-                    return .structure(
-                        .init(
-                            id: structuredSegment.id,
-                            source: structuredSegment.source,
-                            content: fmContent
+                    #if os(watchOS)
+                        return .structure(
+                            .init(
+                                id: structuredSegment.id,
+                                schemaName: structuredSegment.source,
+                                content: fmContent
+                            )
                         )
-                    )
+                    #else
+                        return .structure(
+                            .init(
+                                id: structuredSegment.id,
+                                source: structuredSegment.source,
+                                content: fmContent
+                            )
+                        )
+                    #endif
                 case .image(let imageSegment):
                     #if compiler(>=6.4) && !os(tvOS)
                         if #available(macOS 27.0, iOS 27.0, visionOS 27.0, watchOS 27.0, *) {
@@ -706,7 +718,7 @@
         }
     #endif
 
-    @available(macOS 26.0, iOS 26.0, watchOS 26.0, tvOS 26.0, visionOS 26.0, *)
+    @available(macOS 26.0, iOS 26.0, watchOS 27.0, tvOS 26.0, visionOS 26.0, *)
     extension Array where Element == Transcript.ToolDefinition {
         func toFoundationModels() -> [FoundationModels.Transcript.ToolDefinition] {
             map { toolDef in
@@ -721,7 +733,7 @@
 
     // MARK: - Shared FoundationModels Session Bridging
 
-    @available(macOS 26.0, iOS 26.0, watchOS 26.0, tvOS 26.0, visionOS 26.0, *)
+    @available(macOS 26.0, iOS 26.0, watchOS 27.0, tvOS 26.0, visionOS 26.0, *)
     func fmRespond<Content>(
         makeSession: @Sendable () async throws -> FoundationModels.LanguageModelSession,
         fmPrompt: FoundationModels.Prompt,
@@ -791,7 +803,7 @@
         }
     }
 
-    @available(macOS 26.0, iOS 26.0, watchOS 26.0, tvOS 26.0, visionOS 26.0, *)
+    @available(macOS 26.0, iOS 26.0, watchOS 27.0, tvOS 26.0, visionOS 26.0, *)
     func fmStreamResponse<Content>(
         makeSession: @escaping @Sendable () async throws -> FoundationModels.LanguageModelSession,
         fmPrompt: FoundationModels.Prompt,

@@ -68,6 +68,20 @@ jobs:
       - name: Test
         run: swift test --skip-build --traits MLX,Llama,CoreML${{ matrix.traits != '' && format(',{0}', matrix.traits) || '' }}
 
+  build-watchos:
+    name: Build for watchOS with Xcode 27
+    runs-on: xcode-27
+    timeout-minutes: 20
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Build for watchOS
+        run: xcodebuild build -scheme AnyLanguageModel -destination 'generic/platform=watchOS' CODE_SIGNING_ALLOWED=NO
+
+      - name: Build tests for watchOS Simulator
+        run: xcodebuild build-for-testing -scheme AnyLanguageModel -destination 'generic/platform=watchOS Simulator' CODE_SIGNING_ALLOWED=NO
+
   test-linux:
     name: Swift ${{ matrix.swift }} on Linux${{ matrix.traits != '' && format(' and --traits {0}', matrix.traits) || '' }}
     runs-on: ubuntu-latest

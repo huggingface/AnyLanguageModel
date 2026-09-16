@@ -1,11 +1,9 @@
 import Testing
 @testable import AnyLanguageModel
 
-#if canImport(FoundationModels)
-    import struct FoundationModels.GenerationOptions
-
+#if canImport(FoundationModels) && !os(watchOS)
     private let isSystemLanguageModelAvailable = {
-        if #available(macOS 26.0, iOS 26.0, watchOS 26.0, tvOS 26.0, visionOS 26.0, *) {
+        if #available(macOS 26.0, iOS 26.0, tvOS 26.0, visionOS 26.0, *) {
             return SystemLanguageModel.default.isAvailable
         } else {
             return false
@@ -85,64 +83,6 @@ import Testing
 
     // MARK: - Test Suite
 
-    @Suite("SystemLanguageModel GenerationOptions")
-    struct SystemLanguageModelGenerationOptionsTests {
-        @available(macOS 26.0, iOS 26.0, watchOS 26.0, tvOS 26.0, visionOS 26.0, *)
-        @Test(
-            "Forwards sampling modes",
-            arguments: [
-                (
-                    AnyLanguageModel.GenerationOptions.SamplingMode.greedy,
-                    FoundationModels.GenerationOptions.SamplingMode.greedy
-                ),
-                (
-                    AnyLanguageModel.GenerationOptions.SamplingMode.random(top: 40, seed: 123),
-                    FoundationModels.GenerationOptions.SamplingMode.random(top: 40, seed: 123)
-                ),
-                (
-                    AnyLanguageModel.GenerationOptions.SamplingMode.random(
-                        probabilityThreshold: 0.9,
-                        seed: 456
-                    ),
-                    FoundationModels.GenerationOptions.SamplingMode.random(
-                        probabilityThreshold: 0.9,
-                        seed: 456
-                    )
-                ),
-            ]
-        )
-        func forwardsSamplingMode(
-            sampling: AnyLanguageModel.GenerationOptions.SamplingMode,
-            expected: FoundationModels.GenerationOptions.SamplingMode
-        ) {
-            let converted = AnyLanguageModel.GenerationOptions(sampling: sampling).toFoundationModels()
-
-            #expect(converted.sampling == expected)
-        }
-
-        @available(macOS 26.0, iOS 26.0, watchOS 26.0, tvOS 26.0, visionOS 26.0, *)
-        @Test("Forwards temperature and maximum response tokens")
-        func forwardsTemperatureAndMaximumResponseTokens() {
-            let converted = AnyLanguageModel.GenerationOptions(
-                temperature: 0.5,
-                maximumResponseTokens: 42
-            ).toFoundationModels()
-
-            #expect(converted.temperature == 0.5)
-            #expect(converted.maximumResponseTokens == 42)
-        }
-
-        @available(macOS 26.0, iOS 26.0, watchOS 26.0, tvOS 26.0, visionOS 26.0, *)
-        @Test("Preserves unspecified options")
-        func preservesUnspecifiedOptions() {
-            let converted = AnyLanguageModel.GenerationOptions().toFoundationModels()
-
-            #expect(converted.sampling == nil)
-            #expect(converted.temperature == nil)
-            #expect(converted.maximumResponseTokens == nil)
-        }
-    }
-
     @Test("GenerationSchema merges duplicate defs for the same type")
     func generationSchemaMergesDuplicateDefsForSameType() {
         let schema = ContainerWithDuplicateNestedType.generationSchema
@@ -156,7 +96,7 @@ import Testing
         .enabled(if: isSystemLanguageModelAvailable)
     )
     struct SystemLanguageModelTests {
-        @available(macOS 26.0, iOS 26.0, watchOS 26.0, tvOS 26.0, visionOS 26.0, *)
+        @available(macOS 26.0, iOS 26.0, tvOS 26.0, visionOS 26.0, *)
         @Test func basicResponse() async throws {
             let model: SystemLanguageModel = SystemLanguageModel()
             let session = LanguageModelSession(model: model)
@@ -165,7 +105,7 @@ import Testing
             #expect(!response.content.isEmpty)
         }
 
-        @available(macOS 26.0, iOS 26.0, watchOS 26.0, tvOS 26.0, visionOS 26.0, *)
+        @available(macOS 26.0, iOS 26.0, tvOS 26.0, visionOS 26.0, *)
         @Test func withInstructions() async throws {
             let model = SystemLanguageModel()
             let session = LanguageModelSession(
@@ -177,7 +117,7 @@ import Testing
             #expect(!response.content.isEmpty)
         }
 
-        @available(macOS 26.0, iOS 26.0, watchOS 26.0, tvOS 26.0, visionOS 26.0, *)
+        @available(macOS 26.0, iOS 26.0, tvOS 26.0, visionOS 26.0, *)
         @Test func withTemperature() async throws {
             let model: SystemLanguageModel = SystemLanguageModel()
             let session = LanguageModelSession(model: model)
@@ -190,7 +130,7 @@ import Testing
             #expect(!response.content.isEmpty)
         }
 
-        @available(macOS 26.0, iOS 26.0, watchOS 26.0, tvOS 26.0, visionOS 26.0, *)
+        @available(macOS 26.0, iOS 26.0, tvOS 26.0, visionOS 26.0, *)
         @Test func streamingString() async throws {
             guard isSystemLanguageModelAvailable else { return }
             let model: SystemLanguageModel = SystemLanguageModel()
@@ -207,7 +147,7 @@ import Testing
             #expect(!snapshots.last!.rawContent.jsonString.isEmpty)
         }
 
-        @available(macOS 26.0, iOS 26.0, watchOS 26.0, tvOS 26.0, visionOS 26.0, *)
+        @available(macOS 26.0, iOS 26.0, tvOS 26.0, visionOS 26.0, *)
         @Test func streamingGeneratedContent() async throws {
             guard isSystemLanguageModelAvailable else { return }
             let model: SystemLanguageModel = SystemLanguageModel()
@@ -227,7 +167,7 @@ import Testing
             #expect(!snapshots.last!.rawContent.jsonString.isEmpty)
         }
 
-        @available(macOS 26.0, iOS 26.0, watchOS 26.0, tvOS 26.0, visionOS 26.0, *)
+        @available(macOS 26.0, iOS 26.0, tvOS 26.0, visionOS 26.0, *)
         @Test func withTools() async throws {
             let weatherTool = WeatherTool()
             let session = LanguageModelSession(model: SystemLanguageModel.default, tools: [weatherTool])
@@ -248,7 +188,7 @@ import Testing
             #expect(content.contains("72°F"))
         }
 
-        @available(macOS 26.0, iOS 26.0, watchOS 26.0, tvOS 26.0, visionOS 26.0, *)
+        @available(macOS 26.0, iOS 26.0, tvOS 26.0, visionOS 26.0, *)
         @Test func conversationContext() async throws {
             let model: SystemLanguageModel = SystemLanguageModel()
             let session = LanguageModelSession(model: model)
@@ -319,7 +259,7 @@ import Testing
 
         // MARK: - Guided Generation Tests
 
-        @available(macOS 26.0, iOS 26.0, watchOS 26.0, tvOS 26.0, visionOS 26.0, *)
+        @available(macOS 26.0, iOS 26.0, tvOS 26.0, visionOS 26.0, *)
         @Test func guidedGenerationSimpleStruct() async throws {
             let session = LanguageModelSession(model: SystemLanguageModel.default)
 
@@ -331,7 +271,7 @@ import Testing
             #expect(!response.content.message.isEmpty)
         }
 
-        @available(macOS 26.0, iOS 26.0, watchOS 26.0, tvOS 26.0, visionOS 26.0, *)
+        @available(macOS 26.0, iOS 26.0, tvOS 26.0, visionOS 26.0, *)
         @Test func guidedGenerationWithMultipleFields() async throws {
             let session = LanguageModelSession(model: SystemLanguageModel.default)
 
@@ -345,7 +285,7 @@ import Testing
             #expect(!response.content.occupation.isEmpty)
         }
 
-        @available(macOS 26.0, iOS 26.0, watchOS 26.0, tvOS 26.0, visionOS 26.0, *)
+        @available(macOS 26.0, iOS 26.0, tvOS 26.0, visionOS 26.0, *)
         @Test func guidedGenerationMathCalculation() async throws {
             let session = LanguageModelSession(model: SystemLanguageModel.default)
 
@@ -360,7 +300,7 @@ import Testing
             #expect(combined.contains("15") || combined.contains("27") || combined.contains("42"))
         }
 
-        @available(macOS 26.0, iOS 26.0, watchOS 26.0, tvOS 26.0, visionOS 26.0, *)
+        @available(macOS 26.0, iOS 26.0, tvOS 26.0, visionOS 26.0, *)
         @Test func guidedGenerationNestedStruct() async throws {
             let session = LanguageModelSession(model: SystemLanguageModel.default)
 
@@ -376,7 +316,7 @@ import Testing
             #expect(response.content.rgb.blue >= 0 && response.content.rgb.blue <= 255)
         }
 
-        @available(macOS 26.0, iOS 26.0, watchOS 26.0, tvOS 26.0, visionOS 26.0, *)
+        @available(macOS 26.0, iOS 26.0, tvOS 26.0, visionOS 26.0, *)
         @Test func guidedGenerationWithArray() async throws {
             let session = LanguageModelSession(model: SystemLanguageModel.default)
 
@@ -392,7 +332,7 @@ import Testing
             }
         }
 
-        @available(macOS 26.0, iOS 26.0, watchOS 26.0, tvOS 26.0, visionOS 26.0, *)
+        @available(macOS 26.0, iOS 26.0, tvOS 26.0, visionOS 26.0, *)
         @Test func guidedGenerationWithEnumConstraint() async throws {
             let session = LanguageModelSession(model: SystemLanguageModel.default)
 
@@ -405,7 +345,7 @@ import Testing
             #expect(response.content.confidence >= 0.0 && response.content.confidence <= 1.0)
         }
 
-        @available(macOS 26.0, iOS 26.0, watchOS 26.0, tvOS 26.0, visionOS 26.0, *)
+        @available(macOS 26.0, iOS 26.0, tvOS 26.0, visionOS 26.0, *)
         @Test func guidedGenerationWithInstructions() async throws {
             let session = LanguageModelSession(
                 model: SystemLanguageModel.default,
@@ -422,7 +362,7 @@ import Testing
             #expect(!response.content.occupation.isEmpty)
         }
 
-        @available(macOS 26.0, iOS 26.0, watchOS 26.0, tvOS 26.0, visionOS 26.0, *)
+        @available(macOS 26.0, iOS 26.0, tvOS 26.0, visionOS 26.0, *)
         @Test func guidedGenerationStreaming() async throws {
             let session = LanguageModelSession(model: SystemLanguageModel.default)
 

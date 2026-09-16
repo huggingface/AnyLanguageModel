@@ -8,7 +8,7 @@ import Foundation
     import JSONSchema
 
     private let isFoundationModelsAvailable: Bool = {
-        if #available(macOS 26.0, iOS 26.0, watchOS 26.0, tvOS 26.0, visionOS 26.0, *) {
+        if #available(macOS 26.0, iOS 26.0, watchOS 27.0, tvOS 26.0, visionOS 26.0, *) {
             return true
         }
         return false
@@ -19,7 +19,7 @@ import Foundation
 
         // MARK: - Primitive Types
 
-        @available(macOS 26.0, iOS 26.0, watchOS 26.0, tvOS 26.0, visionOS 26.0, *)
+        @available(macOS 26.0, iOS 26.0, watchOS 27.0, tvOS 26.0, visionOS 26.0, *)
         @Test func convertStringSchema() throws {
             let schema: JSONSchema = .string(description: "A name")
             let dynamic = convertToDynamicSchema(schema)
@@ -27,7 +27,7 @@ import Foundation
             _ = try FoundationModels.GenerationSchema(root: dynamic, dependencies: [])
         }
 
-        @available(macOS 26.0, iOS 26.0, watchOS 26.0, tvOS 26.0, visionOS 26.0, *)
+        @available(macOS 26.0, iOS 26.0, watchOS 27.0, tvOS 26.0, visionOS 26.0, *)
         @Test func convertStringSchemaWithEnum() throws {
             let schema: JSONSchema = .string(enum: ["red", "green", "blue"])
             let dynamic = convertToDynamicSchema(schema)
@@ -35,7 +35,7 @@ import Foundation
             _ = try FoundationModels.GenerationSchema(root: dynamic, dependencies: [])
         }
 
-        @available(macOS 26.0, iOS 26.0, watchOS 26.0, tvOS 26.0, visionOS 26.0, *)
+        @available(macOS 26.0, iOS 26.0, watchOS 27.0, tvOS 26.0, visionOS 26.0, *)
         @Test func convertStringSchemaWithConst() throws {
             let schema: JSONSchema = .string(const: "fixed_value")
             let dynamic = convertToDynamicSchema(schema)
@@ -43,7 +43,7 @@ import Foundation
             _ = try FoundationModels.GenerationSchema(root: dynamic, dependencies: [])
         }
 
-        @available(macOS 26.0, iOS 26.0, watchOS 26.0, tvOS 26.0, visionOS 26.0, *)
+        @available(macOS 26.0, iOS 26.0, watchOS 27.0, tvOS 26.0, visionOS 26.0, *)
         @Test func convertStringSchemaWithPattern() throws {
             let schema: JSONSchema = .string(pattern: "^[A-Z]{2}$")
             let dynamic = convertToDynamicSchema(schema)
@@ -51,7 +51,7 @@ import Foundation
             _ = try FoundationModels.GenerationSchema(root: dynamic, dependencies: [])
         }
 
-        @available(macOS 26.0, iOS 26.0, watchOS 26.0, tvOS 26.0, visionOS 26.0, *)
+        @available(macOS 26.0, iOS 26.0, watchOS 27.0, tvOS 26.0, visionOS 26.0, *)
         @Test func convertIntegerSchema() throws {
             let schema: JSONSchema = .integer(description: "An age")
             let dynamic = convertToDynamicSchema(schema)
@@ -59,7 +59,7 @@ import Foundation
             _ = try FoundationModels.GenerationSchema(root: dynamic, dependencies: [])
         }
 
-        @available(macOS 26.0, iOS 26.0, watchOS 26.0, tvOS 26.0, visionOS 26.0, *)
+        @available(macOS 26.0, iOS 26.0, watchOS 27.0, tvOS 26.0, visionOS 26.0, *)
         @Test func convertIntegerSchemaWithRange() throws {
             let schema: JSONSchema = .integer(minimum: 0, maximum: 100)
             let dynamic = convertToDynamicSchema(schema)
@@ -67,7 +67,7 @@ import Foundation
             _ = try FoundationModels.GenerationSchema(root: dynamic, dependencies: [])
         }
 
-        @available(macOS 26.0, iOS 26.0, watchOS 26.0, tvOS 26.0, visionOS 26.0, *)
+        @available(macOS 26.0, iOS 26.0, watchOS 27.0, tvOS 26.0, visionOS 26.0, *)
         @Test func convertIntegerSchemaWithEnum() throws {
             let schema: JSONSchema = .integer(enum: [1, 2, 3, 5, 8])
             let dynamic = convertToDynamicSchema(schema)
@@ -75,7 +75,7 @@ import Foundation
             _ = try FoundationModels.GenerationSchema(root: dynamic, dependencies: [])
         }
 
-        @available(macOS 26.0, iOS 26.0, watchOS 26.0, tvOS 26.0, visionOS 26.0, *)
+        @available(macOS 26.0, iOS 26.0, watchOS 27.0, tvOS 26.0, visionOS 26.0, *)
         @Test func convertNumberSchema() throws {
             let schema: JSONSchema = .number(description: "A temperature")
             let dynamic = convertToDynamicSchema(schema)
@@ -83,7 +83,7 @@ import Foundation
             _ = try FoundationModels.GenerationSchema(root: dynamic, dependencies: [])
         }
 
-        @available(macOS 26.0, iOS 26.0, watchOS 26.0, tvOS 26.0, visionOS 26.0, *)
+        @available(macOS 26.0, iOS 26.0, watchOS 27.0, tvOS 26.0, visionOS 26.0, *)
         @Test func convertNumberSchemaWithRange() throws {
             let schema: JSONSchema = .number(minimum: -273.15, maximum: 1000.0)
             let dynamic = convertToDynamicSchema(schema)
@@ -91,7 +91,7 @@ import Foundation
             _ = try FoundationModels.GenerationSchema(root: dynamic, dependencies: [])
         }
 
-        @available(macOS 26.0, iOS 26.0, watchOS 26.0, tvOS 26.0, visionOS 26.0, *)
+        @available(macOS 26.0, iOS 26.0, watchOS 27.0, tvOS 26.0, visionOS 26.0, *)
         @Test func convertBooleanSchema() throws {
             let schema: JSONSchema = .boolean(description: "Is active")
             let dynamic = convertToDynamicSchema(schema)
@@ -101,7 +101,7 @@ import Foundation
 
         // MARK: - Array Types
 
-        @available(macOS 26.0, iOS 26.0, watchOS 26.0, tvOS 26.0, visionOS 26.0, *)
+        @available(macOS 26.0, iOS 26.0, watchOS 27.0, tvOS 26.0, visionOS 26.0, *)
         @Test func convertArraySchema() throws {
             let schema: JSONSchema = .array(items: .string())
             let dynamic = convertToDynamicSchema(schema)
@@ -109,7 +109,7 @@ import Foundation
             _ = try FoundationModels.GenerationSchema(root: dynamic, dependencies: [])
         }
 
-        @available(macOS 26.0, iOS 26.0, watchOS 26.0, tvOS 26.0, visionOS 26.0, *)
+        @available(macOS 26.0, iOS 26.0, watchOS 27.0, tvOS 26.0, visionOS 26.0, *)
         @Test func convertArraySchemaWithConstraints() throws {
             let schema: JSONSchema = .array(items: .integer(), minItems: 1, maxItems: 10)
             let dynamic = convertToDynamicSchema(schema)
@@ -117,7 +117,7 @@ import Foundation
             _ = try FoundationModels.GenerationSchema(root: dynamic, dependencies: [])
         }
 
-        @available(macOS 26.0, iOS 26.0, watchOS 26.0, tvOS 26.0, visionOS 26.0, *)
+        @available(macOS 26.0, iOS 26.0, watchOS 27.0, tvOS 26.0, visionOS 26.0, *)
         @Test func convertArraySchemaWithoutItems() throws {
             let schema: JSONSchema = .array()
             let dynamic = convertToDynamicSchema(schema)
@@ -128,7 +128,7 @@ import Foundation
 
         // MARK: - Object Types
 
-        @available(macOS 26.0, iOS 26.0, watchOS 26.0, tvOS 26.0, visionOS 26.0, *)
+        @available(macOS 26.0, iOS 26.0, watchOS 27.0, tvOS 26.0, visionOS 26.0, *)
         @Test func convertObjectSchema() throws {
             let schema: JSONSchema = .object(
                 description: "A person",
@@ -143,7 +143,7 @@ import Foundation
             _ = try FoundationModels.GenerationSchema(root: dynamic, dependencies: [])
         }
 
-        @available(macOS 26.0, iOS 26.0, watchOS 26.0, tvOS 26.0, visionOS 26.0, *)
+        @available(macOS 26.0, iOS 26.0, watchOS 27.0, tvOS 26.0, visionOS 26.0, *)
         @Test func convertNestedObjectSchema() throws {
             let addressSchema: JSONSchema = .object(
                 properties: [
@@ -167,7 +167,7 @@ import Foundation
             _ = try FoundationModels.GenerationSchema(root: dynamic, dependencies: [])
         }
 
-        @available(macOS 26.0, iOS 26.0, watchOS 26.0, tvOS 26.0, visionOS 26.0, *)
+        @available(macOS 26.0, iOS 26.0, watchOS 27.0, tvOS 26.0, visionOS 26.0, *)
         @Test func convertObjectWithArrayProperty() throws {
             let schema: JSONSchema = .object(
                 properties: [
@@ -183,7 +183,7 @@ import Foundation
 
         // MARK: - Composite Types
 
-        @available(macOS 26.0, iOS 26.0, watchOS 26.0, tvOS 26.0, visionOS 26.0, *)
+        @available(macOS 26.0, iOS 26.0, watchOS 27.0, tvOS 26.0, visionOS 26.0, *)
         @Test func convertAnyOfSchema() throws {
             let schema: JSONSchema = .anyOf([
                 .string(),
@@ -194,7 +194,7 @@ import Foundation
             _ = try FoundationModels.GenerationSchema(root: dynamic, dependencies: [])
         }
 
-        @available(macOS 26.0, iOS 26.0, watchOS 26.0, tvOS 26.0, visionOS 26.0, *)
+        @available(macOS 26.0, iOS 26.0, watchOS 27.0, tvOS 26.0, visionOS 26.0, *)
         @Test(arguments: ["SomeType", "#/$defs/SomeType"])
         func convertReferenceSchema(reference: String) throws {
             let schema: JSONSchema = .reference(reference)
@@ -208,7 +208,7 @@ import Foundation
             )
         }
 
-        @available(macOS 26.0, iOS 26.0, watchOS 26.0, tvOS 26.0, visionOS 26.0, *)
+        @available(macOS 26.0, iOS 26.0, watchOS 27.0, tvOS 26.0, visionOS 26.0, *)
         @Test func convertNamedStringEnumDependencySchema() throws {
             let outputVersion: JSONSchema = .string(enum: ["v0", "v1"])
             let enumDependency = convertToDynamicSchema(outputVersion, name: "OutputVersion")
@@ -228,7 +228,7 @@ import Foundation
 
         // MARK: - Fallback Types
 
-        @available(macOS 26.0, iOS 26.0, watchOS 26.0, tvOS 26.0, visionOS 26.0, *)
+        @available(macOS 26.0, iOS 26.0, watchOS 27.0, tvOS 26.0, visionOS 26.0, *)
         @Test func convertNullSchemaFallsBackToString() throws {
             let schema: JSONSchema = .null
             let dynamic = convertToDynamicSchema(schema)
@@ -236,7 +236,7 @@ import Foundation
             _ = try FoundationModels.GenerationSchema(root: dynamic, dependencies: [])
         }
 
-        @available(macOS 26.0, iOS 26.0, watchOS 26.0, tvOS 26.0, visionOS 26.0, *)
+        @available(macOS 26.0, iOS 26.0, watchOS 27.0, tvOS 26.0, visionOS 26.0, *)
         @Test func convertEmptySchemaFallsBackToString() throws {
             let schema: JSONSchema = .empty
             let dynamic = convertToDynamicSchema(schema)
@@ -244,7 +244,7 @@ import Foundation
             _ = try FoundationModels.GenerationSchema(root: dynamic, dependencies: [])
         }
 
-        @available(macOS 26.0, iOS 26.0, watchOS 26.0, tvOS 26.0, visionOS 26.0, *)
+        @available(macOS 26.0, iOS 26.0, watchOS 27.0, tvOS 26.0, visionOS 26.0, *)
         @Test func convertAnySchemaFallsBackToString() throws {
             let schema: JSONSchema = .any
             let dynamic = convertToDynamicSchema(schema)
@@ -254,7 +254,7 @@ import Foundation
 
         // MARK: - Property Conversion
 
-        @available(macOS 26.0, iOS 26.0, watchOS 26.0, tvOS 26.0, visionOS 26.0, *)
+        @available(macOS 26.0, iOS 26.0, watchOS 27.0, tvOS 26.0, visionOS 26.0, *)
         @Test func convertRequiredProperty() throws {
             let schema: JSONSchema = .string(description: "Required field")
             let property = convertToProperty(key: "name", schema: schema, required: ["name"])
@@ -268,7 +268,7 @@ import Foundation
             _ = try FoundationModels.GenerationSchema(root: objectSchema, dependencies: [])
         }
 
-        @available(macOS 26.0, iOS 26.0, watchOS 26.0, tvOS 26.0, visionOS 26.0, *)
+        @available(macOS 26.0, iOS 26.0, watchOS 27.0, tvOS 26.0, visionOS 26.0, *)
         @Test func convertOptionalProperty() throws {
             let schema: JSONSchema = .string(description: "Optional field")
             let property = convertToProperty(key: "nickname", schema: schema, required: ["name"])
@@ -281,7 +281,7 @@ import Foundation
             _ = try FoundationModels.GenerationSchema(root: objectSchema, dependencies: [])
         }
 
-        @available(macOS 26.0, iOS 26.0, watchOS 26.0, tvOS 26.0, visionOS 26.0, *)
+        @available(macOS 26.0, iOS 26.0, watchOS 27.0, tvOS 26.0, visionOS 26.0, *)
         @Test func convertPropertyWithDescription() throws {
             let schema: JSONSchema = .string(description: "A detailed description")
             let property = convertToProperty(key: "field", schema: schema, required: [])
@@ -296,7 +296,7 @@ import Foundation
 
         // MARK: - Constant Value Conversion
 
-        @available(macOS 26.0, iOS 26.0, watchOS 26.0, tvOS 26.0, visionOS 26.0, *)
+        @available(macOS 26.0, iOS 26.0, watchOS 27.0, tvOS 26.0, visionOS 26.0, *)
         @Test func convertIntConstant() {
             let value: JSONValue = .int(42)
             let schema = convertConstToSchema(value)
@@ -304,7 +304,7 @@ import Foundation
             #expect(schema != nil)
         }
 
-        @available(macOS 26.0, iOS 26.0, watchOS 26.0, tvOS 26.0, visionOS 26.0, *)
+        @available(macOS 26.0, iOS 26.0, watchOS 27.0, tvOS 26.0, visionOS 26.0, *)
         @Test func convertDoubleConstant() {
             let value: JSONValue = .double(3.14)
             let schema = convertConstToSchema(value)
@@ -312,7 +312,7 @@ import Foundation
             #expect(schema != nil)
         }
 
-        @available(macOS 26.0, iOS 26.0, watchOS 26.0, tvOS 26.0, visionOS 26.0, *)
+        @available(macOS 26.0, iOS 26.0, watchOS 27.0, tvOS 26.0, visionOS 26.0, *)
         @Test func convertStringConstant() {
             let value: JSONValue = .string("constant")
             let schema = convertConstToSchema(value)
@@ -320,7 +320,7 @@ import Foundation
             #expect(schema != nil)
         }
 
-        @available(macOS 26.0, iOS 26.0, watchOS 26.0, tvOS 26.0, visionOS 26.0, *)
+        @available(macOS 26.0, iOS 26.0, watchOS 27.0, tvOS 26.0, visionOS 26.0, *)
         @Test func convertNullConstantReturnsNil() {
             let value: JSONValue = .null
             let schema = convertConstToSchema(value)
@@ -328,7 +328,7 @@ import Foundation
             #expect(schema == nil)
         }
 
-        @available(macOS 26.0, iOS 26.0, watchOS 26.0, tvOS 26.0, visionOS 26.0, *)
+        @available(macOS 26.0, iOS 26.0, watchOS 27.0, tvOS 26.0, visionOS 26.0, *)
         @Test func convertBoolConstantReturnsNil() {
             let value: JSONValue = .bool(true)
             let schema = convertConstToSchema(value)
@@ -336,7 +336,7 @@ import Foundation
             #expect(schema == nil)
         }
 
-        @available(macOS 26.0, iOS 26.0, watchOS 26.0, tvOS 26.0, visionOS 26.0, *)
+        @available(macOS 26.0, iOS 26.0, watchOS 27.0, tvOS 26.0, visionOS 26.0, *)
         @Test func convertArrayConstantReturnsNil() {
             let value: JSONValue = .array([.int(1), .int(2)])
             let schema = convertConstToSchema(value)
@@ -344,7 +344,7 @@ import Foundation
             #expect(schema == nil)
         }
 
-        @available(macOS 26.0, iOS 26.0, watchOS 26.0, tvOS 26.0, visionOS 26.0, *)
+        @available(macOS 26.0, iOS 26.0, watchOS 27.0, tvOS 26.0, visionOS 26.0, *)
         @Test func convertObjectConstantReturnsNil() {
             let value: JSONValue = .object(["key": .string("value")])
             let schema = convertConstToSchema(value)
@@ -354,7 +354,7 @@ import Foundation
 
         // MARK: - Integration with AnyLanguageModel.GenerationSchema
 
-        @available(macOS 26.0, iOS 26.0, watchOS 26.0, tvOS 26.0, visionOS 26.0, *)
+        @available(macOS 26.0, iOS 26.0, watchOS 27.0, tvOS 26.0, visionOS 26.0, *)
         @Test func convertSchemaWithGenerableArrayProperty() throws {
             let schema = FoundationModels.GenerationSchema(ArrayGenerationSchemaTests.Response.generationSchema)
             let data = try JSONEncoder().encode(schema)
@@ -364,7 +364,7 @@ import Foundation
             #expect(properties["items"] != nil)
         }
 
-        @available(macOS 26.0, iOS 26.0, watchOS 26.0, tvOS 26.0, visionOS 26.0, *)
+        @available(macOS 26.0, iOS 26.0, watchOS 27.0, tvOS 26.0, visionOS 26.0, *)
         @Test func convertFromAnyLanguageModelGenerationSchema() {
             // Create a schema using AnyLanguageModel types
             let schema = AnyLanguageModel.GenerationSchema(
@@ -382,7 +382,7 @@ import Foundation
             _ = FoundationModels.GenerationSchema(schema)
         }
 
-        @available(macOS 26.0, iOS 26.0, watchOS 26.0, tvOS 26.0, visionOS 26.0, *)
+        @available(macOS 26.0, iOS 26.0, watchOS 27.0, tvOS 26.0, visionOS 26.0, *)
         @Test func convertSchemaWithIntegerProperty() {
             let schema = AnyLanguageModel.GenerationSchema(
                 type: Int.self,
@@ -398,7 +398,7 @@ import Foundation
             _ = FoundationModels.GenerationSchema(schema)
         }
 
-        @available(macOS 26.0, iOS 26.0, watchOS 26.0, tvOS 26.0, visionOS 26.0, *)
+        @available(macOS 26.0, iOS 26.0, watchOS 27.0, tvOS 26.0, visionOS 26.0, *)
         @Test func convertSchemaWithBooleanProperty() {
             let schema = AnyLanguageModel.GenerationSchema(
                 type: Bool.self,
@@ -414,7 +414,7 @@ import Foundation
             _ = FoundationModels.GenerationSchema(schema)
         }
 
-        @available(macOS 26.0, iOS 26.0, watchOS 26.0, tvOS 26.0, visionOS 26.0, *)
+        @available(macOS 26.0, iOS 26.0, watchOS 27.0, tvOS 26.0, visionOS 26.0, *)
         @Test func convertSchemaWithMultiplePropertyTypes() {
             let schema = AnyLanguageModel.GenerationSchema(
                 type: String.self,
