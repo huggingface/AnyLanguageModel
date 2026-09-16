@@ -58,6 +58,32 @@ import Testing
             #expect(await counter.count == 1)
         }
 
+        @Test func concurrentLoadsPublishStateBeforeReturning() async throws {
+            guard #available(macOS 27.0, iOS 27.0, visionOS 27.0, watchOS 27.0, *) else { return }
+            var incompleteLoads = 0
+            for _ in 0 ..< 200 {
+                let model = FoundationLanguageModel {
+                    try await Task.sleep(for: .milliseconds(1))
+                    return FoundationModels.PrivateCloudComputeLanguageModel()
+                }
+                incompleteLoads += try await withThrowingTaskGroup(of: Int.self) { group in
+                    for _ in 0 ..< 20 {
+                        group.addTask {
+                            try await model.load()
+                            // Check each caller before waiting for the rest of the group.
+                            let isLoaded = await model.isLoaded
+                            let capabilities = await model.capabilities
+                            return isLoaded && capabilities != nil ? 0 : 1
+                        }
+                    }
+                    var failures = 0
+                    for try await value in group { failures += value }
+                    return failures
+                }
+            }
+            #expect(incompleteLoads == 0)
+        }
+
         @Test func failedFactoryRunIsRetriedOnTheNextRequest() async throws {
             guard #available(macOS 27.0, iOS 27.0, visionOS 27.0, watchOS 27.0, *) else { return }
             struct LoadFailure: Error {}

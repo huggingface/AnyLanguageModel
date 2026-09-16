@@ -81,11 +81,13 @@
             if let model {
                 return model
             }
+            let task: Task<Model, Error>
             if let loadTask {
-                return try await loadTask.value
+                task = loadTask
+            } else {
+                task = Task { try await makeModel() }
+                loadTask = task
             }
-            let task = Task { try await makeModel() }
-            loadTask = task
             do {
                 let model = try await task.value
                 // Publish only if unload() did not run while the factory was in flight.
