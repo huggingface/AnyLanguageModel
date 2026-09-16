@@ -6,12 +6,13 @@ on:
   pull_request:
     branches: ["main"]
 
-permissions:
-  contents: read
-  pull-requests: write
+
+permissions: {}
 
 jobs:
   test-macos:
+    permissions:
+      contents: read
     name: Swift ${{ matrix.swift }} on macOS ${{ matrix.macos }} with Xcode ${{ matrix.xcode }}${{ matrix.traits != '' && format(' and --traits {0}', matrix.traits) || '' }}
     runs-on: macos-${{ matrix.macos }}
     env:
@@ -69,6 +70,8 @@ jobs:
         run: swift test --skip-build --traits MLX,Llama,CoreML${{ matrix.traits != '' && format(',{0}', matrix.traits) || '' }}
 
   build-watchos:
+    permissions:
+      contents: read
     name: Build for watchOS with Xcode 27
     runs-on: xcode-27
     timeout-minutes: 20
@@ -83,6 +86,8 @@ jobs:
         run: xcodebuild build-for-testing -scheme AnyLanguageModel -destination 'generic/platform=watchOS Simulator' CODE_SIGNING_ALLOWED=NO
 
   test-linux:
+    permissions:
+      contents: read
     name: Swift ${{ matrix.swift }} on Linux${{ matrix.traits != '' && format(' and --traits {0}', matrix.traits) || '' }}
     runs-on: ubuntu-latest
     container: swift:${{ matrix.swift }}
