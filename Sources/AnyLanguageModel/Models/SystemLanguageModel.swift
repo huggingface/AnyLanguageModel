@@ -15,7 +15,7 @@
     /// ```
     @available(macOS 26.0, iOS 26.0, tvOS 26.0, visionOS 26.0, *)
     @available(watchOS, unavailable)
-    public actor SystemLanguageModel: LanguageModel {
+    public struct SystemLanguageModel: LanguageModel {
         /// The reason the model is unavailable.
         public typealias UnavailableReason = FoundationModels.SystemLanguageModel.Availability.UnavailableReason
 
@@ -23,9 +23,7 @@
 
         /// The default system language model.
         @available(watchOS, unavailable)
-        public static var `default`: SystemLanguageModel {
-            SystemLanguageModel()
-        }
+        public static let `default` = SystemLanguageModel()
 
         /// Creates the default system language model.
         public init() {
@@ -61,13 +59,13 @@
             /// The size of the context window in tokens.
             /// The underlying property is back-deployed to OS 26.0
             /// but only declared in the 26.4 SDK and later.
-            nonisolated public var contextSize: Int {
+            public var contextSize: Int {
                 systemModel.contextSize
             }
         #endif
 
         /// Whether the model accepts image input.
-        nonisolated public var supportsImageInput: Bool {
+        public var supportsImageInput: Bool {
             #if compiler(>=6.4) && !os(tvOS) && !os(watchOS)
                 if #available(macOS 27.0, iOS 27.0, visionOS 27.0, *) {
                     return systemModel.capabilities.contains(.vision)
@@ -77,7 +75,7 @@
         }
 
         /// The availability status for the system language model.
-        nonisolated public var availability: Availability<UnavailableReason> {
+        public var availability: Availability<UnavailableReason> {
             switch systemModel.availability {
             case .available:
                 .available
@@ -86,7 +84,7 @@
             }
         }
 
-        nonisolated public func respond<Content>(
+        public func respond<Content>(
             within session: LanguageModelSession,
             to prompt: Prompt,
             generating type: Content.Type,
@@ -103,7 +101,7 @@
             )
         }
 
-        nonisolated public func respond(
+        public func respond(
             within session: LanguageModelSession,
             to prompt: Prompt,
             schema: GenerationSchema,
@@ -120,7 +118,7 @@
             )
         }
 
-        nonisolated private func respond<Content>(
+        private func respond<Content>(
             within session: LanguageModelSession,
             to prompt: Prompt,
             generating type: Content.Type,
@@ -152,7 +150,7 @@
             )
         }
 
-        nonisolated public func streamResponse<Content>(
+        public func streamResponse<Content>(
             within session: LanguageModelSession,
             to prompt: Prompt,
             generating type: Content.Type,
@@ -169,7 +167,7 @@
             )
         }
 
-        nonisolated public func streamResponse(
+        public func streamResponse(
             within session: LanguageModelSession,
             to prompt: Prompt,
             schema: GenerationSchema,
@@ -186,7 +184,7 @@
             )
         }
 
-        nonisolated private func streamResponse<Content>(
+        private func streamResponse<Content>(
             within session: LanguageModelSession,
             to prompt: Prompt,
             generating type: Content.Type,
@@ -218,7 +216,7 @@
             )
         }
 
-        nonisolated public func logFeedbackAttachment(
+        public func logFeedbackAttachment(
             within session: LanguageModelSession,
             sentiment: LanguageModelFeedback.Sentiment?,
             issues: [LanguageModelFeedback.Issue],
