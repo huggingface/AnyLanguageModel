@@ -604,7 +604,7 @@ Runs [MLX](https://github.com/ml-explore/mlx-swift) models on Apple Silicon
 (requires `MLX` trait):
 
 ```swift
-let model = MLXLanguageModel(modelId: "mlx-community/Qwen3-0.6B-4bit")
+let model = MLXLanguageModel(modelId: "mlx-community/Qwen3.5-4B-MLX-4bit")
 
 let session = LanguageModelSession(model: model)
 let response = try await session.respond {
@@ -664,7 +664,7 @@ GPU cache behavior can be configured when creating the model:
 
 ```swift
 let model = MLXLanguageModel(
-    modelId: "mlx-community/Qwen3-0.6B-4bit",
+    modelId: "mlx-community/Qwen3.5-4B-MLX-4bit",
     gpuMemory: .automatic
 )
 ```
@@ -763,12 +763,12 @@ Run models locally via Ollama's
 
 ```swift
 // Default: connects to http://localhost:11434
-let model = OllamaLanguageModel(model: "qwen3") // `ollama pull qwen3:8b`
+let model = OllamaLanguageModel(model: "qwen3.5") // `ollama pull qwen3.5:9b`
 
 // Custom endpoint
 let model = OllamaLanguageModel(
     endpoint: URL(string: "http://remote-server:11434")!,
-    model: "llama3.2"
+    model: "gemma4"
 )
 
 let session = LanguageModelSession(model: model)
@@ -782,7 +782,7 @@ For local models, make sure you're using a vision‑capable model
 You can combine multiple images:
 
 ```swift
-let model = OllamaLanguageModel(model: "qwen3-vl") // `ollama pull qwen3-vl:8b`
+let model = OllamaLanguageModel(model: "qwen3.5") // `ollama pull qwen3.5:9b`
 let session = LanguageModelSession(model: model)
 let response = try await session.respond(
     to: "Compare these posters and summarize their differences",
@@ -815,7 +815,7 @@ Supports both
 ```swift
 let model = OpenAILanguageModel(
     apiKey: ProcessInfo.processInfo.environment["OPENAI_API_KEY"]!,
-    model: "gpt-4o-mini"
+    model: "gpt-5.6-luna"
 )
 
 let session = LanguageModelSession(model: model)
@@ -838,13 +838,13 @@ For OpenAI-compatible endpoints that use older Chat Completions API:
 let model = OpenAILanguageModel(
     baseURL: URL(string: "https://api.example.com")!,
     apiKey: apiKey,
-    model: "gpt-4o-mini",
+    model: "gpt-5.6-luna",
     apiVariant: .chatCompletions
 )
 ```
 
 Use custom generation options for advanced parameters like sampling controls,
-reasoning effort (for o-series models), and vendor-specific extensions:
+reasoning effort (for GPT-5.6 and GPT-6 models), and vendor-specific extensions:
 
 ```swift
 var options = GenerationOptions(temperature: 0.8)
@@ -853,7 +853,7 @@ options[custom: OpenAILanguageModel.self] = .init(
     frequencyPenalty: 0.5,
     presencePenalty: 0.3,
     stopSequences: ["END"],
-    reasoningEffort: .high,        // For reasoning models (o3, o4-mini)
+    reasoningEffort: .high,        // For reasoning models (gpt-5.6, gpt-6-astra)
     serviceTier: .priority,
     extraBody: [                   // Vendor-specific parameters
         "custom_param": .string("value")
@@ -873,14 +873,14 @@ Base URL is required—use your provider’s endpoint:
 let model = OpenResponsesLanguageModel(
     baseURL: URL(string: "https://openrouter.ai/api/v1/")!,
     apiKey: ProcessInfo.processInfo.environment["OPEN_RESPONSES_API_KEY"]!,
-    model: "openai/gpt-4o-mini"
+    model: "openai/gpt-5.6"
 )
 
 // Example: OpenAI
 let model = OpenResponsesLanguageModel(
     baseURL: URL(string: "https://api.openai.com/v1/")!,
     apiKey: ProcessInfo.processInfo.environment["OPEN_RESPONSES_API_KEY"]!,
-    model: "gpt-4o-mini"
+    model: "gpt-5.6-luna"
 )
 
 let session = LanguageModelSession(model: model)
@@ -907,7 +907,7 @@ Uses the [Messages API](https://docs.claude.com/en/api/messages) with Claude mod
 ```swift
 let model = AnthropicLanguageModel(
     apiKey: ProcessInfo.processInfo.environment["ANTHROPIC_API_KEY"]!,
-    model: "claude-sonnet-4-5-20250929"
+    model: "claude-sonnet-5"
 )
 
 let session = LanguageModelSession(model: model, tools: [WeatherTool()])
@@ -966,7 +966,7 @@ Uses the [Gemini API](https://ai.google.dev/api/generate-content) with Gemini mo
 ```swift
 let model = GeminiLanguageModel(
     apiKey: ProcessInfo.processInfo.environment["GEMINI_API_KEY"]!,
-    model: "gemini-2.5-flash"
+    model: "gemini-3.8-flash"
 )
 
 let session = LanguageModelSession(model: model, tools: [WeatherTool()])
