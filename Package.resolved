@@ -1,5 +1,5 @@
 {
-  "originHash" : "b46e46d156bb5bfeea0c5c4e9b59d51ebea883a40627ee34aed14b97f142276d",
+  "originHash" : "afcaf7d64f1529491a2f05d864dc9f4984f3ed6c77a583eb96b474a6a001e3ea",
   "pins" : [
     {
       "identity" : "eventsource",
@@ -26,15 +26,6 @@
       "state" : {
         "revision" : "716419d4d7aa542fce301e809cde7234c68ddbc6",
         "version" : "2.10549.0"
-      }
-    },
-    {
-      "identity" : "partialjsondecoder",
-      "kind" : "remoteSourceControl",
-      "location" : "https://github.com/mattt/PartialJSONDecoder",
-      "state" : {
-        "revision" : "e4d389e6bcc6771bb988d1a8a17695d8bfa97172",
-        "version" : "1.0.0"
       }
     },
     {

@@ -179,33 +179,17 @@ public struct GeneratedContent: Sendable, Equatable, Generable, CustomDebugStrin
             return
         }
 
-        // Handle incomplete JSON by attempting to complete it
-        let completedJSON = String(decoding: data, as: UTF8.self)
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-
-        // Try adding closing braces/brackets to make it valid
-        var attempts: [String] = [completedJSON]
-
-        // If it looks like an incomplete object, try closing it
-        if completedJSON.hasPrefix("{") && !completedJSON.hasSuffix("}") {
-            attempts.append(completedJSON + "}")
-            attempts.append(completedJSON + "\"\"}")  // incomplete string value
-        }
-
-        // If it looks like an incomplete array, try closing it
-        if completedJSON.hasPrefix("[") && !completedJSON.hasSuffix("]") {
-            attempts.append(completedJSON + "]")
-        }
-
-        for attempt in attempts {
-            if let parsed = try? JSONSerialization.jsonObject(with: Data(attempt.utf8), options: [.fragmentsAllowed]) {
-                self = try Self.fromJSONObject(parsed)
-                return
-            }
+        // Handle incomplete JSON by completing it and parsing again
+        let json = String(decoding: data, as: UTF8.self)
+        if let completed = try? JSONCompleter().complete(json),
+            let parsed = try? JSONSerialization.jsonObject(with: Data(completed.utf8), options: [.fragmentsAllowed])
+        {
+            self = try Self.fromJSONObject(parsed)
+            return
         }
 
         // If all else fails, treat it as a string
-        self.init(kind: .string(completedJSON))
+        self.init(kind: .string(json.trimmingCharacters(in: .whitespacesAndNewlines)))
     }
 
     private static func fromJSONObject(_ value: Any) throws -> GeneratedContent {

@@ -40,12 +40,38 @@ struct GeneratedContentJSONTests {
     }
 
     @Test func dataInitializerCompletesPartialJSON() throws {
-        let partial = Data(#"{"title": "A story of""#.utf8)
+        let partial = Data(#"{"title": "A story of"#.utf8)
         let content = try GeneratedContent(json: partial)
         #expect(try content.value(String.self, forProperty: "title") == "A story of")
 
         let partialArray = Data(#"[1, 2, 3"#.utf8)
         #expect(try GeneratedContent(json: partialArray).kind == .array([1, 2, 3].map { GeneratedContent($0) }))
+    }
+
+    @Test(arguments: [
+        (#"{"a": {"b": "x"#, #"{"a": {"b": "x"}}"#),
+        (#"{"a": [1, 2"#, #"{"a": [1, 2]}"#),
+        (#"[{"a": 1}, {"b": "#, #"[{"a": 1}, {"b": null}]"#),
+        (#"{"a": 1, "b": tr"#, #"{"a": 1, "b": true}"#),
+        (#"{"a": 12."#, #"{"a": 12.0}"#),
+        (#"{"a": "esc\"#, #"{"a": "esc"}"#),
+        (#"{"a": "q\" more\u00"#, #"{"a": "q\" more"}"#),
+        (#"{"na"#, #"{"na": null}"#),
+    ])
+    func completesTruncatedStreamingJSON(partial: String, expected: String) throws {
+        let fromString = try GeneratedContent(json: partial)
+        let fromData = try GeneratedContent(json: Data(partial.utf8))
+        let expectedContent = try GeneratedContent(json: expected)
+        #expect(fromString.jsonValue == expectedContent.jsonValue)
+        #expect(fromData.jsonValue == expectedContent.jsonValue)
+    }
+
+    @Test func partialGenerableDecodesFromTruncatedJSON() throws {
+        let partial = #"{"title": "Dune", "pages": 41"#
+        let idea = try NovelIdea.PartiallyGenerated(GeneratedContent(json: partial))
+        #expect(idea.title == "Dune")
+        #expect(idea.pages == 41)
+        #expect(idea.tags == nil)
     }
 
     @Test func dataInitializerFallsBackToString() throws {
