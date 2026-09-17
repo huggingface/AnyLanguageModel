@@ -127,6 +127,33 @@ struct JSONCompleterTests {
         )
     }
 
+    @Test func keepsValuesAfterEmptyNestedContainers() throws {
+        #expect(try completer.complete(#"{"a": {}, "b": 2"#) == #"{"a": {}, "b": 2}"#)
+        #expect(try completer.complete(#"{"a": [], "b": 2"#) == #"{"a": [], "b": 2}"#)
+        #expect(try completer.complete(#"[{}, 2"#) == #"[{}, 2]"#)
+        #expect(try completer.complete(#"[[], [1"#) == #"[[], [1]]"#)
+        #expect(try completer.complete(#"{"a": {  }, "b""#) == #"{"a": {  }, "b": null}"#)
+        #expect(try completer.complete("{}") == "{}")
+        #expect(try completer.complete("[]") == "[]")
+        #expect(try completer.completion(for: "{}", from: "{}".startIndex) == nil)
+        #expect(try completer.completion(for: "[ ]", from: "[ ]".startIndex) == nil)
+    }
+
+    @Test func keepsValuesAfterWhitespaceBeforeComma() throws {
+        #expect(try completer.complete("[1 , 2") == "[1 , 2]")
+        #expect(try completer.complete("[1 ,") == "[1]")
+        #expect(try completer.complete("[1 ") == "[1]")
+        #expect(try completer.complete(#"{"a": 1 , "b": 2"#) == #"{"a": 1 , "b": 2}"#)
+        #expect(
+            try completer.complete(#"{"a": "x" , "b": [1 , {"c": true , "d""#)
+                == #"{"a": "x" , "b": [1 , {"c": true , "d": null}]}"#
+        )
+        #expect(
+            try completer.complete("{\"a\": 1\n,\n\"b\": [\n1\n,\n2\n")
+                == "{\"a\": 1\n,\n\"b\": [\n1\n,\n2]}"
+        )
+    }
+
     @Test func completesArraysWithMissingValues() throws {
         #expect(try completer.complete("[1, 2, 3,") == "[1, 2, 3]")
         #expect(try completer.complete("[1, 2,") == "[1, 2]")

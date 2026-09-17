@@ -57,6 +57,8 @@ struct GeneratedContentJSONTests {
         (#"{"a": "esc\"#, #"{"a": "esc"}"#),
         (#"{"a": "q\" more\u00"#, #"{"a": "q\" more"}"#),
         (#"{"na"#, #"{"na": null}"#),
+        (#"{"a": {}, "b": 2"#, #"{"a": {}, "b": 2}"#),
+        (#"{"a": [] , "b": [1 , 2"#, #"{"a": [], "b": [1, 2]}"#),
     ])
     func completesTruncatedStreamingJSON(partial: String, expected: String) throws {
         let fromString = try GeneratedContent(json: partial)

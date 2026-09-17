@@ -1,6 +1,8 @@
 import Foundation
 
-// Ported from PartialJSONDecoder (https://github.com/mattt/PartialJSONDecoder), MIT licensed.
+// Ported from PartialJSONDecoder (https://github.com/mattt/PartialJSONDecoder)
+// at revision d331b237cafe56c5233557bdf1f5a3415393435c, MIT licensed.
+// The same source ships in the 1.0.0 release under the Apache License 2.0.
 
 /// An error that occurs while completing partial JSON.
 enum JSONCompletionError: Error, Equatable {
@@ -161,7 +163,7 @@ struct JSONCompleter: Sendable {
         var requiresComma = false
         var lastValidIndex = current
 
-        if current >= json.endIndex || json[current] == "]" {
+        if current >= json.endIndex {
             return (string: "]", endIndex: current)
         }
 
@@ -190,6 +192,7 @@ struct JSONCompleter: Sendable {
 
             current = findEndOfCompleteValue(json, from: current)
             lastValidIndex = current
+            current = skipWhitespace(json, from: current)
             requiresComma = true
         }
 
@@ -203,7 +206,7 @@ struct JSONCompleter: Sendable {
         var requiresComma = false
         var lastValidIndex = current
 
-        if current >= json.endIndex || json[current] == "}" {
+        if current >= json.endIndex {
             return (string: "}", endIndex: current)
         }
 
@@ -257,6 +260,7 @@ struct JSONCompleter: Sendable {
 
             current = findEndOfCompleteValue(json, from: current)
             lastValidIndex = current
+            current = skipWhitespace(json, from: current)
             requiresComma = true
         }
 
