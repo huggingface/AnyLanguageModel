@@ -1,8 +1,6 @@
 import Foundation
 
-// Ported from PartialJSONDecoder (https://github.com/mattt/PartialJSONDecoder)
-// at revision d331b237cafe56c5233557bdf1f5a3415393435c, MIT licensed.
-// The same source ships in the 1.0.0 release under the Apache License 2.0.
+// Ported from PartialJSONDecoder (https://github.com/mattt/PartialJSONDecoder), Apache-2.0 licensed.
 
 /// An error that occurs while completing partial JSON.
 enum JSONCompletionError: Error, Equatable {
