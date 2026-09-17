@@ -177,6 +177,26 @@ struct GeneratedContentJSONTests {
         #expect(try content.value(String.self, forProperty: "city") == "Paris")
     }
 
+    @Test func decodesPlainJSONObjectWithCanonicalLookingKindAndSiblings() throws {
+        let json = #"{"kind": {"type": "string", "value": "inner"}, "sibling": "kept"}"#
+        let content = try JSONDecoder().decode(GeneratedContent.self, from: Data(json.utf8))
+        #expect(try content.value(String.self, forProperty: "sibling") == "kept")
+        let kind = try content.value(GeneratedContent.self, forProperty: "kind")
+        #expect(try kind.value(String.self, forProperty: "type") == "string")
+        #expect(try kind.value(String.self, forProperty: "value") == "inner")
+    }
+
+    @Test func jsonValueOmitsPropertiesAbsentFromOrderedKeys() throws {
+        let content = GeneratedContent(
+            kind: .structure(
+                properties: ["a": GeneratedContent(1), "hidden": GeneratedContent(2)],
+                orderedKeys: ["a"]
+            )
+        )
+        #expect(content.jsonValue == ["a": 1.0])
+        #expect(try GeneratedContent(json: content.jsonData).jsonValue == content.jsonValue)
+    }
+
     @Test func encodedFormIsNotPlainJSON() throws {
         let content = GeneratedContent(properties: ["a": 1])
         let object = try JSONSerialization.jsonObject(with: JSONEncoder().encode(content)) as? [String: Any]

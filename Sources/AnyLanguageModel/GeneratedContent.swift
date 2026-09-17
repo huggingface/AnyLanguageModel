@@ -447,6 +447,7 @@ extension GeneratedContent {
     public init(from decoder: Decoder) throws {
         if let container = try? decoder.container(keyedBy: CodingKeys.self),
             container.contains(.kind),
+            Self.hasOnlyCanonicalKeys(decoder),
             let kind = try? container.decode(Kind.self, forKey: .kind)
         {
             let id = try container.decodeIfPresent(GenerationID.self, forKey: .id)
@@ -455,6 +456,24 @@ extension GeneratedContent {
         }
 
         self.init(try JSONValue(from: decoder))
+    }
+
+    private struct AnyCodingKey: CodingKey {
+        var stringValue: String
+        var intValue: Int? { nil }
+        init?(stringValue: String) { self.stringValue = stringValue }
+        init?(intValue: Int) { nil }
+    }
+
+    /// Returns whether the decoder's keyed container holds only the canonical `id` and `kind` keys.
+    ///
+    /// A container keyed by `CodingKeys` drops unknown keys from `allKeys`,
+    /// so this uses a string-backed key to see every key present.
+    private static func hasOnlyCanonicalKeys(_ decoder: Decoder) -> Bool {
+        guard let container = try? decoder.container(keyedBy: AnyCodingKey.self) else { return false }
+        return container.allKeys.allSatisfy { key in
+            key.stringValue == CodingKeys.kind.stringValue || key.stringValue == CodingKeys.id.stringValue
+        }
     }
 
     /// Encodes this generated content into the given encoder.
@@ -533,8 +552,15 @@ extension GeneratedContent.Kind {
             return .string(value)
         case .array(let elements):
             return .array(elements.map(\.jsonValue))
-        case .structure(let properties, _):
-            return .object(properties.mapValues(\.jsonValue))
+        case .structure(let properties, let orderedKeys):
+            var object: [String: JSONValue] = [:]
+            object.reserveCapacity(orderedKeys.count)
+            for key in orderedKeys {
+                if let value = properties[key] {
+                    object[key] = value.jsonValue
+                }
+            }
+            return .object(object)
         }
     }
 }
