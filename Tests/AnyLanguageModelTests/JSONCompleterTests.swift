@@ -49,6 +49,10 @@ struct JSONCompleterTests {
         #expect(throws: JSONCompletionError.depthLimitExceeded(10)) {
             try limited.complete(String(repeating: "[", count: 20))
         }
+        #expect(throws: JSONCompletionError.depthLimitExceeded(10)) {
+            try limited.complete(String(repeating: "[", count: 11))
+        }
+        #expect(try limited.complete(String(repeating: "[", count: 10)) == "[[[[[[[[[[]]]]]]]]]]")
         #expect(try limited.complete(String(repeating: "[", count: 5)) == "[[[[[]]]]]")
         #expect(JSONCompleter().maximumDepth >= 32)
     }
@@ -151,6 +155,20 @@ struct JSONCompleterTests {
         #expect(
             try completer.complete("{\"a\": 1\n,\n\"b\": [\n1\n,\n2\n")
                 == "{\"a\": 1\n,\n\"b\": [\n1\n,\n2]}"
+        )
+    }
+
+    @Test func scansCompleteNestedSiblingsInLinearTime() throws {
+        // Before the redundant rescan was removed, each nesting level doubled the work,
+        // so this depth would not finish.
+        let depth = 60
+        let sibling = String(repeating: "[", count: depth) + String(repeating: "]", count: depth)
+        #expect(try completer.complete("[" + sibling + ", [1") == "[" + sibling + ", [1]]")
+
+        let objectSibling = String(repeating: "{\"a\": ", count: depth) + "1" + String(repeating: "}", count: depth)
+        #expect(
+            try completer.complete("{\"x\": " + objectSibling + ", \"y\": \"tail")
+                == "{\"x\": " + objectSibling + ", \"y\": \"tail\"}"
         )
     }
 

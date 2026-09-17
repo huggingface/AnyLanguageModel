@@ -29,7 +29,7 @@ struct JSONCompleter: Sendable {
     /// The kept portion can be shorter than the input when the text ends inside an escape sequence.
     typealias Completion = (string: String, endIndex: String.Index)
 
-    /// The maximum nesting depth the completer accepts before it throws.
+    /// The maximum number of nested arrays and objects the completer accepts before it throws.
     ///
     /// This bounds recursion on adversarial or malformed input.
     var maximumDepth: Int = 64
@@ -184,7 +184,7 @@ struct JSONCompleter: Sendable {
                 return nil
             }
 
-            if let elementCompletion = try completeValue(json, from: current, depth: depth + 1) {
+            if let elementCompletion = try completeValue(json, from: current, depth: depth) {
                 return (string: elementCompletion.string + "]", endIndex: elementCompletion.endIndex)
             }
 
@@ -252,7 +252,7 @@ struct JSONCompleter: Sendable {
                 return (string: "null}", endIndex: lastValidIndex)
             }
 
-            if let valueCompletion = try completeValue(json, from: current, depth: depth + 1) {
+            if let valueCompletion = try completeValue(json, from: current, depth: depth) {
                 return (string: valueCompletion.string + "}", endIndex: valueCompletion.endIndex)
             }
 
@@ -326,13 +326,12 @@ struct JSONCompleter: Sendable {
     }
 
     /// Returns the index immediately after the complete value that starts at the given index.
+    ///
+    /// Callers invoke this only after `completeValue` has reported the value complete,
+    /// so this scans the text once without re-running the completer on it.
     private func findEndOfCompleteValue(_ json: String, from startIndex: String.Index) -> String.Index {
         let start = skipWhitespace(json, from: startIndex)
         guard start < json.endIndex else { return start }
-
-        if let completion = try? completeValue(json, from: start, depth: 0) {
-            return completion.endIndex
-        }
 
         switch json[start] {
         case "\"":
