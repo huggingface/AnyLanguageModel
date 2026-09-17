@@ -154,19 +154,34 @@ public struct GeneratedContent: Sendable, Equatable, Generable, CustomDebugStrin
     /// print(idea.title) // A story of
     /// ```
     public init(json: String) throws {
-        // Parse JSON with support for incomplete JSON
-        guard let data = json.data(using: .utf8) else {
-            throw GeneratedContentError.typeMismatch
-        }
+        try self.init(json: Data(json.utf8))
+    }
 
+    /// Creates equivalent content from UTF-8 encoded JSON data.
+    ///
+    /// Use this initializer when you already hold the JSON as `Data`,
+    /// for example the body of a network response,
+    /// to avoid converting it to a `String` first.
+    ///
+    /// Like the `String` variant of `init(json:)`, the JSON you provide may be incomplete.
+    /// This is useful for correctly handling partially generated responses.
+    ///
+    /// ```swift
+    /// let data = try await URLSession.shared.data(for: request).0
+    /// let content = try GeneratedContent(json: data)
+    /// ```
+    ///
+    /// - Parameter data: UTF-8 encoded JSON.
+    public init(json data: Data) throws {
         // Try to parse as complete JSON first
         if let parsed = try? JSONSerialization.jsonObject(with: data, options: [.fragmentsAllowed]) {
-            self = try Self.fromJSONValue(parsed)
+            self = try Self.fromJSONObject(parsed)
             return
         }
 
         // Handle incomplete JSON by attempting to complete it
-        let completedJSON = json.trimmingCharacters(in: .whitespacesAndNewlines)
+        let completedJSON = String(decoding: data, as: UTF8.self)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
 
         // Try adding closing braces/brackets to make it valid
         var attempts: [String] = [completedJSON]
@@ -183,10 +198,8 @@ public struct GeneratedContent: Sendable, Equatable, Generable, CustomDebugStrin
         }
 
         for attempt in attempts {
-            if let data = attempt.data(using: .utf8),
-                let parsed = try? JSONSerialization.jsonObject(with: data, options: [.fragmentsAllowed])
-            {
-                self = try Self.fromJSONValue(parsed)
+            if let parsed = try? JSONSerialization.jsonObject(with: Data(attempt.utf8), options: [.fragmentsAllowed]) {
+                self = try Self.fromJSONObject(parsed)
                 return
             }
         }
@@ -195,17 +208,17 @@ public struct GeneratedContent: Sendable, Equatable, Generable, CustomDebugStrin
         self.init(kind: .string(completedJSON))
     }
 
-    private static func fromJSONValue(_ value: Any) throws -> GeneratedContent {
+    private static func fromJSONObject(_ value: Any) throws -> GeneratedContent {
         if let dict = value as? [String: Any] {
             var properties: [String: GeneratedContent] = [:]
             var keys: [String] = []
             for (key, val) in dict {
-                properties[key] = try fromJSONValue(val)
+                properties[key] = try fromJSONObject(val)
                 keys.append(key)
             }
             return GeneratedContent(kind: .structure(properties: properties, orderedKeys: keys))
         } else if let array = value as? [Any] {
-            let contents = try array.map { try fromJSONValue($0) }
+            let contents = try array.map { try fromJSONObject($0) }
             return GeneratedContent(kind: .array(contents))
         } else if let string = value as? String {
             return GeneratedContent(kind: .string(string))
@@ -236,16 +249,26 @@ public struct GeneratedContent: Sendable, Equatable, Generable, CustomDebugStrin
     /// // Output: {"name": "Johnny Appleseed", "age": 30}
     /// ```
     public var jsonString: String {
+        String(decoding: jsonData, as: UTF8.self)
+    }
+
+    /// Returns a UTF-8 encoded JSON representation of the generated content.
+    ///
+    /// Use this property when you need to send the content over the network
+    /// or hand it to a `JSONDecoder`,
+    /// to avoid converting it to a `String` first.
+    ///
+    /// If the content cannot be serialized, this returns the JSON for an empty object.
+    public var jsonData: Data {
         do {
-            let jsonValue = try toJSONValue()
-            let data = try JSONSerialization.data(withJSONObject: jsonValue, options: [.fragmentsAllowed])
-            return String(data: data, encoding: .utf8) ?? "{}"
+            let jsonObject = try toJSONObject()
+            return try JSONSerialization.data(withJSONObject: jsonObject, options: [.fragmentsAllowed])
         } catch {
-            return "{}"
+            return Data("{}".utf8)
         }
     }
 
-    private func toJSONValue() throws -> Any {
+    private func toJSONObject() throws -> Any {
         switch kind {
         case .null:
             return NSNull()
@@ -256,12 +279,12 @@ public struct GeneratedContent: Sendable, Equatable, Generable, CustomDebugStrin
         case .string(let value):
             return value
         case .array(let elements):
-            return try elements.map { try $0.toJSONValue() }
+            return try elements.map { try $0.toJSONObject() }
         case .structure(let properties, let orderedKeys):
             var dict: [String: Any] = [:]
             for key in orderedKeys {
                 if let value = properties[key] {
-                    dict[key] = try value.toJSONValue()
+                    dict[key] = try value.toJSONObject()
                 }
             }
             return dict
@@ -400,16 +423,136 @@ extension GeneratedContent {
         case kind
     }
 
+    /// Creates generated content by decoding from the given decoder.
+    ///
+    /// This initializer accepts two representations:
+    ///
+    /// - The canonical representation produced by ``encode(to:)``,
+    ///   which preserves the ``id`` and the order of structure keys.
+    /// - Plain JSON of any shape, such as an object, array, string, number, boolean, or null.
+    ///   This lets you declare a `GeneratedContent` property directly on a `Decodable`
+    ///   response type and decode provider JSON without an intermediate representation.
+    ///
+    /// ```swift
+    /// struct ProviderResponse: Decodable {
+    ///     let content: GeneratedContent
+    ///     let model: String
+    /// }
+    ///
+    /// let response = try JSONDecoder().decode(ProviderResponse.self, from: data)
+    /// let idea = try NovelIdea(response.content)
+    /// ```
+    ///
+    /// Content decoded from plain JSON has a nil ``id``.
     public init(from decoder: Decoder) throws {
-        let container = try decoder.container(keyedBy: CodingKeys.self)
-        self.id = try container.decodeIfPresent(GenerationID.self, forKey: .id)
-        self.kind = try container.decode(Kind.self, forKey: .kind)
+        if let container = try? decoder.container(keyedBy: CodingKeys.self),
+            container.contains(.kind),
+            let kind = try? container.decode(Kind.self, forKey: .kind)
+        {
+            let id = try container.decodeIfPresent(GenerationID.self, forKey: .id)
+            self.init(kind: kind, id: id)
+            return
+        }
+
+        self.init(try JSONValue(from: decoder))
     }
 
+    /// Encodes this generated content into the given encoder.
+    ///
+    /// The encoded representation preserves the ``id`` and the order of structure keys,
+    /// so a round trip through ``init(from:)`` yields an equal value.
+    /// It is not plain JSON of the content itself.
+    /// To produce plain JSON, use ``jsonData``, ``jsonString``, or ``jsonValue``.
     public func encode(to encoder: Encoder) throws {
         var container = encoder.container(keyedBy: CodingKeys.self)
         try container.encodeIfPresent(id, forKey: .id)
         try container.encode(kind, forKey: .kind)
+    }
+}
+
+// MARK: - JSONValue
+
+extension GeneratedContent {
+    /// Creates generated content from a JSON value.
+    ///
+    /// This conversion walks the value directly and does not serialize or parse JSON text.
+    /// Objects keep the key order of the underlying dictionary, which is unspecified.
+    ///
+    /// - Parameters:
+    ///   - value: The JSON value to convert.
+    ///   - id: The generation ID for this content.
+    public init(_ value: JSONValue, id: GenerationID? = nil) {
+        self.init(kind: Kind(value), id: id)
+    }
+
+    /// A JSON value representation of the generated content.
+    ///
+    /// This conversion walks the content directly and does not serialize or parse JSON text.
+    /// Numbers are always represented as `JSONValue.double`.
+    public var jsonValue: JSONValue {
+        kind.jsonValue
+    }
+}
+
+extension GeneratedContent.Kind {
+    /// Creates a kind from a JSON value.
+    public init(_ value: JSONValue) {
+        switch value {
+        case .null:
+            self = .null
+        case .bool(let bool):
+            self = .bool(bool)
+        case .int(let int):
+            self = .number(Double(int))
+        case .double(let double):
+            self = .number(double)
+        case .string(let string):
+            self = .string(string)
+        case .array(let elements):
+            self = .array(elements.map { GeneratedContent($0) })
+        case .object(let object):
+            var properties: [String: GeneratedContent] = [:]
+            properties.reserveCapacity(object.count)
+            for (key, value) in object {
+                properties[key] = GeneratedContent(value)
+            }
+            self = .structure(properties: properties, orderedKeys: Array(object.keys))
+        }
+    }
+
+    /// A JSON value representation of this kind.
+    public var jsonValue: JSONValue {
+        switch self {
+        case .null:
+            return .null
+        case .bool(let value):
+            return .bool(value)
+        case .number(let value):
+            return .double(value)
+        case .string(let value):
+            return .string(value)
+        case .array(let elements):
+            return .array(elements.map(\.jsonValue))
+        case .structure(let properties, _):
+            return .object(properties.mapValues(\.jsonValue))
+        }
+    }
+}
+
+extension JSONValue: ConvertibleToGeneratedContent {
+    /// A representation of this JSON value as generated content.
+    public var generatedContent: GeneratedContent {
+        GeneratedContent(self)
+    }
+}
+
+extension JSONValue: ConvertibleFromGeneratedContent {
+    /// Creates a JSON value from generated content.
+    ///
+    /// This initializer never throws;
+    /// it is marked `throws` to satisfy ``ConvertibleFromGeneratedContent``.
+    public init(_ content: GeneratedContent) throws {
+        self = content.jsonValue
     }
 }
 
