@@ -244,102 +244,86 @@ public struct OllamaLanguageModel: LanguageModel {
         includeSchemaInPrompt: Bool,
         options: GenerationOptions
     ) -> sending LanguageModelSession.ResponseStream<Content> where Content: Generable {
-        let userSegments = extractPromptSegments(from: session, fallbackText: prompt.description)
-        let (ollamaText, ollamaImages) = convertSegmentsToOllama(userSegments)
-        let messages = [
-            OllamaMessage(
-                role: .user,
-                content: ollamaText,
-                images: ollamaImages.isEmpty ? nil : ollamaImages
-            )
-        ]
-        let ollamaOptions = convertOptions(options)
         let url = baseURL.appendingPathComponent("api/chat")
-
-        // Transform the newline-delimited JSON stream from Ollama into ResponseStream snapshots
-        let stream: AsyncThrowingStream<LanguageModelSession.ResponseStream<Content>.Snapshot, any Error> =
-            AsyncThrowingStream { continuation in
+        let stream = AsyncThrowingStream<LanguageModelSession.ResponseStream<Content>.Snapshot, any Error> {
+            continuation in
+            let task = Task {
                 do {
-                    let ollamaTools = try session.tools.map { tool in
-                        try convertToolToOllamaFormat(tool)
+                    let tools = try session.tools.map { try convertToolToOllamaFormat($0) }
+                    let format = type == String.self ? nil : try JSONValue(convertSchemaToOllamaFormat(schema))
+                    var messages = try session.transcript.toOllamaMessages()
+                    if messages.isEmpty {
+                        messages.append(.init(role: .user, content: prompt.description))
                     }
-                    let ollamaFormat: JSONValue?
-                    if type == String.self {
-                        ollamaFormat = nil
-                    } else {
-                        let schema = try convertSchemaToOllamaFormat(schema)
-                        ollamaFormat = try JSONValue(schema)
-                    }
-
-                    let params = try createChatParams(
-                        model: model,
-                        messages: messages,
-                        tools: ollamaTools.isEmpty ? nil : ollamaTools,
-                        options: ollamaOptions,
-                        stream: true,
-                        format: ollamaFormat,
-                        parameters: extractTopLevelChatParameters(options)
-                    )
-                    let body = try JSONEncoder().encode(params)
-
-                    let task = Task {
-                        // Reuse ChatResponse as each streamed line shares the same shape
-                        do {
-                            let chunks =
-                                httpSession.fetchStream(
-                                    .post,
-                                    url: url,
-                                    body: body,
-                                    dateDecodingStrategy: .iso8601WithFractionalSeconds
-                                ) as AsyncThrowingStream<ChatResponse, any Error>
-
-                            var partialText = ""
-                            var usage = ReportedUsage()
-
-                            for try await chunk in chunks {
-                                usage.merge(chunk.reportedUsage)
-                                if let piece = chunk.message.content { partialText += piece }
-                                if chunk.message.content != nil || chunk.reportedUsage != nil {
-                                    if type == String.self {
-                                        continuation.yield(
-                                            .init(
-                                                content: (partialText as! Content).asPartiallyGenerated(),
-                                                rawContent: GeneratedContent(partialText),
-                                                usage: usage.value
-                                            )
-                                        )
-                                    } else if let raw = try? GeneratedContent(json: partialText),
-                                        let parsed = try? type.init(raw)
-                                    {
-                                        continuation.yield(
-                                            .init(
-                                                content: parsed.asPartiallyGenerated(),
-                                                rawContent: raw,
-                                                usage: usage.value
-                                            )
-                                        )
-                                    }
-                                }
-
-                                if chunk.done {
-                                    break
-                                }
+                    var state = StreamingResponseState<Content>()
+                    while true {
+                        try Task.checkCancellation()
+                        let params = try createChatParams(
+                            model: model,
+                            messages: messages,
+                            tools: tools.isEmpty ? nil : tools,
+                            options: convertOptions(options),
+                            stream: true,
+                            format: format,
+                            parameters: extractTopLevelChatParameters(options)
+                        )
+                        let body = try JSONEncoder().encode(params)
+                        let chunks: AsyncThrowingStream<ChatResponse, any Error> = httpSession.fetchStream(
+                            .post,
+                            url: url,
+                            body: body,
+                            dateDecodingStrategy: .iso8601WithFractionalSeconds
+                        )
+                        var toolCalls: [OllamaToolCall] = []
+                        for try await chunk in chunks {
+                            state.usage.merge(chunk.reportedUsage)
+                            if let piece = chunk.message.content { state.text += piece }
+                            toolCalls.append(contentsOf: chunk.message.toolCalls ?? [])
+                            if chunk.message.content != nil || chunk.reportedUsage != nil {
+                                if let snapshot = state.snapshot() { continuation.yield(snapshot) }
                             }
-
-                            continuation.finish()
-                        } catch {
-                            continuation.finish(throwing: error)
+                            if chunk.done { break }
                         }
+                        guard !toolCalls.isEmpty else { break }
+                        try Task.checkCancellation()
+                        switch try await resolveToolCalls(toolCalls, session: session) {
+                        case .stop(let calls):
+                            state.entries.append(.toolCalls(Transcript.ToolCalls(calls)))
+                            continuation.yield(try state.stoppedSnapshot())
+                            continuation.finish()
+                            return
+                        case .invocations(let invocations):
+                            messages.append(
+                                .init(
+                                    role: .assistant,
+                                    content: state.text,
+                                    toolCalls: try toolCalls.map { try JSONValue($0) }
+                                )
+                            )
+                            state.entries.append(.toolCalls(Transcript.ToolCalls(invocations.map(\.call))))
+                            for invocation in invocations {
+                                state.entries.append(.toolOutput(invocation.output))
+                                let (text, images) = convertSegmentsToOllama(invocation.output.segments)
+                                messages.append(
+                                    .init(
+                                        role: .tool,
+                                        content: text,
+                                        images: images.isEmpty ? nil : images,
+                                        toolName: invocation.call.toolName
+                                    )
+                                )
+                            }
+                        }
+                        if let snapshot = state.snapshot() { continuation.yield(snapshot) }
+                        state.beginNextRound()
                     }
-
-                    continuation.onTermination = { _ in
-                        task.cancel()
-                    }
+                    continuation.finish()
                 } catch {
                     continuation.finish(throwing: error)
                 }
             }
-
+            continuation.onTermination = { _ in task.cancel() }
+        }
         return LanguageModelSession.ResponseStream(stream: stream)
     }
 }
@@ -590,11 +574,71 @@ struct OllamaMessage: Hashable, Codable, Sendable {
     let role: Role
     let content: String
     let images: [String]?
+    let toolCalls: [JSONValue]?
+    let toolName: String?
 
-    init(role: Role, content: String, images: [String]? = nil) {
+    enum CodingKeys: String, CodingKey {
+        case role, content, images
+        case toolCalls = "tool_calls"
+        case toolName = "tool_name"
+    }
+
+    init(
+        role: Role,
+        content: String,
+        images: [String]? = nil,
+        toolCalls: [JSONValue]? = nil,
+        toolName: String? = nil
+    ) {
         self.role = role
         self.content = content
         self.images = images
+        self.toolCalls = toolCalls
+        self.toolName = toolName
+    }
+}
+
+private extension Transcript {
+    func toOllamaMessages() throws -> [OllamaMessage] {
+        try map { entry in
+            let role: OllamaMessage.Role
+            let segments: [Transcript.Segment]
+            switch entry {
+            case .instructions(let instructions):
+                role = .system
+                segments = instructions.segments
+            case .prompt(let prompt):
+                role = .user
+                segments = prompt.segments
+            case .response(let response):
+                role = .assistant
+                segments = response.segments
+            case .toolCalls(let calls):
+                return .init(
+                    role: .assistant,
+                    content: "",
+                    toolCalls: try calls.map { call in
+                        try JSONValue(
+                            OllamaToolCall(
+                                id: call.id,
+                                type: "function",
+                                function: .init(name: call.toolName, arguments: call.arguments.jsonValue)
+                            )
+                        )
+                    }
+                )
+            case .toolOutput(let output):
+                let (text, images) = convertSegmentsToOllama(output.segments)
+                return .init(
+                    role: .tool,
+                    content: text,
+                    images: images.isEmpty ? nil : images,
+                    toolName: output.toolName
+                )
+            }
+            let (text, images) = convertSegmentsToOllama(segments)
+            return .init(role: role, content: text, images: images.isEmpty ? nil : images)
+        }
     }
 }
 
@@ -666,13 +710,13 @@ private struct ChatMessageResponse: Decodable, Sendable {
     }
 }
 
-private struct OllamaToolCall: Decodable, Sendable {
+private struct OllamaToolCall: Codable, Sendable {
     let id: String?
     let type: String?
     let function: OllamaToolFunction
 }
 
-private struct OllamaToolFunction: Decodable, Sendable {
+private struct OllamaToolFunction: Codable, Sendable {
     let name: String
     let arguments: JSONValue?
 

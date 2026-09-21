@@ -1220,8 +1220,15 @@ extension LanguageModelSession.ResponseStream: AsyncSequence {
     }
 }
 
-private enum ResponseStreamError: Error {
+private enum ResponseStreamError: Error, LocalizedError {
     case noSnapshots
+
+    var errorDescription: String? {
+        switch self {
+        case .noSnapshots:
+            return "The response stream ended without producing a snapshot."
+        }
+    }
 }
 
 // MARK: -

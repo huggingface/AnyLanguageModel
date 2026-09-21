@@ -489,20 +489,23 @@ public struct OpenResponsesLanguageModel: LanguageModel {
         let tools: [OpenResponsesTool]? =
             session.tools.isEmpty ? nil : session.tools.map { convertToolToOpenResponsesFormat($0) }
         let url = baseURL.appendingPathComponent("responses")
-        let stream: AsyncThrowingStream<LanguageModelSession.ResponseStream<Content>.Snapshot, any Error> = .init {
+        let stream = AsyncThrowingStream<LanguageModelSession.ResponseStream<Content>.Snapshot, any Error> {
             continuation in
-            do {
-                let params = try OpenResponsesAPI.createRequestBody(
-                    model: model,
-                    messages: session.transcript.toOpenResponsesMessages(),
-                    tools: tools,
-                    generating: type,
-                    schema: schema,
-                    options: options,
-                    stream: true
-                )
-                let task = Task { @Sendable in
-                    do {
+            let task = Task {
+                do {
+                    var messages = session.transcript.toOpenResponsesMessages()
+                    var state = StreamingResponseState<Content>()
+                    while true {
+                        try Task.checkCancellation()
+                        let params = try OpenResponsesAPI.createRequestBody(
+                            model: model,
+                            messages: messages,
+                            tools: tools,
+                            generating: type,
+                            schema: schema,
+                            options: options,
+                            stream: true
+                        )
                         let body = try JSONEncoder().encode(params)
                         let events: AsyncThrowingStream<OpenResponsesStreamEvent, any Error> =
                             httpSession.fetchEventStream(
@@ -511,44 +514,61 @@ public struct OpenResponsesLanguageModel: LanguageModel {
                                 headers: ["Authorization": "Bearer \(tokenProvider())"],
                                 body: body
                             )
-                        var accumulatedText = ""
-                        var usage = ReportedUsage()
-                        for try await event in events {
+                        var toolCalls: [OpenResponsesToolCall] = []
+                        responseEvents: for try await event in events {
                             switch event {
                             case .outputTextDelta(let delta):
-                                accumulatedText += delta
-                                if let snapshot = LanguageModelSession.ResponseStream<Content>.Snapshot(
-                                    text: accumulatedText,
-                                    usage: usage.value
-                                ) {
-                                    continuation.yield(snapshot)
+                                state.text += delta
+                                if let snapshot = state.snapshot() { continuation.yield(snapshot) }
+                            case .completed(let response):
+                                state.usage.merge(response?.usage?.reportedUsage)
+                                // The completed response contains full tool arguments and
+                                // the output items required by the next request.
+                                toolCalls = extractToolCallsFromOutput(response?.output)
+                                if !toolCalls.isEmpty, let output = response?.output {
+                                    for item in output {
+                                        messages.append(.init(role: .raw(rawContent: item), content: .text("")))
+                                    }
                                 }
-                            case .completed(let responseUsage):
-                                usage.merge(responseUsage?.reportedUsage)
-                                if let snapshot = LanguageModelSession.ResponseStream<Content>.Snapshot(
-                                    text: accumulatedText,
-                                    usage: usage.value
-                                ) {
-                                    continuation.yield(snapshot)
-                                }
-                                continuation.finish()
-                                return
+                                if let snapshot = state.snapshot() { continuation.yield(snapshot) }
+                                break responseEvents
                             case .failed:
-                                continuation.finish(throwing: OpenResponsesLanguageModelError.streamFailed)
-                                return
+                                throw OpenResponsesLanguageModelError.streamFailed
                             case .ignored:
                                 break
                             }
                         }
-                        continuation.finish()
-                    } catch {
-                        continuation.finish(throwing: error)
+                        guard !toolCalls.isEmpty else { break }
+                        try Task.checkCancellation()
+                        switch try await resolveToolCalls(toolCalls, session: session) {
+                        case .stop(let calls):
+                            state.entries.append(.toolCalls(Transcript.ToolCalls(calls)))
+                            continuation.yield(try state.stoppedSnapshot())
+                            continuation.finish()
+                            return
+                        case .invocations(let invocations):
+                            state.entries.append(.toolCalls(Transcript.ToolCalls(invocations.map(\.call))))
+                            for invocation in invocations {
+                                state.entries.append(.toolOutput(invocation.output))
+                                messages.append(
+                                    .init(
+                                        role: .tool(id: invocation.call.id),
+                                        content: .text(
+                                            openResponsesConvertSegmentsToToolContentString(invocation.output.segments)
+                                        )
+                                    )
+                                )
+                            }
+                        }
+                        if let snapshot = state.snapshot() { continuation.yield(snapshot) }
+                        state.beginNextRound()
                     }
+                    continuation.finish()
+                } catch {
+                    continuation.finish(throwing: error)
                 }
-                continuation.onTermination = { _ in task.cancel() }
-            } catch {
-                continuation.finish(throwing: error)
             }
+            continuation.onTermination = { _ in task.cancel() }
         }
         return LanguageModelSession.ResponseStream(stream: stream)
     }
@@ -1191,7 +1211,7 @@ private func resolveToolCalls(
 
 private enum OpenResponsesStreamEvent: Decodable, Sendable {
     case outputTextDelta(String)
-    case completed(ResponsesUsage?)
+    case completed(OpenResponsesAPI.Response?)
     case failed
     case ignored
 
@@ -1202,12 +1222,7 @@ private enum OpenResponsesStreamEvent: Decodable, Sendable {
         case "response.output_text.delta":
             self = .outputTextDelta(try c.decode(String.self, forKey: .delta))
         case "response.completed":
-            if c.contains(.response), !(try c.decodeNil(forKey: .response)) {
-                let response = try c.nestedContainer(keyedBy: CodingKeys.self, forKey: .response)
-                self = .completed(try response.decodeIfPresent(ResponsesUsage.self, forKey: .usage))
-            } else {
-                self = .completed(nil)
-            }
+            self = .completed(try c.decodeIfPresent(OpenResponsesAPI.Response.self, forKey: .response))
         case "response.failed":
             self = .failed
         default:

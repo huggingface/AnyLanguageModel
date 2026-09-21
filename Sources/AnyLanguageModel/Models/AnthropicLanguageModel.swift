@@ -583,91 +583,113 @@ public struct AnthropicLanguageModel: LanguageModel {
 
                     let responseSchema =
                         type == String.self ? nil : try convertSchemaToAnthropicFormat(schema)
-                    var params = try createMessageParams(
-                        model: model,
-                        system: nil,
-                        messages: session.transcript.toAnthropicMessages(),
-                        tools: anthropicTools.isEmpty ? nil : anthropicTools,
-                        responseSchema: responseSchema,
-                        options: options
-                    )
-                    params["stream"] = .bool(true)
-
-                    let body = try JSONEncoder().encode(params)
-
-                    // Stream server-sent events from Anthropic API
-                    let events: AsyncThrowingStream<AnthropicStreamEvent, any Error> =
-                        httpSession
-                        .fetchEventStream(
-                            .post,
-                            url: url,
-                            headers: headers,
-                            body: body
+                    var messages = session.transcript.toAnthropicMessages()
+                    var state = StreamingResponseState<Content>()
+                    while true {
+                        try Task.checkCancellation()
+                        var params = try createMessageParams(
+                            model: model,
+                            system: nil,
+                            messages: messages,
+                            tools: anthropicTools.isEmpty ? nil : anthropicTools,
+                            responseSchema: responseSchema,
+                            options: options
                         )
+                        params["stream"] = .bool(true)
+                        let body = try JSONEncoder().encode(params)
+                        let events: AsyncThrowingStream<AnthropicStreamEvent, any Error> =
+                            httpSession.fetchEventStream(.post, url: url, headers: headers, body: body)
+                        var blocks: [Int: AnthropicStreamBlock] = [:]
+                        var lastSnapshot: LanguageModelSession.ResponseStream<Content>.Snapshot?
 
-                    var accumulatedText = ""
-                    var usage = ReportedUsage()
-                    var lastSnapshot: LanguageModelSession.ResponseStream<Content>.Snapshot?
-                    let expectsStructuredResponse = type != String.self
+                        func snapshot() -> LanguageModelSession.ResponseStream<Content>.Snapshot? {
+                            if type == String.self { return state.snapshot() }
+                            guard
+                                var snapshot: LanguageModelSession.ResponseStream<Content>.Snapshot =
+                                    try? partialSnapshot(from: state.text)
+                            else { return nil }
+                            snapshot.usage = state.totalUsage
+                            snapshot.transcriptEntries = ArraySlice(state.entries)
+                            return snapshot
+                        }
 
-                    for try await event in events {
-                        switch event {
-                        case .contentBlockDelta(let delta):
-                            if case .textDelta(let textDelta) = delta.delta {
-                                accumulatedText += textDelta.text
-
-                                if expectsStructuredResponse {
-                                    if var snapshot: LanguageModelSession.ResponseStream<Content>.Snapshot =
-                                        try? partialSnapshot(from: accumulatedText)
-                                    {
-                                        snapshot.usage = usage.value
+                        responseEvents: for try await event in events {
+                            switch event {
+                            case .contentBlockStart(let start):
+                                blocks[start.index] = AnthropicStreamBlock(start.contentBlock)
+                            case .contentBlockDelta(let delta):
+                                switch delta.delta {
+                                case .textDelta(let textDelta):
+                                    state.text += textDelta.text
+                                    blocks[delta.index]?.text += textDelta.text
+                                    if let snapshot = snapshot() {
                                         lastSnapshot = snapshot
                                         continuation.yield(snapshot)
                                     }
-                                } else {
-                                    let raw = GeneratedContent(accumulatedText)
-                                    let content: Content.PartiallyGenerated = (accumulatedText as! Content)
-                                        .asPartiallyGenerated()
-                                    let snapshot = LanguageModelSession.ResponseStream<Content>.Snapshot(
-                                        content: content,
-                                        rawContent: raw,
-                                        usage: usage.value
-                                    )
-                                    lastSnapshot = snapshot
+                                case .inputJsonDelta(let input):
+                                    blocks[delta.index]?.arguments += input.partialJson
+                                case .thinkingDelta(let thinking):
+                                    blocks[delta.index]?.thinking += thinking.thinking
+                                case .signatureDelta(let signature):
+                                    blocks[delta.index]?.signature += signature.signature
+                                case .ignored:
+                                    break
+                                }
+                            case .messageStart(let start):
+                                state.usage.merge(start.message.usage?.reportedUsage)
+                            case .messageDelta(let delta):
+                                state.usage.merge(delta.usage?.reportedUsage)
+                                if delta.usage?.reportedUsage != nil {
+                                    if var current = lastSnapshot {
+                                        current.usage = state.totalUsage
+                                        lastSnapshot = current
+                                        continuation.yield(current)
+                                    } else if let current = state.snapshot() {
+                                        lastSnapshot = current
+                                        continuation.yield(current)
+                                    }
+                                }
+                            case .messageStop:
+                                if lastSnapshot == nil, !state.usage.isEmpty, let snapshot = state.snapshot() {
                                     continuation.yield(snapshot)
                                 }
+                                break responseEvents
+                            case .contentBlockStop, .ping, .ignored:
+                                break
                             }
-                        case .messageStart(let start):
-                            usage.merge(start.message.usage?.reportedUsage)
-                        case .messageDelta(let delta):
-                            usage.merge(delta.usage?.reportedUsage)
-                            if delta.usage?.reportedUsage != nil {
-                                if var snapshot = lastSnapshot {
-                                    snapshot.usage = usage.value
-                                    lastSnapshot = snapshot
-                                    continuation.yield(snapshot)
-                                } else if let snapshot = LanguageModelSession.ResponseStream<Content>.Snapshot(
-                                    text: accumulatedText,
-                                    usage: usage.value
-                                ) {
-                                    lastSnapshot = snapshot
-                                    continuation.yield(snapshot)
-                                }
-                            }
-                        case .messageStop:
-                            if lastSnapshot == nil, !usage.isEmpty,
-                                let snapshot = LanguageModelSession.ResponseStream<Content>.Snapshot(
-                                    text: accumulatedText,
-                                    usage: usage.value
-                                )
-                            {
-                                continuation.yield(snapshot)
-                            }
+                        }
+                        let content = try blocks.keys.sorted().compactMap { try blocks[$0]?.content() }
+                        let toolUses = content.compactMap { block -> AnthropicToolUse? in
+                            if case .toolUse(let use) = block { return use }
+                            return nil
+                        }
+                        guard !toolUses.isEmpty else { break }
+                        try Task.checkCancellation()
+                        switch try await resolveToolUses(toolUses, session: session) {
+                        case .stop(let calls):
+                            state.entries.append(.toolCalls(Transcript.ToolCalls(calls)))
+                            continuation.yield(try state.stoppedSnapshot())
                             continuation.finish()
                             return
-                        case .contentBlockStart, .contentBlockStop, .ping, .ignored:
-                            break
+                        case .invocations(let invocations):
+                            messages.append(.init(role: .assistant, content: content))
+                            state.entries.append(.toolCalls(Transcript.ToolCalls(invocations.map(\.call))))
+                            var results: [AnthropicContent] = []
+                            for invocation in invocations {
+                                state.entries.append(.toolOutput(invocation.output))
+                                results.append(
+                                    .toolResult(
+                                        .init(
+                                            toolUseId: invocation.call.id,
+                                            content: convertSegmentsToAnthropicContent(invocation.output.segments)
+                                        )
+                                    )
+                                )
+                            }
+                            messages.append(.init(role: .user, content: results))
                         }
+                        if let snapshot = snapshot() { continuation.yield(snapshot) }
+                        state.beginNextRound()
                     }
 
                     continuation.finish()
@@ -1217,6 +1239,36 @@ private struct AnthropicErrorDetail: Codable {
 
 // MARK: - Streaming Event Types
 
+private struct AnthropicStreamBlock {
+    let start: AnthropicStreamEvent.ContentBlockStartEvent.ContentBlock
+    var text: String
+    var arguments = ""
+    var thinking: String
+    var signature: String
+
+    init(_ start: AnthropicStreamEvent.ContentBlockStartEvent.ContentBlock) {
+        self.start = start
+        text = start.text ?? ""
+        thinking = start.thinking ?? ""
+        signature = start.signature ?? ""
+    }
+
+    func content() throws -> AnthropicContent? {
+        switch start.type {
+        case "text": return .text(.init(text: text))
+        case "thinking": return .thinking(.init(thinking: thinking, signature: signature))
+        case "tool_use":
+            guard let id = start.id, let name = start.name else { return nil }
+            let input =
+                arguments.isEmpty
+                ? start.input
+                : try JSONDecoder().decode([String: JSONValue].self, from: Data(arguments.utf8))
+            return .toolUse(.init(id: id, name: name, input: input))
+        default: return nil
+        }
+    }
+}
+
 private enum AnthropicStreamEvent: Codable, Sendable {
     case messageStart(MessageStartEvent)
     case contentBlockStart(ContentBlockStartEvent)
@@ -1290,6 +1342,11 @@ private enum AnthropicStreamEvent: Codable, Sendable {
         struct ContentBlock: Codable, Sendable {
             let type: String
             let text: String?
+            let id: String?
+            let name: String?
+            let input: [String: JSONValue]?
+            let thinking: String?
+            let signature: String?
         }
     }
 

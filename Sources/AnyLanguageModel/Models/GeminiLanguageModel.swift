@@ -485,82 +485,71 @@ public struct GeminiLanguageModel: LanguageModel {
 
                     let geminiTools = try buildTools(from: session.tools, serverTools: effectiveServerTools)
 
-                    let params = try createGenerateContentParams(
-                        contents: session.transcript.toGeminiContent(),
-                        tools: geminiTools,
-                        generating: type,
-                        schema: schema,
-                        options: options,
-                        thinking: effectiveThinking,
-                        jsonMode: effectiveJsonMode
-                    )
-
-                    let body = try JSONEncoder().encode(params)
-
-                    let stream: AsyncThrowingStream<GeminiGenerateContentResponse, any Error> =
-                        httpSession
-                        .fetchEventStream(
-                            .post,
-                            url: url,
-                            headers: headers,
-                            body: body
+                    var transcript = session.transcript
+                    var state = StreamingResponseState<Content>()
+                    while true {
+                        try Task.checkCancellation()
+                        let params = try createGenerateContentParams(
+                            contents: transcript.toGeminiContent(),
+                            tools: geminiTools,
+                            generating: type,
+                            schema: schema,
+                            options: options,
+                            thinking: effectiveThinking,
+                            jsonMode: effectiveJsonMode
                         )
-
-                    var accumulatedText = ""
-                    var accumulatedParts: [GeminiPart] = []
-                    var usage = ReportedUsage()
-
-                    func snapshot() throws -> LanguageModelSession.ResponseStream<Content>.Snapshot? {
-                        var raw: GeneratedContent
-                        let content: Content.PartiallyGenerated?
-
-                        if type == String.self {
-                            raw = GeneratedContent(accumulatedText)
-                            content = (accumulatedText as! Content).asPartiallyGenerated()
-                        } else {
-                            raw =
-                                (try? GeneratedContent(json: accumulatedText))
-                                ?? GeneratedContent(accumulatedText)
-                            if let parsed = try? type.init(raw) {
-                                content = parsed.asPartiallyGenerated()
-                            } else {
-                                // Skip invalid partial JSON until it parses cleanly.
-                                content = nil
-                            }
-                        }
-
-                        guard let content else { return nil }
-                        return .init(
-                            content: content,
-                            rawContent: raw,
-                            usage: usage.value,
-                            providerMetadata: try textPartMetadata(accumulatedParts)
-                        )
-                    }
-
-                    for try await chunk in stream {
-                        let chunkUsage = chunk.usageMetadata?.reportedUsage
-                        usage.merge(chunkUsage)
-
-                        var yieldedText = false
-                        if let parts = chunk.candidates.first?.content.parts {
-                            for part in parts {
-                                if case .text(let textPart) = part {
-                                    accumulatedText += textPart.text
-                                    accumulatedParts.append(part)
-
-                                    if let snapshot = try snapshot() {
+                        let body = try JSONEncoder().encode(params)
+                        let stream: AsyncThrowingStream<GeminiGenerateContentResponse, any Error> =
+                            httpSession.fetchEventStream(.post, url: url, headers: headers, body: body)
+                        var parts: [GeminiPart] = []
+                        var functionCalls: [GeminiFunctionCall] = []
+                        for try await chunk in stream {
+                            state.usage.merge(chunk.usageMetadata?.reportedUsage)
+                            var yieldedText = false
+                            for part in chunk.candidates.first?.content.parts ?? [] {
+                                parts.append(part)
+                                switch part {
+                                case .text(let textPart):
+                                    state.text += textPart.text
+                                    if let snapshot = state.snapshot(providerMetadata: try textPartMetadata(parts)) {
                                         continuation.yield(snapshot)
                                         yieldedText = true
                                     }
+                                case .functionCall(let call):
+                                    functionCalls.append(call)
+                                default:
+                                    break
                                 }
                             }
+                            if chunk.usageMetadata?.reportedUsage != nil, !yieldedText,
+                                let snapshot = state.snapshot(providerMetadata: try textPartMetadata(parts))
+                            {
+                                continuation.yield(snapshot)
+                            }
                         }
-
-                        // A chunk that only reports usage still updates the counts.
-                        if chunkUsage != nil, !yieldedText, let snapshot = try snapshot() {
-                            continuation.yield(snapshot)
+                        guard !functionCalls.isEmpty else { break }
+                        try Task.checkCancellation()
+                        let metadata = try textPartMetadata(parts)
+                        switch try await resolveFunctionCalls(functionCalls, session: session) {
+                        case .stop(let calls):
+                            state.entries.append(.toolCalls(Transcript.ToolCalls(calls, providerMetadata: metadata)))
+                            continuation.yield(try state.stoppedSnapshot())
+                            continuation.finish()
+                            return
+                        case .invocations(let invocations):
+                            let calls = Transcript.Entry.toolCalls(
+                                Transcript.ToolCalls(invocations.map(\.call), providerMetadata: metadata)
+                            )
+                            transcript.append(calls)
+                            state.entries.append(calls)
+                            for invocation in invocations {
+                                let output = Transcript.Entry.toolOutput(invocation.output)
+                                transcript.append(output)
+                                state.entries.append(output)
+                            }
                         }
+                        if let snapshot = state.snapshot() { continuation.yield(snapshot) }
+                        state.beginNextRound()
                     }
 
                     continuation.finish()
