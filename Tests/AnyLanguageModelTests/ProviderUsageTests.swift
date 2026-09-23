@@ -428,6 +428,33 @@ import Testing
             #expect(!session.isResponding)
         }
 
+        @Test(arguments: Provider.allCases)
+        func stoppedStreamedToolsWithoutEmptyObjectContent(_ provider: Provider) async throws {
+            UsageURLProtocol.reset()
+            UsageURLProtocol.enqueue(json: try provider.toolStream())
+            let tool = RecordingWeatherTool()
+            let session = provider.makeSession(tools: [tool])
+            session.toolExecutionDelegate = StopDelegate()
+            var snapshots: [LanguageModelSession.ResponseStream<Int>.Snapshot] = []
+            for try await snapshot in session.streamResponse(to: "Weather?", generating: Int.self) {
+                snapshots.append(snapshot)
+            }
+            let last = try #require(snapshots.last)
+            #expect(last.content == 0)
+            #expect(last.transcriptEntries.count == 1)
+            #expect(last.usage == provider.expected)
+            #expect(session.transcript.count == 3)
+
+            UsageURLProtocol.enqueue(json: try provider.toolStream())
+            let arraySession = provider.makeSession(tools: [tool])
+            arraySession.toolExecutionDelegate = StopDelegate()
+            let response = try await arraySession.streamResponse(to: "Weather?", generating: [String].self).collect()
+            #expect(response.content.isEmpty)
+            #expect(response.transcriptEntries.count == 1)
+            #expect(tool.cities.withLock { $0.isEmpty })
+            #expect(UsageURLProtocol.recordedBodies.count == 2)
+        }
+
         @Test func openResponsesToolHistoryUsesTopLevelFunctionCallItems() async throws {
             let provider = Provider.openResponses
             UsageURLProtocol.reset()
