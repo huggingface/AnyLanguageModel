@@ -428,6 +428,39 @@ import Testing
             #expect(!session.isResponding)
         }
 
+        @Test func openResponsesToolHistoryUsesTopLevelFunctionCallItems() async throws {
+            let provider = Provider.openResponses
+            UsageURLProtocol.reset()
+            UsageURLProtocol.enqueue(json: try provider.toolStream())
+            UsageURLProtocol.enqueue(json: try provider.stream())
+            UsageURLProtocol.enqueue(json: try provider.stream())
+            let session = provider.makeSession(tools: [WeatherTool()])
+            _ = try await session.streamResponse(to: "Weather?").collect()
+            _ = try await session.streamResponse(to: "And tomorrow?").collect()
+            #expect(UsageURLProtocol.recordedBodies.count == 3)
+
+            let body = try #require(UsageURLProtocol.recordedBodies.last)
+            let json = try #require(JSONSerialization.jsonObject(with: body) as? [String: Any])
+            let input = try #require(json["input"] as? [[String: Any]])
+            let types = input.map { $0["type"] as? String }
+            let callIndex = try #require(types.firstIndex(of: "function_call"))
+            let outputIndex = try #require(types.firstIndex(of: "function_call_output"))
+            #expect(types.filter { $0 == "function_call" }.count == 1)
+            #expect(callIndex < outputIndex)
+            let call = input[callIndex]
+            #expect(call["call_id"] as? String == "call_1")
+            #expect(call["name"] as? String == "getWeather")
+            let arguments = try #require(call["arguments"] as? String)
+            let decodedArguments = try JSONSerialization.jsonObject(with: Data(arguments.utf8)) as? [String: String]
+            #expect(decodedArguments == ["city": "Paris"])
+            #expect(call["id"] == nil)
+            #expect(input[outputIndex]["call_id"] as? String == "call_1")
+            for item in input where item["type"] as? String == "message" {
+                let content = item["content"] as? [[String: Any]] ?? []
+                #expect(!content.contains { $0["type"] as? String == "function_call" })
+            }
+        }
+
         @Test(arguments: Provider.allCases)
         func streamedToolOutputOverride(_ provider: Provider) async throws {
             UsageURLProtocol.reset()

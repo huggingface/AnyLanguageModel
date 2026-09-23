@@ -918,30 +918,23 @@ extension Transcript {
                     )
                 )
             case .toolCalls(let toolCalls):
-                let rawCalls: [JSONValue] = toolCalls.map { call in
-                    let argsStr =
-                        (try? JSONEncoder().encode(call.arguments)).flatMap { String(data: $0, encoding: .utf8) }
-                        ?? "{}"
-                    return .object([
-                        "id": .string(call.id),
-                        "type": .string("function_call"),
-                        "call_id": .string(call.id),
-                        "name": .string(call.toolName),
-                        "arguments": .string(argsStr),
-                    ])
-                }
-                list.append(
-                    OpenResponsesMessage(
-                        role: .raw(
-                            rawContent: .object([
-                                "type": .string("message"),
-                                "role": .string("assistant"),
-                                "content": .array(rawCalls),
-                            ])
-                        ),
-                        content: .text("")
+                // Function calls are top-level input items, not assistant message content.
+                // The transcript keeps only the call ID, so the optional item ID is omitted.
+                for call in toolCalls {
+                    list.append(
+                        OpenResponsesMessage(
+                            role: .raw(
+                                rawContent: .object([
+                                    "type": .string("function_call"),
+                                    "call_id": .string(call.id),
+                                    "name": .string(call.toolName),
+                                    "arguments": .string(call.arguments.jsonString),
+                                ])
+                            ),
+                            content: .text("")
+                        )
                     )
-                )
+                }
             case .toolOutput(let out):
                 list.append(
                     OpenResponsesMessage(
