@@ -1,11 +1,28 @@
 import Foundation
 import Observation
 
+/// Controls transcript retention when generation fails or is cancelled.
+public enum TranscriptErrorHandlingPolicy: Sendable, Equatable {
+    /// Retain the prompt and the latest cumulative streaming checkpoint.
+    /// Nonstreaming failures have no checkpoint and retain only the prompt.
+    case preserveTranscript
+    /// Restore the transcript as it was before the request. Tool side effects are not undone.
+    case revertTranscript
+}
+
 @Observable
 public final class LanguageModelSession: @unchecked Sendable {
     public var isResponding: Bool {
         access(keyPath: \.isResponding)
         return state.withLock { $0.isResponding }
+    }
+
+    /// On failure, `nil` retains the prompt without committing streaming checkpoints.
+    /// Cancellation never commits the partial answer as a completed response, regardless
+    /// of this policy. These defaults do not claim Foundation Models behavioral parity.
+    public var transcriptErrorHandlingPolicy: TranscriptErrorHandlingPolicy? {
+        get { state.withLock { $0.transcriptErrorHandlingPolicy } }
+        set { state.withLock { $0.transcriptErrorHandlingPolicy = newValue } }
     }
 
     public var transcript: Transcript {
@@ -23,6 +40,17 @@ public final class LanguageModelSession: @unchecked Sendable {
     }
 
     @ObservationIgnored private let state: Locked<State>
+
+    @ObservationIgnored private let responseRelay = Locked<Task<Void, Never>?>(nil)
+
+    /// Waits for the current streaming response relay to finish transcript cleanup.
+    /// Call after cancelling a consumer, before persisting the transcript or starting
+    /// another response. This synchronization API is an AnyLanguageModel extension.
+    /// Do not call from a tool executing within the same response.
+    nonisolated public func waitForResponseCompletion() async {
+        let task = responseRelay.withLock { $0 }
+        await task?.value
+    }
 
     private let model: any LanguageModel
     public let tools: [any Tool]
@@ -141,12 +169,16 @@ public final class LanguageModelSession: @unchecked Sendable {
     }
 
     nonisolated private func wrapRespond<T>(_ operation: () async throws -> T) async throws -> T {
+        let initialTranscript = transcript
         beginResponding()
         do {
             let result = try await operation()
             endResponding()
             return result
         } catch {
+            if transcriptErrorHandlingPolicy == .revertTranscript {
+                withMutation(keyPath: \.transcript) { state.withLock { $0.transcript = initialTranscript } }
+            }
             endResponding()
             throw error
         }
@@ -169,6 +201,10 @@ public final class LanguageModelSession: @unchecked Sendable {
                         session.recordUsage(snapshot.usage.increment(since: &accountedUsage))
                         continuation.yield(snapshot)
                     }
+
+                    // AsyncThrowingStream may end normally when its task is cancelled.
+                    // A partial snapshot must not become a completed transcript response.
+                    try Task.checkCancellation()
 
                     // Commit the response to the transcript
                     // before the stream reports completion,
@@ -200,10 +236,25 @@ public final class LanguageModelSession: @unchecked Sendable {
                     session.endResponding()
                     continuation.finish()
                 } catch {
+                    session.withMutation(keyPath: \.transcript) {
+                        session.state.withLock { state in
+                            switch state.transcriptErrorHandlingPolicy {
+                            case .preserveTranscript:
+                                state.transcript.append(contentsOf: lastSnapshot?.transcriptEntries ?? [])
+                            case .revertTranscript:
+                                state.transcript = Transcript(
+                                    entries: state.transcript.prefix { $0.id != promptEntry.id }
+                                )
+                            case nil:
+                                break
+                            }
+                        }
+                    }
                     session.endResponding()
                     continuation.finish(throwing: error)
                 }
             }
+            session.responseRelay.withLock { $0 = task }
             continuation.onTermination = { termination in
                 if case .cancelled = termination {
                     task.cancel()
@@ -1235,6 +1286,7 @@ private enum ResponseStreamError: Error, LocalizedError {
 
 private struct State: Equatable, Sendable {
     var transcript: Transcript
+    var transcriptErrorHandlingPolicy: TranscriptErrorHandlingPolicy?
     var usage = LanguageModelSession.Usage.zero
 
     var isResponding: Bool { count > 0 }
