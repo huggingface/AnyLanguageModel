@@ -510,6 +510,8 @@ public struct OpenAILanguageModel: LanguageModel {
         var entries: [Transcript.Entry] = []
         var usage = ReportedUsage()
         var text = ""
+        // The text of earlier tool rounds, which string responses include.
+        var earlierText = ""
         var messages = messages
 
         var toolRounds = ToolRoundLimit(provider: "OpenAI")
@@ -586,12 +588,13 @@ public struct OpenAILanguageModel: LanguageModel {
                                 )
                             )
                         }
+                        if type == String.self { earlierText += toolCallMessage.content ?? "" }
                         continue
                     }
                 }
             }
 
-            text = choice.message.content ?? ""
+            text = earlierText + (choice.message.content ?? "")
             break
         }
 
@@ -625,6 +628,8 @@ public struct OpenAILanguageModel: LanguageModel {
         var entries: [Transcript.Entry] = []
         var usage = ReportedUsage()
         var text = ""
+        // The text of earlier tool rounds, which string responses include.
+        var earlierText = ""
         var lastOutput: [JSONValue]?
         var messages = messages
 
@@ -692,12 +697,15 @@ public struct OpenAILanguageModel: LanguageModel {
                                 )
                             )
                         }
+                        if type == String.self {
+                            earlierText += resp.outputText ?? extractTextFromOutput(resp.output) ?? ""
+                        }
                         continue
                     }
                 }
             }
 
-            text = resp.outputText ?? extractTextFromOutput(resp.output) ?? ""
+            text = earlierText + (resp.outputText ?? extractTextFromOutput(resp.output) ?? "")
 
             break
         }
