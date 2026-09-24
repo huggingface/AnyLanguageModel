@@ -495,6 +495,7 @@ public struct OpenResponsesLanguageModel: LanguageModel {
                 do {
                     var messages = session.transcript.toOpenResponsesMessages()
                     var state = StreamingResponseState<Content>()
+                    var toolRounds = ToolRoundLimit(provider: "Open Responses")
                     while true {
                         try Task.checkCancellation()
                         let params = try OpenResponsesAPI.createRequestBody(
@@ -540,6 +541,7 @@ public struct OpenResponsesLanguageModel: LanguageModel {
                         }
                         guard !toolCalls.isEmpty else { break }
                         try Task.checkCancellation()
+                        try toolRounds.record(toolCalls.map(\.roundCall))
                         switch try await resolveToolCalls(toolCalls, session: session) {
                         case .stop(let calls):
                             state.entries.append(.toolCalls(Transcript.ToolCalls(calls)))
@@ -589,6 +591,7 @@ public struct OpenResponsesLanguageModel: LanguageModel {
         var messages = messages
         let url = baseURL.appendingPathComponent("responses")
 
+        var toolRounds = ToolRoundLimit(provider: "Open Responses")
         while true {
             let params = try OpenResponsesAPI.createRequestBody(
                 model: model,
@@ -617,6 +620,7 @@ public struct OpenResponsesLanguageModel: LanguageModel {
                         messages.append(OpenResponsesMessage(role: .raw(rawContent: item), content: .text("")))
                     }
                 }
+                try toolRounds.record(toolCalls.map(\.roundCall))
                 let resolution = try await resolveToolCalls(toolCalls, session: session)
                 switch resolution {
                 case .stop(let calls):
@@ -1256,5 +1260,11 @@ private extension GenerationSchema {
             value = .object(obj)
         }
         return value
+    }
+}
+
+extension OpenResponsesToolCall {
+    var roundCall: ToolRoundLimit.Call {
+        .init(name: name, jsonArguments: arguments)
     }
 }

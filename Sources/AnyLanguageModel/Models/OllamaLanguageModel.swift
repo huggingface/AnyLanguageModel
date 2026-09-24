@@ -256,6 +256,7 @@ public struct OllamaLanguageModel: LanguageModel {
                         messages.append(.init(role: .user, content: prompt.description))
                     }
                     var state = StreamingResponseState<Content>()
+                    var toolRounds = ToolRoundLimit(provider: "Ollama")
                     while true {
                         try Task.checkCancellation()
                         let params = try createChatParams(
@@ -286,6 +287,7 @@ public struct OllamaLanguageModel: LanguageModel {
                         }
                         guard !toolCalls.isEmpty else { break }
                         try Task.checkCancellation()
+                        try toolRounds.record(toolCalls.map(\.roundCall))
                         switch try await resolveToolCalls(toolCalls, session: session) {
                         case .stop(let calls):
                             state.entries.append(.toolCalls(Transcript.ToolCalls(calls)))
@@ -723,5 +725,11 @@ private struct OllamaToolFunction: Codable, Sendable {
     private enum CodingKeys: String, CodingKey {
         case name
         case arguments
+    }
+}
+
+extension OllamaToolCall {
+    var roundCall: ToolRoundLimit.Call {
+        .init(name: function.name, arguments: function.arguments)
     }
 }

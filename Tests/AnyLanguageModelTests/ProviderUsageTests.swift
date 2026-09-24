@@ -729,6 +729,66 @@ import Testing
             #expect(response.usage == .zero)
         }
 
+        /// Returns the debug description of the decoding failure that `body` throws, if any.
+        private static func decodingFailureDescription(_ body: () async throws -> Void) async -> String? {
+            do {
+                try await body()
+                return nil
+            } catch LanguageModelSession.GenerationError.decodingFailure(let context) {
+                return context.debugDescription
+            } catch {
+                return "\(error)"
+            }
+        }
+
+        @Test(arguments: Provider.allCases)
+        func streamedToolRoundsStopAtLimit(_ provider: Provider) async throws {
+            UsageURLProtocol.reset()
+            let limit = ToolRoundLimit.maximumRounds
+            for round in 0 ... limit {
+                UsageURLProtocol.enqueue(json: try provider.toolStream(city: "City \(round)", callID: "call_\(round)"))
+            }
+            let tool = RecordingWeatherTool()
+            let session = provider.makeSession(tools: [tool])
+            let description = await Self.decodingFailureDescription {
+                _ = try await session.streamResponse(to: "Weather?").collect()
+            }
+            #expect(description?.contains("Exceeded maximum tool iterations (\(limit))") == true)
+            #expect(tool.cities.withLock { $0.count } == limit)
+            #expect(UsageURLProtocol.recordedBodies.count == limit + 1)
+            #expect(!session.isResponding)
+        }
+
+        @Test(arguments: Provider.allCases)
+        func streamedRepeatedToolRoundStops(_ provider: Provider) async throws {
+            UsageURLProtocol.reset()
+            UsageURLProtocol.enqueue(json: try provider.toolStream())
+            UsageURLProtocol.enqueue(json: try provider.toolStream(callID: "call_2"))
+            let tool = RecordingWeatherTool()
+            let session = provider.makeSession(tools: [tool])
+            let description = await Self.decodingFailureDescription {
+                _ = try await session.streamResponse(to: "Weather?").collect()
+            }
+            #expect(description?.contains("repeated") == true)
+            #expect(tool.cities.withLock { $0 } == ["Paris"])
+            #expect(UsageURLProtocol.recordedBodies.count == 2)
+        }
+
+        @Test(arguments: [Provider.chat, .responses, .openResponses, .gemini])
+        func repeatedToolRoundStops(_ provider: Provider) async throws {
+            UsageURLProtocol.reset()
+            UsageURLProtocol.enqueue(json: try Self.json(provider.response(tool: true)))
+            UsageURLProtocol.enqueue(json: try Self.json(provider.response(tool: true)))
+            let tool = RecordingWeatherTool()
+            let session = provider.makeSession(tools: [tool])
+            let description = await Self.decodingFailureDescription {
+                _ = try await session.respond(to: "Weather?")
+            }
+            #expect(description?.contains("repeated") == true)
+            #expect(tool.cities.withLock { $0 } == ["Paris"])
+            #expect(UsageURLProtocol.recordedBodies.count == 2)
+        }
+
         @Test(arguments: [Provider.chat, .responses, .openResponses, .gemini])
         func toolRoundsAccumulateUsage(_ provider: Provider) async throws {
             UsageURLProtocol.reset()

@@ -585,6 +585,7 @@ public struct AnthropicLanguageModel: LanguageModel {
                         type == String.self ? nil : try convertSchemaToAnthropicFormat(schema)
                     var messages = session.transcript.toAnthropicMessages()
                     var state = StreamingResponseState<Content>()
+                    var toolRounds = ToolRoundLimit(provider: "Anthropic")
                     while true {
                         try Task.checkCancellation()
                         var params = try createMessageParams(
@@ -665,6 +666,7 @@ public struct AnthropicLanguageModel: LanguageModel {
                         }
                         guard !toolUses.isEmpty else { break }
                         try Task.checkCancellation()
+                        try toolRounds.record(toolUses.map(\.roundCall))
                         switch try await resolveToolUses(toolUses, session: session) {
                         case .stop(let calls):
                             state.entries.append(.toolCalls(Transcript.ToolCalls(calls)))
@@ -1472,5 +1474,11 @@ private struct AnthropicUsage: Codable, Sendable {
             output: .init(totalTokenCount: outputTokens),
             metadata: metadata
         ).normalized
+    }
+}
+
+extension AnthropicToolUse {
+    var roundCall: ToolRoundLimit.Call {
+        .init(name: name, arguments: input)
     }
 }

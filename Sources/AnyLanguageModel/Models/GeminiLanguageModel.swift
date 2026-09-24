@@ -322,6 +322,7 @@ public struct GeminiLanguageModel: LanguageModel {
         var entries: [Transcript.Entry] = []
         var usage = ReportedUsage()
 
+        var toolRounds = ToolRoundLimit(provider: "Gemini")
         // Multi-turn conversation loop for tool calling
         while true {
             let params = try createGenerateContentParams(
@@ -358,6 +359,7 @@ public struct GeminiLanguageModel: LanguageModel {
 
             if !functionCalls.isEmpty {
                 // Resolve function calls
+                try toolRounds.record(functionCalls.map(\.roundCall))
                 let resolution = try await resolveFunctionCalls(functionCalls, session: session)
                 switch resolution {
                 case .stop(let calls):
@@ -487,6 +489,7 @@ public struct GeminiLanguageModel: LanguageModel {
 
                     var transcript = session.transcript
                     var state = StreamingResponseState<Content>()
+                    var toolRounds = ToolRoundLimit(provider: "Gemini")
                     while true {
                         try Task.checkCancellation()
                         let params = try createGenerateContentParams(
@@ -530,6 +533,7 @@ public struct GeminiLanguageModel: LanguageModel {
                         guard !functionCalls.isEmpty else { break }
                         try Task.checkCancellation()
                         let metadata = try textPartMetadata(parts)
+                        try toolRounds.record(functionCalls.map(\.roundCall))
                         switch try await resolveFunctionCalls(functionCalls, session: session) {
                         case .stop(let calls):
                             state.entries.append(.toolCalls(Transcript.ToolCalls(calls, providerMetadata: metadata)))
@@ -1216,5 +1220,11 @@ enum GeminiError: Error, CustomStringConvertible {
         case .noCandidate:
             return "No candidate in response"
         }
+    }
+}
+
+extension GeminiFunctionCall {
+    var roundCall: ToolRoundLimit.Call {
+        .init(name: name, arguments: args)
     }
 }

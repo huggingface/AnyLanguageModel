@@ -512,6 +512,7 @@ public struct OpenAILanguageModel: LanguageModel {
         var text = ""
         var messages = messages
 
+        var toolRounds = ToolRoundLimit(provider: "OpenAI")
         // Loop until no more tool calls
         while true {
             let params = try ChatCompletions.createRequestBody(
@@ -558,6 +559,7 @@ public struct OpenAILanguageModel: LanguageModel {
                 if let value = try? JSONValue(toolCallMessage) {
                     messages.append(OpenAIMessage(role: .raw(rawContent: value), content: .text("")))
                 }
+                try toolRounds.record(toolCalls.map(\.roundCall))
                 let resolution = try await resolveToolCalls(toolCalls, session: session)
                 switch resolution {
                 case .stop(let calls):
@@ -628,6 +630,7 @@ public struct OpenAILanguageModel: LanguageModel {
 
         let url = baseURL.appendingPathComponent("responses")
 
+        var toolRounds = ToolRoundLimit(provider: "OpenAI")
         // Loop until no more tool calls
         while true {
             let params = try Responses.createRequestBody(
@@ -661,6 +664,7 @@ public struct OpenAILanguageModel: LanguageModel {
                         messages.append(OpenAIMessage(role: .raw(rawContent: msg), content: .text("")))
                     }
                 }
+                try toolRounds.record(toolCalls.map(\.roundCall))
                 let resolution = try await resolveToolCalls(toolCalls, session: session)
                 switch resolution {
                 case .stop(let calls):
@@ -769,6 +773,7 @@ public struct OpenAILanguageModel: LanguageModel {
                 do {
                     var messages = session.transcript.toOpenAIMessages()
                     var state = StreamingResponseState<Content>()
+                    var toolRounds = ToolRoundLimit(provider: "OpenAI")
                     while true {
                         try Task.checkCancellation()
                         let params: JSONValue
@@ -859,6 +864,7 @@ public struct OpenAILanguageModel: LanguageModel {
 
                         guard !toolCalls.isEmpty else { break }
                         try Task.checkCancellation()
+                        try toolRounds.record(toolCalls.map(\.roundCall))
                         switch try await resolveToolCalls(toolCalls, session: session) {
                         case .stop(let calls):
                             state.entries.append(.toolCalls(Transcript.ToolCalls(calls)))
@@ -2043,5 +2049,11 @@ private struct ChatCompletionsUsage: Decodable, Sendable {
                 reasoningTokenCount: completionTokensDetails?.reasoningTokens
             )
         ).normalized
+    }
+}
+
+extension OpenAIToolCall {
+    var roundCall: ToolRoundLimit.Call {
+        .init(name: function?.name ?? "", jsonArguments: function?.arguments)
     }
 }
