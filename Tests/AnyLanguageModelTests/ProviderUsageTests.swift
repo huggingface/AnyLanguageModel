@@ -440,7 +440,8 @@ import Testing
                 snapshots.append(snapshot)
             }
             let last = try #require(snapshots.last)
-            #expect(last.content == 0)
+            let content: Int = last.content
+            #expect(content == 0)
             #expect(last.transcriptEntries.count == 1)
             #expect(last.usage == provider.expected)
             #expect(session.transcript.count == 3)
