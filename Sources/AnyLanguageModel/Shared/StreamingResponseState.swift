@@ -23,6 +23,8 @@ struct StreamingResponseState<Content: Generable> {
     ///
     /// Without text, the snapshot uses the first empty value that the content type accepts:
     /// an empty object, an empty array, `null`, and then zero or `false` for scalar types.
+    /// The value must decode as the complete content type, not only its partial form,
+    /// so that `collect()` accepts the snapshot.
     func stoppedSnapshot() throws -> LanguageModelSession.ResponseStream<Content>.Snapshot {
         if let snapshot = snapshot() { return snapshot }
         let candidates: [GeneratedContent.Kind] = [
@@ -30,9 +32,9 @@ struct StreamingResponseState<Content: Generable> {
         ]
         for kind in candidates {
             let raw = GeneratedContent(kind: kind)
-            guard let content = try? Content.PartiallyGenerated(raw) else { continue }
+            guard let content = try? Content(raw) else { continue }
             return .init(
-                content: content,
+                content: content.asPartiallyGenerated(),
                 rawContent: raw,
                 transcriptEntries: ArraySlice(entries),
                 usage: totalUsage

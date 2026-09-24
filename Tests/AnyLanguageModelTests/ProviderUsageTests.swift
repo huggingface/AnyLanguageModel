@@ -455,6 +455,25 @@ import Testing
             #expect(UsageURLProtocol.recordedBodies.count == 2)
         }
 
+        @Test(arguments: Provider.allCases)
+        func stoppedStreamedToolsWithoutDecodableEmptyContentThrow(_ provider: Provider) async throws {
+            UsageURLProtocol.reset()
+            UsageURLProtocol.enqueue(json: try provider.toolStream())
+            let session = provider.makeSession(tools: [RecordingWeatherTool()])
+            session.toolExecutionDelegate = StopDelegate()
+            var snapshotCount = 0
+            var thrownError: (any Error)?
+            do {
+                for try await _ in session.streamResponse(to: "Weather?", generating: Forecast.self) {
+                    snapshotCount += 1
+                }
+            } catch {
+                thrownError = error
+            }
+            #expect(snapshotCount == 0)
+            #expect(thrownError as? GeneratedContentError == .typeMismatch)
+        }
+
         @Test func openResponsesToolHistoryUsesTopLevelFunctionCallItems() async throws {
             let provider = Provider.openResponses
             UsageURLProtocol.reset()
@@ -645,6 +664,12 @@ import Testing
 
         @Generable
         struct Answer { var answer: String }
+
+        @Generable
+        enum Sky { case clear, cloudy }
+
+        @Generable
+        struct Forecast { var sky: Sky }
 
         @Test(arguments: Provider.allCases)
         func structuredResponsesPreserveUsage(_ provider: Provider) async throws {
