@@ -587,6 +587,8 @@ public struct OpenResponsesLanguageModel: LanguageModel {
         var entries: [Transcript.Entry] = []
         var usage = ReportedUsage()
         var text = ""
+        // The text of earlier tool rounds, which string responses include.
+        var earlierText = ""
         var lastOutput: [JSONValue]?
         var messages = messages
         let url = baseURL.appendingPathComponent("responses")
@@ -646,12 +648,15 @@ public struct OpenResponsesLanguageModel: LanguageModel {
                                 )
                             )
                         }
+                        if type == String.self {
+                            earlierText += resp.outputText ?? extractTextFromOutput(resp.output) ?? ""
+                        }
                         continue
                     }
                 }
             }
 
-            text = resp.outputText ?? extractTextFromOutput(resp.output) ?? ""
+            text = earlierText + (resp.outputText ?? extractTextFromOutput(resp.output) ?? "")
             break
         }
 

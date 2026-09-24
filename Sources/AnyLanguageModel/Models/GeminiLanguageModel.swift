@@ -321,6 +321,8 @@ public struct GeminiLanguageModel: LanguageModel {
         // full conversation because each iteration rebuilds the request from it.
         var entries: [Transcript.Entry] = []
         var usage = ReportedUsage()
+        // The text of earlier tool rounds, which string responses include.
+        var earlierText = ""
 
         var toolRounds = ToolRoundLimit(provider: "Gemini")
         // Multi-turn conversation loop for tool calling
@@ -388,18 +390,14 @@ public struct GeminiLanguageModel: LanguageModel {
                         }
                     }
 
+                    if type == String.self { earlierText += textPartsText(firstCandidate.content.parts) }
+
                     // Continue the loop to send the next request with tool results
                     continue
                 }
             } else {
                 // No function calls, extract final text and return
-                let text =
-                    firstCandidate.content.parts?.compactMap { part -> String? in
-                        switch part {
-                        case .text(let t): return t.text
-                        default: return nil
-                        }
-                    }.joined() ?? ""
+                let text = earlierText + textPartsText(firstCandidate.content.parts)
 
                 if type == String.self {
                     return LanguageModelSession.Response(
@@ -797,6 +795,16 @@ private func resolveFunctionCalls(
     }
 
     return .invocations(results)
+}
+
+/// Joins the text parts of a Gemini response.
+private func textPartsText(_ parts: [GeminiPart]?) -> String {
+    parts?.compactMap { part -> String? in
+        switch part {
+        case .text(let t): return t.text
+        default: return nil
+        }
+    }.joined() ?? ""
 }
 
 private func emptyResponseContent<Content: Generable>(

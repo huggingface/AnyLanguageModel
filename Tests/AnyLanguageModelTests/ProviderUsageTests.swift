@@ -94,30 +94,38 @@ import Testing
                     }
                     result = ["id": "test", "choices": [["message": message]]]
                 case .responses, .openResponses:
+                    let message: [String: Any] = [
+                        "type": "message", "content": [["type": "output_text", "text": text]],
+                    ]
                     let output: [[String: Any]] =
                         tool
-                        ? [
+                        ? (text.isEmpty ? [] : [message]) + [
                             [
                                 "type": "function_call", "call_id": "call_1", "name": "getWeather",
                                 "arguments": "{\"city\":\"Paris\"}",
                             ]
                         ]
-                        : [["type": "message", "content": [["type": "output_text", "text": text]]]]
+                        : [message]
                     result = ["id": "test", "output": output]
                 case .anthropic:
+                    let textBlock: [String: Any] = ["type": "text", "text": text]
                     let content: [[String: Any]] =
                         tool
-                        ? [["type": "tool_use", "id": "call_1", "name": "getWeather", "input": ["city": "Paris"]]]
-                        : [["type": "text", "text": text]]
+                        ? (text.isEmpty ? [] : [textBlock]) + [
+                            ["type": "tool_use", "id": "call_1", "name": "getWeather", "input": ["city": "Paris"]]
+                        ]
+                        : [textBlock]
                     result = [
                         "id": "test", "type": "message", "role": "assistant", "model": "test", "content": content,
                     ]
                 case .gemini:
-                    let part: [String: Any] =
+                    let parts: [[String: Any]] =
                         tool
-                        ? ["functionCall": ["name": "getWeather", "args": ["city": "Paris"]]]
-                        : ["text": text]
-                    result = ["candidates": [["content": ["role": "model", "parts": [part]]]]]
+                        ? (text.isEmpty ? [] : [["text": text]]) + [
+                            ["functionCall": ["name": "getWeather", "args": ["city": "Paris"]]]
+                        ]
+                        : [["text": text]]
+                    result = ["candidates": [["content": ["role": "model", "parts": parts]]]]
                 case .ollama:
                     var message: [String: Any] = ["role": "assistant", "content": text]
                     if tool {
@@ -137,15 +145,19 @@ import Testing
                 return result
             }
 
-            func toolStream(includeUsage: Bool = true, city: String = "Paris", callID: String = "call_1") throws
-                -> String
-            {
-                let toolResponse = response(text: "", counts: includeUsage ? counts : nil, tool: true)
-                let events: [[String: Any]]
+            /// A streamed tool round, optionally with `text` before the tool call.
+            func toolStream(
+                text: String = "",
+                includeUsage: Bool = true,
+                city: String = "Paris",
+                callID: String = "call_1"
+            ) throws -> String {
+                let toolResponse = response(text: text, counts: includeUsage ? counts : nil, tool: true)
+                var events: [[String: Any]]
                 switch self {
                 case .chat:
                     events =
-                        [
+                        (text.isEmpty ? [] : [["id": "test", "choices": [["delta": ["content": text]]]]]) + [
                             [
                                 "id": "test",
                                 "choices": [
@@ -177,29 +189,47 @@ import Testing
                             ],
                         ] + (includeUsage ? [["id": "test", "choices": [], "usage": counts]] : [])
                 case .responses, .openResponses:
-                    events = [["type": "response.completed", "response": toolResponse]]
+                    events =
+                        (text.isEmpty ? [] : [["type": "response.output_text.delta", "delta": text]])
+                        + [["type": "response.completed", "response": toolResponse]]
                 case .anthropic:
+                    let toolIndex = text.isEmpty ? 0 : 1
                     events = [
-                        ["type": "message_start", "message": response(text: "", counts: includeUsage ? counts : nil)],
+                        ["type": "message_start", "message": response(text: "", counts: includeUsage ? counts : nil)]
+                    ]
+                    if !text.isEmpty {
+                        events += [
+                            [
+                                "type": "content_block_start", "index": 0,
+                                "content_block": ["type": "text", "text": ""],
+                            ],
+                            [
+                                "type": "content_block_delta", "index": 0,
+                                "delta": ["type": "text_delta", "text": text],
+                            ],
+                            ["type": "content_block_stop", "index": 0],
+                        ]
+                    }
+                    events += [
                         [
-                            "type": "content_block_start", "index": 0,
+                            "type": "content_block_start", "index": toolIndex,
                             "content_block": [
                                 "type": "tool_use", "id": "call_1", "name": "getWeather", "input": [:],
                             ],
                         ],
                         [
-                            "type": "content_block_delta", "index": 0,
+                            "type": "content_block_delta", "index": toolIndex,
                             "delta": [
                                 "type": "input_json_delta", "partial_json": "{\"city\":",
                             ],
                         ],
                         [
-                            "type": "content_block_delta", "index": 0,
+                            "type": "content_block_delta", "index": toolIndex,
                             "delta": [
                                 "type": "input_json_delta", "partial_json": "\"Paris\"}",
                             ],
                         ],
-                        ["type": "content_block_stop", "index": 0],
+                        ["type": "content_block_stop", "index": toolIndex],
                         ["type": "message_stop"],
                     ]
                 case .gemini, .ollama:
@@ -388,6 +418,42 @@ import Testing
                 #expect(next.usage.totalTokenCount >= previous.usage.totalTokenCount)
                 #expect(next.transcriptEntries.count >= previous.transcriptEntries.count)
             }
+        }
+
+        @Test(arguments: Provider.allCases)
+        func streamedToolRoundsKeepEarlierText(_ provider: Provider) async throws {
+            UsageURLProtocol.reset()
+            UsageURLProtocol.enqueue(json: try provider.toolStream(text: "Checking. "))
+            UsageURLProtocol.enqueue(json: try provider.stream(text: "Sunny"))
+            let session = provider.makeSession(tools: [RecordingWeatherTool()])
+            var contents: [String] = []
+            for try await snapshot in session.streamResponse(to: "Weather?") { contents.append(snapshot.content) }
+            #expect(contents.last == "Checking. Sunny")
+            for (previous, next) in zip(contents, contents.dropFirst()) {
+                #expect(next.hasPrefix(previous))
+            }
+            #expect(UsageURLProtocol.recordedBodies.count == 2)
+        }
+
+        @Test(arguments: Provider.allCases)
+        func streamedStructuredContentOmitsEarlierText(_ provider: Provider) async throws {
+            UsageURLProtocol.reset()
+            UsageURLProtocol.enqueue(json: try provider.toolStream(text: "Checking. "))
+            UsageURLProtocol.enqueue(json: try provider.stream(text: "{\"answer\":\"Hello\"}"))
+            let session = provider.makeSession(tools: [WeatherTool()])
+            let response = try await session.streamResponse(to: "Weather?", generating: Answer.self).collect()
+            #expect(response.content.answer == "Hello")
+        }
+
+        @Test(arguments: [Provider.chat, .responses, .openResponses, .gemini])
+        func toolRoundsKeepEarlierText(_ provider: Provider) async throws {
+            UsageURLProtocol.reset()
+            UsageURLProtocol.enqueue(json: try Self.json(provider.response(text: "Checking. ", tool: true)))
+            UsageURLProtocol.enqueue(json: try Self.json(provider.response(text: "Sunny")))
+            let session = provider.makeSession(tools: [WeatherTool()])
+            let response = try await session.respond(to: "Weather?")
+            #expect(response.content == "Checking. Sunny")
+            #expect(UsageURLProtocol.recordedBodies.count == 2)
         }
 
         @Test(arguments: Provider.allCases, [false, true])
@@ -792,7 +858,9 @@ import Testing
         @Test(arguments: [Provider.chat, .responses, .openResponses, .gemini])
         func toolRoundsAccumulateUsage(_ provider: Provider) async throws {
             UsageURLProtocol.reset()
-            UsageURLProtocol.enqueue(json: try Self.json(provider.response(counts: provider.counts, tool: true)))
+            UsageURLProtocol.enqueue(
+                json: try Self.json(provider.response(text: "", counts: provider.counts, tool: true))
+            )
             UsageURLProtocol.enqueue(json: try Self.json(provider.response(counts: provider.counts)))
             let session = provider.makeSession(tools: [WeatherTool()])
             let response = try await session.respond(to: "Weather?")

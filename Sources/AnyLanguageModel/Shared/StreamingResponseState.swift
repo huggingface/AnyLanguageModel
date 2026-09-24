@@ -1,9 +1,18 @@
 /// Accumulates response metadata across streamed tool rounds.
 struct StreamingResponseState<Content: Generable> {
+    /// The text of the current round, which providers replay as that round's assistant message.
     var text = ""
     var entries: [Transcript.Entry] = []
     var usage = ReportedUsage()
     private var completedUsage = LanguageModelSession.Usage.zero
+
+    /// The text of completed rounds, for string content.
+    ///
+    /// Like the MLX and llama.cpp providers,
+    /// a string response includes the text from every round.
+    /// Structured content uses only the current round,
+    /// because text from separate rounds doesn't form one JSON value.
+    private var earlierText = ""
 
     var totalUsage: LanguageModelSession.Usage {
         var total = completedUsage
@@ -11,8 +20,14 @@ struct StreamingResponseState<Content: Generable> {
         return total
     }
 
+    /// The response text so far.
+    var responseText: String {
+        Content.self == String.self ? earlierText + text : text
+    }
+
     func snapshot(providerMetadata: [String: String]? = nil) -> LanguageModelSession.ResponseStream<Content>.Snapshot? {
-        guard var snapshot = LanguageModelSession.ResponseStream<Content>.Snapshot(text: text, usage: totalUsage)
+        guard
+            var snapshot = LanguageModelSession.ResponseStream<Content>.Snapshot(text: responseText, usage: totalUsage)
         else { return nil }
         snapshot.transcriptEntries = ArraySlice(entries)
         snapshot.providerMetadata = providerMetadata
@@ -46,6 +61,7 @@ struct StreamingResponseState<Content: Generable> {
     mutating func beginNextRound() {
         completedUsage.add(usage.value)
         usage = ReportedUsage()
+        earlierText = responseText
         text = ""
     }
 }
