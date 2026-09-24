@@ -612,6 +612,8 @@ private extension Transcript {
             case .prompt(let prompt):
                 role = .user
                 segments = prompt.segments
+            case .reasoning:
+                throw Transcript.ReasoningReplayError.unsupportedProvider("OllamaLanguageModel")
             case .response(let response):
                 role = .assistant
                 segments = response.segments

@@ -2320,6 +2320,8 @@ import Foundation
                         messages.append(("user", text))
                     }
 
+                case .reasoning:
+                    throw Transcript.ReasoningReplayError.unsupportedProvider("LlamaLanguageModel")
                 case .response(let response):
                     let text = try extractContent(
                         from: response.segments,

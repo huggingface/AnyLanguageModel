@@ -86,8 +86,7 @@ extension LanguageModel {
                                 content: response.content.asPartiallyGenerated(),
                                 rawContent: response.rawContent,
                                 transcriptEntries: response.transcriptEntries,
-                                usage: response.usage,
-                                reasoning: response.reasoning
+                                usage: response.usage
                             )
                         )
                         continuation.finish()

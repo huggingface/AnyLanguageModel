@@ -158,7 +158,7 @@
             options: GenerationOptions
         ) async throws -> LanguageModelSession.Response<Content> where Content: Generable {
             let fmTools = session.tools.toFoundationModels()
-            let fmTranscript = fmTranscriptDroppingDuplicatePrompt(session.transcript, prompt: prompt)
+            let fmTranscript = try fmTranscriptDroppingDuplicatePrompt(session.transcript, prompt: prompt)
                 .toFoundationModels(
                     instructions: session.instructions,
                     toolDefinitions: session.tools
@@ -217,22 +217,26 @@
             includeSchemaInPrompt: Bool,
             options: GenerationOptions
         ) -> sending LanguageModelSession.ResponseStream<Content> where Content: Generable {
-            let fmTools = session.tools.toFoundationModels()
-            let fmTranscript = fmTranscriptDroppingDuplicatePrompt(session.transcript, prompt: prompt)
-                .toFoundationModels(
-                    instructions: session.instructions,
-                    toolDefinitions: session.tools
-                        .filter(\.includesSchemaInInstructions)
-                        .map { Transcript.ToolDefinition(tool: $0) }
+            do {
+                let fmTools = session.tools.toFoundationModels()
+                let fmTranscript = try fmTranscriptDroppingDuplicatePrompt(session.transcript, prompt: prompt)
+                    .toFoundationModels(
+                        instructions: session.instructions,
+                        toolDefinitions: session.tools
+                            .filter(\.includesSchemaInInstructions)
+                            .map { Transcript.ToolDefinition(tool: $0) }
+                    )
+                return fmStreamResponse(
+                    makeSession: { try await self.makeSession(tools: fmTools, transcript: fmTranscript) },
+                    fmPrompt: prompt.toFoundationModels(),
+                    fmOptions: options.toFoundationModels(),
+                    type: type,
+                    schema: schema,
+                    includeSchemaInPrompt: includeSchemaInPrompt
                 )
-            return fmStreamResponse(
-                makeSession: { try await self.makeSession(tools: fmTools, transcript: fmTranscript) },
-                fmPrompt: prompt.toFoundationModels(),
-                fmOptions: options.toFoundationModels(),
-                type: type,
-                schema: schema,
-                includeSchemaInPrompt: includeSchemaInPrompt
-            )
+            } catch {
+                return .init(stream: AsyncThrowingStream { $0.finish(throwing: error) })
+            }
         }
     }
 #endif
