@@ -352,12 +352,15 @@ public struct GeminiLanguageModel: LanguageModel {
                 throw GeminiError.noCandidate
             }
 
-            let providerMetadata = try textPartMetadata(firstCandidate.content.parts ?? [])
             let functionCalls: [GeminiFunctionCall] =
                 firstCandidate.content.parts?.compactMap { part in
                     if case .functionCall(let call) = part { return call }
                     return nil
                 } ?? []
+            let providerMetadata = try textPartMetadata(
+                firstCandidate.content.parts ?? [],
+                includeUnsignedText: !functionCalls.isEmpty
+            )
 
             if !functionCalls.isEmpty {
                 // Resolve function calls
@@ -530,7 +533,7 @@ public struct GeminiLanguageModel: LanguageModel {
                         }
                         guard !functionCalls.isEmpty else { break }
                         try Task.checkCancellation()
-                        let metadata = try textPartMetadata(parts)
+                        let metadata = try textPartMetadata(parts, includeUnsignedText: true)
                         try toolRounds.record(functionCalls.map(\.roundCall))
                         switch try await resolveFunctionCalls(functionCalls, session: session) {
                         case .stop(let calls):
@@ -1069,12 +1072,21 @@ private struct GeminiTextHistoryPart: Codable {
 // Keep signed text on its original part,
 // including unsigned siblings and their order relative to function calls.
 // Call arguments remain in the transcript's semantic representation.
-private func textPartMetadata(_ parts: [GeminiPart]) throws -> [String: String]? {
+// Tool-call rounds keep unsigned text too,
+// so the follow-up request replays what the model wrote before its calls.
+private func textPartMetadata(
+    _ parts: [GeminiPart],
+    includeUnsignedText: Bool = false
+) throws -> [String: String]? {
     let textParts = parts.enumerated().compactMap { index, part -> GeminiTextHistoryPart? in
         guard case .text(let text) = part else { return nil }
         return GeminiTextHistoryPart(index: index, part: text)
     }
-    guard textParts.contains(where: { $0.part.thoughtSignature != nil }) else { return nil }
+    guard
+        includeUnsignedText
+            ? !textParts.isEmpty
+            : textParts.contains(where: { $0.part.thoughtSignature != nil })
+    else { return nil }
     let data = try JSONEncoder().encode(textParts)
     return [textPartsMetadataKey: String(decoding: data, as: UTF8.self)]
 }

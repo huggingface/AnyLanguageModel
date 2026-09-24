@@ -433,6 +433,8 @@ import Testing
                 #expect(next.hasPrefix(previous))
             }
             #expect(UsageURLProtocol.recordedBodies.count == 2)
+            let followUp = try #require(UsageURLProtocol.recordedBodies.last)
+            #expect(String(decoding: followUp, as: UTF8.self).contains("Checking. "))
         }
 
         @Test(arguments: Provider.allCases)
@@ -454,6 +456,8 @@ import Testing
             let response = try await session.respond(to: "Weather?")
             #expect(response.content == "Checking. Sunny")
             #expect(UsageURLProtocol.recordedBodies.count == 2)
+            let followUp = try #require(UsageURLProtocol.recordedBodies.last)
+            #expect(String(decoding: followUp, as: UTF8.self).contains("Checking. "))
         }
 
         @Test(arguments: Provider.allCases, [false, true])
