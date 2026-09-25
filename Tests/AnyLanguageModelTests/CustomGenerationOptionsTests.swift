@@ -100,47 +100,6 @@ struct CustomGenerationOptionsTests {
 
         #expect(options1 != options2)
     }
-
-    // MARK: - Encoding
-
-    @Test func encodingWithCustomOptions() throws {
-        var options = GenerationOptions(temperature: 0.8)
-        options[custom: OpenAILanguageModel.self] = .init(
-            extraBody: ["reasoning": .object(["enabled": .bool(true)])]
-        )
-
-        let encoder = JSONEncoder()
-        encoder.outputFormatting = [.sortedKeys, .prettyPrinted]
-        let data = try encoder.encode(options)
-        let json = String(data: data, encoding: .utf8)!
-
-        // Verify the JSON contains the temperature
-        #expect(json.contains("\"temperature\""))
-        #expect(json.contains("0.8"))
-
-        // Verify custom options type name is in the output
-        #expect(json.contains("OpenAILanguageModel"))
-        #expect(json.contains("CustomGenerationOptions"))
-    }
-
-    @Test func decodingLosesCustomOptions() throws {
-        var options = GenerationOptions(temperature: 0.8)
-        options[custom: OpenAILanguageModel.self] = .init(
-            extraBody: ["key": .string("value")]
-        )
-
-        let encoder = JSONEncoder()
-        let data = try encoder.encode(options)
-
-        let decoder = JSONDecoder()
-        let decoded = try decoder.decode(GenerationOptions.self, from: data)
-
-        // Standard options should be preserved
-        #expect(decoded.temperature == 0.8)
-
-        // Custom options are lost on round-trip (documented behavior)
-        #expect(decoded[custom: OpenAILanguageModel.self] == nil)
-    }
 }
 
 @Suite("Anthropic CustomGenerationOptions")

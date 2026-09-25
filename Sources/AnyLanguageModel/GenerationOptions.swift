@@ -7,14 +7,14 @@ import JSONSchema
 /// perform various adjustments on how the model chooses output tokens,
 /// to specify the penalties for repeating tokens or generating
 /// longer responses.
-public struct GenerationOptions: Sendable, Equatable, Codable {
+public struct GenerationOptions: Sendable, Equatable {
     /// A type that defines how values are sampled from a probability distribution.
     ///
     /// A model builds its response to a prompt in a loop. At each iteration in the
     /// loop the model produces a probability distribution for all the tokens in its
     /// vocabulary. The sampling mode controls how a token is selected from that
     /// distribution.
-    public struct SamplingMode: Sendable, Equatable, Codable {
+    public struct SamplingMode: Sendable, Equatable {
         enum Mode: Equatable, Codable {
             case greedy
             case topK(Int, seed: UInt64?)
@@ -168,6 +168,42 @@ public struct GenerationOptions: Sendable, Equatable, Codable {
     }
 }
 
+// MARK: - Transcript Coding
+
+extension GenerationOptions {
+    /// The coded form of generation options in a transcript prompt.
+    ///
+    /// `GenerationOptions` isn't `Codable`, matching Foundation Models,
+    /// but ``Transcript/Prompt`` is, so it codes its options through this type.
+    /// It codes the sampling mode, temperature, and maximum response tokens
+    /// in the same format as earlier releases.
+    /// Custom options aren't coded,
+    /// because decoding them would need a registry of every model's option types.
+    struct TranscriptCoding: Codable {
+        struct Sampling: Codable {
+            var mode: SamplingMode.Mode
+        }
+
+        var sampling: Sampling?
+        var temperature: Double?
+        var maximumResponseTokens: Int?
+
+        init(_ options: GenerationOptions) {
+            self.sampling = options.sampling.map { Sampling(mode: $0.mode) }
+            self.temperature = options.temperature
+            self.maximumResponseTokens = options.maximumResponseTokens
+        }
+
+        var options: GenerationOptions {
+            GenerationOptions(
+                sampling: sampling.map { SamplingMode(mode: $0.mode) },
+                temperature: temperature,
+                maximumResponseTokens: maximumResponseTokens
+            )
+        }
+    }
+}
+
 // MARK: - Custom Generation Options
 
 /// A protocol for model-specific generation options.
@@ -190,7 +226,7 @@ extension Never: CustomGenerationOptions {}
 extension Dictionary: CustomGenerationOptions where Key == String, Value == JSONValue {}
 
 /// Storage for model-specific custom options.
-private struct CustomOptionsStorage: Sendable, Equatable, Codable {
+private struct CustomOptionsStorage: Sendable, Equatable {
     private var storage: [ObjectIdentifier: AnyCustomOptions] = [:]
 
     init() {}
@@ -222,24 +258,6 @@ private struct CustomOptionsStorage: Sendable, Equatable, Codable {
         }
         return true
     }
-
-    func encode(to encoder: any Encoder) throws {
-        // Encode custom options that conform to Encodable, keyed by type name
-        var container = encoder.container(keyedBy: TypeNameCodingKey.self)
-        for (_, wrapper) in storage {
-            if let encodeImpl = wrapper.encodeImpl {
-                let key = TypeNameCodingKey(wrapper.typeName)
-                let nestedEncoder = container.superEncoder(forKey: key)
-                try encodeImpl(nestedEncoder)
-            }
-        }
-    }
-
-    init(from decoder: any Decoder) throws {
-        // Custom options cannot be decoded without a type registry.
-        // The encoded type names are preserved but the values are lost on round-trip.
-        self.storage = [:]
-    }
 }
 
 // MARK: - AnyCustomOptions
@@ -247,48 +265,17 @@ private struct CustomOptionsStorage: Sendable, Equatable, Codable {
 /// A type-erased wrapper for custom generation options.
 private struct AnyCustomOptions: Sendable {
     let value: any CustomGenerationOptions
-    let typeName: String
     let equalsImpl: @Sendable (any CustomGenerationOptions) -> Bool
-    let encodeImpl: (@Sendable (any Encoder) throws -> Void)?
 
     init<T: CustomGenerationOptions>(_ value: T) {
         self.value = value
-        self.typeName = String(reflecting: T.self)
         self.equalsImpl = { other in
             guard let otherTyped = other as? T else { return false }
             return value == otherTyped
-        }
-
-        // Conditionally capture encode if T conforms to Encodable.
-        // We capture `value` (which is Sendable) and cast inside the closure.
-        if value is any Encodable {
-            self.encodeImpl = { encoder in
-                // Safe: we checked conformance above, and value is Sendable
-                try (value as! any Encodable).encode(to: encoder)
-            }
-        } else {
-            self.encodeImpl = nil
         }
     }
 
     func isEqual(to other: AnyCustomOptions) -> Bool {
         equalsImpl(other.value)
-    }
-}
-
-private struct TypeNameCodingKey: CodingKey {
-    var stringValue: String
-    var intValue: Int? { nil }
-
-    init(_ typeName: String) {
-        self.stringValue = typeName
-    }
-
-    init?(stringValue: String) {
-        self.stringValue = stringValue
-    }
-
-    init?(intValue: Int) {
-        nil
     }
 }
