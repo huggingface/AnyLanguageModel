@@ -62,15 +62,63 @@ import AnyLanguageModel
             }
         }
 
+        /// A `response.failed` event as the OpenAI Responses API and Open Responses send it.
+        private static let failedEvent = """
+            data: {"type": "response.failed", "sequence_number": 1, "response": {"id": "test", \
+            "status": "failed", "error": {"code": "server_error", "message": "The model failed."}}}
+
+
+            """
+
+        @Test func openAIResponsesStreamFailure() async throws {
+            CannedURLProtocol.respond(with: Self.failedEvent)
+            let model = OpenAILanguageModel(
+                apiKey: "test",
+                model: "test",
+                apiVariant: .responses,
+                session: CannedURLProtocol.makeSession()
+            )
+            let session = LanguageModelSession(model: model)
+
+            do {
+                for try await _ in session.streamResponse(to: "Hello") {}
+                Issue.record("Expected OpenAILanguageModelError.streamFailed")
+            } catch OpenAILanguageModelError.streamFailed(let code, let message) {
+                #expect(code == "server_error")
+                #expect(message == "The model failed.")
+            }
+        }
+
         @Test func openResponsesStreamFailure() async throws {
+            CannedURLProtocol.respond(with: Self.failedEvent)
+            let session = LanguageModelSession(model: Self.openResponsesModel())
+
+            do {
+                for try await _ in session.streamResponse(to: "Hello") {}
+                Issue.record("Expected OpenResponsesLanguageModelError.streamFailed")
+            } catch let error as OpenResponsesLanguageModelError {
+                guard case .streamFailed(let code, let message) = error else {
+                    Issue.record("Unexpected error: \(error)")
+                    return
+                }
+                #expect(code == "server_error")
+                #expect(message == "The model failed.")
+                #expect(
+                    error.errorDescription == "The response failed while streaming (server_error): The model failed."
+                )
+            }
+        }
+
+        @Test func openResponsesStreamFailureWithoutDetails() async throws {
             CannedURLProtocol.respond(with: "data: {\"type\": \"response.failed\"}\n\n")
             let session = LanguageModelSession(model: Self.openResponsesModel())
 
             do {
                 for try await _ in session.streamResponse(to: "Hello") {}
                 Issue.record("Expected OpenResponsesLanguageModelError.streamFailed")
-            } catch OpenResponsesLanguageModelError.streamFailed {
-                // Expected.
+            } catch OpenResponsesLanguageModelError.streamFailed(let code, let message) {
+                #expect(code == nil)
+                #expect(message == nil)
             }
         }
 
