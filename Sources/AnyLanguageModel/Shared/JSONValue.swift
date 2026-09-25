@@ -17,7 +17,7 @@ import Foundation
 ///     "manager": nil,
 /// ]
 /// ```
-public enum JSONValue: Sendable, Hashable {
+@frozen public enum JSONValue: Sendable, Hashable {
     /// A JSON null value.
     case null
 
