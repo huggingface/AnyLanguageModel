@@ -502,7 +502,7 @@
             {
                 header += ". Expected value: \(constString)"
             } else if let enumValues = jsonSchema.enum, !enumValues.isEmpty,
-                let data = try? encoder.encode(JSONValue.array(enumValues)),
+                let data = try? encoder.encode(enumValues),
                 let enumString = String(data: data, encoding: .utf8)
             {
                 header += ". Allowed values: \(enumString)"

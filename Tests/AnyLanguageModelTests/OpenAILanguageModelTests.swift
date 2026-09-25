@@ -1,5 +1,4 @@
 import Foundation
-import JSONSchema
 import Testing
 
 @testable import AnyLanguageModel
