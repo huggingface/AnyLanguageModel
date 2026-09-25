@@ -18,8 +18,8 @@ struct ReasoningTests {
         #expect(!transcript.first!.description.contains("255"))
     }
 
-    @available(macOS 26.0, iOS 26.0, *)
     @Test func originalInitializerFunctionReferencesCompile() async throws {
+        guard #available(macOS 26.0, iOS 26.0, watchOS 27.0, *) else { return }
         let responseInit = LanguageModelSession.Response<String>.init(content:rawContent:transcriptEntries:usage:)
         let snapshotInit = LanguageModelSession.ResponseStream<String>.Snapshot.init(
             content:

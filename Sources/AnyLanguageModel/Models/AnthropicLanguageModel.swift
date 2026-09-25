@@ -1029,7 +1029,8 @@ extension Transcript {
                 )
             case .reasoning(let reasoning):
                 guard reasoning.metadata["provider"] == GeneratedContent("anthropic") else {
-                    throw Transcript.ReasoningReplayError.unsupportedProvider("AnthropicLanguageModel")
+                    // Foreign reasoning remains display history, not Anthropic replay state.
+                    continue
                 }
                 guard let data = reasoning.signature, let signature = String(data: data, encoding: .utf8),
                     !signature.isEmpty

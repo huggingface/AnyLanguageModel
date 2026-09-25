@@ -474,8 +474,11 @@ Choose an Anthropic model and thinking budget that support this configuration.
 Redacted thinking has no display segments. Signatures and metadata are opaque
 replay state; preserve them with the transcript, and do not display them as text.
 The Anthropic adapter can replay its own reasoning entries after Codable restoration.
-Other adapters currently reject reasoning replay explicitly rather than flattening
-it into answer text or silently dropping it. For structured scalar outputs that
+When switching providers, adapters that cannot replay reasoning omit those entries
+from their requests; Anthropic likewise skips reasoning from other providers.
+The original reasoning remains in the transcript for display and persistence.
+Anthropic still validates its own replay signatures. CoreML keeps its existing
+prompt-only behavior and does not send transcript history. For structured scalar outputs that
 cannot represent an absent partial value, reasoning updates wait until a valid
 partial answer is available. Cancellation behavior is unchanged.
 

@@ -131,13 +131,12 @@
             let fmSession = FoundationModels.LanguageModelSession(
                 model: systemModel,
                 tools: session.tools.toFoundationModels(),
-                transcript: try fmTranscriptDroppingDuplicatePrompt(session.transcript, prompt: prompt)
-                    .toFoundationModels(
-                        instructions: session.instructions,
-                        toolDefinitions: session.tools
-                            .filter(\.includesSchemaInInstructions)
-                            .map { Transcript.ToolDefinition(tool: $0) }
-                    )
+                transcript: fmTranscriptDroppingDuplicatePrompt(session.transcript, prompt: prompt).toFoundationModels(
+                    instructions: session.instructions,
+                    toolDefinitions: session.tools
+                        .filter(\.includesSchemaInInstructions)
+                        .map { Transcript.ToolDefinition(tool: $0) }
+                )
             )
 
             return try await fmRespond(
@@ -195,30 +194,25 @@
             let fmPrompt = prompt.toFoundationModels()
             let fmOptions = options.toFoundationModels()
 
-            do {
-                let fmSession = FoundationModels.LanguageModelSession(
-                    model: systemModel,
-                    tools: session.tools.toFoundationModels(),
-                    transcript: try fmTranscriptDroppingDuplicatePrompt(session.transcript, prompt: prompt)
-                        .toFoundationModels(
-                            instructions: session.instructions,
-                            toolDefinitions: session.tools
-                                .filter(\.includesSchemaInInstructions)
-                                .map { Transcript.ToolDefinition(tool: $0) }
-                        )
+            let fmSession = FoundationModels.LanguageModelSession(
+                model: systemModel,
+                tools: session.tools.toFoundationModels(),
+                transcript: fmTranscriptDroppingDuplicatePrompt(session.transcript, prompt: prompt).toFoundationModels(
+                    instructions: session.instructions,
+                    toolDefinitions: session.tools
+                        .filter(\.includesSchemaInInstructions)
+                        .map { Transcript.ToolDefinition(tool: $0) }
                 )
+            )
 
-                return fmStreamResponse(
-                    makeSession: { fmSession },
-                    fmPrompt: fmPrompt,
-                    fmOptions: fmOptions,
-                    type: type,
-                    schema: schema,
-                    includeSchemaInPrompt: includeSchemaInPrompt
-                )
-            } catch {
-                return .init(stream: AsyncThrowingStream { $0.finish(throwing: error) })
-            }
+            return fmStreamResponse(
+                makeSession: { fmSession },
+                fmPrompt: fmPrompt,
+                fmOptions: fmOptions,
+                type: type,
+                schema: schema,
+                includeSchemaInPrompt: includeSchemaInPrompt
+            )
         }
 
         public func logFeedbackAttachment(
@@ -574,7 +568,7 @@
         func toFoundationModels(
             instructions: AnyLanguageModel.Instructions?,
             toolDefinitions: [Transcript.ToolDefinition]
-        ) throws -> FoundationModels.Transcript {
+        ) -> FoundationModels.Transcript {
             var fmEntries: [FoundationModels.Transcript.Entry] = []
 
             // Add instructions entry if provided and not already in transcript
@@ -613,7 +607,8 @@
                     fmEntries.append(.prompt(fmPrompt))
 
                 case .reasoning:
-                    throw Transcript.ReasoningReplayError.unsupportedProvider("SystemLanguageModel")
+                    // Keep display history in the transcript without sending unsupported replay state.
+                    continue
                 case .response(let response):
                     let fmSegments = response.segments.toFoundationModels()
                     let fmResponse = FoundationModels.Transcript.Response(

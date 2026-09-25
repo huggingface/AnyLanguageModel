@@ -328,7 +328,7 @@ public struct GeminiLanguageModel: LanguageModel {
         // Multi-turn conversation loop for tool calling
         while true {
             let params = try createGenerateContentParams(
-                contents: try transcript.toGeminiContent(),
+                contents: transcript.toGeminiContent(),
                 tools: geminiTools,
                 generating: type,
                 schema: schema,
@@ -494,7 +494,7 @@ public struct GeminiLanguageModel: LanguageModel {
                     while true {
                         try Task.checkCancellation()
                         let params = try createGenerateContentParams(
-                            contents: try transcript.toGeminiContent(),
+                            contents: transcript.toGeminiContent(),
                             tools: geminiTools,
                             generating: type,
                             schema: schema,
@@ -854,7 +854,7 @@ private func toJSONValue(_ toolOutput: Transcript.ToolOutput) throws -> [String:
 // MARK: - Supporting Types
 
 extension Transcript {
-    fileprivate func toGeminiContent() throws -> [GeminiContent] {
+    fileprivate func toGeminiContent() -> [GeminiContent] {
         var messages = [GeminiContent]()
         for item in self {
             switch item {
@@ -873,7 +873,8 @@ extension Transcript {
                     )
                 )
             case .reasoning:
-                throw Transcript.ReasoningReplayError.unsupportedProvider("GeminiLanguageModel")
+                // Keep display history in the transcript without sending unsupported replay state.
+                continue
             case .response(let response):
                 messages.append(
                     .init(

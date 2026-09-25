@@ -479,7 +479,7 @@ public struct OpenAILanguageModel: LanguageModel {
         switch apiVariant {
         case .chatCompletions:
             return try await respondWithChatCompletions(
-                messages: try session.transcript.toOpenAIMessages(),
+                messages: session.transcript.toOpenAIMessages(),
                 tools: openAITools,
                 generating: type,
                 schema: schema,
@@ -488,7 +488,7 @@ public struct OpenAILanguageModel: LanguageModel {
             )
         case .responses:
             return try await respondWithResponses(
-                messages: try session.transcript.toOpenAIMessages(),
+                messages: session.transcript.toOpenAIMessages(),
                 tools: openAITools,
                 generating: type,
                 schema: schema,
@@ -779,7 +779,7 @@ public struct OpenAILanguageModel: LanguageModel {
             continuation in
             let task = Task {
                 do {
-                    var messages = try session.transcript.toOpenAIMessages()
+                    var messages = session.transcript.toOpenAIMessages()
                     var state = StreamingResponseState<Content>()
                     var toolRounds = ToolRoundLimit(provider: "OpenAI")
                     while true {
@@ -1320,7 +1320,7 @@ private enum Responses {
 // MARK: - Supporting Types
 
 extension Transcript {
-    fileprivate func toOpenAIMessages() throws -> [OpenAIMessage] {
+    fileprivate func toOpenAIMessages() -> [OpenAIMessage] {
         var messages = [OpenAIMessage]()
         for item in self {
             switch item {
@@ -1339,7 +1339,8 @@ extension Transcript {
                     )
                 )
             case .reasoning:
-                throw Transcript.ReasoningReplayError.unsupportedProvider("OpenAILanguageModel")
+                // Keep display history in the transcript without sending unsupported replay state.
+                continue
             case .response(let response):
                 messages.append(
                     .init(

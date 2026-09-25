@@ -1022,7 +1022,7 @@ import Foundation
                 ?? .init(resize: nil)
 
             // Build chat history from full transcript
-            var chat = try convertTranscriptToMLXChat(session: session, fallbackPrompt: prompt.description)
+            var chat = convertTranscriptToMLXChat(session: session, fallbackPrompt: prompt.description)
 
             var usage = LanguageModelSession.Usage.zero
             var allTextChunks: [String] = []
@@ -1260,7 +1260,7 @@ import Foundation
                             options[custom: MLXLanguageModel.self]?.processingForUserInput
                             ?? .init(resize: nil)
                         let toolSpecs = mlxToolSpecs(for: session)
-                        var chat = try convertTranscriptToMLXChat(
+                        var chat = convertTranscriptToMLXChat(
                             session: session,
                             fallbackPrompt: prompt.description
                         )
@@ -1535,7 +1535,7 @@ import Foundation
     private func convertTranscriptToMLXChat(
         session: LanguageModelSession,
         fallbackPrompt: String
-    ) throws -> [MLXLMCommon.Chat.Message] {
+    ) -> [MLXLMCommon.Chat.Message] {
         var chat: [MLXLMCommon.Chat.Message] = []
 
         // Check if instructions are already in transcript
@@ -1562,7 +1562,8 @@ import Foundation
                 chat.append(makeMLXChatMessage(from: prompt.segments, role: .user))
 
             case .reasoning:
-                throw Transcript.ReasoningReplayError.unsupportedProvider("MLXLanguageModel")
+                // Keep display history in the transcript without sending unsupported replay state.
+                continue
             case .response(let response):
                 let content = response.segments.map { extractText(from: $0) }.joined(separator: "\n")
                 chat.append(.assistant(content))
@@ -1920,7 +1921,7 @@ import Foundation
         let maxTokens = options.maximumResponseTokens ?? 512
         let generateParameters = toStructuredGenerateParameters(options)
 
-        let baseChat = try convertTranscriptToMLXChat(session: session, fallbackPrompt: prompt.description)
+        let baseChat = convertTranscriptToMLXChat(session: session, fallbackPrompt: prompt.description)
         let schemaPrompt = includeSchemaInPrompt ? schemaPrompt(for: schema) : nil
         let chat = normalizeChatForStructuredGeneration(baseChat, schemaPrompt: schemaPrompt)
 

@@ -435,7 +435,7 @@ public struct OpenResponsesLanguageModel: LanguageModel {
         let tools: [OpenResponsesTool]? =
             session.tools.isEmpty ? nil : session.tools.map { convertToolToOpenResponsesFormat($0) }
         return try await respondWithOpenResponses(
-            messages: try session.transcript.toOpenResponsesMessages(),
+            messages: session.transcript.toOpenResponsesMessages(),
             tools: tools,
             generating: type,
             schema: schema,
@@ -493,7 +493,7 @@ public struct OpenResponsesLanguageModel: LanguageModel {
             continuation in
             let task = Task {
                 do {
-                    var messages = try session.transcript.toOpenResponsesMessages()
+                    var messages = session.transcript.toOpenResponsesMessages()
                     var state = StreamingResponseState<Content>()
                     var toolRounds = ToolRoundLimit(provider: "Open Responses")
                     while true {
@@ -904,7 +904,7 @@ private enum OpenResponsesBlock: Sendable {
 }
 
 extension Transcript {
-    fileprivate func toOpenResponsesMessages() throws -> [OpenResponsesMessage] {
+    fileprivate func toOpenResponsesMessages() -> [OpenResponsesMessage] {
         var list: [OpenResponsesMessage] = []
         for item in self {
             switch item {
@@ -923,7 +923,8 @@ extension Transcript {
                     )
                 )
             case .reasoning:
-                throw Transcript.ReasoningReplayError.unsupportedProvider("OpenResponsesLanguageModel")
+                // Keep display history in the transcript without sending unsupported replay state.
+                continue
             case .response(let response):
                 list.append(
                     OpenResponsesMessage(
