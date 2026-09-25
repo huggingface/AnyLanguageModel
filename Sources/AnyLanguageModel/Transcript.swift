@@ -270,6 +270,31 @@ public struct Transcript: Sendable, Equatable, Codable {
             self.options = options
             self.responseFormat = responseFormat
         }
+
+        private enum CodingKeys: String, CodingKey {
+            case id, segments, options, responseFormat
+        }
+
+        public init(from decoder: Decoder) throws {
+            let container = try decoder.container(keyedBy: CodingKeys.self)
+            self.id = try container.decode(String.self, forKey: .id)
+            self.segments = try container.decode([Segment].self, forKey: .segments)
+            self.options = try container.decode(GenerationOptions.TranscriptCoding.self, forKey: .options).options
+            self.responseFormat = try container.decodeIfPresent(ResponseFormat.self, forKey: .responseFormat)
+        }
+
+        /// Encodes this prompt into the given encoder.
+        ///
+        /// The encoded ``options`` include the sampling mode, temperature,
+        /// and maximum response tokens, but not custom options
+        /// set with ``GenerationOptions/subscript(custom:)``.
+        public func encode(to encoder: Encoder) throws {
+            var container = encoder.container(keyedBy: CodingKeys.self)
+            try container.encode(id, forKey: .id)
+            try container.encode(segments, forKey: .segments)
+            try container.encode(GenerationOptions.TranscriptCoding(options), forKey: .options)
+            try container.encodeIfPresent(responseFormat, forKey: .responseFormat)
+        }
     }
 
     /// Specifies a response format that the model must conform its output to.
