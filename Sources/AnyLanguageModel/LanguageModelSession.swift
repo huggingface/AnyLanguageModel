@@ -2,12 +2,15 @@ import Foundation
 import Observation
 
 /// Controls transcript retention when generation fails or is cancelled.
-public enum TranscriptErrorHandlingPolicy: Sendable, Equatable {
+public struct TranscriptErrorHandlingPolicy: Sendable, Equatable {
+    private let shouldRevert: Bool
+
     /// Retain the prompt and the latest cumulative streaming checkpoint.
     /// Nonstreaming failures have no checkpoint and retain only the prompt.
-    case preserveTranscript
-    /// Restore the transcript as it was before the request. Tool side effects are not undone.
-    case revertTranscript
+    public static let preserveTranscript = Self(shouldRevert: false)
+    /// Remove entries added by the failing request, preserving other requests.
+    /// Tool side effects are not undone.
+    public static let revertTranscript = Self(shouldRevert: true)
 }
 
 @Observable
@@ -18,11 +21,18 @@ public final class LanguageModelSession: @unchecked Sendable {
     }
 
     /// On failure, `nil` retains the prompt without committing streaming checkpoints.
-    /// Cancellation never commits the partial answer as a completed response, regardless
+    /// Streaming cancellation never commits the partial answer as a completed response, regardless
     /// of this policy. These defaults do not claim Foundation Models behavioral parity.
     public var transcriptErrorHandlingPolicy: TranscriptErrorHandlingPolicy? {
-        get { state.withLock { $0.transcriptErrorHandlingPolicy } }
-        set { state.withLock { $0.transcriptErrorHandlingPolicy = newValue } }
+        get {
+            access(keyPath: \.transcriptErrorHandlingPolicy)
+            return state.withLock { $0.transcriptErrorHandlingPolicy }
+        }
+        set {
+            withMutation(keyPath: \.transcriptErrorHandlingPolicy) {
+                state.withLock { $0.transcriptErrorHandlingPolicy = newValue }
+            }
+        }
     }
 
     public var transcript: Transcript {
@@ -41,15 +51,16 @@ public final class LanguageModelSession: @unchecked Sendable {
 
     @ObservationIgnored private let state: Locked<State>
 
-    @ObservationIgnored private let responseRelay = Locked<Task<Void, Never>?>(nil)
+    @ObservationIgnored private let responseRelays = Locked<[UUID: Task<Void, Never>]>([:])
 
-    /// Waits for the current streaming response relay to finish transcript cleanup.
-    /// Call after cancelling a consumer, before persisting the transcript or starting
-    /// another response. This synchronization API is an AnyLanguageModel extension.
-    /// Do not call from a tool executing within the same response.
+    /// Waits for transcript cleanup of all streaming relays registered when this call begins.
+    /// Relays started later are excluded. Cancelling this wait does not cancel generation.
+    /// Call after cancelling consumers and before persisting the transcript. This is an
+    /// AnyLanguageModel extension; nonstreaming operations must be awaited separately.
+    /// Do not call from a tool executing within one of the included responses.
     nonisolated public func waitForResponseCompletion() async {
-        let task = responseRelay.withLock { $0 }
-        await task?.value
+        let tasks = responseRelays.withLock { Array($0.values) }
+        for task in tasks { await task.value }
     }
 
     private let model: any LanguageModel
@@ -168,16 +179,26 @@ public final class LanguageModelSession: @unchecked Sendable {
         }
     }
 
-    nonisolated private func wrapRespond<T>(_ operation: () async throws -> T) async throws -> T {
-        let initialTranscript = transcript
+    // The prompt is the only entry committed before a request succeeds. Checkpoints and
+    // the final response commit atomically at completion, so rollback owns only this ID.
+    nonisolated private func removePrompt(id: String) {
+        withMutation(keyPath: \.transcript) {
+            state.withLock { state in
+                state.transcript = Transcript(entries: state.transcript.filter { $0.id != id })
+            }
+        }
+    }
+
+    nonisolated private func wrapRespond<T>(_ operation: (String) async throws -> T) async throws -> T {
+        let promptID = UUID().uuidString
         beginResponding()
         do {
-            let result = try await operation()
+            let result = try await operation(promptID)
             endResponding()
             return result
         } catch {
             if transcriptErrorHandlingPolicy == .revertTranscript {
-                withMutation(keyPath: \.transcript) { state.withLock { $0.transcript = initialTranscript } }
+                removePrompt(id: promptID)
             }
             endResponding()
             throw error
@@ -191,70 +212,74 @@ public final class LanguageModelSession: @unchecked Sendable {
         let session = self
         let relay = AsyncThrowingStream<ResponseStream<Content>.Snapshot, any Error> { continuation in
             let stream = upstream
-            let task = Task {
-                session.beginResponding()
-                var lastSnapshot: ResponseStream<Content>.Snapshot?
-                var accountedUsage = Usage.zero
-                do {
-                    for try await snapshot in stream {
-                        lastSnapshot = snapshot
-                        session.recordUsage(snapshot.usage.increment(since: &accountedUsage))
-                        continuation.yield(snapshot)
-                    }
-
-                    // AsyncThrowingStream may end normally when its task is cancelled.
-                    // A partial snapshot must not become a completed transcript response.
-                    try Task.checkCancellation()
-
-                    // Commit the response to the transcript
-                    // before the stream reports completion,
-                    // so a caller that drains the stream
-                    // and starts the next turn sees the full history.
-                    if let lastSnapshot {
-                        // Extract text content from the generated content
-                        let textContent: String
-                        if case .string(let str) = lastSnapshot.rawContent.kind {
-                            textContent = str
-                        } else {
-                            textContent = lastSnapshot.rawContent.jsonString
+            let relayID = UUID()
+            // Publish the task under the same lock used by completion removal, so a
+            // fast relay cannot finish before registration and leave a stale handle.
+            let task = session.responseRelays.withLock { relays in
+                let task = Task {
+                    defer { session.responseRelays.withLock { _ = $0.removeValue(forKey: relayID) } }
+                    session.beginResponding()
+                    var lastSnapshot: ResponseStream<Content>.Snapshot?
+                    var accountedUsage = Usage.zero
+                    do {
+                        for try await snapshot in stream {
+                            lastSnapshot = snapshot
+                            session.recordUsage(snapshot.usage.increment(since: &accountedUsage))
+                            continuation.yield(snapshot)
                         }
 
-                        let responseEntry = Transcript.Entry.response(
-                            Transcript.Response(
-                                assetIDs: [],
-                                segments: [.text(.init(content: textContent))],
-                                providerMetadata: lastSnapshot.providerMetadata
-                            )
-                        )
-                        session.withMutation(keyPath: \.transcript) {
-                            session.state.withLock {
-                                $0.transcript.append(contentsOf: lastSnapshot.transcriptEntries)
-                                $0.transcript.append(responseEntry)
+                        // AsyncThrowingStream may end normally when its task is cancelled.
+                        // A partial snapshot must not become a completed transcript response.
+                        try Task.checkCancellation()
+
+                        // Commit the response to the transcript
+                        // before the stream reports completion,
+                        // so a caller that drains the stream
+                        // and starts the next turn sees the full history.
+                        if let lastSnapshot {
+                            // Extract text content from the generated content
+                            let textContent: String
+                            if case .string(let str) = lastSnapshot.rawContent.kind {
+                                textContent = str
+                            } else {
+                                textContent = lastSnapshot.rawContent.jsonString
                             }
-                        }
-                    }
-                    session.endResponding()
-                    continuation.finish()
-                } catch {
-                    session.withMutation(keyPath: \.transcript) {
-                        session.state.withLock { state in
-                            switch state.transcriptErrorHandlingPolicy {
-                            case .preserveTranscript:
-                                state.transcript.append(contentsOf: lastSnapshot?.transcriptEntries ?? [])
-                            case .revertTranscript:
-                                state.transcript = Transcript(
-                                    entries: state.transcript.prefix { $0.id != promptEntry.id }
+
+                            let responseEntry = Transcript.Entry.response(
+                                Transcript.Response(
+                                    assetIDs: [],
+                                    segments: [.text(.init(content: textContent))],
+                                    providerMetadata: lastSnapshot.providerMetadata
                                 )
-                            case nil:
-                                break
+                            )
+                            session.withMutation(keyPath: \.transcript) {
+                                session.state.withLock {
+                                    $0.transcript.append(contentsOf: lastSnapshot.transcriptEntries)
+                                    $0.transcript.append(responseEntry)
+                                }
                             }
                         }
+                        session.endResponding()
+                        continuation.finish()
+                    } catch {
+                        session.withMutation(keyPath: \.transcript) {
+                            session.state.withLock { state in
+                                if state.transcriptErrorHandlingPolicy == .preserveTranscript {
+                                    state.transcript.append(contentsOf: lastSnapshot?.transcriptEntries ?? [])
+                                } else if state.transcriptErrorHandlingPolicy == .revertTranscript {
+                                    state.transcript = Transcript(
+                                        entries: state.transcript.filter { $0.id != promptEntry.id }
+                                    )
+                                }
+                            }
+                        }
+                        session.endResponding()
+                        continuation.finish(throwing: error)
                     }
-                    session.endResponding()
-                    continuation.finish(throwing: error)
                 }
+                relays[relayID] = task
+                return task
             }
-            session.responseRelay.withLock { $0 = task }
             continuation.onTermination = { termination in
                 if case .cancelled = termination {
                     task.cancel()
@@ -466,10 +491,11 @@ public final class LanguageModelSession: @unchecked Sendable {
         options: GenerationOptions,
         generate: () async throws -> Response<Content>
     ) async throws -> Response<Content> {
-        try await wrapRespond {
+        try await wrapRespond { promptID in
             // Add prompt to transcript
             let promptEntry = Transcript.Entry.prompt(
                 Transcript.Prompt(
+                    id: promptID,
                     segments: [.text(.init(content: prompt.description))],
                     options: options,
                     responseFormat: responseFormat
@@ -835,7 +861,7 @@ extension LanguageModelSession {
         includeSchemaInPrompt: Bool = true,
         options: GenerationOptions = GenerationOptions()
     ) async throws -> Response<Content> where Content: Generable {
-        try await wrapRespond {
+        try await wrapRespond { promptID in
             // Build segments from text and images
             var segments: [Transcript.Segment] = []
             if !prompt.isEmpty {
@@ -846,6 +872,7 @@ extension LanguageModelSession {
             // Add prompt to transcript
             let promptEntry = Transcript.Entry.prompt(
                 Transcript.Prompt(
+                    id: promptID,
                     segments: segments,
                     options: options,
                     responseFormat: type == String.self ? nil : .init(type: type)
