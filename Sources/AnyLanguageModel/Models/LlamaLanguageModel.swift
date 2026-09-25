@@ -2320,6 +2320,9 @@ import Foundation
                         messages.append(("user", text))
                     }
 
+                case .reasoning:
+                    // Keep display history in the transcript without sending unsupported replay state.
+                    return
                 case .response(let response):
                     let text = try extractContent(
                         from: response.segments,

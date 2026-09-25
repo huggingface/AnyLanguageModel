@@ -1561,6 +1561,9 @@ import Foundation
             case .prompt(let prompt):
                 chat.append(makeMLXChatMessage(from: prompt.segments, role: .user))
 
+            case .reasoning:
+                // Keep display history in the transcript without sending unsupported replay state.
+                continue
             case .response(let response):
                 let content = response.segments.map { extractText(from: $0) }.joined(separator: "\n")
                 chat.append(.assistant(content))

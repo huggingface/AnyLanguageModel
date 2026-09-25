@@ -439,6 +439,49 @@ actor ToolExecutionObserver: ToolExecutionDelegate {
 session.toolExecutionDelegate = ToolExecutionObserver()
 ```
 
+### Reasoning in the transcript
+
+Reasoning is transcript content, separate from the answer in `response.content`.
+A provider can emit `Transcript.Entry.reasoning` through the existing cumulative
+`transcriptEntries` on responses and streaming snapshots. Each `Transcript.Reasoning`
+contains a stable `id`, display `segments`, opaque `signature: Data?`, and metadata.
+Treat successive snapshots as updates to the same entries, not new history rows.
+
+The built-in Anthropic provider populates these entries for thinking and redacted
+thinking, in streaming and nonstreaming responses, including tool rounds:
+
+```swift
+let model = AnthropicLanguageModel(apiKey: apiKey, model: modelID)
+let session = LanguageModelSession(model: model)
+var options = GenerationOptions(maximumResponseTokens: 4096)
+options[custom: AnthropicLanguageModel.self] = .init(thinking: .init(budgetTokens: 1024))
+for try await snapshot in session.streamResponse(to: "Explain your approach", options: options) {
+    let reasoning = snapshot.transcriptEntries.compactMap { entry -> String? in
+        guard case .reasoning(let value) = entry else { return nil }
+        return value.segments.compactMap { segment -> String? in
+            guard case .text(let text) = segment else { return nil }
+            return text.content
+        }.joined()
+    }.joined()
+    // Replace the displayed reasoning and answer independently.
+    print(reasoning)
+    print(snapshot.content)
+}
+let savedTranscript = try JSONEncoder().encode(session.transcript)
+```
+
+Choose an Anthropic model and thinking budget that support this configuration.
+Redacted thinking has no display segments. Signatures and metadata are opaque
+replay state; preserve them with the transcript, and do not display them as text.
+The Anthropic adapter can replay its own reasoning entries after Codable restoration.
+When switching providers, adapters that cannot replay reasoning omit those entries
+from their requests; Anthropic likewise skips reasoning from other providers.
+The original reasoning remains in the transcript for display and persistence.
+Anthropic still validates its own replay signatures. CoreML keeps its existing
+prompt-only behavior and does not send transcript history. For structured scalar outputs that
+cannot represent an absent partial value, reasoning updates wait until a valid
+partial answer is available. Cancellation behavior is unchanged.
+
 ### Token Usage
 
 Inspect token counts with `response.usage`

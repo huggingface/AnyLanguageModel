@@ -606,6 +606,9 @@
                     )
                     fmEntries.append(.prompt(fmPrompt))
 
+                case .reasoning:
+                    // Keep display history in the transcript without sending unsupported replay state.
+                    continue
                 case .response(let response):
                     let fmSegments = response.segments.toFoundationModels()
                     let fmResponse = FoundationModels.Transcript.Response(

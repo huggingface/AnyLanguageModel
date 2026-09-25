@@ -872,6 +872,9 @@ extension Transcript {
                         parts: convertSegmentsToGeminiParts(prompt.segments)
                     )
                 )
+            case .reasoning:
+                // Keep display history in the transcript without sending unsupported replay state.
+                continue
             case .response(let response):
                 messages.append(
                     .init(

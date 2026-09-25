@@ -202,7 +202,7 @@ public struct AnthropicLanguageModel: LanguageModel {
 
             /// How thinking should be returned by the API.
             ///
-            /// Thinking content is not currently exposed in session responses or snapshots.
+            /// Thinking content is exposed as reasoning transcript entries.
             public var display: ThinkingDisplay?
 
             /// The type of thinking mode.
@@ -452,7 +452,7 @@ public struct AnthropicLanguageModel: LanguageModel {
         let params = try createMessageParams(
             model: model,
             system: nil,
-            messages: session.transcript.toAnthropicMessages(),
+            messages: try session.transcript.toAnthropicMessages(),
             tools: anthropicTools.isEmpty ? nil : anthropicTools,
             responseSchema: responseSchema,
             options: options
@@ -467,7 +467,13 @@ public struct AnthropicLanguageModel: LanguageModel {
             body: body
         )
 
-        var entries: [Transcript.Entry] = []
+        var entries: [Transcript.Entry] = message.content.compactMap { block in
+            switch block {
+            case .thinking(let thinking): return .reasoning(thinking.transcriptReasoning())
+            case .redactedThinking(let redacted): return .reasoning(redacted.transcriptReasoning())
+            default: return nil
+            }
+        }
         let usage = message.usage?.reportedUsage?.value ?? .zero
 
         // Handle tool calls, if present
@@ -583,7 +589,7 @@ public struct AnthropicLanguageModel: LanguageModel {
 
                     let responseSchema =
                         type == String.self ? nil : try convertSchemaToAnthropicFormat(schema)
-                    var messages = session.transcript.toAnthropicMessages()
+                    var messages = try session.transcript.toAnthropicMessages()
                     var state = StreamingResponseState<Content>()
                     var toolRounds = ToolRoundLimit(provider: "Anthropic")
                     while true {
@@ -618,6 +624,10 @@ public struct AnthropicLanguageModel: LanguageModel {
                             switch event {
                             case .contentBlockStart(let start):
                                 blocks[start.index] = AnthropicStreamBlock(start.contentBlock)
+                                if let reasoning = blocks[start.index]?.reasoningEntry {
+                                    state.entries.append(.reasoning(reasoning))
+                                    if let current = snapshot() { lastSnapshot = current; continuation.yield(current) }
+                                }
                             case .contentBlockDelta(let delta):
                                 switch delta.delta {
                                 case .textDelta(let textDelta):
@@ -631,8 +641,20 @@ public struct AnthropicLanguageModel: LanguageModel {
                                     blocks[delta.index]?.arguments += input.partialJson
                                 case .thinkingDelta(let thinking):
                                     blocks[delta.index]?.thinking += thinking.thinking
+                                    if let reasoning = blocks[delta.index]?.reasoningEntry,
+                                        let index = state.entries.firstIndex(where: { $0.id == reasoning.id })
+                                    {
+                                        state.entries[index] = .reasoning(reasoning)
+                                    }
+                                    if let current = snapshot() { lastSnapshot = current; continuation.yield(current) }
                                 case .signatureDelta(let signature):
                                     blocks[delta.index]?.signature += signature.signature
+                                    if let reasoning = blocks[delta.index]?.reasoningEntry,
+                                        let index = state.entries.firstIndex(where: { $0.id == reasoning.id })
+                                    {
+                                        state.entries[index] = .reasoning(reasoning)
+                                    }
+                                    if let current = snapshot() { lastSnapshot = current; continuation.yield(current) }
                                 case .ignored:
                                     break
                                 }
@@ -980,8 +1002,15 @@ private func convertToolToAnthropicFormat(_ tool: any Tool) throws -> AnthropicT
 // MARK: - Supporting Types
 
 extension Transcript {
-    fileprivate func toAnthropicMessages() -> [AnthropicMessage] {
+    fileprivate func toAnthropicMessages() throws -> [AnthropicMessage] {
         var messages = [AnthropicMessage]()
+        func appendAssistant(_ content: [AnthropicContent]) {
+            if let last = messages.last, last.role == .assistant {
+                messages[messages.count - 1] = .init(role: .assistant, content: last.content + content)
+            } else {
+                messages.append(.init(role: .assistant, content: content))
+            }
+        }
         for item in self {
             switch item {
             case .instructions(let instructions):
@@ -998,13 +1027,29 @@ extension Transcript {
                         content: convertSegmentsToAnthropicContent(prompt.segments)
                     )
                 )
+            case .reasoning(let reasoning):
+                guard reasoning.metadata["provider"] == GeneratedContent("anthropic") else {
+                    // Foreign reasoning remains display history, not Anthropic replay state.
+                    continue
+                }
+                guard let data = reasoning.signature, let signature = String(data: data, encoding: .utf8),
+                    !signature.isEmpty
+                else {
+                    throw Transcript.ReasoningReplayError.invalidSignature
+                }
+                if reasoning.metadata["isRedacted"] == GeneratedContent(true) {
+                    appendAssistant([.redactedThinking(.init(data: signature))])
+                    continue
+                }
+                let text = try reasoning.segments.map { segment -> String in
+                    guard case .text(let text) = segment else {
+                        throw Transcript.ReasoningReplayError.unsupportedProvider("Anthropic reasoning segment")
+                    }
+                    return text.content
+                }.joined()
+                appendAssistant([.thinking(.init(thinking: text, signature: signature))])
             case .response(let response):
-                messages.append(
-                    .init(
-                        role: .assistant,
-                        content: convertSegmentsToAnthropicContent(response.segments)
-                    )
-                )
+                appendAssistant(convertSegmentsToAnthropicContent(response.segments))
             case .toolCalls(let toolCalls):
                 // Add assistant message with tool use blocks
                 let toolUseBlocks: [AnthropicContent] = toolCalls.map { call in
@@ -1017,12 +1062,7 @@ extension Transcript {
                         )
                     )
                 }
-                messages.append(
-                    .init(
-                        role: .assistant,
-                        content: toolUseBlocks
-                    )
-                )
+                appendAssistant(toolUseBlocks)
             case .toolOutput(let toolOutput):
                 // Add user message with tool result
                 messages.append(
@@ -1069,11 +1109,13 @@ private enum AnthropicContent: Codable, Sendable {
     case toolUse(AnthropicToolUse)
     case toolResult(AnthropicToolResult)
     case thinking(AnthropicThinking)
+    case redactedThinking(AnthropicRedactedThinking)
 
     enum CodingKeys: String, CodingKey { case type }
 
     enum ContentType: String, Codable {
-        case text = "text", image = "image", toolUse = "tool_use", toolResult = "tool_result", thinking = "thinking"
+        case text = "text", image = "image", toolUse = "tool_use", toolResult = "tool_result", thinking = "thinking",
+            redactedThinking = "redacted_thinking"
     }
 
     init(from decoder: any Decoder) throws {
@@ -1090,6 +1132,8 @@ private enum AnthropicContent: Codable, Sendable {
             self = .toolResult(try AnthropicToolResult(from: decoder))
         case .thinking:
             self = .thinking(try AnthropicThinking(from: decoder))
+        case .redactedThinking:
+            self = .redactedThinking(try AnthropicRedactedThinking(from: decoder))
         }
     }
 
@@ -1100,7 +1144,22 @@ private enum AnthropicContent: Codable, Sendable {
         case .toolUse(let u): try u.encode(to: encoder)
         case .toolResult(let r): try r.encode(to: encoder)
         case .thinking(let h): try h.encode(to: encoder)
+        case .redactedThinking(let value): try value.encode(to: encoder)
         }
+    }
+}
+
+private struct AnthropicRedactedThinking: Codable, Sendable {
+    let type: String
+    let data: String
+    init(data: String) { self.type = "redacted_thinking"; self.data = data }
+    func transcriptReasoning(id: String = UUID().uuidString) -> Transcript.Reasoning {
+        .init(
+            id: id,
+            metadata: ["provider": GeneratedContent("anthropic"), "isRedacted": GeneratedContent(true)],
+            segments: [],
+            signature: Data(data.utf8)
+        )
     }
 }
 
@@ -1152,6 +1211,17 @@ private struct AnthropicImage: Codable, Sendable {
     init(url: String) {
         self.type = "image"
         self.source = Source(type: "url", mediaType: nil, data: nil, url: url)
+    }
+}
+
+private extension AnthropicThinking {
+    func transcriptReasoning(id: String = UUID().uuidString) -> Transcript.Reasoning {
+        .init(
+            id: id,
+            metadata: ["provider": GeneratedContent("anthropic")],
+            segments: [.text(.init(id: id + ":text", content: thinking))],
+            signature: signature.isEmpty ? nil : Data(signature.utf8)
+        )
     }
 }
 
@@ -1242,6 +1312,14 @@ private struct AnthropicErrorDetail: Codable {
 // MARK: - Streaming Event Types
 
 private struct AnthropicStreamBlock {
+    let reasoningID = UUID().uuidString
+    var reasoningEntry: Transcript.Reasoning? {
+        if start.type == "redacted_thinking", let data = start.data {
+            return AnthropicRedactedThinking(data: data).transcriptReasoning(id: reasoningID)
+        }
+        guard start.type == "thinking" else { return nil }
+        return AnthropicThinking(thinking: thinking, signature: signature).transcriptReasoning(id: reasoningID)
+    }
     let start: AnthropicStreamEvent.ContentBlockStartEvent.ContentBlock
     var text: String
     var arguments = ""
@@ -1259,6 +1337,9 @@ private struct AnthropicStreamBlock {
         switch start.type {
         case "text": return .text(.init(text: text))
         case "thinking": return .thinking(.init(thinking: thinking, signature: signature))
+        case "redacted_thinking":
+            guard let data = start.data else { throw Transcript.ReasoningReplayError.invalidSignature }
+            return .redactedThinking(.init(data: data))
         case "tool_use":
             guard let id = start.id, let name = start.name else { return nil }
             let input =
@@ -1349,6 +1430,7 @@ private enum AnthropicStreamEvent: Codable, Sendable {
             let input: [String: JSONValue]?
             let thinking: String?
             let signature: String?
+            let data: String?
         }
     }
 

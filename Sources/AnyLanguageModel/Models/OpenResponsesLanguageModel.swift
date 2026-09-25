@@ -922,6 +922,9 @@ extension Transcript {
                         content: .blocks(openResponsesConvertSegmentsToBlocks(prompt.segments))
                     )
                 )
+            case .reasoning:
+                // Keep display history in the transcript without sending unsupported replay state.
+                continue
             case .response(let response):
                 list.append(
                     OpenResponsesMessage(

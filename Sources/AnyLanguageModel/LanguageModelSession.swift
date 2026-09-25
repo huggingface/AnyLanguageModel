@@ -1081,7 +1081,7 @@ extension LanguageModelSession {
             /// The raw content produced so far by the model.
             public var rawContent: GeneratedContent
 
-            /// Transcript entries (tool calls and outputs) produced so far while streaming.
+            /// Transcript entries (reasoning, tool calls and outputs) produced so far while streaming.
             /// Cumulative across tool rounds;
             /// empty for providers that don't stream tool activity.
             public var transcriptEntries: ArraySlice<Transcript.Entry>
@@ -1096,7 +1096,7 @@ extension LanguageModelSession {
             /// - Parameters:
             ///   - content: The partially generated content.
             ///   - rawContent: The raw content produced by the model.
-            ///   - transcriptEntries: Transcript entries accumulated so far (tool calls/outputs).
+            ///   - transcriptEntries: Transcript entries accumulated so far (reasoning/tool calls/outputs).
             ///   - usage: Provider-reported token usage so far.
             public init(
                 content: Content.PartiallyGenerated,

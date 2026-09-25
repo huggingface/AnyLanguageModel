@@ -36,6 +36,9 @@ public struct Transcript: Sendable, Equatable, Codable {
         /// An tool output provided back to the model.
         case toolOutput(ToolOutput)
 
+        /// Provider reasoning, separate from the person-facing response.
+        case reasoning(Reasoning)
+
         /// A response from the model.
         case response(Response)
 
@@ -50,6 +53,8 @@ public struct Transcript: Sendable, Equatable, Codable {
                 return toolCalls.id
             case .toolOutput(let toolOutput):
                 return toolOutput.id
+            case .reasoning(let reasoning):
+                return reasoning.id
             case .response(let response):
                 return response.id
             }
@@ -384,6 +389,32 @@ public struct Transcript: Sendable, Equatable, Codable {
         }
     }
 
+    /// A provider cannot safely replay a reasoning entry in this transcript.
+    public enum ReasoningReplayError: Error, Sendable, Equatable {
+        case unsupportedProvider(String)
+        case invalidSignature
+    }
+
+    /// Model reasoning and opaque state needed to continue a conversation.
+    public struct Reasoning: Sendable, Identifiable, Equatable, Codable {
+        public var id: String
+        public var segments: [Segment]
+        public var signature: Data?
+        public var metadata: [String: GeneratedContent]
+
+        public init(
+            id: String = UUID().uuidString,
+            metadata: [String: GeneratedContent] = [:],
+            segments: [Segment],
+            signature: Data? = nil
+        ) {
+            self.id = id
+            self.segments = segments
+            self.signature = signature
+            self.metadata = metadata
+        }
+    }
+
     /// A response from the model.
     public struct Response: Sendable, Identifiable, Equatable, Codable {
         /// The stable identity of the entity associated with this instance.
@@ -456,6 +487,8 @@ extension Transcript.Entry: CustomStringConvertible {
             return "toolCalls(\(toolCalls))"
         case .toolOutput(let toolOutput):
             return "toolOutput(\(toolOutput))"
+        case .reasoning(let reasoning):
+            return "reasoning(segments: \(reasoning.segments.count))"
         case .response(let response):
             return "response(\(response))"
         }
