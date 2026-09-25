@@ -1291,7 +1291,7 @@ private enum Responses {
         let id: String
         let output: [JSONValue]?
         let usage: ResponsesUsage?
-        let error: [JSONValue]?
+        let error: ResponseError?
         let outputText: String?
         let finishReason: String?
 
@@ -1303,6 +1303,12 @@ private enum Responses {
             case finishReason = "finish_reason"
             case error = "error"
         }
+    }
+
+    /// The `error` object of a response, which is `null` unless the response failed.
+    struct ResponseError: Decodable, Sendable {
+        let code: String?
+        let message: String?
     }
 }
 
