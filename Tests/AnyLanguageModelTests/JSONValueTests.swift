@@ -103,9 +103,64 @@ struct JSONValueTests {
         #expect(try AnyLanguageModel.JSONValue(sample) == sample)
     }
 
+    @Test func isNull() {
+        #expect(AnyLanguageModel.JSONValue.null.isNull)
+        #expect(!AnyLanguageModel.JSONValue.bool(false).isNull)
+        #expect(!AnyLanguageModel.JSONValue.string("").isNull)
+    }
+
+    @Test func boolValue() {
+        #expect(AnyLanguageModel.JSONValue.bool(true).boolValue == true)
+        #expect(AnyLanguageModel.JSONValue.bool(false).boolValue == false)
+        #expect(AnyLanguageModel.JSONValue.int(1).boolValue == nil)
+        #expect(AnyLanguageModel.JSONValue.string("true").boolValue == nil)
+    }
+
+    @Test func intValue() {
+        #expect(AnyLanguageModel.JSONValue.int(42).intValue == 42)
+        #expect(AnyLanguageModel.JSONValue.double(42.0).intValue == nil)
+        #expect(AnyLanguageModel.JSONValue.string("42").intValue == nil)
+    }
+
+    @Test func doubleValue() {
+        #expect(AnyLanguageModel.JSONValue.double(2.5).doubleValue == 2.5)
+        #expect(AnyLanguageModel.JSONValue.int(42).doubleValue == 42.0)
+        #expect(AnyLanguageModel.JSONValue.string("2.5").doubleValue == nil)
+        #expect(AnyLanguageModel.JSONValue.null.doubleValue == nil)
+    }
+
+    @Test func stringValue() {
+        #expect(AnyLanguageModel.JSONValue.string("hello").stringValue == "hello")
+        #expect(AnyLanguageModel.JSONValue.int(1).stringValue == nil)
+        #expect(AnyLanguageModel.JSONValue.null.stringValue == nil)
+    }
+
+    @Test func arrayValue() {
+        #expect(sample.objectValue?["array"]?.arrayValue == [.int(1), .string("two"), .null])
+        #expect(AnyLanguageModel.JSONValue.array([]).arrayValue == [])
+        #expect(sample.arrayValue == nil)
+    }
+
     @Test func objectValue() {
         #expect(sample.objectValue?["int"] == .int(42))
+        #expect(AnyLanguageModel.JSONValue.object([:]).objectValue == [:])
         #expect(AnyLanguageModel.JSONValue.string("x").objectValue == nil)
+    }
+
+    @Test func accessorsMatchJSONSchema() {
+        let values: [AnyLanguageModel.JSONValue] = [
+            .null, .bool(true), .int(-3), .double(0.5), .string("s"), .array([.null]), .object(["k": .int(1)]),
+        ]
+        for value in values {
+            let theirs = value.jsonSchemaValue
+            #expect(value.isNull == theirs.isNull)
+            #expect(value.boolValue == theirs.boolValue)
+            #expect(value.intValue == theirs.intValue)
+            #expect(value.doubleValue == theirs.doubleValue)
+            #expect(value.stringValue == theirs.stringValue)
+            #expect(value.arrayValue?.map(\.jsonSchemaValue) == theirs.arrayValue)
+            #expect(value.objectValue?.mapValues(\.jsonSchemaValue) == theirs.objectValue)
+        }
     }
 
     // MARK: - JSONSchema conversion

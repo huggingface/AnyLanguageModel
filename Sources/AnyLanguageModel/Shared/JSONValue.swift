@@ -55,6 +55,49 @@ public enum JSONValue: Sendable, Hashable {
         }
     }
 
+    /// A Boolean value that indicates whether this is a null value.
+    public var isNull: Bool {
+        self == .null
+    }
+
+    /// The value of a boolean value, or `nil` for any other value.
+    public var boolValue: Bool? {
+        guard case .bool(let value) = self else { return nil }
+        return value
+    }
+
+    /// The value of an integer value, or `nil` for any other value.
+    ///
+    /// This property returns `nil` for a ``double(_:)`` value,
+    /// even one without a fractional part.
+    public var intValue: Int? {
+        guard case .int(let value) = self else { return nil }
+        return value
+    }
+
+    /// The value of a number, or `nil` for any other value.
+    ///
+    /// This property converts an ``int(_:)`` value to `Double`.
+    public var doubleValue: Double? {
+        switch self {
+        case .double(let value): return value
+        case .int(let value): return Double(value)
+        default: return nil
+        }
+    }
+
+    /// The value of a string value, or `nil` for any other value.
+    public var stringValue: String? {
+        guard case .string(let value) = self else { return nil }
+        return value
+    }
+
+    /// The elements of an array value, or `nil` for any other value.
+    public var arrayValue: [JSONValue]? {
+        guard case .array(let value) = self else { return nil }
+        return value
+    }
+
     /// The dictionary of an object value, or `nil` for any other value.
     public var objectValue: [String: JSONValue]? {
         guard case .object(let value) = self else { return nil }
