@@ -165,7 +165,7 @@ struct AnthropicLanguageModelTests {
 
     @Suite("Anthropic request encoding", .serialized)
     struct AnthropicRequestTests {
-        private func makeSession() -> LanguageModelSession {
+        private func makeSession(transcript: Transcript = Transcript()) -> LanguageModelSession {
             let configuration = URLSessionConfiguration.ephemeral
             configuration.protocolClasses = [AnthropicRequestURLProtocol.self]
             let model = AnthropicLanguageModel(
@@ -173,7 +173,7 @@ struct AnthropicLanguageModelTests {
                 model: "test-model",
                 session: URLSession(configuration: configuration)
             )
-            return LanguageModelSession(model: model)
+            return LanguageModelSession(model: model, transcript: transcript)
         }
 
         private func requestBody() throws -> [String: JSONValue] {
@@ -260,6 +260,35 @@ struct AnthropicLanguageModelTests {
             let body = try requestBody()
             #expect(body["thinking"] == nil)
             #expect(body["output_config"] == nil)
+        }
+
+        @Test(arguments: ["", " \n"])
+        func blankResponseIsOmittedFromHistory(responseText: String) async throws {
+            let arguments = try GeneratedContent(json: #"{"city":"Cupertino"}"#)
+            let transcript = Transcript(entries: [
+                .prompt(Transcript.Prompt(segments: [.text(.init(content: "Weather?"))])),
+                .toolCalls(
+                    Transcript.ToolCalls([
+                        Transcript.ToolCall(id: "call-1", toolName: "getWeather", arguments: arguments)
+                    ])
+                ),
+                .toolOutput(
+                    Transcript.ToolOutput(
+                        id: "call-1",
+                        toolName: "getWeather",
+                        segments: [.text(.init(content: "Sunny"))]
+                    )
+                ),
+                .response(Transcript.Response(assetIDs: [], segments: [.text(.init(content: responseText))])),
+            ])
+            _ = try await makeSession(transcript: transcript).respond(to: "Thanks")
+
+            let messages = try #require(requestBody()["messages"]?.arrayValue)
+            let roles = messages.map { $0.objectValue?["role"]?.stringValue }
+            #expect(roles == ["user", "assistant", "user", "user"])
+            let texts = messages.flatMap { $0.objectValue?["content"]?.arrayValue ?? [] }
+                .compactMap { $0.objectValue?["text"]?.stringValue }
+            #expect(texts == ["Weather?", "Thanks"])
         }
 
         @Test func extraBodyOverridesCustomOptions() async throws {
