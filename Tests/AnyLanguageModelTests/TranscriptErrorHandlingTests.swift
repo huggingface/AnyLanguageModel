@@ -5,6 +5,43 @@ import Testing
 
 @Suite("Transcript error handling")
 struct TranscriptErrorHandlingTests {
+    @Test(arguments: [nil, .preserveTranscript, .revertTranscript] as [TranscriptErrorHandlingPolicy?], [false, true])
+    func emptyStreamAppliesPolicyBeforeReportingFailure(policy: TranscriptErrorHandlingPolicy?, collect: Bool)
+        async throws
+    {
+        let previous = Transcript.Entry.prompt(.init(id: "previous", segments: [.text(.init(content: "Previous"))]))
+        let session = LanguageModelSession(
+            model: CheckpointModel(completedTools: false, empty: true),
+            transcript: Transcript(entries: [previous])
+        )
+        session.transcriptErrorHandlingPolicy = policy
+        do {
+            let stream = session.streamResponse(to: "Empty request")
+            if collect {
+                _ = try await stream.collect()
+            } else {
+                for try await _ in stream { Issue.record("Empty stream yielded a snapshot") }
+            }
+            Issue.record("Expected noSnapshots error")
+        } catch {
+            #expect(String(describing: error) == "noSnapshots")
+            // Cleanup must have run before the error reaches either kind of consumer.
+            #expect(!session.isResponding)
+            if policy == .revertTranscript {
+                #expect(Array(session.transcript) == [previous])
+            } else {
+                #expect(session.transcript.count == 2)
+                #expect(session.transcript.first == previous)
+                guard case .prompt(let prompt) = session.transcript.last else {
+                    Issue.record("Expected retained request prompt"); return
+                }
+                #expect(prompt.segments.first?.description == "Empty request")
+            }
+            #expect(!session.transcript.contains { if case .response = $0 { true } else { false } })
+        }
+        await session.waitForResponseCompletion()
+    }
+
     @Test(arguments: [false, true])
     func cancelledPartialAnswerIsNotCommitted(completedTools: Bool) async throws {
         let session = LanguageModelSession(model: CheckpointModel(completedTools: completedTools))
@@ -121,6 +158,7 @@ private struct CheckpointModel: LanguageModel {
     enum Finish: Sendable { case suspended, failure, success }
     var completedTools: Bool
     var finish: Finish = .suspended
+    var empty = false
 
     func respond<Content: Generable>(
         within session: LanguageModelSession,
@@ -147,6 +185,7 @@ private struct CheckpointModel: LanguageModel {
     ) -> sending LanguageModelSession.ResponseStream<Content> {
         .init(
             stream: AsyncThrowingStream { continuation in
+                if empty { continuation.finish(); return }
                 do {
                     var entries: [Transcript.Entry] = []
                     if completedTools {

@@ -236,27 +236,28 @@ public final class LanguageModelSession: @unchecked Sendable {
                         // before the stream reports completion,
                         // so a caller that drains the stream
                         // and starts the next turn sees the full history.
-                        if let lastSnapshot {
-                            // Extract text content from the generated content
-                            let textContent: String
-                            if case .string(let str) = lastSnapshot.rawContent.kind {
-                                textContent = str
-                            } else {
-                                textContent = lastSnapshot.rawContent.jsonString
-                            }
+                        guard let lastSnapshot else {
+                            throw ResponseStreamError.noSnapshots
+                        }
+                        // Extract text content from the generated content
+                        let textContent: String
+                        if case .string(let str) = lastSnapshot.rawContent.kind {
+                            textContent = str
+                        } else {
+                            textContent = lastSnapshot.rawContent.jsonString
+                        }
 
-                            let responseEntry = Transcript.Entry.response(
-                                Transcript.Response(
-                                    assetIDs: [],
-                                    segments: [.text(.init(content: textContent))],
-                                    providerMetadata: lastSnapshot.providerMetadata
-                                )
+                        let responseEntry = Transcript.Entry.response(
+                            Transcript.Response(
+                                assetIDs: [],
+                                segments: [.text(.init(content: textContent))],
+                                providerMetadata: lastSnapshot.providerMetadata
                             )
-                            session.withMutation(keyPath: \.transcript) {
-                                session.state.withLock {
-                                    $0.transcript.append(contentsOf: lastSnapshot.transcriptEntries)
-                                    $0.transcript.append(responseEntry)
-                                }
+                        )
+                        session.withMutation(keyPath: \.transcript) {
+                            session.state.withLock {
+                                $0.transcript.append(contentsOf: lastSnapshot.transcriptEntries)
+                                $0.transcript.append(responseEntry)
                             }
                         }
                         session.endResponding()
