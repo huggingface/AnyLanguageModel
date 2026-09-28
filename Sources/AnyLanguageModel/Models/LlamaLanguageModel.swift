@@ -843,9 +843,14 @@ import Foundation
             return LlamaToolCallFormat.detect(template: template)
         }
 
-        private func makeToolPromptContext(for session: LanguageModelSession) throws -> LlamaToolPromptContext? {
-            guard !session.tools.isEmpty, self.model != nil else { return nil }
-            return try LlamaToolPromptContext(format: currentToolCallFormat(), tools: session.tools)
+        private func makeToolPromptContext(
+            tools: [any Tool],
+            pendingEntries: [Transcript.Entry] = []
+        ) throws -> LlamaToolPromptContext? {
+            guard (!tools.isEmpty || !pendingEntries.isEmpty), self.model != nil else { return nil }
+            var context = try LlamaToolPromptContext(format: currentToolCallFormat(), tools: tools)
+            context.pendingEntries = pendingEntries
+            return context
         }
 
         private func makeTranscriptToolCalls(
@@ -862,12 +867,13 @@ import Foundation
 
         private func resolveToolCalls(
             _ parsedCalls: [LlamaParsedToolCall],
+            tools: [any Tool],
             session: LanguageModelSession
         ) async throws -> ToolResolutionOutcome {
             if parsedCalls.isEmpty { return .invocations([]) }
 
             var toolsByName: [String: any Tool] = [:]
-            for tool in session.tools where toolsByName[tool.name] == nil {
+            for tool in tools where toolsByName[tool.name] == nil {
                 toolsByName[tool.name] = tool
             }
 
@@ -989,9 +995,6 @@ import Foundation
             includeSchemaInPrompt: Bool,
             options: GenerationOptions
         ) async throws -> LanguageModelSession.Response<Content> where Content: Generable {
-            if mmprojPath == nil {
-                try validateNoImageSegments(in: session)
-            }
             try ensureModelLoaded()
 
             let runtimeOptions = resolvedOptions(from: options)
@@ -1002,18 +1005,26 @@ import Foundation
             if type == String.self {
                 let maxTokens = runtimeOptions.maximumResponseTokens ?? 100
                 let outputFormat = currentToolCallFormat()
-                var toolContext = try makeToolPromptContext(for: session)
                 let maxToolIterations = 8
                 var toolIteration = 0
                 var previousToolCallSignature: String?
                 var allEntries: [Transcript.Entry] = []
                 var text = ""
                 var usage = LanguageModelSession.Usage.zero
+                var pendingEntries: [Transcript.Entry] = []
 
                 generationLoop: while true {
+                    let requestContext = session.resolvedRequestContext()
+                    if mmprojPath == nil {
+                        try validateNoImageSegments(in: requestContext.transcript)
+                    }
+                    let toolContext = try makeToolPromptContext(
+                        tools: requestContext.tools,
+                        pendingEntries: pendingEntries
+                    )
                     var promptImages: [Data] = []
                     let fullPrompt = try formatPrompt(
-                        for: session,
+                        requestContext: requestContext,
                         extraSystemMessage: nil,
                         assistantPrefill: runtimeOptions.assistantPrefill,
                         imageMarker: imageMarker,
@@ -1091,7 +1102,11 @@ import Foundation
                     }
                     previousToolCallSignature = signature
 
-                    let resolution = try await resolveToolCalls(parsedCalls, session: session)
+                    let resolution = try await resolveToolCalls(
+                        parsedCalls,
+                        tools: requestContext.tools,
+                        session: session
+                    )
                     switch resolution {
                     case .stop(let calls):
                         if !calls.isEmpty {
@@ -1111,11 +1126,11 @@ import Foundation
                             Transcript.ToolCalls(invocations.map(\.call))
                         )
                         allEntries.append(callsEntry)
-                        toolContext?.pendingEntries.append(callsEntry)
+                        pendingEntries.append(callsEntry)
                         for invocation in invocations {
                             let outputEntry = Transcript.Entry.toolOutput(invocation.output)
                             allEntries.append(outputEntry)
-                            toolContext?.pendingEntries.append(outputEntry)
+                            pendingEntries.append(outputEntry)
                         }
                     }
                 }
@@ -1127,11 +1142,15 @@ import Foundation
                     usage: usage
                 )
             } else {
+                let requestContext = session.resolvedRequestContext()
+                if mmprojPath == nil {
+                    try validateNoImageSegments(in: requestContext.transcript)
+                }
                 var promptImages: [Data] = []
                 let fullPrompt: String
                 if includeSchemaInPrompt {
                     fullPrompt = try formatPrompt(
-                        for: session,
+                        requestContext: requestContext,
                         extraSystemMessage: schemaPrompt(for: schema),
                         assistantPrefill: runtimeOptions.assistantPrefill,
                         imageMarker: imageMarker,
@@ -1139,7 +1158,7 @@ import Foundation
                     )
                 } else {
                     fullPrompt = try formatPrompt(
-                        for: session,
+                        requestContext: requestContext,
                         extraSystemMessage: nil,
                         assistantPrefill: runtimeOptions.assistantPrefill,
                         imageMarker: imageMarker,
@@ -1227,18 +1246,6 @@ import Foundation
                 }
             }
 
-            if mmprojPath == nil {
-                do {
-                    try validateNoImageSegments(in: session)
-                } catch {
-                    return LanguageModelSession.ResponseStream(
-                        stream: AsyncThrowingStream { continuation in
-                            continuation.finish(throwing: error)
-                        }
-                    )
-                }
-            }
-
             let stream: AsyncThrowingStream<LanguageModelSession.ResponseStream<Content>.Snapshot, any Error> =
                 AsyncThrowingStream { continuation in
                     let task = Task {
@@ -1248,7 +1255,6 @@ import Foundation
                             let runtimeOptions = resolvedOptions(from: options)
                             let maxTokens = runtimeOptions.maximumResponseTokens ?? 100
                             let outputFormat = self.currentToolCallFormat()
-                            var toolContext = try self.makeToolPromptContext(for: session)
                             let maxToolIterations = 8
                             var toolIteration = 0
                             var previousToolCallSignature: String?
@@ -1256,6 +1262,7 @@ import Foundation
                             var emittedBase = ""
                             var usage = LanguageModelSession.Usage.zero
                             var lastYieldedText: String?
+                            var pendingEntries: [Transcript.Entry] = []
                             let imageMarker =
                                 self.mtmdContext != nil ? String(cString: mtmd_default_marker()) : nil
 
@@ -1271,9 +1278,17 @@ import Foundation
                             }
 
                             generationLoop: while true {
+                                let requestContext = session.resolvedRequestContext()
+                                if self.mmprojPath == nil {
+                                    try self.validateNoImageSegments(in: requestContext.transcript)
+                                }
+                                let toolContext = try self.makeToolPromptContext(
+                                    tools: requestContext.tools,
+                                    pendingEntries: pendingEntries
+                                )
                                 var promptImages: [Data] = []
                                 let fullPrompt = try self.formatPrompt(
-                                    for: session,
+                                    requestContext: requestContext,
                                     extraSystemMessage: nil,
                                     assistantPrefill: runtimeOptions.assistantPrefill,
                                     imageMarker: imageMarker,
@@ -1366,7 +1381,11 @@ import Foundation
                                 }
                                 previousToolCallSignature = signature
 
-                                let resolution = try await self.resolveToolCalls(parsedCalls, session: session)
+                                let resolution = try await self.resolveToolCalls(
+                                    parsedCalls,
+                                    tools: requestContext.tools,
+                                    session: session
+                                )
                                 switch resolution {
                                 case .stop(let calls):
                                     emittedBase += roundVisible
@@ -1384,11 +1403,11 @@ import Foundation
                                         Transcript.ToolCalls(invocations.map(\.call))
                                     )
                                     accumulatedEntries.append(callsEntry)
-                                    toolContext?.pendingEntries.append(callsEntry)
+                                    pendingEntries.append(callsEntry)
                                     for invocation in invocations {
                                         let outputEntry = Transcript.Entry.toolOutput(invocation.output)
                                         accumulatedEntries.append(outputEntry)
-                                        toolContext?.pendingEntries.append(outputEntry)
+                                        pendingEntries.append(outputEntry)
                                     }
                                     emittedBase += roundVisible
                                     yieldSnapshot(emittedBase)
@@ -2133,9 +2152,9 @@ import Foundation
 
         // MARK: - Image Validation
 
-        private func validateNoImageSegments(in session: LanguageModelSession) throws {
+        private func validateNoImageSegments(in transcript: Transcript) throws {
             // Check for image segments in the most recent prompt from the transcript
-            for entry in session.transcript.reversed() {
+            for entry in transcript.reversed() {
                 if case .prompt(let p) = entry {
                     for segment in p.segments {
                         if case .image = segment {
@@ -2268,14 +2287,14 @@ import Foundation
         }
 
         private func formatPrompt(
-            for session: LanguageModelSession,
+            requestContext: LanguageModelSession.RequestContext,
             extraSystemMessage: String? = nil,
             assistantPrefill: String? = nil,
             toolContext: LlamaToolPromptContext? = nil
         ) throws -> String {
             var images: [Data] = []
             return try formatPrompt(
-                for: session,
+                requestContext: requestContext,
                 extraSystemMessage: extraSystemMessage,
                 assistantPrefill: assistantPrefill,
                 imageMarker: nil,
@@ -2285,7 +2304,7 @@ import Foundation
         }
 
         private func formatPrompt(
-            for session: LanguageModelSession,
+            requestContext: LanguageModelSession.RequestContext,
             extraSystemMessage: String?,
             assistantPrefill: String?,
             imageMarker: String?,
@@ -2359,7 +2378,7 @@ import Foundation
                 }
             }
 
-            for entry in session.transcript {
+            for entry in requestContext.transcript {
                 try appendEntry(entry)
             }
             if let toolContext {

@@ -65,6 +65,38 @@ let session = LanguageModelSession(model: model, tools: [WeatherTool()])
 session.toolExecutionDelegate = ToolExecutionObserver()
 ```
 
+Mirroring the OS 27 Foundation Models contract, `DynamicInstructions` can change
+the instructions and tools visible to the next model request without rebuilding
+the session:
+
+```swift
+final class CurrentAppState {
+    var canCheckWeather = false
+}
+
+struct CurrentAppInstructions: DynamicInstructions {
+    let state: CurrentAppState
+
+    var body: some DynamicInstructions {
+        Instructions("Help with the currently visible app.")
+        if state.canCheckWeather {
+            WeatherTool()
+        }
+    }
+}
+
+let state = CurrentAppState()
+let session = LanguageModelSession(
+    model: model,
+    dynamicInstructions: CurrentAppInstructions(state: state),
+    history: savedHistory
+)
+```
+
+The body is evaluated before every model request, including continuation
+requests after tool calls. Dynamic instructions are projected into the request
+context and are not persisted as the session's durable history.
+
 ## Features
 
 ### Supported Providers

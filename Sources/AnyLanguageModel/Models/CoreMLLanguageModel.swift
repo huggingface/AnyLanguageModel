@@ -113,11 +113,12 @@
             includeSchemaInPrompt: Bool,
             options: GenerationOptions
         ) async throws -> LanguageModelSession.Response<Content> where Content: Generable {
-            try validateNoImageSegments(in: session)
+            let requestContext = session.resolvedRequestContext()
+            try validateNoImageSegments(in: requestContext.transcript)
 
             if type != String.self {
                 let (jsonString, usage) = try await generateStructuredJSON(
-                    session: session,
+                    requestContext: requestContext,
                     prompt: prompt,
                     schema: schema,
                     options: options,
@@ -139,8 +140,8 @@
             let tokens: [Int]
             if let chatTemplateHandler = chatTemplateHandler {
                 // Use chat template handler with optional tools
-                let messages = chatTemplateHandler(session.instructions, prompt)
-                let toolSpecs: [ToolSpec]? = toolsHandler?(session.tools)
+                let messages = chatTemplateHandler(requestContext.instructions, prompt)
+                let toolSpecs: [ToolSpec]? = toolsHandler?(requestContext.tools)
                 tokens = try tokenizer.applyChatTemplate(messages: messages, tools: toolSpecs)
             } else {
                 // Fall back to direct tokenizer encoding
@@ -227,17 +228,6 @@
                 }
             }
 
-            // Validate that no image segments are present
-            do {
-                try validateNoImageSegments(in: session)
-            } catch {
-                return LanguageModelSession.ResponseStream(
-                    stream: AsyncThrowingStream { continuation in
-                        continuation.finish(throwing: error)
-                    }
-                )
-            }
-
             // Convert AnyLanguageModel GenerationOptions to swift-transformers GenerationConfig
             let generationConfig = toGenerationConfig(options)
 
@@ -246,11 +236,13 @@
                 @Sendable continuation in
                 let task = Task {
                     do {
+                        let requestContext = session.resolvedRequestContext()
+                        try validateNoImageSegments(in: requestContext.transcript)
                         let tokens: [Int]
                         if let chatTemplateHandler = chatTemplateHandler {
                             // Use chat template handler with optional tools
-                            let messages = chatTemplateHandler(session.instructions, prompt)
-                            let toolSpecs: [ToolSpec]? = toolsHandler?(session.tools)
+                            let messages = chatTemplateHandler(requestContext.instructions, prompt)
+                            let toolSpecs: [ToolSpec]? = toolsHandler?(requestContext.tools)
                             tokens = try tokenizer.applyChatTemplate(messages: messages, tools: toolSpecs)
                         } else {
                             // Fall back to direct tokenizer encoding
@@ -298,10 +290,10 @@
 
         // MARK: - Image Validation
 
-        private func validateNoImageSegments(in session: LanguageModelSession) throws {
+        private func validateNoImageSegments(in transcript: Transcript) throws {
             // Note: Instructions is a plain text type without segments, so no image check needed there.
             // Check for image segments in the most recent prompt
-            for entry in session.transcript.reversed() {
+            for entry in transcript.reversed() {
                 if case .prompt(let p) = entry {
                     for segment in p.segments {
                         if case .image = segment {
@@ -406,7 +398,7 @@
         }
 
         private func generateStructuredJSON(
-            session: LanguageModelSession,
+            requestContext: LanguageModelSession.RequestContext,
             prompt: Prompt,
             schema: GenerationSchema,
             options: GenerationOptions,
@@ -416,7 +408,7 @@
             var generationConfig = toStructuredGenerationConfig(options)
 
             let promptTokens = try structuredPromptTokens(
-                in: session,
+                requestContext: requestContext,
                 prompt: prompt,
                 schema: schema,
                 includeSchemaInPrompt: includeSchemaInPrompt
@@ -453,20 +445,20 @@
         }
 
         private func structuredPromptTokens(
-            in session: LanguageModelSession,
+            requestContext: LanguageModelSession.RequestContext,
             prompt: Prompt,
             schema: GenerationSchema,
             includeSchemaInPrompt: Bool
         ) throws -> [Int] {
             if let chatTemplateHandler = chatTemplateHandler {
-                var messages = chatTemplateHandler(session.instructions, prompt)
+                var messages = chatTemplateHandler(requestContext.instructions, prompt)
                 if includeSchemaInPrompt {
                     let schemaPrompt = schemaPrompt(for: schema)
                     if !schemaPrompt.isEmpty {
                         messages.insert(["role": "system", "content": schemaPrompt], at: 0)
                     }
                 }
-                let toolSpecs: [ToolSpec]? = toolsHandler?(session.tools)
+                let toolSpecs: [ToolSpec]? = toolsHandler?(requestContext.tools)
                 return try tokenizer.applyChatTemplate(messages: messages, tools: toolSpecs)
             }
 

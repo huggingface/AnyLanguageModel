@@ -66,6 +66,34 @@ public final class LanguageModelSession: @unchecked Sendable {
     private let model: any LanguageModel
     public let tools: [any Tool]
     public let instructions: Instructions?
+    private let dynamicInstructions: AnyDynamicInstructions?
+    private let dynamicInstructionsLock = NSLock()
+
+    nonisolated var usesDynamicInstructions: Bool {
+        dynamicInstructions != nil
+    }
+
+    /// The immutable session inputs resolved for one model request.
+    ///
+    /// Language-model implementations should create one context immediately
+    /// before each provider or local-model request. If that request produces
+    /// tool calls, execute them with ``tools`` from the same context. Resolve a
+    /// new context only before the continuation request.
+    public struct RequestContext: Sendable {
+        public let transcript: Transcript
+        public let instructions: Instructions?
+        public let tools: [any Tool]
+
+        fileprivate init(
+            transcript: Transcript,
+            instructions: Instructions?,
+            tools: [any Tool]
+        ) {
+            self.transcript = transcript
+            self.instructions = instructions
+            self.tools = tools
+        }
+    }
 
     /// A delegate that observes and controls tool execution.
     ///
@@ -90,7 +118,13 @@ public final class LanguageModelSession: @unchecked Sendable {
         tools: [any Tool] = [],
         instructions: String
     ) {
-        self.init(model: model, tools: tools, instructions: Instructions(instructions), transcript: Transcript())
+        self.init(
+            model: model,
+            tools: tools,
+            instructions: Instructions(instructions),
+            dynamicInstructions: nil,
+            transcript: Transcript()
+        )
     }
 
     public convenience init(
@@ -98,7 +132,13 @@ public final class LanguageModelSession: @unchecked Sendable {
         tools: [any Tool] = [],
         instructions: Instructions? = nil
     ) {
-        self.init(model: model, tools: tools, instructions: instructions, transcript: Transcript())
+        self.init(
+            model: model,
+            tools: tools,
+            instructions: instructions,
+            dynamicInstructions: nil,
+            transcript: Transcript()
+        )
     }
 
     public convenience init(
@@ -106,17 +146,45 @@ public final class LanguageModelSession: @unchecked Sendable {
         tools: [any Tool] = [],
         transcript: Transcript
     ) {
-        self.init(model: model, tools: tools, instructions: nil, transcript: transcript)
+        self.init(
+            model: model,
+            tools: tools,
+            instructions: nil,
+            dynamicInstructions: nil,
+            transcript: transcript
+        )
+    }
+
+    /// Creates a session whose instructions and tools are resolved before each
+    /// model request.
+    ///
+    /// The history excludes the dynamic instructions entry. Resolved dynamic
+    /// instructions are projected only into ``RequestContext/transcript`` and
+    /// never become durable transcript state.
+    public convenience init(
+        model: any LanguageModel,
+        dynamicInstructions: sending some DynamicInstructions,
+        history: some Collection<Transcript.Entry> = []
+    ) {
+        self.init(
+            model: model,
+            tools: [],
+            instructions: nil,
+            dynamicInstructions: AnyDynamicInstructions(dynamicInstructions),
+            transcript: Transcript(entries: Array(history))
+        )
     }
 
     private init(
         model: any LanguageModel,
         tools: [any Tool],
         instructions: Instructions?,
+        dynamicInstructions: AnyDynamicInstructions?,
         transcript: Transcript
     ) {
         self.model = model
         self.tools = tools
+        self.dynamicInstructions = dynamicInstructions
         let resolvedInstructions = instructions ?? Self.instructions(from: transcript)
         self.instructions = resolvedInstructions
 
@@ -144,6 +212,44 @@ public final class LanguageModelSession: @unchecked Sendable {
         }
 
         self.state = .init(.init(finalTranscript))
+    }
+
+    /// Resolves the instructions, tools, and transcript view for the next model
+    /// request.
+    ///
+    /// This is an AnyLanguageModel provider-integration seam. Calling it does
+    /// not mutate the session transcript or any global tool registry.
+    nonisolated public func resolvedRequestContext() -> RequestContext {
+        guard let dynamicInstructions else {
+            return RequestContext(
+                transcript: transcript,
+                instructions: instructions,
+                tools: tools
+            )
+        }
+
+        let resolved = dynamicInstructionsLock.withLock {
+            dynamicInstructions.resolveForRequest()
+        }
+        var requestTranscript = transcript
+        if let instructions = resolved.instructions {
+            let instructionsEntry = Transcript.Entry.instructions(
+                Transcript.Instructions(
+                    segments: [
+                        .text(Transcript.TextSegment(content: instructions.description))
+                    ],
+                    toolDefinitions: resolved.tools
+                        .filter(\.includesSchemaInInstructions)
+                        .map { Transcript.ToolDefinition(tool: $0) }
+                )
+            )
+            requestTranscript = Transcript(entries: [instructionsEntry] + requestTranscript)
+        }
+        return RequestContext(
+            transcript: requestTranscript,
+            instructions: resolved.instructions,
+            tools: resolved.tools
+        )
     }
 
     private static func instructions(from transcript: Transcript) -> Instructions? {

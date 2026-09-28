@@ -126,10 +126,11 @@
             issues: [LanguageModelFeedback.Issue],
             desiredOutput: Transcript.Entry?
         ) -> Data {
+            let requestContext = session.resolvedRequestContext()
             let fmSession = FoundationModels.LanguageModelSession(
                 model: pccModel,
-                tools: session.tools.toFoundationModels(),
-                instructions: session.instructions?.toFoundationModels()
+                tools: requestContext.tools.toFoundationModels(),
+                instructions: requestContext.instructions?.toFoundationModels()
             )
             return fmSession.logFeedbackAttachment(
                 sentiment: sentiment?.toFoundationModels(),
