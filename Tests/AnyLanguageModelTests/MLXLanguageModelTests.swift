@@ -100,6 +100,22 @@ import Testing
             #expect(snapshots.dropLast().last?.usage == .zero)
         }
 
+        @Test func sessionCacheReuseMatchesFreshSession() async throws {
+            // The second turn reuses the first turn's cache,
+            // so it should match a fresh session with the same history.
+            let options = GenerationOptions(sampling: .greedy, maximumResponseTokens: 48)
+            let session = LanguageModelSession(model: model)
+            _ = try await session.respond(to: "Name three primary colors.", options: options)
+            let history = session.transcript
+            let reused = try await session.respond(to: "Which of those is your favorite?", options: options)
+            #expect(reused.usage.input.cachedTokenCount > 0)
+
+            let fresh = try await LanguageModelSession(model: model, transcript: history)
+                .respond(to: "Which of those is your favorite?", options: options)
+            #expect(fresh.usage.input.cachedTokenCount == 0)
+            #expect(reused.content == fresh.content)
+        }
+
         @Test func tokenUsageStructuredResponseStreamParity() async throws {
             let options = GenerationOptions(sampling: .greedy, maximumResponseTokens: 16)
             let response = try await LanguageModelSession(model: model).respond(

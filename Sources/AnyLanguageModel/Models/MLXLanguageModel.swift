@@ -895,6 +895,18 @@ import Foundation
             generateParameters: MLXLMCommon.GenerateParameters,
             session: LanguageModelSession
         ) {
+            // After generation, the cache also holds the response tokens.
+            // The next prompt encodes the response again through the chat template,
+            // so keep only the prompt, or drop the entry if the cache can't be trimmed.
+            let generatedCount = (cache.first?.offset ?? 0) - fullTokens.count
+            if generatedCount > 0 {
+                guard MLXLMCommon.canTrimPromptCache(cache) else {
+                    removeSessionCache(for: session)
+                    return
+                }
+                MLXLMCommon.trimPromptCache(cache, numTokens: generatedCount)
+            }
+
             let offset = cache.first?.offset ?? 0
             let prefillCount = max(0, min(offset, fullTokens.count))
             guard prefillCount > 0 else {
