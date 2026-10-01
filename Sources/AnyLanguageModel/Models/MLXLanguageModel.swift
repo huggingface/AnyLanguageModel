@@ -857,7 +857,9 @@ import Foundation
             lmInput: MLXLMCommon.LMInput,
             generateParameters: MLXLMCommon.GenerateParameters,
             context: ModelContext
-        ) -> (cache: [MLXLMCommon.KVCache], input: MLXLMCommon.LMInput, fullTokens: [Int32], cachedTokenCount: Int) {
+        ) throws -> (
+            cache: [MLXLMCommon.KVCache], input: MLXLMCommon.LMInput, fullTokens: [Int32], cachedTokenCount: Int
+        ) {
             let signature = cacheSignature(from: generateParameters)
             let fullTokens = tokens(from: lmInput)
             let existingEntry = getSessionCache(for: session)
@@ -883,7 +885,7 @@ import Foundation
                 removeSessionCache(for: session)
             }
 
-            let newCache = context.model.newCache(parameters: generateParameters)
+            let newCache = try context.model.newCache(parameters: generateParameters)
             return (newCache, lmInput, fullTokens, 0)
         }
 
@@ -1041,7 +1043,7 @@ import Foundation
                     additionalContext: additionalContext
                 )
                 let lmInput = try await context.processor.prepare(input: userInput)
-                let resolved = resolveCache(
+                let resolved = try resolveCache(
                     session: session,
                     lmInput: lmInput,
                     generateParameters: generateParameters,
@@ -1058,6 +1060,7 @@ import Foundation
 
                 var chunks: [String] = []
                 var collectedToolCalls: [MLXLMCommon.ToolCall] = []
+                var rejectedToolCall: MLXLMCommon.RejectedToolCall?
 
                 for await item in stream {
                     switch item {
@@ -1073,7 +1076,13 @@ import Foundation
                         )
                     case .toolCall(let call):
                         collectedToolCalls.append(call)
+                    case .rejectedToolCall(let rejection):
+                        rejectedToolCall = rejectedToolCall ?? rejection
                     }
+                }
+                if let rejectedToolCall {
+                    removeSessionCache(for: session)
+                    throw MLXLMCommon.RejectedToolCallError(rejectedToolCall)
                 }
                 storeSessionCache(
                     cache: resolved.cache,
@@ -1298,7 +1307,7 @@ import Foundation
                                 additionalContext: additionalContext
                             )
                             let lmInput = try await context.processor.prepare(input: userInput)
-                            let resolved = resolveCache(
+                            let resolved = try resolveCache(
                                 session: session,
                                 lmInput: lmInput,
                                 generateParameters: generateParameters,
@@ -1314,6 +1323,7 @@ import Foundation
 
                             let roundStartTextCount = accumulatedText.count
                             var collectedToolCalls: [MLXLMCommon.ToolCall] = []
+                            var rejectedToolCall: MLXLMCommon.RejectedToolCall?
 
                             for await item in mlxStream {
                                 if Task.isCancelled { break toolLoop }
@@ -1324,6 +1334,8 @@ import Foundation
                                     yieldSnapshot()
                                 case .toolCall(let call):
                                     collectedToolCalls.append(call)
+                                case .rejectedToolCall(let rejection):
+                                    rejectedToolCall = rejectedToolCall ?? rejection
                                 case .info(let info):
                                     usage.add(
                                         LocalGenerationUsage(
@@ -1334,6 +1346,10 @@ import Foundation
                                     )
                                     yieldSnapshot()
                                 }
+                            }
+                            if let rejectedToolCall {
+                                removeSessionCache(for: session)
+                                throw MLXLMCommon.RejectedToolCallError(rejectedToolCall)
                             }
 
                             storeSessionCache(
@@ -1445,14 +1461,14 @@ import Foundation
                     let toolSpecs = mlxToolSpecs(for: session)
 
                     let params = toGenerateParameters(.init())
-                    let newCache = context.model.newCache(parameters: params)
+                    let newCache = try context.model.newCache(parameters: params)
                     let userInput = MLXLMCommon.UserInput(
                         chat: [.init(role: .system, content: instructions)],
                         processing: .init(resize: nil),
                         tools: toolSpecs
                     )
                     let lmInput = try await context.processor.prepare(input: userInput)
-                    _ = try context.model.prepare(lmInput, cache: newCache, windowSize: params.prefillStepSize)
+                    _ = try context.model.prepare(lmInput, cache: newCache, state: nil, prefill: params.prefill)
                     storeSessionCache(
                         cache: newCache,
                         fullTokens: tokens(from: lmInput),
@@ -1947,7 +1963,7 @@ import Foundation
         let json = try await generator.generate()
         // Ensure pending MLX operations complete before returning JSON.
         // This synchronization can be a performance cost if called frequently.
-        Stream().synchronize()
+        Stream.gpu.synchronize()
         return (
             json,
             LocalGenerationUsage(
@@ -2034,7 +2050,7 @@ import Foundation
             self.model = context.model
             self.tokenizer = context.tokenizer
             self.state = nil
-            self.cache = context.model.newCache(parameters: parameters)
+            self.cache = try context.model.newCache(parameters: parameters)
             self.processor = parameters.processor()
             self.sampler = parameters.sampler()
             self.remainingTokens = maximumTokens
@@ -2062,7 +2078,8 @@ import Foundation
             let prepareResult = try context.model.prepare(
                 input,
                 cache: cache,
-                windowSize: parameters.prefillStepSize
+                state: nil,
+                prefill: parameters.prefill
             )
 
             let output: MLXLMCommon.LMOutput
