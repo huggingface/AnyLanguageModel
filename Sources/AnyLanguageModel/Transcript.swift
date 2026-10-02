@@ -1,6 +1,13 @@
 import Foundation
 
 /// A type that represents a conversation history between a user and a language model.
+///
+/// - Note: Foundation Models makes only `Transcript` and `GenerationSchema` `Codable`.
+///   The `Codable` conformances of the nested transcript types,
+///   such as ``Transcript/Entry`` and ``Transcript/Segment``,
+///   are exclusive to AnyLanguageModel,
+///   and using them means your code is no longer drop-in compatible
+///   with the Foundation Models framework.
 public struct Transcript: Sendable, Equatable, Codable {
     private var entries: [Entry]
 

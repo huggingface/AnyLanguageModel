@@ -352,6 +352,12 @@ public final class LanguageModelSession: @unchecked Sendable {
     /// Matches the token-usage API in Foundation Models 27.
     /// Counts default to zero when the provider does not report them.
     /// Usage is cumulative across the response's tool rounds.
+    ///
+    /// - Note: This API is exclusive to AnyLanguageModel on OS 26.
+    ///   It follows the Foundation Models 27 `Usage` API,
+    ///   so code that uses it ports to Foundation Models on OS 27.
+    ///   The `Codable` and `Equatable` conformances are exclusive to AnyLanguageModel;
+    ///   Foundation Models 27 doesn't provide them.
     public struct Usage: Sendable, Equatable, Codable {
         /// Token counts for the input submitted to the model.
         public struct Input: Sendable, Equatable, Codable {
