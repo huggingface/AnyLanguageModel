@@ -40,6 +40,9 @@ import Testing
             directory: ProcessInfo.processInfo.environment["MLX_MODEL_DIRECTORY"].map { URL(fileURLWithPath: $0) }
         )
         let visionModel = MLXLanguageModel(modelId: "mlx-community/Qwen2-VL-2B-Instruct-4bit")
+        // Text generation has no default token limit, and a model that never emits an end token
+        // would keep generating. Bound every response so that one can't stall the suite.
+        let boundedOptions = GenerationOptions(maximumResponseTokens: 512)
 
         @Test func availabilityBecomesAvailableAfterSuccessfulLoad() async throws {
             await model.removeFromCache()
@@ -48,7 +51,7 @@ import Testing
             #expect(model.isAvailable == false)
 
             let session = LanguageModelSession(model: model)
-            let response = try await session.respond(to: "Say hello")
+            let response = try await session.respond(to: "Say hello", options: boundedOptions)
             #expect(!response.content.isEmpty)
 
             #expect(model.availability == .available)
@@ -58,14 +61,14 @@ import Testing
         @Test func basicResponse() async throws {
             let session = LanguageModelSession(model: model)
 
-            let response = try await session.respond(to: "Say hello")
+            let response = try await session.respond(to: "Say hello", options: boundedOptions)
             #expect(!response.content.isEmpty)
         }
 
         @Test func streamingResponse() async throws {
             let session = LanguageModelSession(model: model)
 
-            let stream = session.streamResponse(to: "Count to 5")
+            let stream = session.streamResponse(to: "Count to 5", options: boundedOptions)
             var chunks: [String] = []
 
             for try await response in stream {
@@ -241,10 +244,13 @@ import Testing
 
         @Test func multiTurnSameSession() async throws {
             let session = LanguageModelSession(model: model)
-            let first = try await session.respond(to: "Say hello in one sentence.")
+            let first = try await session.respond(to: "Say hello in one sentence.", options: boundedOptions)
             #expect(!first.content.isEmpty)
 
-            let second = try await session.respond(to: "Now answer with one more short sentence.")
+            let second = try await session.respond(
+                to: "Now answer with one more short sentence.",
+                options: boundedOptions
+            )
             #expect(!second.content.isEmpty)
         }
 
@@ -299,7 +305,7 @@ import Testing
 
             let response = try await session.respond(
                 to: "How's the weather in San Francisco?",
-                options: GenerationOptions(sampling: .greedy)
+                options: GenerationOptions(sampling: .greedy, maximumResponseTokens: 512)
             )
 
             var foundToolOutput = false
@@ -330,7 +336,7 @@ import Testing
 
             let stream = session.streamResponse(
                 to: "How's the weather in San Francisco?",
-                options: GenerationOptions(sampling: .greedy)
+                options: GenerationOptions(sampling: .greedy, maximumResponseTokens: 512)
             )
 
             // Iterate the stream, keeping the last snapshot as the final state.
@@ -375,7 +381,7 @@ import Testing
                 )
             ])
             let session = LanguageModelSession(model: visionModel, transcript: transcript)
-            var options = GenerationOptions()
+            var options = boundedOptions
             var mlxOptions = MLXLanguageModel.CustomGenerationOptions.default
             mlxOptions.userInputProcessing = .resize(to: CGSize(width: 512, height: 512))
             options[custom: MLXLanguageModel.self] = mlxOptions
@@ -393,7 +399,7 @@ import Testing
                 )
             ])
             let session = LanguageModelSession(model: visionModel, transcript: transcript)
-            var options = GenerationOptions()
+            var options = boundedOptions
             var mlxOptions = MLXLanguageModel.CustomGenerationOptions.default
             mlxOptions.userInputProcessing = .resize(to: CGSize(width: 512, height: 512))
             options[custom: MLXLanguageModel.self] = mlxOptions
@@ -529,7 +535,7 @@ import Testing
         @Test func removeAllFromCacheThenRespond() async throws {
             await MLXLanguageModel.removeAllFromCache()
             let session = LanguageModelSession(model: model)
-            let response = try await session.respond(to: "Say hello after cache clear")
+            let response = try await session.respond(to: "Say hello after cache clear", options: boundedOptions)
             #expect(!response.content.isEmpty)
         }
     }
