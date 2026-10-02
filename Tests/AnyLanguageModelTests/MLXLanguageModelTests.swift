@@ -106,6 +106,17 @@ import Testing
             #expect(!response.content.isEmpty)
         }
 
+        @Test func continuationStateIsKeptWithTheSessionCache() async throws {
+            // Qwen3-VL needs the model state from the request that filled the cache to continue it.
+            let model = MLXLanguageModel(modelId: "mlx-community/Qwen3-VL-2B-Instruct-4bit")
+            let options = GenerationOptions(sampling: .greedy, maximumResponseTokens: 8)
+            let session = LanguageModelSession(model: model)
+            _ = try await session.respond(to: "Name three primary colors.", options: options)
+            let response = try await session.respond(to: "Which of those is your favorite?", options: options)
+            #expect(response.usage.input.cachedTokenCount > 0)
+            #expect(!response.content.isEmpty)
+        }
+
         @Test func tokenUsageAndCacheReuse() async throws {
             let options = GenerationOptions(sampling: .greedy, maximumResponseTokens: 8)
             let session = LanguageModelSession(model: model)

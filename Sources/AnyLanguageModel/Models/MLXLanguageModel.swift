@@ -453,14 +453,18 @@ import Foundation
             let prefillTokenCount: Int
             let prefixTokens: [Int32]
             let cacheConfigSignature: CacheConfigSignature
+            /// Model state that continuing this cache requires, such as M-RoPE position deltas.
+            let state: MLXLMCommon.LMOutput.State?
 
             init(
                 kvCache: [MLXLMCommon.KVCache],
                 prefillTokenCount: Int,
                 prefixTokens: [Int32],
-                cacheConfigSignature: CacheConfigSignature
+                cacheConfigSignature: CacheConfigSignature,
+                state: MLXLMCommon.LMOutput.State?
             ) {
                 self.kvCache = kvCache
+                self.state = state
                 self.prefillTokenCount = prefillTokenCount
                 self.prefixTokens = prefixTokens
                 self.cacheConfigSignature = cacheConfigSignature
@@ -883,7 +887,8 @@ import Foundation
             generateParameters: MLXLMCommon.GenerateParameters,
             context: ModelContext
         ) throws -> (
-            cache: [MLXLMCommon.KVCache], input: MLXLMCommon.LMInput, fullTokens: [Int32], cachedTokenCount: Int
+            cache: [MLXLMCommon.KVCache], input: MLXLMCommon.LMInput, fullTokens: [Int32], cachedTokenCount: Int,
+            state: MLXLMCommon.LMOutput.State?
         ) {
             let signature = cacheSignature(from: generateParameters)
             let fullTokens = tokens(from: lmInput)
@@ -909,7 +914,10 @@ import Foundation
                     )
                 }
                 let partialText = Self.droppingCachedPrefix(of: lmInput.text, count: cachedCount)
-                return (existingEntry.kvCache, MLXLMCommon.LMInput(text: partialText), fullTokens, cachedCount)
+                return (
+                    existingEntry.kvCache, MLXLMCommon.LMInput(text: partialText), fullTokens, cachedCount,
+                    existingEntry.state
+                )
             }
 
             if existingEntry != nil {
@@ -917,14 +925,15 @@ import Foundation
             }
 
             let newCache = try context.model.newCache(parameters: generateParameters)
-            return (newCache, lmInput, fullTokens, 0)
+            return (newCache, lmInput, fullTokens, 0, nil)
         }
 
         /// Starts generation, reusing the session's cache when it can.
         ///
         /// Some models, such as Qwen3-VL, need model state along with a reused cache.
-        /// The session cache doesn't keep that state, so those models throw
-        /// `ContinuationStateError`; in that case, drop the session cache and start from an empty one.
+        /// The session cache keeps the state from the request that filled it.
+        /// If a model still throws `ContinuationStateError`,
+        /// drop the session cache and start from an empty one.
         private func startGeneration(
             session: LanguageModelSession,
             lmInput: MLXLMCommon.LMInput,
@@ -932,43 +941,62 @@ import Foundation
             context: ModelContext
         ) throws -> (
             stream: AsyncStream<MLXLMCommon.Generation>, cache: [MLXLMCommon.KVCache], fullTokens: [Int32],
-            cachedTokenCount: Int
+            cachedTokenCount: Int, state: MLXLMCommon.LMOutput.State?
         ) {
-            var resolved = try resolveCache(
+            func start(
+                _ resolved: (
+                    cache: [MLXLMCommon.KVCache], input: MLXLMCommon.LMInput, fullTokens: [Int32],
+                    cachedTokenCount: Int, state: MLXLMCommon.LMOutput.State?
+                )
+            ) throws -> (
+                stream: AsyncStream<MLXLMCommon.Generation>, cache: [MLXLMCommon.KVCache], fullTokens: [Int32],
+                cachedTokenCount: Int, state: MLXLMCommon.LMOutput.State?
+            ) {
+                // Creating the iterator evaluates the prompt.
+                // Its state then anchors the next request that reuses this cache.
+                let iterator = try MLXLMCommon.TokenIterator(
+                    input: resolved.input,
+                    model: context.model,
+                    cache: resolved.cache,
+                    state: resolved.state,
+                    parameters: generateParameters
+                )
+                let state = iterator.state
+                let (stream, _) = MLXLMCommon.generateTask(
+                    promptTokenCount: resolved.input.text.tokens.size,
+                    modelConfiguration: context.configuration,
+                    tokenizer: context.tokenizer,
+                    iterator: iterator,
+                    toolCallPolicy: generateParameters.toolCallPolicy
+                )
+                return (stream, resolved.cache, resolved.fullTokens, resolved.cachedTokenCount, state)
+            }
+
+            let resolved = try resolveCache(
                 session: session,
                 lmInput: lmInput,
                 generateParameters: generateParameters,
                 context: context
             )
-            let stream: AsyncStream<MLXLMCommon.Generation>
             do {
-                stream = try MLXLMCommon.generate(
-                    input: resolved.input,
-                    cache: resolved.cache,
-                    parameters: generateParameters,
-                    context: context
-                )
+                return try start(resolved)
             } catch is MLXLMCommon.ContinuationStateError where resolved.cachedTokenCount > 0 {
                 removeSessionCache(for: session)
-                resolved = try resolveCache(
-                    session: session,
-                    lmInput: lmInput,
-                    generateParameters: generateParameters,
-                    context: context
-                )
-                stream = try MLXLMCommon.generate(
-                    input: resolved.input,
-                    cache: resolved.cache,
-                    parameters: generateParameters,
-                    context: context
+                return try start(
+                    resolveCache(
+                        session: session,
+                        lmInput: lmInput,
+                        generateParameters: generateParameters,
+                        context: context
+                    )
                 )
             }
-            return (stream, resolved.cache, resolved.fullTokens, resolved.cachedTokenCount)
         }
 
         private func storeSessionCache(
             cache: [MLXLMCommon.KVCache],
             fullTokens: [Int32],
+            state: MLXLMCommon.LMOutput.State?,
             generateParameters: MLXLMCommon.GenerateParameters,
             session: LanguageModelSession
         ) {
@@ -996,7 +1024,8 @@ import Foundation
                 kvCache: cache,
                 prefillTokenCount: prefillCount,
                 prefixTokens: prefixTokens,
-                cacheConfigSignature: cacheSignature(from: generateParameters)
+                cacheConfigSignature: cacheSignature(from: generateParameters),
+                state: state
             )
             setSessionCache(entry, for: session)
         }
@@ -1170,6 +1199,7 @@ import Foundation
                 storeSessionCache(
                     cache: resolved.cache,
                     fullTokens: resolved.fullTokens,
+                    state: resolved.state,
                     generateParameters: generateParameters,
                     session: session
                 )
@@ -1432,6 +1462,7 @@ import Foundation
                             storeSessionCache(
                                 cache: resolved.cache,
                                 fullTokens: resolved.fullTokens,
+                                state: resolved.state,
                                 generateParameters: generateParameters,
                                 session: session
                             )
@@ -1559,13 +1590,21 @@ import Foundation
                 )
                 // `prepare` can leave the last chunk for the first decoding step;
                 // evaluate it so that the cache holds every token.
-                if case .tokens(let remaining) = prepareResult, remaining.tokens.size > 0 {
-                    _ = context.model(remaining[text: .newAxis], cache: newCache, state: nil)
-                    eval(newCache)
+                var state: MLXLMCommon.LMOutput.State?
+                switch prepareResult {
+                case .logits(let output):
+                    state = output.state
+                case .tokens(let remaining):
+                    if remaining.tokens.size > 0 {
+                        let output = context.model(remaining[text: .newAxis], cache: newCache, state: nil)
+                        eval(newCache)
+                        state = output.state
+                    }
                 }
                 storeSessionCache(
                     cache: newCache,
                     fullTokens: tokens(from: lmInput),
+                    state: state,
                     generateParameters: params,
                     session: session
                 )
