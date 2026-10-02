@@ -889,6 +889,52 @@ import Foundation
             return (newCache, lmInput, fullTokens, 0)
         }
 
+        /// Starts generation, reusing the session's cache when it can.
+        ///
+        /// Some models, such as Qwen3-VL, need model state along with a reused cache.
+        /// The session cache doesn't keep that state, so those models throw
+        /// `ContinuationStateError`; in that case, drop the session cache and start from an empty one.
+        private func startGeneration(
+            session: LanguageModelSession,
+            lmInput: MLXLMCommon.LMInput,
+            generateParameters: MLXLMCommon.GenerateParameters,
+            context: ModelContext
+        ) throws -> (
+            stream: AsyncStream<MLXLMCommon.Generation>, cache: [MLXLMCommon.KVCache], fullTokens: [Int32],
+            cachedTokenCount: Int
+        ) {
+            var resolved = try resolveCache(
+                session: session,
+                lmInput: lmInput,
+                generateParameters: generateParameters,
+                context: context
+            )
+            let stream: AsyncStream<MLXLMCommon.Generation>
+            do {
+                stream = try MLXLMCommon.generate(
+                    input: resolved.input,
+                    cache: resolved.cache,
+                    parameters: generateParameters,
+                    context: context
+                )
+            } catch is MLXLMCommon.ContinuationStateError where resolved.cachedTokenCount > 0 {
+                removeSessionCache(for: session)
+                resolved = try resolveCache(
+                    session: session,
+                    lmInput: lmInput,
+                    generateParameters: generateParameters,
+                    context: context
+                )
+                stream = try MLXLMCommon.generate(
+                    input: resolved.input,
+                    cache: resolved.cache,
+                    parameters: generateParameters,
+                    context: context
+                )
+            }
+            return (stream, resolved.cache, resolved.fullTokens, resolved.cachedTokenCount)
+        }
+
         private func storeSessionCache(
             cache: [MLXLMCommon.KVCache],
             fullTokens: [Int32],
@@ -1055,20 +1101,14 @@ import Foundation
                     additionalContext: additionalContext
                 )
                 let lmInput = try await context.processor.prepare(input: userInput)
-                let resolved = try resolveCache(
+                // Generate
+                let resolved = try startGeneration(
                     session: session,
                     lmInput: lmInput,
                     generateParameters: generateParameters,
                     context: context
                 )
-
-                // Generate
-                let stream = try MLXLMCommon.generate(
-                    input: resolved.input,
-                    cache: resolved.cache,
-                    parameters: generateParameters,
-                    context: context
-                )
+                let stream = resolved.stream
 
                 var chunks: [String] = []
                 var collectedToolCalls: [MLXLMCommon.ToolCall] = []
@@ -1319,19 +1359,13 @@ import Foundation
                                 additionalContext: additionalContext
                             )
                             let lmInput = try await context.processor.prepare(input: userInput)
-                            let resolved = try resolveCache(
+                            let resolved = try startGeneration(
                                 session: session,
                                 lmInput: lmInput,
                                 generateParameters: generateParameters,
                                 context: context
                             )
-
-                            let mlxStream = try MLXLMCommon.generate(
-                                input: resolved.input,
-                                cache: resolved.cache,
-                                parameters: generateParameters,
-                                context: context
-                            )
+                            let mlxStream = resolved.stream
 
                             let roundStartTextCount = accumulatedText.count
                             var collectedToolCalls: [MLXLMCommon.ToolCall] = []
