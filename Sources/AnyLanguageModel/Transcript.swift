@@ -65,6 +65,12 @@ public struct Transcript: Sendable, Equatable, Codable {
         case structure(StructuredSegment)
 
         /// A segment containing an image.
+        ///
+        /// - Note: This API is exclusive to AnyLanguageModel
+        ///   and using it means your code is no longer drop-in compatible
+        ///   with the Foundation Models framework.
+        ///   Foundation Models 27 adds prompt attachments,
+        ///   so this API will change to match them in AnyLanguageModel 2.0.
         case image(ImageSegment)
 
         /// The stable identity of the entity associated with this instance.
@@ -116,6 +122,12 @@ public struct Transcript: Sendable, Equatable, Codable {
     /// Use this type to include images alongside text and structured content when
     /// constructing `Transcript` entries. Images can be provided as raw data with a
     /// MIME type or by URL.
+    ///
+    /// - Note: This API is exclusive to AnyLanguageModel
+    ///   and using it means your code is no longer drop-in compatible
+    ///   with the Foundation Models framework.
+    ///   Foundation Models 27 adds prompt attachments,
+    ///   so this API will change to match them in AnyLanguageModel 2.0.
     public struct ImageSegment: Sendable, Identifiable, Equatable, Codable {
         /// The stable identity of the entity associated with this instance.
         public var id: String
@@ -124,6 +136,10 @@ public struct Transcript: Sendable, Equatable, Codable {
         public let source: Source
 
         /// The origin of an image's content.
+        ///
+        /// - Note: This API is exclusive to AnyLanguageModel
+        ///   and will change to match Foundation Models 27 prompt attachments
+        ///   in AnyLanguageModel 2.0.
         public enum Source: Sendable, Equatable, Codable {
             /// Image bytes and their MIME type (for example, `image/jpeg`).
             case data(Data, mimeType: String)
@@ -197,6 +213,12 @@ public struct Transcript: Sendable, Equatable, Codable {
     }
 
     /// Errors that can occur when converting platform images to encoded data.
+    ///
+    /// - Note: This API is exclusive to AnyLanguageModel
+    ///   and using it means your code is no longer drop-in compatible
+    ///   with the Foundation Models framework.
+    ///   Foundation Models 27 adds prompt attachments,
+    ///   so this API will change to match them in AnyLanguageModel 2.0.
     public enum ImageEncodingError: Error {
         /// The image couldn't be converted to the requested format.
         case imageConversionFailed
@@ -514,6 +536,10 @@ extension Transcript.StructuredSegment: CustomStringConvertible {
 
 extension Transcript.ImageSegment {
     /// Preferred image encodings for image conversion.
+    ///
+    /// - Note: This API is exclusive to AnyLanguageModel
+    ///   and will change to match Foundation Models 27 prompt attachments
+    ///   in AnyLanguageModel 2.0.
     public enum Format: Sendable {
         /// JPEG encoding with the specified compression quality.
         case jpeg(compressionQuality: Double = 0.9)
@@ -547,6 +573,10 @@ extension Transcript.ImageSegment {
         ///   - image: The source image to encode.
         ///   - format: The target encoding. Defaults to JPEG with 0.9 quality.
         /// - Throws: ``Transcript/ImageEncodingError-swift.enum/imageConversionFailed`` if encoding fails.
+        ///
+        /// - Note: This API is exclusive to AnyLanguageModel
+        ///   and will change to match Foundation Models 27 prompt attachments
+        ///   in AnyLanguageModel 2.0.
         public init(image: UIImage, format: Format = .jpeg()) throws {
             let (data, mimeType) = try Self.encode(image, format: format)
             self.init(data: data, mimeType: mimeType)
@@ -593,6 +623,10 @@ extension Transcript.ImageSegment {
         ///   - image: The source image to encode.
         ///   - format: The target encoding. Defaults to JPEG with 0.9 quality.
         /// - Throws: ``Transcript/ImageEncodingError-swift.enum/imageConversionFailed`` if encoding fails.
+        ///
+        /// - Note: This API is exclusive to AnyLanguageModel
+        ///   and will change to match Foundation Models 27 prompt attachments
+        ///   in AnyLanguageModel 2.0.
         public init(image: NSImage, format: Format = .jpeg()) throws {
             let (data, mimeType) = try Self.encode(image, format: format)
             self.init(data: data, mimeType: mimeType)
@@ -649,6 +683,10 @@ extension Transcript.ImageSegment {
         ///   - image: The source image to encode.
         ///   - format: The target encoding. Defaults to JPEG with 0.9 quality.
         /// - Throws: ``Transcript/ImageEncodingError-swift.enum/imageConversionFailed`` if encoding fails.
+        ///
+        /// - Note: This API is exclusive to AnyLanguageModel
+        ///   and will change to match Foundation Models 27 prompt attachments
+        ///   in AnyLanguageModel 2.0.
         public init(image: CGImage, format: Format = .jpeg()) throws {
             let (data, mimeType) = try Self.encode(image, format: format)
             self.init(data: data, mimeType: mimeType)

@@ -866,6 +866,11 @@ extension LanguageModelSession {
 // MARK: - Image Convenience Methods
 
 extension LanguageModelSession {
+    /// Produces a text response to a prompt and an image.
+    ///
+    /// - Note: This API is exclusive to AnyLanguageModel
+    ///   and will change to match Foundation Models 27 prompt attachments
+    ///   in AnyLanguageModel 2.0.
     @discardableResult
     nonisolated public func respond(
         to prompt: String,
@@ -879,6 +884,11 @@ extension LanguageModelSession {
         )
     }
 
+    /// Produces a text response to a prompt and images.
+    ///
+    /// - Note: This API is exclusive to AnyLanguageModel
+    ///   and will change to match Foundation Models 27 prompt attachments
+    ///   in AnyLanguageModel 2.0.
     @discardableResult
     nonisolated public func respond(
         to prompt: String,
@@ -894,6 +904,11 @@ extension LanguageModelSession {
         )
     }
 
+    /// Produces a response of the specified type to a prompt and an image.
+    ///
+    /// - Note: This API is exclusive to AnyLanguageModel
+    ///   and will change to match Foundation Models 27 prompt attachments
+    ///   in AnyLanguageModel 2.0.
     @discardableResult
     nonisolated public func respond<Content>(
         to prompt: String,
@@ -911,6 +926,11 @@ extension LanguageModelSession {
         )
     }
 
+    /// Produces a response of the specified type to a prompt and images.
+    ///
+    /// - Note: This API is exclusive to AnyLanguageModel
+    ///   and will change to match Foundation Models 27 prompt attachments
+    ///   in AnyLanguageModel 2.0.
     @discardableResult
     nonisolated public func respond<Content>(
         to prompt: String,
@@ -981,6 +1001,11 @@ extension LanguageModelSession {
         }
     }
 
+    /// Streams a text response to a prompt and an image.
+    ///
+    /// - Note: This API is exclusive to AnyLanguageModel
+    ///   and will change to match Foundation Models 27 prompt attachments
+    ///   in AnyLanguageModel 2.0.
     public func streamResponse(
         to prompt: String,
         image: Transcript.ImageSegment,
@@ -993,6 +1018,11 @@ extension LanguageModelSession {
         )
     }
 
+    /// Streams a text response to a prompt and images.
+    ///
+    /// - Note: This API is exclusive to AnyLanguageModel
+    ///   and will change to match Foundation Models 27 prompt attachments
+    ///   in AnyLanguageModel 2.0.
     public func streamResponse(
         to prompt: String,
         images: [Transcript.ImageSegment],
@@ -1007,6 +1037,11 @@ extension LanguageModelSession {
         )
     }
 
+    /// Streams a response of the specified type to a prompt and an image.
+    ///
+    /// - Note: This API is exclusive to AnyLanguageModel
+    ///   and will change to match Foundation Models 27 prompt attachments
+    ///   in AnyLanguageModel 2.0.
     nonisolated public func streamResponse<Content>(
         to prompt: String,
         image: Transcript.ImageSegment,
@@ -1023,6 +1058,11 @@ extension LanguageModelSession {
         )
     }
 
+    /// Streams a response of the specified type to a prompt and images.
+    ///
+    /// - Note: This API is exclusive to AnyLanguageModel
+    ///   and will change to match Foundation Models 27 prompt attachments
+    ///   in AnyLanguageModel 2.0.
     nonisolated public func streamResponse<Content>(
         to prompt: String,
         images: [Transcript.ImageSegment],
