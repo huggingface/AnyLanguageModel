@@ -230,6 +230,13 @@ public struct GenerationSchema: Equatable, Codable, CustomDebugStringConvertible
         var description: String?
         var properties: [String: Node]
         var required: Set<String>
+        /// Whether generated content has a `null` value for each optional property
+        /// that it would otherwise leave out.
+        var representsNilExplicitly = false
+
+        private enum CodingKeys: String, CodingKey {
+            case description, properties, required
+        }
     }
 
     struct ArrayNode: Sendable, Codable {
@@ -308,6 +315,32 @@ public struct GenerationSchema: Equatable, Codable, CustomDebugStringConvertible
         description: String? = nil,
         properties: [GenerationSchema.Property]
     ) {
+        self.init(type: type, description: description, explicitNil: false, properties: properties)
+    }
+
+    /// Creates a schema by providing an array of properties.
+    ///
+    /// - Parameters:
+    ///   - type: The type this schema represents.
+    ///   - description: A natural language description of this schema.
+    ///   - explicitNil: Whether generated content has a `null` value
+    ///     for each optional property that it would otherwise leave out.
+    ///   - properties: An array of properties.
+    public init(
+        type: any Generable.Type,
+        description: String? = nil,
+        representNilExplicitlyInGeneratedContent explicitNil: Bool,
+        properties: [GenerationSchema.Property]
+    ) {
+        self.init(type: type, description: description, explicitNil: explicitNil, properties: properties)
+    }
+
+    private init(
+        type: any Generable.Type,
+        description: String?,
+        explicitNil: Bool,
+        properties: [GenerationSchema.Property]
+    ) {
         let typeName = String(reflecting: type)
         var props: [String: Node] = [:]
         var required: Set<String> = []
@@ -326,7 +359,12 @@ public struct GenerationSchema: Equatable, Codable, CustomDebugStringConvertible
             }
         }
 
-        let objectNode = ObjectNode(description: description, properties: props, required: required)
+        let objectNode = ObjectNode(
+            description: description,
+            properties: props,
+            required: required,
+            representsNilExplicitly: explicitNil
+        )
         allDefs[typeName] = .object(objectNode)
 
         self.root = .ref(typeName)
@@ -490,7 +528,14 @@ public struct GenerationSchema: Equatable, Codable, CustomDebugStringConvertible
                     required.insert(prop.name)
                 }
             }
-            let node = Node.object(ObjectNode(description: desc, properties: props, required: required))
+            let node = Node.object(
+                ObjectNode(
+                    description: desc,
+                    properties: props,
+                    required: required,
+                    representsNilExplicitly: dynamic.representsNilExplicitly
+                )
+            )
             if let name = name {
                 defs[name] = node
                 return .ref(name)
@@ -892,5 +937,57 @@ extension GenerationSchema {
             return "Respond with valid JSON only."
         }
         return "Respond with valid JSON matching this schema:\n\(schemaJSON)"
+    }
+}
+
+// MARK: - Explicit nil
+
+extension GenerationSchema {
+    /// Returns generated content with a `null` value for each optional property
+    /// that the content leaves out,
+    /// in objects whose schema represents `nil` explicitly.
+    ///
+    /// Content for a schema without such objects is returned unchanged.
+    func representingNilExplicitly(in content: GeneratedContent) -> GeneratedContent {
+        let representsNilExplicitly = ([root] + Array(defs.values)).contains { node in
+            if case .object(let object) = node { return object.representsNilExplicitly }
+            return false
+        }
+        guard representsNilExplicitly else { return content }
+        return representingNilExplicitly(in: content, node: root, depth: 0)
+    }
+
+    private func representingNilExplicitly(
+        in content: GeneratedContent,
+        node: Node,
+        depth: Int
+    ) -> GeneratedContent {
+        guard depth < 64 else { return content }
+        switch node {
+        case .ref(let name):
+            guard let resolved = defs[name] else { return content }
+            return representingNilExplicitly(in: content, node: resolved, depth: depth + 1)
+        case .object(let object):
+            guard case .structure(var properties, var orderedKeys) = content.kind else { return content }
+            for (key, value) in properties {
+                if let child = object.properties[key] {
+                    properties[key] = representingNilExplicitly(in: value, node: child, depth: depth + 1)
+                }
+            }
+            if object.representsNilExplicitly {
+                for key in object.properties.keys.sorted()
+                where properties[key] == nil && !object.required.contains(key) {
+                    properties[key] = GeneratedContent(kind: .null)
+                    orderedKeys.append(key)
+                }
+            }
+            return GeneratedContent(kind: .structure(properties: properties, orderedKeys: orderedKeys), id: content.id)
+        case .array(let array):
+            guard case .array(let elements) = content.kind else { return content }
+            let items = elements.map { representingNilExplicitly(in: $0, node: array.items, depth: depth + 1) }
+            return GeneratedContent(kind: .array(items), id: content.id)
+        case .string, .number, .boolean, .null, .anyOf:
+            return content
+        }
     }
 }

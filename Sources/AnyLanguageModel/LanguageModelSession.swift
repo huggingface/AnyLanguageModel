@@ -205,6 +205,24 @@ public final class LanguageModelSession: @unchecked Sendable {
         }
     }
 
+    /// Returns the response with a `null` value for each omitted optional property
+    /// when the response format's schema represents `nil` explicitly.
+    nonisolated private static func representingNilExplicitly<Content>(
+        in response: Response<Content>,
+        responseFormat: Transcript.ResponseFormat?
+    ) -> Response<Content> where Content: Generable {
+        guard let responseFormat else { return response }
+        let rawContent = responseFormat.schema.representingNilExplicitly(in: response.rawContent)
+        guard rawContent != response.rawContent else { return response }
+        return Response(
+            content: response.content,
+            rawContent: rawContent,
+            transcriptEntries: response.transcriptEntries,
+            usage: response.usage,
+            providerMetadata: response.providerMetadata
+        )
+    }
+
     nonisolated private func wrapStream<Content>(
         _ upstream: sending ResponseStream<Content>,
         promptEntry: Transcript.Entry
@@ -240,11 +258,15 @@ public final class LanguageModelSession: @unchecked Sendable {
                             throw ResponseStreamError.noSnapshots
                         }
                         // Extract text content from the generated content
+                        var rawContent = lastSnapshot.rawContent
+                        if case .prompt(let prompt) = promptEntry, let responseFormat = prompt.responseFormat {
+                            rawContent = responseFormat.schema.representingNilExplicitly(in: rawContent)
+                        }
                         let textContent: String
-                        if case .string(let str) = lastSnapshot.rawContent.kind {
+                        if case .string(let str) = rawContent.kind {
                             textContent = str
                         } else {
-                            textContent = lastSnapshot.rawContent.jsonString
+                            textContent = rawContent.jsonString
                         }
 
                         let responseEntry = Transcript.Entry.response(
@@ -506,7 +528,7 @@ public final class LanguageModelSession: @unchecked Sendable {
                 state.withLock { $0.transcript.append(promptEntry) }
             }
 
-            let response = try await generate()
+            let response = Self.representingNilExplicitly(in: try await generate(), responseFormat: responseFormat)
 
             recordUsage(response.usage)
 
@@ -886,12 +908,15 @@ extension LanguageModelSession {
             // Extract text content for the Prompt parameter
             let textPrompt = Prompt(prompt)
 
-            let response = try await model.respond(
-                within: self,
-                to: textPrompt,
-                generating: type,
-                includeSchemaInPrompt: includeSchemaInPrompt,
-                options: options
+            let response = Self.representingNilExplicitly(
+                in: try await model.respond(
+                    within: self,
+                    to: textPrompt,
+                    generating: type,
+                    includeSchemaInPrompt: includeSchemaInPrompt,
+                    options: options
+                ),
+                responseFormat: type == String.self ? nil : .init(type: type)
             )
 
             recordUsage(response.usage)

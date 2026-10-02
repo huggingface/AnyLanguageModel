@@ -55,6 +55,17 @@ public typealias GeneratedContentConversionError = GeneratedContentError
 public macro Generable(description: String? = nil) =
     #externalMacro(module: "AnyLanguageModelMacros", type: "GenerableMacro")
 
+/// Conforms a type to ``Generable`` protocol,
+/// choosing how generated content represents `nil` optional properties.
+///
+/// By default, generated content leaves out an optional property whose value is `nil`.
+/// Pass `true` for `representNilExplicitlyInGeneratedContent`
+/// to give such properties a `null` value instead.
+@attached(extension, conformances: Generable, names: named(init(_:)), named(generatedContent))
+@attached(member, names: arbitrary)
+public macro Generable(description: String? = nil, representNilExplicitlyInGeneratedContent: Bool) =
+    #externalMacro(module: "AnyLanguageModelMacros", type: "GenerableMacro")
+
 /// Allows for influencing the allowed values of properties of a generable type.
 @attached(peer)
 public macro Guide(description: String) =

@@ -26,6 +26,7 @@ public struct DynamicGenerationSchema: Sendable {
     }
 
     internal let body: Body
+    internal private(set) var representsNilExplicitly = false
     internal var name: String? {
         switch body {
         case .object(let name, _, _), .anyOf(let name, _, _), .stringEnum(let name, _, _):
@@ -47,6 +48,24 @@ public struct DynamicGenerationSchema: Sendable {
         properties: [DynamicGenerationSchema.Property]
     ) {
         self.body = .object(name: name, description: description, properties: properties)
+    }
+
+    /// Creates an object schema.
+    ///
+    /// - Parameters:
+    ///   - name: A name this dynamic schema can be referenced by.
+    ///   - description: A natural language description of this schema.
+    ///   - explicitNil: Whether generated content has a `null` value
+    ///     for each optional property that it would otherwise leave out.
+    ///   - properties: The properties associated with this schema.
+    public init(
+        name: String,
+        description: String? = nil,
+        representNilExplicitlyInGeneratedContent explicitNil: Bool,
+        properties: [DynamicGenerationSchema.Property]
+    ) {
+        self.body = .object(name: name, description: description, properties: properties)
+        self.representsNilExplicitly = explicitNil
     }
 
     /// Creates an any-of schema.

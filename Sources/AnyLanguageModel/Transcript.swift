@@ -299,7 +299,7 @@ public struct Transcript: Sendable, Equatable, Codable {
 
     /// Specifies a response format that the model must conform its output to.
     public struct ResponseFormat: Sendable, Codable {
-        private let schema: GenerationSchema
+        let schema: GenerationSchema
 
         /// A name associated with the response format.
         public var name: String {
