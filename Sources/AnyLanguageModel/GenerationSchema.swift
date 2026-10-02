@@ -1000,7 +1000,8 @@ extension GenerationSchema {
     /// Returns the first variant whose shape matches the content:
     /// an object that declares every property in a structure
     /// and whose required properties the structure has,
-    /// or an array for an array.
+    /// an array for an array,
+    /// or a nested union with a matching variant.
     private func variant(matching content: GeneratedContent, among variants: [Node], depth: Int) -> Node? {
         variants.first { variant in
             switch (resolving(variant, depth: depth), content.kind) {
@@ -1009,6 +1010,9 @@ extension GenerationSchema {
                     && object.required.allSatisfy { properties[$0] != nil }
             case (.array?, .array):
                 return true
+            case (.anyOf(let nested)?, _):
+                guard depth < 64 else { return false }
+                return self.variant(matching: content, among: nested, depth: depth + 1) != nil
             default:
                 return false
             }
