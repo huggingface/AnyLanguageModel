@@ -25,10 +25,7 @@ import Foundation
     /// Use this model to generate text using GGUF models running directly with llama.cpp.
     ///
     /// ```swift
-    /// let model = LlamaLanguageModel(
-    ///     modelPath: "/path/to/model.gguf",
-    ///     contextSize: 2048
-    /// )
+    /// let model = LlamaLanguageModel(modelPath: "/path/to/model.gguf")
     /// ```
     public final class LlamaLanguageModel: LanguageModel, @unchecked Sendable {
         /// The reason the model is unavailable.
@@ -227,109 +224,8 @@ import Foundation
             #endif
         }
 
-        /// The context size for the model.
-        ///
-        /// - Important: This property is deprecated.
-        ///   Use ``GenerationOptions`` with custom options instead:
-        ///   ```swift
-        ///   var options = GenerationOptions()
-        ///   options[custom: LlamaLanguageModel.self] = .init(contextSize: 4096)
-        ///   ```
-        @available(*, deprecated, message: "Use GenerationOptions custom options instead")
-        public var contextSize: UInt32 { legacyDefaults.contextSize }
-
-        /// The batch size for processing.
-        ///
-        /// - Important: This property is deprecated.
-        ///   Use ``GenerationOptions`` with custom options instead:
-        ///   ```swift
-        ///   var options = GenerationOptions()
-        ///   options[custom: LlamaLanguageModel.self] = .init(batchSize: 1024)
-        ///   ```
-        @available(*, deprecated, message: "Use GenerationOptions custom options instead")
-        public var batchSize: UInt32 { legacyDefaults.batchSize }
-
-        /// The number of threads to use.
-        ///
-        /// - Important: This property is deprecated.
-        ///   Use ``GenerationOptions`` with custom options instead:
-        ///   ```swift
-        ///   var options = GenerationOptions()
-        ///   options[custom: LlamaLanguageModel.self] = .init(threads: 8)
-        ///   ```
-        ///   custom options instead.
-        @available(*, deprecated, message: "Use GenerationOptions custom options instead")
-        public var threads: Int32 { legacyDefaults.threads }
-
-        /// The random seed for generation.
-        ///
-        /// - Important: This property is deprecated.
-        ///   Use ``GenerationOptions`` with custom options instead:
-        ///   ```swift
-        ///   var options = GenerationOptions()
-        ///   options[custom: LlamaLanguageModel.self] = .init(seed: 42)
-        ///   ```
-        ///   custom options instead.
-        @available(*, deprecated, message: "Use GenerationOptions custom options instead")
-        public var seed: UInt32 { legacyDefaults.seed }
-
-        /// The temperature for sampling.
-        ///
-        /// - Important: This property is deprecated.
-        ///   Use ``GenerationOptions`` with custom options instead:
-        ///   ```swift
-        ///   var options = GenerationOptions()
-        ///   options[custom: LlamaLanguageModel.self] = .init(temperature: 0.6)
-        ///   ```
-        @available(*, deprecated, message: "Use GenerationOptions custom options instead")
-        public var temperature: Float { legacyDefaults.temperature }
-
-        /// The top-K sampling parameter.
-        ///
-        /// - Important: This property is deprecated.
-        ///   Use ``GenerationOptions`` with custom options instead:
-        ///   ```swift
-        ///   var options = GenerationOptions()
-        ///   options[custom: LlamaLanguageModel.self] = .init(topK: 25)
-        ///   ```
-        @available(*, deprecated, message: "Use GenerationOptions custom options instead")
-        public var topK: Int32 { legacyDefaults.topK }
-
-        /// The top-P (nucleus) sampling parameter.
-        ///
-        /// - Important: This property is deprecated.
-        ///   Use ``GenerationOptions`` with custom options instead:
-        ///   ```swift
-        ///   var options = GenerationOptions()
-        ///   options[custom: LlamaLanguageModel.self] = .init(topP: 0.9)
-        ///   ```
-        @available(*, deprecated, message: "Use GenerationOptions custom options instead")
-        public var topP: Float { legacyDefaults.topP }
-
-        /// The repeat penalty for generation.
-        ///
-        /// - Important: This property is deprecated.
-        ///   Use ``GenerationOptions`` with custom options instead:
-        ///   ```swift
-        ///   var options = GenerationOptions()
-        ///   options[custom: LlamaLanguageModel.self] = .init(repeatPenalty: 1.2)
-        ///   ```
-        @available(*, deprecated, message: "Use GenerationOptions custom options instead")
-        public var repeatPenalty: Float { legacyDefaults.repeatPenalty }
-
-        /// The number of tokens to consider for repeat penalty.
-        ///
-        /// - Important: This property is deprecated.
-        ///   Use ``GenerationOptions`` with custom options instead:
-        ///   ```swift
-        ///   var options = GenerationOptions()
-        ///   options[custom: LlamaLanguageModel.self] = .init(repeatLastN: 128)
-        ///   ```
-        @available(*, deprecated, message: "Use GenerationOptions custom options instead")
-        public var repeatLastN: Int32 { legacyDefaults.repeatLastN }
-
-        /// Normalized legacy defaults used for deprecated properties.
-        private let legacyDefaults: ResolvedGenerationOptions
+        /// The default options that each request's options override.
+        private let defaultOptions: ResolvedGenerationOptions
 
         /// The minimum log level for llama.cpp output.
         ///
@@ -733,43 +629,7 @@ import Foundation
             self.modelPath = modelPath
             self.gpuLayers = gpuLayers
             self.mmprojPath = mmprojPath
-            self.legacyDefaults = ResolvedGenerationOptions()
-        }
-
-        /// Creates a Llama language model using legacy parameter defaults.
-        ///
-        /// - Important: This initializer is deprecated.
-        ///   Use `init(modelPath:)` and configure per-request values via
-        ///   ``GenerationOptions`` custom options instead.
-        ///
-        ///   ```swift
-        ///   let model = LlamaLanguageModel(modelPath: "/path/to/model.gguf")
-        ///   var options = GenerationOptions()
-        ///   options[custom: LlamaLanguageModel.self] = .init(contextSize: 4096)
-        ///
-        ///   let session = LanguageModelSession(model: model)
-        ///   session.respond(to: "Hello, world!", options: options)
-        ///   ```
-        @available(
-            *,
-            deprecated,
-            message: "Use init(modelPath:) and pass values via GenerationOptions custom options"
-        )
-        public convenience init(
-            modelPath: String,
-            contextSize: UInt32 = 2048,
-            batchSize: UInt32 = 512,
-            threads: Int32 = Int32(ProcessInfo.processInfo.processorCount),
-            seed: UInt32 = UInt32.random(in: 0 ... UInt32.max),
-            temperature: Float = 0.8,
-            topK: Int32 = 40,
-            topP: Float = 0.95,
-            repeatPenalty: Float = 1.1,
-            repeatLastN: Int32 = 64
-        ) {
-            // Deprecated: prefer setting these via GenerationOptions custom options.
-            // We intentionally ignore legacy parameters to avoid storing model-level state.
-            self.init(modelPath: modelPath)
+            self.defaultOptions = ResolvedGenerationOptions()
         }
 
         deinit {
@@ -1455,7 +1315,7 @@ import Foundation
                 var mtmdParams = mtmd_context_params_default()
                 mtmdParams.use_gpu = gpuLayers != 0
                 mtmdParams.print_timings = false
-                mtmdParams.n_threads = legacyDefaults.threads
+                mtmdParams.n_threads = defaultOptions.threads
                 guard let projector = mtmd_init_from_file(mmprojPath, loadedModel, mtmdParams) else {
                     llama_model_free(loadedModel)
                     throw LlamaLanguageModelError.modelLoadFailed
@@ -1479,7 +1339,7 @@ import Foundation
         }
 
         private func resolvedOptions(from options: GenerationOptions) -> ResolvedGenerationOptions {
-            var base = legacyDefaults
+            var base = defaultOptions
             if let temp = options.temperature {
                 base.temperature = Float(temp)
             }
@@ -1494,7 +1354,7 @@ import Foundation
 
         /// Builds structured-generation defaults while honoring explicit overrides.
         private func resolvedStructuredOptions(from options: GenerationOptions) -> ResolvedGenerationOptions {
-            var base = legacyDefaults
+            var base = defaultOptions
             if let temp = options.temperature {
                 base.temperature = Float(temp)
             } else {

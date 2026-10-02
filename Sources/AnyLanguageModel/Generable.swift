@@ -32,12 +32,6 @@ public protocol Generable: ConvertibleFromGeneratedContent, ConvertibleToGenerat
     static var generationSchema: GenerationSchema { get }
 }
 
-// MARK: - Error
-
-/// Errors from converting generated content are ``GeneratedContentError``.
-@available(*, deprecated, renamed: "GeneratedContentError")
-public typealias GeneratedContentConversionError = GeneratedContentError
-
 // MARK: - Macros
 
 /// Conforms a type to ``Generable`` protocol.
