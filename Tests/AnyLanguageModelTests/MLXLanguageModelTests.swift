@@ -76,6 +76,8 @@ import Testing
         }
 
         // Text-only processors return rank-1 tokens; some VLM processors return `[1, L]`.
+        // This test needs no model, but it stays in this gated suite:
+        // creating an `MLXArray` loads the Metal library, which `swift build` doesn't produce.
         @Test(arguments: [[6], [1, 6]])
         func droppingCachedPrefixKeepsLeadingAxes(shape: [Int]) {
             let text = LMInput.Text(
