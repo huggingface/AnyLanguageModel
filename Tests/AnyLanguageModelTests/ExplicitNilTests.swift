@@ -181,6 +181,31 @@ struct ExplicitNilTests {
         #expect(lastResponseText(in: session)?.contains(#""nickname":null"#) == true)
     }
 
+    @Test func schemaResponsesReturnNullInContent() async throws {
+        let contact = DynamicGenerationSchema(
+            name: "Contact",
+            representNilExplicitlyInGeneratedContent: true,
+            properties: [
+                .init(name: "name", schema: .init(type: String.self)),
+                .init(name: "nickname", schema: .init(type: String.self), isOptional: true),
+            ]
+        )
+        let schema = try GenerationSchema(root: contact, dependencies: [])
+        let model = MockLanguageModel { _, _ in #"{"name": "Alice"}"# }
+
+        let response = try await LanguageModelSession(model: model).respond(to: "Who?", schema: schema)
+        #expect(response.content == response.rawContent)
+        guard case .structure(let properties, _) = response.content.kind else {
+            Issue.record("Expected structured content")
+            return
+        }
+        #expect(properties["nickname"]?.kind == .null)
+
+        let streamed = try await LanguageModelSession(model: model).streamResponse(to: "Who?", schema: schema)
+            .collect()
+        #expect(streamed.content == streamed.rawContent)
+    }
+
     @Test func sessionRecordsNullForOmittedOptionalProperties() async throws {
         let model = MockLanguageModel { _, _ in #"{"name": "Alice"}"# }
 

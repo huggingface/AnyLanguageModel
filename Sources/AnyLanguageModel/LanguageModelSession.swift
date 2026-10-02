@@ -215,7 +215,8 @@ public final class LanguageModelSession: @unchecked Sendable {
         let rawContent = responseFormat.schema.representingNilExplicitly(in: response.rawContent)
         guard rawContent != response.rawContent else { return response }
         return Response(
-            content: response.content,
+            // Schema-based responses return the generated content itself.
+            content: (rawContent as? Content) ?? response.content,
             rawContent: rawContent,
             transcriptEntries: response.transcriptEntries,
             usage: response.usage,
@@ -266,7 +267,8 @@ public final class LanguageModelSession: @unchecked Sendable {
                         if rawContent != lastSnapshot.rawContent {
                             continuation.yield(
                                 ResponseStream<Content>.Snapshot(
-                                    content: lastSnapshot.content,
+                                    // Schema-based streams yield the generated content itself.
+                                    content: (rawContent as? Content.PartiallyGenerated) ?? lastSnapshot.content,
                                     rawContent: rawContent,
                                     transcriptEntries: lastSnapshot.transcriptEntries,
                                     usage: lastSnapshot.usage,
