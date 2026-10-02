@@ -1,3 +1,8 @@
+/// Feedback about a model's response.
+///
+/// - Note: The ``sentiment`` and ``issues`` properties are exclusive to AnyLanguageModel.
+///   They're public for language models outside this module;
+///   Foundation Models doesn't make them public.
 public struct LanguageModelFeedback {
     /// A sentiment regarding the model's response.
     public enum Sentiment: Sendable, CaseIterable, Equatable, Hashable {
@@ -92,6 +97,11 @@ public struct LanguageModelFeedback {
     /// - Parameters:
     ///   - sentiment: A sentiment for the model's response.
     ///   - issues: Issues with the model's response.
+    ///
+    /// - Note: This initializer is exclusive to AnyLanguageModel.
+    ///   It's public so that language models outside this module
+    ///   can create feedback;
+    ///   Foundation Models doesn't make it public.
     public init(sentiment: Sentiment, issues: [Issue]) {
         self.sentiment = sentiment
         self.issues = issues

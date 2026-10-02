@@ -491,6 +491,11 @@ public final class LanguageModelSession: @unchecked Sendable {
         ///   - rawContent: The raw content produced by the model.
         ///   - transcriptEntries: Transcript entries associated with the response.
         ///   - usage: Provider-reported token usage.
+        ///
+        /// - Note: This initializer is exclusive to AnyLanguageModel.
+        ///   It's public so that language models outside this module
+        ///   can create responses;
+        ///   Foundation Models doesn't make it public.
         public init(
             content: Content,
             rawContent: GeneratedContent,
@@ -1142,6 +1147,13 @@ extension LanguageModelSession {
         }
 
         public struct Refusal: Sendable {
+            /// The transcript entries associated with the refusal.
+            ///
+            /// - Note: This property is exclusive to AnyLanguageModel
+            ///   and using it means your code is no longer drop-in compatible
+            ///   with the Foundation Models framework.
+            ///   Foundation Models takes transcript entries in the initializer
+            ///   but doesn't make this property public.
             public let transcriptEntries: [Transcript.Entry]
 
             public init(transcriptEntries: [Transcript.Entry]) {
@@ -1231,6 +1243,11 @@ extension LanguageModelSession {
         ///   - content: The complete response content.
         ///   - rawContent: The raw content produced by the model.
         ///   - usage: Provider-reported token usage.
+        ///
+        /// - Note: This initializer is exclusive to AnyLanguageModel.
+        ///   It's public so that language models outside this module
+        ///   can create response streams;
+        ///   Foundation Models doesn't make it public.
         public init(
             content: Content,
             rawContent: GeneratedContent,
@@ -1249,6 +1266,11 @@ extension LanguageModelSession {
 
         /// Creates a response stream that yields snapshots from an async stream.
         /// - Parameter stream: The snapshot stream to relay.
+        ///
+        /// - Note: This initializer is exclusive to AnyLanguageModel.
+        ///   It's public so that language models outside this module
+        ///   can create response streams;
+        ///   Foundation Models doesn't make it public.
         public init(stream: AsyncThrowingStream<Snapshot, any Error>) {
             // When streaming, snapshots arrive from the upstream sequence, so no fallback is required.
             self.fallbackSnapshot = nil
@@ -1280,6 +1302,11 @@ extension LanguageModelSession {
             ///   - rawContent: The raw content produced by the model.
             ///   - transcriptEntries: Transcript entries accumulated so far (tool calls/outputs).
             ///   - usage: Provider-reported token usage so far.
+            ///
+            /// - Note: This initializer is exclusive to AnyLanguageModel.
+            ///   It's public so that language models outside this module
+            ///   can create snapshots;
+            ///   Foundation Models doesn't make it public.
             public init(
                 content: Content.PartiallyGenerated,
                 rawContent: GeneratedContent,
