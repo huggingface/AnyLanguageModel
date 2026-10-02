@@ -998,12 +998,15 @@ extension GenerationSchema {
     }
 
     /// Returns the first variant whose shape matches the content:
-    /// an object with every property in a structure, or an array for an array.
+    /// an object that declares every property in a structure
+    /// and whose required properties the structure has,
+    /// or an array for an array.
     private func variant(matching content: GeneratedContent, among variants: [Node], depth: Int) -> Node? {
         variants.first { variant in
             switch (resolving(variant, depth: depth), content.kind) {
             case (.object(let object)?, .structure(let properties, _)):
                 return properties.keys.allSatisfy { object.properties[$0] != nil }
+                    && object.required.allSatisfy { properties[$0] != nil }
             case (.array?, .array):
                 return true
             default:

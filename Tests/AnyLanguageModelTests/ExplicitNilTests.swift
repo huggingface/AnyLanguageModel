@@ -130,6 +130,33 @@ struct ExplicitNilTests {
         #expect(schema.representingNilExplicitly(in: null) == null)
     }
 
+    @Test func unionSkipsObjectVariantsWithMissingRequiredProperties() throws {
+        let person = DynamicGenerationSchema(
+            name: "Person",
+            properties: [
+                .init(name: "name", schema: .init(type: String.self)),
+                .init(name: "age", schema: .init(type: Int.self)),
+            ]
+        )
+        let contact = DynamicGenerationSchema(
+            name: "Contact",
+            representNilExplicitlyInGeneratedContent: true,
+            properties: [
+                .init(name: "name", schema: .init(type: String.self)),
+                .init(name: "nickname", schema: .init(type: String.self), isOptional: true),
+            ]
+        )
+        let either = DynamicGenerationSchema(name: "Either", anyOf: [person, contact])
+        let schema = try GenerationSchema(root: either, dependencies: [])
+
+        let content = schema.representingNilExplicitly(in: try GeneratedContent(json: #"{"name": "Alice"}"#))
+        guard case .structure(let properties, _) = content.kind else {
+            Issue.record("Expected structured content")
+            return
+        }
+        #expect(properties["nickname"]?.kind == .null)
+    }
+
     @Test func flagIsPartOfSchemaEquality() {
         let properties = [GenerationSchema.Property(name: "nickname", type: String?.self)]
         let implicit = GenerationSchema(type: ImplicitNilContact.self, properties: properties)

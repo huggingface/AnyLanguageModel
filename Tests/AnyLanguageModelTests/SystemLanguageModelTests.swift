@@ -104,7 +104,7 @@ import Testing
             #expect(model.supportsLocale(Locale(identifier: "en_US")))
         }
 
-        #if compiler(>=6.3)
+        #if compiler(>=6.3) && !os(tvOS)
             @available(macOS 26.0, iOS 26.0, tvOS 26.0, visionOS 26.0, *)
             @Test func tokenCountsArePositive() async throws {
                 guard #available(macOS 26.4, iOS 26.4, visionOS 26.4, *) else { return }
