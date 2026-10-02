@@ -579,7 +579,21 @@
             return .init(type: Bool.self)
 
         case .anyOf(let schemas):
-            return .init(name: name ?? "", anyOf: schemas.map { convertToDynamicSchema($0) })
+            // Before OS 26.4, Foundation Models has no null schema.
+            // Leave out null variants there,
+            // so that the model generates another variant instead of an unconstrained string.
+            var choices = schemas
+            if !supportsNullSchema {
+                let nonNull = schemas.filter { schema in
+                    if case .null = schema { return false }
+                    return true
+                }
+                if !nonNull.isEmpty { choices = nonNull }
+            }
+            if choices.count == 1 {
+                return convertToDynamicSchema(choices[0], name: name)
+            }
+            return .init(name: name ?? "", anyOf: choices.map { convertToDynamicSchema($0) })
 
         case .array(_, _, _, _, _, _, items: let items, minItems: let minItems, maxItems: let maxItems, _):
             let itemsSchema =
@@ -603,6 +617,17 @@
         case .allOf, .oneOf, .not, .empty, .any:
             return .init(type: String.self)
         }
+    }
+
+    /// Whether Foundation Models supports `DynamicGenerationSchema.null` at run time.
+    @available(macOS 26.0, iOS 26.0, watchOS 27.0, tvOS 26.0, visionOS 26.0, *)
+    private var supportsNullSchema: Bool {
+        #if compiler(>=6.3)
+            if #available(macOS 26.4, iOS 26.4, watchOS 27.0, visionOS 26.4, *) {
+                return true
+            }
+        #endif
+        return false
     }
 
     @available(macOS 26.0, iOS 26.0, watchOS 27.0, tvOS 26.0, visionOS 26.0, *)

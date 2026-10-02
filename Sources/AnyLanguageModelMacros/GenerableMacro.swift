@@ -15,7 +15,7 @@ public struct GenerableMacro: MemberMacro, ExtensionMacro {
             let structName = structDecl.name.text
 
             let description = extractDescription(from: node)
-            let explicitNil = extractRepresentNilExplicitly(from: node)
+            let explicitNil = try extractRepresentNilExplicitly(from: node)
             let properties = extractGuidedProperties(from: structDecl)
 
             return [
@@ -91,12 +91,17 @@ public struct GenerableMacro: MemberMacro, ExtensionMacro {
     // MARK: - Helpers
 
     /// Returns whether the attribute passes `representNilExplicitlyInGeneratedContent: true`.
-    private static func extractRepresentNilExplicitly(from node: AttributeSyntax) -> Bool {
+    ///
+    /// The macro reads the value when it expands the type,
+    /// so the argument must be a Boolean literal.
+    private static func extractRepresentNilExplicitly(from node: AttributeSyntax) throws -> Bool {
         guard let arguments = node.arguments?.as(LabeledExprListSyntax.self),
-            let argument = arguments.first(where: { $0.label?.text == "representNilExplicitlyInGeneratedContent" }),
-            let literal = argument.expression.as(BooleanLiteralExprSyntax.self)
+            let argument = arguments.first(where: { $0.label?.text == "representNilExplicitlyInGeneratedContent" })
         else {
             return false
+        }
+        guard let literal = argument.expression.as(BooleanLiteralExprSyntax.self) else {
+            throw GenerableMacroError.nonLiteralRepresentNilExplicitly
         }
         return literal.literal.tokenKind == .keyword(.true)
     }
@@ -1458,6 +1463,7 @@ public enum GenerableMacroError: Error, CustomStringConvertible {
     case notApplicableToType
     case invalidSyntax
     case missingRequiredParameter
+    case nonLiteralRepresentNilExplicitly
 
     public var description: String {
         switch self {
@@ -1467,6 +1473,8 @@ public enum GenerableMacroError: Error, CustomStringConvertible {
             return "Invalid macro syntax"
         case .missingRequiredParameter:
             return "Missing required parameter"
+        case .nonLiteralRepresentNilExplicitly:
+            return "representNilExplicitlyInGeneratedContent must be a Boolean literal (true or false)"
         }
     }
 }
