@@ -11,9 +11,10 @@ All you need to do is change your import statement:
 ```
 
 Anything AnyLanguageModel adds beyond Apple's API
-is marked as an extension in its documentation
-and listed in [Differences from Foundation Models](#differences-from-foundation-models),
-along with the few Foundation Models APIs it doesn't implement yet.
+is marked as an extension in its documentation.
+[Differences from Foundation Models](#differences-from-foundation-models)
+summarizes these extensions
+and lists the few Foundation Models APIs it doesn't implement yet.
 
 ```swift
 struct WeatherTool: Tool {
@@ -507,8 +508,11 @@ the latest value is kept for each metadata key.
 
 ## Differences from Foundation Models
 
-Code that uses an extension compiles only with AnyLanguageModel.
-Each extension's documentation comment says so.
+Code that uses an extension doesn't compile with Foundation Models on OS 26.
+Each extension's documentation comment says so,
+and extensions that follow a Foundation Models 27 API,
+such as token usage,
+say which API they follow.
 
 ### Extensions
 
@@ -541,6 +545,11 @@ Each extension's documentation comment says so.
 - `Codable` conformance for `GeneratedContent`, `GenerationID`, `Usage`,
   and the types nested in `Transcript`.
 - `GeneratedContentError` and each provider's error type.
+- `JSONValue`:
+  JSON values for provider options such as `extraBody`.
+- Smaller additions to existing types,
+  such as `LanguageModel.isAvailable`, `SystemLanguageModel.supportsImageInput`,
+  `Transcript.ToolCall.providerMetadata`, and `GenerationError.Refusal.transcriptEntries`.
 
 ### Behavior differences
 
