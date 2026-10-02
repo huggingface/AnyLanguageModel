@@ -16,6 +16,9 @@ public struct GeminiLanguageModel: LanguageModel {
 
     /// Custom generation options specific to Gemini models.
     ///
+    /// Reached through `GenerationOptions[custom: GeminiLanguageModel.self]`,
+    /// an AnyLanguageModel extension.
+    ///
     /// Use this type to configure Gemini-specific features like thinking mode
     /// and server-side tools through ``GenerationOptions``.
     ///

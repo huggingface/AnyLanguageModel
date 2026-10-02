@@ -30,6 +30,9 @@ import OrderedCollections
 public struct AnthropicLanguageModel: LanguageModel {
     /// Custom generation options specific to Anthropic's Claude API.
     ///
+    /// Reached through `GenerationOptions[custom: AnthropicLanguageModel.self]`,
+    /// an AnyLanguageModel extension.
+    ///
     /// Use this type to pass additional parameters that are not part of the
     /// standard ``GenerationOptions``, such as Anthropic-specific sampling
     /// parameters and metadata.

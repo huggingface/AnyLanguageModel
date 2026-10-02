@@ -138,6 +138,10 @@ public struct GenerationOptions: Sendable, Equatable {
     ///
     /// - Parameter modelType: The language model type to get or set custom options for.
     /// - Returns: The custom options for the specified model type, or `nil` if none are set.
+    ///
+    /// - Note: This API is exclusive to AnyLanguageModel
+    ///   and using it means your code is no longer drop-in compatible
+    ///   with the Foundation Models framework.
     public subscript<Model: LanguageModel>(
         custom modelType: Model.Type
     ) -> Model.CustomGenerationOptions? {
@@ -219,6 +223,10 @@ extension GenerationOptions {
 ///     }
 /// }
 /// ```
+///
+/// - Note: This API is exclusive to AnyLanguageModel
+///   and using it means your code is no longer drop-in compatible
+///   with the Foundation Models framework.
 public protocol CustomGenerationOptions: Equatable, Sendable {}
 
 extension Never: CustomGenerationOptions {}

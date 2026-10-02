@@ -38,6 +38,9 @@ public struct OpenAILanguageModel: LanguageModel {
 
     /// Custom generation options specific to OpenAI-compatible APIs.
     ///
+    /// Reached through `GenerationOptions[custom: OpenAILanguageModel.self]`,
+    /// an AnyLanguageModel extension.
+    ///
     /// Use this type to pass additional parameters that are not part of the
     /// standard ``GenerationOptions``, such as sampling parameters, penalties,
     /// and vendor-specific extensions.

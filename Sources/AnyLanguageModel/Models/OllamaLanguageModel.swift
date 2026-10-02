@@ -20,6 +20,9 @@ public struct OllamaLanguageModel: LanguageModel {
 
     /// Custom generation options specific to Ollama.
     ///
+    /// Reached through `GenerationOptions[custom: OllamaLanguageModel.self]`,
+    /// an AnyLanguageModel extension.
+    ///
     /// Use this type to pass additional model parameters that are not part
     /// of the standard ``GenerationOptions``.
     ///

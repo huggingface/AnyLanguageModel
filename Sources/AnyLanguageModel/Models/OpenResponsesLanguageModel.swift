@@ -27,6 +27,9 @@ public struct OpenResponsesLanguageModel: LanguageModel {
 
     /// Custom generation options for Open Responses–compatible APIs.
     ///
+    /// Reached through `GenerationOptions[custom: OpenResponsesLanguageModel.self]`,
+    /// an AnyLanguageModel extension.
+    ///
     /// Includes Open Responses–specific fields such as ``toolChoice`` (including
     /// ``ToolChoice/allowedTools(tools:mode:)``), ``allowedTools``, and
     /// reasoning/text options. Use ``extraBody`` for parameters not yet modeled.

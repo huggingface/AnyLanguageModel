@@ -66,6 +66,9 @@ import Foundation
 
         /// Custom generation options specific to llama.cpp.
         ///
+        /// Reached through `GenerationOptions[custom: LlamaLanguageModel.self]`,
+        /// an AnyLanguageModel extension.
+        ///
         /// Use this type to pass llama.cpp-specific sampling parameters that are
         /// not part of the standard ``GenerationOptions``.
         ///

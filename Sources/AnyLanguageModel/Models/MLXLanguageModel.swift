@@ -201,8 +201,9 @@ import Foundation
 
         /// Configures MLX-specific generation behavior.
         ///
-        /// Set these values through ``GenerationOptions`` using
-        /// `GenerationOptions[custom: MLXLanguageModel.self]`.
+        /// Set these values through
+        /// `GenerationOptions[custom: MLXLanguageModel.self]`,
+        /// an AnyLanguageModel extension.
         public struct CustomGenerationOptions: AnyLanguageModel.CustomGenerationOptions, Codable {
             /// Configures KV-cache behavior for MLX generation.
             public struct KVCache: Codable, Equatable, Sendable {
