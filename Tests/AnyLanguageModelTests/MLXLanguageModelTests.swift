@@ -117,6 +117,19 @@ import Testing
             #expect(!response.content.isEmpty)
         }
 
+        @Test func continuationStateIsKeptWithAPrewarmedCache() async throws {
+            let model = MLXLanguageModel(modelId: "mlx-community/Qwen3-VL-2B-Instruct-4bit")
+            let options = GenerationOptions(sampling: .greedy, maximumResponseTokens: 8)
+            let session = LanguageModelSession(
+                model: model,
+                instructions: "You are a terse assistant. Answer in one short sentence."
+            )
+            await model.prewarmSessionCache(for: session)
+            let response = try await session.respond(to: "Name three primary colors.", options: options)
+            #expect(response.usage.input.cachedTokenCount > 0)
+            #expect(!response.content.isEmpty)
+        }
+
         @Test func tokenUsageAndCacheReuse() async throws {
             let options = GenerationOptions(sampling: .greedy, maximumResponseTokens: 8)
             let session = LanguageModelSession(model: model)
