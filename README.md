@@ -10,6 +10,11 @@ All you need to do is change your import statement:
 + import AnyLanguageModel
 ```
 
+Anything AnyLanguageModel adds beyond Apple's API
+is marked as an extension in its documentation
+and listed in [Differences from Foundation Models](#differences-from-foundation-models),
+along with the few Foundation Models APIs it doesn't implement yet.
+
 ```swift
 struct WeatherTool: Tool {
     let name = "getWeather"
@@ -373,6 +378,10 @@ use a vision-capable model
 For llama.cpp,
 pass the model's multimodal projector with `mmprojPath:`.
 
+> [!NOTE]
+> Image inputs are an AnyLanguageModel extension.
+> See [Differences from Foundation Models](#differences-from-foundation-models).
+
 ### Tool Calling
 
 Tool calling is supported by all providers.
@@ -431,6 +440,10 @@ actor ToolExecutionObserver: ToolExecutionDelegate {
 
 session.toolExecutionDelegate = ToolExecutionObserver()
 ```
+
+> [!NOTE]
+> Tool execution delegates are an AnyLanguageModel extension.
+> See [Differences from Foundation Models](#differences-from-foundation-models).
 
 ### Token Usage
 
@@ -491,6 +504,61 @@ the latest value is kept for each metadata key.
 > and follows the documented
 > [Foundation Models 27 usage API](https://developer.apple.com/documentation/foundationmodels/languagemodelsession/usage-swift.struct).
 > `Codable` and `Equatable` support are AnyLanguageModel extensions.
+
+## Differences from Foundation Models
+
+Code that uses an extension compiles only with AnyLanguageModel.
+Each extension's documentation comment says so.
+
+### Extensions
+
+- `LanguageModel` and `Availability`:
+  the protocol that lets a session use any model provider.
+  Foundation Models 27 adds its own `LanguageModel` protocol
+  with different requirements.
+  Session initializers require a `model:` argument
+  instead of defaulting to `SystemLanguageModel.default`.
+- `GenerationOptions[custom:]` and `CustomGenerationOptions`:
+  options for one provider,
+  described in that provider's section under [Providers](#providers).
+- `respond(to:images:)`, `Transcript.ImageSegment`, and `Transcript.Segment.image`:
+  [image inputs](#image-inputs).
+  Foundation Models 27 adds prompt attachments,
+  and AnyLanguageModel 2.0 will change to match them.
+- `ToolExecutionDelegate`, `ToolExecutionDecision`, and `toolExecutionDelegate`:
+  [observing and controlling tool calls](#tool-calling).
+- `transcriptErrorHandlingPolicy` and `waitForResponseCompletion()`:
+  what a transcript keeps when a request fails or is cancelled.
+- `LanguageModelSession.tools` and `instructions`:
+  the session's tools and instructions,
+  for language models defined outside AnyLanguageModel.
+- `Usage` and the `usage` properties:
+  [token usage](#token-usage),
+  which follows the Foundation Models 27 API.
+- Public initializers for `Response`, `ResponseStream`, `ResponseStream.Snapshot`,
+  `GenerationGuide`, and `LanguageModelFeedback`,
+  for language models defined outside AnyLanguageModel.
+- `Codable` conformance for `GeneratedContent`, `GenerationID`, `Usage`,
+  and the types nested in `Transcript`.
+- `GeneratedContentError` and each provider's error type.
+
+### Behavior differences
+
+- A session adds the prompt to its transcript before the model responds,
+  as a single text segment.
+- A structured response is recorded in the transcript as JSON text,
+  not as a structured segment.
+- A session created from a transcript restores `instructions`
+  only when the first entry is instructions with a single text segment.
+
+### Not yet implemented
+
+- `@Generable(description:representNilExplicitlyInGeneratedContent:)`
+  and the matching `GenerationSchema` and `DynamicGenerationSchema` initializers
+- `DynamicGenerationSchema.null`
+- `logFeedbackAttachment(sentiment:issues:desiredResponseText:)`
+  and `logFeedbackAttachment(sentiment:issues:desiredResponseContent:)`
+- `SystemLanguageModel.supportedLanguages`, `supportsLocale(_:)`, and `tokenCount(for:)`
 
 ## Providers
 
