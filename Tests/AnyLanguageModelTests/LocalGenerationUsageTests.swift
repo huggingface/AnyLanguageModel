@@ -100,6 +100,7 @@ struct LocalGenerationUsageTests {
             func cachedCount(
                 prefix: [Int32] = [1, 2],
                 prefill: Int = 2,
+                cacheOffset: Int = 2,
                 current: [Int32] = [1, 2, 3],
                 configurationMatches: Bool = true,
                 hasMedia: Bool = false
@@ -107,6 +108,7 @@ struct LocalGenerationUsageTests {
                 MLXLanguageModel.reusablePrefixTokenCount(
                     prefixTokens: prefix,
                     prefillTokenCount: prefill,
+                    cacheOffset: cacheOffset,
                     currentTokens: current,
                     configurationMatches: configurationMatches,
                     hasMedia: hasMedia
@@ -117,6 +119,7 @@ struct LocalGenerationUsageTests {
             #expect(cachedCount(current: [1, 2]) == 0)
             #expect(cachedCount(current: [1]) == 0)
             #expect(cachedCount(prefill: 1) == 0)
+            #expect(cachedCount(cacheOffset: 5) == 0)
             #expect(cachedCount(prefix: [], prefill: 0) == 0)
             #expect(cachedCount(configurationMatches: false) == 0)
             #expect(cachedCount(hasMedia: true) == 0)
