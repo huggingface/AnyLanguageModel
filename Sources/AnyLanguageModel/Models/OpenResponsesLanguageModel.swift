@@ -1243,6 +1243,10 @@ private enum OpenResponsesStreamEvent: Decodable, Sendable {
 // MARK: - Errors
 
 /// Errors that can occur when using ``OpenResponsesLanguageModel``.
+///
+/// - Note: This API is exclusive to AnyLanguageModel
+///   and using it means your code is no longer drop-in compatible
+///   with the Foundation Models framework.
 public enum OpenResponsesLanguageModelError: LocalizedError, Sendable {
     /// The response contained no output to use.
     ///

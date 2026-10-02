@@ -315,6 +315,10 @@
     }
 
     /// Errors that can occur when working with Core ML language models.
+    ///
+    /// - Note: This API is exclusive to AnyLanguageModel
+    ///   and using it means your code is no longer drop-in compatible
+    ///   with the Foundation Models framework.
     @available(macOS 15.0, iOS 18.0, tvOS 18.0, visionOS 2.0, watchOS 11.0, *)
     public enum CoreMLLanguageModelError: LocalizedError {
         /// The provided model isn't a compiled Core ML model.

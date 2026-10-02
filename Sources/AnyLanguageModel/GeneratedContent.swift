@@ -401,6 +401,11 @@ extension GeneratedContent {
 
 // MARK: - GeneratedContentError
 
+/// Errors that can occur when converting generated content to a value.
+///
+/// - Note: This API is exclusive to AnyLanguageModel
+///   and using it means your code is no longer drop-in compatible
+///   with the Foundation Models framework.
 public enum GeneratedContentError: Error, Hashable {
     case propertyNotFound(String)
     case typeMismatch
