@@ -107,6 +107,53 @@ struct ExplicitNilTests {
         #expect(properties["nickname"]?.kind == .null)
     }
 
+    @Test func nullableUnionFillsInNullForTheObjectVariant() throws {
+        let contact = DynamicGenerationSchema(
+            name: "Contact",
+            representNilExplicitlyInGeneratedContent: true,
+            properties: [
+                .init(name: "name", schema: .init(type: String.self)),
+                .init(name: "nickname", schema: .init(type: String.self), isOptional: true),
+            ]
+        )
+        let nullableContact = DynamicGenerationSchema(name: "NullableContact", anyOf: [contact, .null])
+        let schema = try GenerationSchema(root: nullableContact, dependencies: [])
+
+        let content = schema.representingNilExplicitly(in: try GeneratedContent(json: #"{"name": "Alice"}"#))
+        guard case .structure(let properties, _) = content.kind else {
+            Issue.record("Expected structured content")
+            return
+        }
+        #expect(properties["nickname"]?.kind == .null)
+
+        let null = GeneratedContent(kind: .null)
+        #expect(schema.representingNilExplicitly(in: null) == null)
+    }
+
+    @Test func flagIsPartOfSchemaEquality() {
+        let properties = [GenerationSchema.Property(name: "nickname", type: String?.self)]
+        let implicit = GenerationSchema(type: ImplicitNilContact.self, properties: properties)
+        let explicit = GenerationSchema(
+            type: ImplicitNilContact.self,
+            representNilExplicitlyInGeneratedContent: true,
+            properties: properties
+        )
+        #expect(implicit != explicit)
+    }
+
+    @Test func streamedResponseCollectsNullForOmittedOptionalProperties() async throws {
+        let model = MockLanguageModel { _, _ in #"{"name": "Alice"}"# }
+        let session = LanguageModelSession(model: model)
+
+        let response = try await session.streamResponse(to: "Who?", generating: ExplicitNilContact.self).collect()
+        guard case .structure(let properties, _) = response.rawContent.kind else {
+            Issue.record("Expected structured content")
+            return
+        }
+        #expect(properties["nickname"]?.kind == .null)
+        #expect(lastResponseText(in: session)?.contains(#""nickname":null"#) == true)
+    }
+
     @Test func sessionRecordsNullForOmittedOptionalProperties() async throws {
         let model = MockLanguageModel { _, _ in #"{"name": "Alice"}"# }
 

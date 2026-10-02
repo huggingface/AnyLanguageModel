@@ -57,6 +57,8 @@ public struct DynamicGenerationSchema: Sendable {
     ///   - description: A natural language description of this schema.
     ///   - explicitNil: Whether generated content has a `null` value
     ///     for each optional property that it would otherwise leave out.
+    ///     Like Foundation Models,
+    ///     the encoded form of a schema built from this one doesn't include this setting.
     ///   - properties: The properties associated with this schema.
     public init(
         name: String,

@@ -257,11 +257,25 @@ public final class LanguageModelSession: @unchecked Sendable {
                         guard let lastSnapshot else {
                             throw ResponseStreamError.noSnapshots
                         }
-                        // Extract text content from the generated content
+                        // Fill in `null` for omitted optional properties when the schema asks for it,
+                        // and yield the result so that consumers and `collect()` see it.
                         var rawContent = lastSnapshot.rawContent
                         if case .prompt(let prompt) = promptEntry, let responseFormat = prompt.responseFormat {
                             rawContent = responseFormat.schema.representingNilExplicitly(in: rawContent)
                         }
+                        if rawContent != lastSnapshot.rawContent {
+                            continuation.yield(
+                                ResponseStream<Content>.Snapshot(
+                                    content: lastSnapshot.content,
+                                    rawContent: rawContent,
+                                    transcriptEntries: lastSnapshot.transcriptEntries,
+                                    usage: lastSnapshot.usage,
+                                    providerMetadata: lastSnapshot.providerMetadata
+                                )
+                            )
+                        }
+
+                        // Extract text content from the generated content
                         let textContent: String
                         if case .string(let str) = rawContent.kind {
                             textContent = str

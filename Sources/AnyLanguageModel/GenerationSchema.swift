@@ -44,6 +44,7 @@ public struct GenerationSchema: Equatable, Codable, CustomDebugStringConvertible
             case (.object(let lhsObject), .object(let rhsObject)):
                 return lhsObject.description == rhsObject.description
                     && lhsObject.required == rhsObject.required
+                    && lhsObject.representsNilExplicitly == rhsObject.representsNilExplicitly
                     && lhsObject.properties.keys == rhsObject.properties.keys
                     && lhsObject.properties.allSatisfy { key, lhsNode in
                         guard let rhsNode = rhsObject.properties[key] else { return false }
@@ -325,6 +326,8 @@ public struct GenerationSchema: Equatable, Codable, CustomDebugStringConvertible
     ///   - description: A natural language description of this schema.
     ///   - explicitNil: Whether generated content has a `null` value
     ///     for each optional property that it would otherwise leave out.
+    ///     Like Foundation Models,
+    ///     the schema's encoded form doesn't include this setting.
     ///   - properties: An array of properties.
     public init(
         type: any Generable.Type,
@@ -986,8 +989,32 @@ extension GenerationSchema {
             guard case .array(let elements) = content.kind else { return content }
             let items = elements.map { representingNilExplicitly(in: $0, node: array.items, depth: depth + 1) }
             return GeneratedContent(kind: .array(items), id: content.id)
-        case .string, .number, .boolean, .null, .anyOf:
+        case .anyOf(let variants):
+            guard let variant = variant(matching: content, among: variants, depth: depth) else { return content }
+            return representingNilExplicitly(in: content, node: variant, depth: depth + 1)
+        case .string, .number, .boolean, .null:
             return content
         }
+    }
+
+    /// Returns the first variant whose shape matches the content:
+    /// an object with every property in a structure, or an array for an array.
+    private func variant(matching content: GeneratedContent, among variants: [Node], depth: Int) -> Node? {
+        variants.first { variant in
+            switch (resolving(variant, depth: depth), content.kind) {
+            case (.object(let object)?, .structure(let properties, _)):
+                return properties.keys.allSatisfy { object.properties[$0] != nil }
+            case (.array?, .array):
+                return true
+            default:
+                return false
+            }
+        }
+    }
+
+    private func resolving(_ node: Node, depth: Int) -> Node? {
+        guard depth < 64 else { return nil }
+        guard case .ref(let name) = node else { return node }
+        return defs[name].flatMap { resolving($0, depth: depth + 1) }
     }
 }
