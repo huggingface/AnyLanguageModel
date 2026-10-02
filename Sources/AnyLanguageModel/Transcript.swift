@@ -376,6 +376,8 @@ public struct Transcript: Sendable, Equatable, Codable {
         /// should interpret or modify them.
         ///
         /// - Note: This property is exclusive to AnyLanguageModel
+        ///   and using it means your code is no longer drop-in compatible
+        ///   with the Foundation Models framework.
         public var providerMetadata: [String: String]?
 
         public init(

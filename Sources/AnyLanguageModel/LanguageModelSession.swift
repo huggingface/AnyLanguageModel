@@ -2,6 +2,10 @@ import Foundation
 import Observation
 
 /// Controls transcript retention when generation fails or is cancelled.
+///
+/// - Note: This API is exclusive to AnyLanguageModel
+///   and using it means your code is no longer drop-in compatible
+///   with the Foundation Models framework.
 public struct TranscriptErrorHandlingPolicy: Sendable, Equatable {
     private let shouldRevert: Bool
 
@@ -23,6 +27,10 @@ public final class LanguageModelSession: @unchecked Sendable {
     /// On failure, `nil` retains the prompt without committing streaming checkpoints.
     /// Streaming cancellation never commits the partial answer as a completed response, regardless
     /// of this policy. These defaults do not claim Foundation Models behavioral parity.
+    ///
+    /// - Note: This property is exclusive to AnyLanguageModel
+    ///   and using it means your code is no longer drop-in compatible
+    ///   with the Foundation Models framework.
     public var transcriptErrorHandlingPolicy: TranscriptErrorHandlingPolicy? {
         get {
             access(keyPath: \.transcriptErrorHandlingPolicy)
@@ -54,17 +62,39 @@ public final class LanguageModelSession: @unchecked Sendable {
     @ObservationIgnored private let responseRelays = Locked<[UUID: Task<Void, Never>]>([:])
 
     /// Waits for transcript cleanup of all streaming relays registered when this call begins.
-    /// Relays started later are excluded. Cancelling this wait does not cancel generation.
-    /// Call after cancelling consumers and before persisting the transcript. This is an
-    /// AnyLanguageModel extension; nonstreaming operations must be awaited separately.
+    ///
+    /// Relays started later are excluded.
+    /// Cancelling this wait does not cancel generation.
+    /// Call after cancelling consumers and before persisting the transcript.
+    /// Nonstreaming operations must be awaited separately.
     /// Do not call from a tool executing within one of the included responses.
+    ///
+    /// - Note: This API is exclusive to AnyLanguageModel
+    ///   and using it means your code is no longer drop-in compatible
+    ///   with the Foundation Models framework.
     nonisolated public func waitForResponseCompletion() async {
         let tasks = responseRelays.withLock { Array($0.values) }
         for task in tasks { await task.value }
     }
 
     private let model: any LanguageModel
+
+    /// The tools that the model can call during the session.
+    ///
+    /// - Note: This property is exclusive to AnyLanguageModel
+    ///   and using it means your code is no longer drop-in compatible
+    ///   with the Foundation Models framework.
+    ///   It's public so that language models outside this module
+    ///   can read the session's tools.
     public let tools: [any Tool]
+
+    /// The instructions for the session, if any.
+    ///
+    /// - Note: This property is exclusive to AnyLanguageModel
+    ///   and using it means your code is no longer drop-in compatible
+    ///   with the Foundation Models framework.
+    ///   It's public so that language models outside this module
+    ///   can read the session's instructions.
     public let instructions: Instructions?
 
     /// A delegate that observes and controls tool execution.
@@ -77,6 +107,17 @@ public final class LanguageModelSession: @unchecked Sendable {
     ///   with the Foundation Models framework.
     @ObservationIgnored public var toolExecutionDelegate: (any ToolExecutionDelegate)?
 
+    /// Creates a session with a model, tools,
+    /// and instructions that you build with a result builder.
+    ///
+    /// - Note: Unlike Foundation Models,
+    ///   which defaults `model` to `SystemLanguageModel.default`,
+    ///   AnyLanguageModel requires the `model` argument
+    ///   and accepts any type that conforms to ``LanguageModel``.
+    ///   Code that omits `model` doesn't compile with AnyLanguageModel;
+    ///   pass `SystemLanguageModel.default` to use the system model.
+    ///   Code that passes another model
+    ///   is no longer drop-in compatible with the Foundation Models framework.
     public convenience init(
         model: any LanguageModel,
         tools: [any Tool] = [],
@@ -85,6 +126,11 @@ public final class LanguageModelSession: @unchecked Sendable {
         try self.init(model: model, tools: tools, instructions: instructions())
     }
 
+    /// Creates a session with a model, tools, and instructions as a string.
+    ///
+    /// - Note: Unlike Foundation Models,
+    ///   AnyLanguageModel requires the `model` argument
+    ///   and accepts any ``LanguageModel``.
     public convenience init(
         model: any LanguageModel,
         tools: [any Tool] = [],
@@ -93,6 +139,11 @@ public final class LanguageModelSession: @unchecked Sendable {
         self.init(model: model, tools: tools, instructions: Instructions(instructions), transcript: Transcript())
     }
 
+    /// Creates a session with a model, tools, and optional instructions.
+    ///
+    /// - Note: Unlike Foundation Models,
+    ///   AnyLanguageModel requires the `model` argument
+    ///   and accepts any ``LanguageModel``.
     public convenience init(
         model: any LanguageModel,
         tools: [any Tool] = [],
@@ -101,6 +152,12 @@ public final class LanguageModelSession: @unchecked Sendable {
         self.init(model: model, tools: tools, instructions: instructions, transcript: Transcript())
     }
 
+    /// Creates a session with a model and tools
+    /// that continues from an existing transcript.
+    ///
+    /// - Note: Unlike Foundation Models,
+    ///   AnyLanguageModel requires the `model` argument
+    ///   and accepts any ``LanguageModel``.
     public convenience init(
         model: any LanguageModel,
         tools: [any Tool] = [],
