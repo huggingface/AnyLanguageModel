@@ -308,7 +308,10 @@ import Testing
                 instructions: "You are a helpful assistant. Use available tools when needed."
             )
 
-            let response = try await session.respond(to: "How's the weather in San Francisco?")
+            let response = try await session.respond(
+                to: "How's the weather in San Francisco?",
+                options: GenerationOptions(sampling: .greedy)
+            )
 
             var foundToolOutput = false
             for case let .toolOutput(toolOutput) in response.transcriptEntries {
@@ -336,7 +339,10 @@ import Testing
                 instructions: "You are a helpful assistant. Use available tools when needed."
             )
 
-            let stream = session.streamResponse(to: "How's the weather in San Francisco?")
+            let stream = session.streamResponse(
+                to: "How's the weather in San Francisco?",
+                options: GenerationOptions(sampling: .greedy)
+            )
 
             // Iterate the stream, keeping the last snapshot as the final state.
             var snapshotCount = 0
