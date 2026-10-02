@@ -293,9 +293,7 @@
 
             let fmSentiment = sentiment?.toFoundationModels()
             let fmIssues = issues.map { $0.toFoundationModels() }
-            let fmDesiredOutput = desiredOutput.flatMap { entry in
-                Transcript(entries: [entry]).toFoundationModels(instructions: nil, toolDefinitions: []).first
-            }
+            let fmDesiredOutput = desiredOutput?.toFoundationModels()
 
             return fmSession.logFeedbackAttachment(
                 sentiment: fmSentiment,
@@ -634,6 +632,14 @@
             .init(type: String.self, guides: [.constant(stringValue)])
         case .null, .object, .bool, .array:
             nil
+        }
+    }
+
+    @available(macOS 26.0, iOS 26.0, watchOS 27.0, tvOS 26.0, visionOS 26.0, *)
+    extension Transcript.Entry {
+        /// Converts the entry to a Foundation Models transcript entry.
+        func toFoundationModels() -> FoundationModels.Transcript.Entry? {
+            Transcript(entries: [self]).toFoundationModels(instructions: nil, toolDefinitions: []).first
         }
     }
 

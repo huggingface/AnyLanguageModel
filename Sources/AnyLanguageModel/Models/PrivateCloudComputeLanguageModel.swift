@@ -134,7 +134,7 @@
             return fmSession.logFeedbackAttachment(
                 sentiment: sentiment?.toFoundationModels(),
                 issues: issues.map { $0.toFoundationModels() },
-                desiredOutput: nil
+                desiredOutput: desiredOutput?.toFoundationModels()
             )
         }
     }
