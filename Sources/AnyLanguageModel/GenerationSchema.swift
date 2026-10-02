@@ -79,10 +79,11 @@ public struct GenerationSchema: Equatable, Codable, CustomDebugStringConvertible
                     keyedBy: GenerationSchema.DynamicCodingKey.self,
                     forKey: .properties
                 )
-                for (name, node) in obj.properties {
+                for name in obj.properties.keys.sorted() {
+                    guard let node = obj.properties[name] else { continue }
                     try propsContainer.encode(node, forKey: GenerationSchema.DynamicCodingKey(stringValue: name)!)
                 }
-                try container.encode(Array(obj.required), forKey: .required)
+                try container.encode(obj.required.sorted(), forKey: .required)
 
                 // Check userInfo to see if additionalProperties should be omitted
                 let shouldOmit = encoder.userInfo[GenerationSchema.omitAdditionalPropertiesKey] as? Bool ?? false
@@ -614,7 +615,7 @@ public struct GenerationSchema: Equatable, Codable, CustomDebugStringConvertible
 
         if !defs.isEmpty {
             var defsContainer = container.nestedContainer(keyedBy: DynamicCodingKey.self, forKey: .defs)
-            for (name, node) in defs {
+            for (name, node) in defs.sorted(by: { $0.key < $1.key }) {
                 try defsContainer.encode(node, forKey: DynamicCodingKey(stringValue: name)!)
             }
         }

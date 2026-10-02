@@ -999,10 +999,17 @@ extension Transcript {
                     )
                 )
             case .response(let response):
+                // Anthropic rejects text blocks without non-whitespace text,
+                // such as the empty response of a turn that only called tools.
+                let content = convertSegmentsToAnthropicContent(response.segments).filter { block in
+                    guard case .text(let text) = block else { return true }
+                    return !text.text.allSatisfy(\.isWhitespace)
+                }
+                guard !content.isEmpty else { continue }
                 messages.append(
                     .init(
                         role: .assistant,
-                        content: convertSegmentsToAnthropicContent(response.segments)
+                        content: content
                     )
                 )
             case .toolCalls(let toolCalls):

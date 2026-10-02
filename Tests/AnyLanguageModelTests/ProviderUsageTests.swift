@@ -859,6 +859,16 @@ import Testing
             #expect(UsageURLProtocol.recordedBodies.count == 2)
         }
 
+        @Test(arguments: [Provider.responses, .openResponses])
+        func responsesDecodeErrorObjects(_ provider: Provider) async throws {
+            UsageURLProtocol.reset()
+            var body = provider.response(counts: provider.counts)
+            body["error"] = ["code": "server_error", "message": "The model failed."]
+            UsageURLProtocol.enqueue(json: try Self.json(body))
+            let response = try await provider.makeSession().respond(to: "Hi")
+            #expect(response.content == "Hello")
+        }
+
         @Test(arguments: [Provider.chat, .responses, .openResponses, .gemini])
         func toolRoundsAccumulateUsage(_ provider: Provider) async throws {
             UsageURLProtocol.reset()
