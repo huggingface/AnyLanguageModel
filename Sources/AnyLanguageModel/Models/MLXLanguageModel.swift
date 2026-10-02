@@ -857,6 +857,20 @@ import Foundation
             return prefillTokenCount
         }
 
+        /// Returns the tokens and mask that follow a cached prefix of `count` tokens.
+        ///
+        /// Tokens are rank 1 from text-only processors and `[1, length]` from some VLM processors,
+        /// so this slices the last axis.
+        internal static func droppingCachedPrefix(
+            of text: MLXLMCommon.LMInput.Text,
+            count: Int
+        ) -> MLXLMCommon.LMInput.Text {
+            MLXLMCommon.LMInput.Text(
+                tokens: text.tokens[.ellipsis, count...],
+                mask: text.mask?[.ellipsis, count...]
+            )
+        }
+
         private func resolveCache(
             session: LanguageModelSession,
             lmInput: MLXLMCommon.LMInput,
@@ -881,9 +895,7 @@ import Foundation
                     )
                 } ?? 0
             if let existingEntry, cachedCount > 0 {
-                let newTokens = lmInput.text.tokens[cachedCount...]
-                let newMask = lmInput.text.mask?[cachedCount...]
-                let partialText = MLXLMCommon.LMInput.Text(tokens: newTokens, mask: newMask)
+                let partialText = Self.droppingCachedPrefix(of: lmInput.text, count: cachedCount)
                 return (existingEntry.kvCache, MLXLMCommon.LMInput(text: partialText), fullTokens, cachedCount)
             }
 

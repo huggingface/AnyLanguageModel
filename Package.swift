@@ -113,6 +113,11 @@ let package = Package(
             dependencies: [
                 "AnyLanguageModel",
                 .product(
+                    name: "MLXLMCommon",
+                    package: "mlx-swift-lm",
+                    condition: .when(traits: ["MLX"])
+                ),
+                .product(
                     name: "AsyncHTTPClient",
                     package: "async-http-client",
                     condition: .when(traits: ["AsyncHTTPClient"])

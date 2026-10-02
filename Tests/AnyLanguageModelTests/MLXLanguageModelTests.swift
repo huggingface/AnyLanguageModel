@@ -4,6 +4,9 @@ import Testing
 @testable import AnyLanguageModel
 
 #if MLX
+    import class MLX.MLXArray
+    import struct MLXLMCommon.LMInput
+
     private let shouldRunMLXTests = {
         // Enable when explicitly requested via environment variable
         if ProcessInfo.processInfo.environment["ENABLE_MLX_TESTS"] != nil {
@@ -70,6 +73,19 @@ import Testing
             }
 
             #expect(!chunks.isEmpty)
+        }
+
+        // Text-only processors return rank-1 tokens; some VLM processors return `[1, L]`.
+        @Test(arguments: [[6], [1, 6]])
+        func droppingCachedPrefixKeepsLeadingAxes(shape: [Int]) {
+            let text = LMInput.Text(
+                tokens: MLXArray([Int32](0 ..< 6), shape),
+                mask: MLXArray([Int32](repeating: 1, count: 6), shape)
+            )
+            let remaining = MLXLanguageModel.droppingCachedPrefix(of: text, count: 4)
+            #expect(remaining.tokens.shape == shape.dropLast() + [2])
+            #expect(remaining.tokens.asArray(Int32.self) == [4, 5])
+            #expect(remaining.mask?.shape == shape.dropLast() + [2])
         }
 
         @Test func tokenUsageAndCacheReuse() async throws {
