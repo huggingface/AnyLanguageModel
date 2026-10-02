@@ -15,6 +15,7 @@ public struct GenerationSchema: Equatable, Codable, CustomDebugStringConvertible
         case string(StringNode)
         case number(NumberNode)
         case boolean
+        case null
         case anyOf([Node])
         case ref(String)
 
@@ -22,7 +23,7 @@ public struct GenerationSchema: Equatable, Codable, CustomDebugStringConvertible
 
         static func == (lhs: GenerationSchema.Node, rhs: GenerationSchema.Node) -> Bool {
             switch (lhs, rhs) {
-            case (.boolean, .boolean):
+            case (.boolean, .boolean), (.null, .null):
                 return true
             case (.ref(let lhsName), .ref(let rhsName)):
                 return lhsName == rhsName
@@ -131,6 +132,9 @@ public struct GenerationSchema: Equatable, Codable, CustomDebugStringConvertible
             case .boolean:
                 try container.encode("boolean", forKey: .type)
 
+            case .null:
+                try container.encode("null", forKey: .type)
+
             case .anyOf(let nodes):
                 try container.encode(nodes, forKey: .anyOf)
 
@@ -209,6 +213,9 @@ public struct GenerationSchema: Equatable, Codable, CustomDebugStringConvertible
             case "boolean":
                 self = .boolean
 
+            case "null":
+                self = .null
+
             default:
                 throw DecodingError.dataCorruptedError(
                     forKey: .type,
@@ -281,6 +288,8 @@ public struct GenerationSchema: Equatable, Codable, CustomDebugStringConvertible
             return num.integerOnly ? "integer" : "number"
         case .boolean:
             return "boolean"
+        case .null:
+            return "null"
         case .anyOf(let nodes):
             return "anyOf(\(nodes.count) choices)"
         case .ref(let name):
@@ -521,6 +530,8 @@ public struct GenerationSchema: Equatable, Codable, CustomDebugStringConvertible
             switch scalar {
             case .bool:
                 return .boolean
+            case .null:
+                return .null
             case .string:
                 return .string(StringNode(description: dynamicProp?.description, pattern: nil, enumChoices: nil))
             case .number:

@@ -92,6 +92,22 @@ struct DynamicGenerationSchemaTests {
         }
     }
 
+    @Test func nullSchemaEncodesAsNullType() throws {
+        let person = DynamicGenerationSchema(
+            name: "Person",
+            properties: [.init(name: "fullName", schema: .init(type: String.self))]
+        )
+        let nullablePerson = DynamicGenerationSchema(name: "NullablePerson", anyOf: [person, .null])
+
+        let schema = try GenerationSchema(root: nullablePerson, dependencies: [])
+        let data = try JSONEncoder().encode(schema)
+        let json = try #require(String(data: data, encoding: .utf8))
+        #expect(json.contains(#"{"type":"null"}"#))
+
+        let decoded = try JSONDecoder().decode(GenerationSchema.self, from: data)
+        #expect(decoded == schema)
+    }
+
     @Test func duplicateDependencyNamesThrow() {
         let dep1 = DynamicGenerationSchema(name: "Shared", properties: [])
         let dep2 = DynamicGenerationSchema(name: "Shared", properties: [])

@@ -22,6 +22,7 @@ public struct DynamicGenerationSchema: Sendable {
         case number
         case integer
         case decimal
+        case null
     }
 
     internal let body: Body
@@ -113,6 +114,35 @@ public struct DynamicGenerationSchema: Sendable {
             let typeName = String(reflecting: Value.self)
             self.body = .reference(typeName)
         }
+    }
+
+    /// A schema that represents a null value.
+    ///
+    /// Use a null schema to express a value that can't be absent but can be empty.
+    /// For example, combine it with another schema in an any-of schema:
+    ///
+    /// ```swift
+    /// let person = DynamicGenerationSchema(
+    ///     name: "Person",
+    ///     properties: [
+    ///         DynamicGenerationSchema.Property(
+    ///             name: "fullName",
+    ///             schema: DynamicGenerationSchema(type: String.self)
+    ///         )
+    ///     ]
+    /// )
+    /// let nullablePerson = DynamicGenerationSchema(
+    ///     name: "NullablePerson",
+    ///     anyOf: [person, .null]
+    /// )
+    /// let schema = try GenerationSchema(root: nullablePerson, dependencies: [])
+    /// ```
+    public static var null: DynamicGenerationSchema {
+        DynamicGenerationSchema(body: .scalar(.null))
+    }
+
+    private init(body: Body) {
+        self.body = body
     }
 
     /// Creates an refrence schema.

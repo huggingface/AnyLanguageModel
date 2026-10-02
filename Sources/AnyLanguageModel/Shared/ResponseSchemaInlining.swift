@@ -93,7 +93,7 @@ extension GenerationSchema {
                     )
                 }
             )
-        case .string, .number, .boolean:
+        case .string, .number, .boolean, .null:
             return node
         }
     }

@@ -63,6 +63,70 @@
             }
         #endif
 
+        /// The languages that the model supports.
+        public var supportedLanguages: Set<Locale.Language> {
+            systemModel.supportedLanguages
+        }
+
+        /// Returns a Boolean value that indicates whether the model supports a locale.
+        ///
+        /// - Parameter locale: The locale to check. Defaults to the current locale.
+        /// - Returns: `true` if the model supports the locale's language.
+        public func supportsLocale(_ locale: Locale = Locale.current) -> Bool {
+            systemModel.supportsLocale(locale)
+        }
+
+        #if compiler(>=6.3) && !os(tvOS) && !os(watchOS)
+            /// Returns the number of tokens in a prompt.
+            ///
+            /// - Parameter prompt: The prompt to count.
+            /// - Returns: The number of tokens.
+            @available(macOS 26.4, iOS 26.4, visionOS 26.4, *)
+            public func tokenCount(for prompt: some PromptRepresentable) async throws -> Int {
+                try await systemModel.tokenCount(for: prompt.promptRepresentation.toFoundationModels())
+            }
+
+            /// Returns the number of tokens in instructions.
+            ///
+            /// - Parameter instructions: The instructions to count.
+            /// - Returns: The number of tokens.
+            @available(macOS 26.4, iOS 26.4, visionOS 26.4, *)
+            public func tokenCount(for instructions: Instructions) async throws -> Int {
+                try await systemModel.tokenCount(for: instructions.toFoundationModels())
+            }
+
+            /// Returns the number of tokens that the definitions of tools use.
+            ///
+            /// - Parameter tools: The tools to count.
+            /// - Returns: The number of tokens.
+            @available(macOS 26.4, iOS 26.4, visionOS 26.4, *)
+            public func tokenCount(for tools: [any Tool]) async throws -> Int {
+                try await systemModel.tokenCount(for: tools.toFoundationModels())
+            }
+
+            /// Returns the number of tokens in a generation schema.
+            ///
+            /// - Parameter schema: The schema to count.
+            /// - Returns: The number of tokens.
+            @available(macOS 26.4, iOS 26.4, visionOS 26.4, *)
+            public func tokenCount(for schema: GenerationSchema) async throws -> Int {
+                try await systemModel.tokenCount(for: FoundationModels.GenerationSchema(schema))
+            }
+
+            /// Returns the number of tokens in transcript entries.
+            ///
+            /// - Parameter transcriptEntries: The entries to count.
+            /// - Returns: The number of tokens.
+            @available(macOS 26.4, iOS 26.4, visionOS 26.4, *)
+            public func tokenCount(
+                for transcriptEntries: some Collection<Transcript.Entry>
+            ) async throws -> Int {
+                let transcript = Transcript(entries: Array(transcriptEntries))
+                    .toFoundationModels(instructions: nil, toolDefinitions: [])
+                return try await systemModel.tokenCount(for: Array(transcript))
+            }
+        #endif
+
         /// Whether the model accepts image input.
         public var supportsImageInput: Bool {
             #if compiler(>=6.4) && !os(tvOS) && !os(watchOS)
@@ -229,7 +293,9 @@
 
             let fmSentiment = sentiment?.toFoundationModels()
             let fmIssues = issues.map { $0.toFoundationModels() }
-            let fmDesiredOutput: FoundationModels.Transcript.Entry? = nil
+            let fmDesiredOutput = desiredOutput.flatMap { entry in
+                Transcript(entries: [entry]).toFoundationModels(instructions: nil, toolDefinitions: []).first
+            }
 
             return fmSession.logFeedbackAttachment(
                 sentiment: fmSentiment,
@@ -528,7 +594,15 @@
             let typeName = name.hasPrefix(prefix) ? String(name.dropFirst(prefix.count)) : name
             return .init(referenceTo: typeName)
 
-        case .allOf, .oneOf, .not, .null, .empty, .any:
+        case .null:
+            #if compiler(>=6.3)
+                if #available(macOS 26.4, iOS 26.4, watchOS 27.0, visionOS 26.4, *) {
+                    return .null
+                }
+            #endif
+            return .init(type: String.self)
+
+        case .allOf, .oneOf, .not, .empty, .any:
             return .init(type: String.self)
         }
     }
@@ -1052,6 +1126,9 @@
 
         case .boolean:
             return GeneratedContent(true)
+
+        case .null:
+            return GeneratedContent(kind: .null)
 
         case .anyOf(let nodes):
             if let first = nodes.first {

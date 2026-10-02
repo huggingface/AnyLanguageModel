@@ -1024,6 +1024,52 @@ extension LanguageModelSession {
             desiredOutput: desiredOutput
         )
     }
+
+    /// Logs feedback about the most recent response, with the text you wanted instead.
+    ///
+    /// - Parameters:
+    ///   - sentiment: Whether the response was positive, negative, or neutral.
+    ///   - issues: The problems with the response.
+    ///   - desiredResponseText: The text that the model should have generated.
+    /// - Returns: The feedback attachment data.
+    @discardableResult
+    public func logFeedbackAttachment(
+        sentiment: LanguageModelFeedback.Sentiment?,
+        issues: [LanguageModelFeedback.Issue] = [],
+        desiredResponseText: String?
+    ) -> Data {
+        let entry = desiredResponseText.map { content in
+            Transcript.Entry.response(
+                Transcript.Response(assetIDs: [], segments: [.text(.init(content: content))])
+            )
+        }
+        return logFeedbackAttachment(sentiment: sentiment, issues: issues, desiredOutput: entry)
+    }
+
+    /// Logs feedback about the most recent response, with the content you wanted instead.
+    ///
+    /// - Parameters:
+    ///   - sentiment: Whether the response was positive, negative, or neutral.
+    ///   - issues: The problems with the response.
+    ///   - desiredResponseContent: The content that the model should have generated.
+    /// - Returns: The feedback attachment data.
+    @discardableResult
+    public func logFeedbackAttachment(
+        sentiment: LanguageModelFeedback.Sentiment?,
+        issues: [LanguageModelFeedback.Issue] = [],
+        desiredResponseContent: (any ConvertibleToGeneratedContent)?
+    ) -> Data {
+        let entry = desiredResponseContent.map { content in
+            let segment = Transcript.StructuredSegment(
+                source: String(describing: type(of: content)),
+                content: content.generatedContent
+            )
+            return Transcript.Entry.response(
+                Transcript.Response(assetIDs: [], segments: [.structure(segment)])
+            )
+        }
+        return logFeedbackAttachment(sentiment: sentiment, issues: issues, desiredOutput: entry)
+    }
 }
 
 // MARK: -
