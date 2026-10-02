@@ -836,7 +836,11 @@ import Foundation
             input.text.tokens.asArray(Int32.self)
         }
 
-        /// Returns the prefix that can actually be reused, or zero for a cache miss.
+        /// Returns the number of cached tokens that can be reused, or zero for a cache miss.
+        ///
+        /// This is the longest common prefix of the cached and current tokens,
+        /// leaving at least one current token to evaluate.
+        /// Reusing less than the whole cache requires trimming it, so `canTrim` must be true.
         ///
         /// A cache whose offset no longer matches the stored prefix was changed
         /// by a request that ended before storing it, such as a cancelled stream.
@@ -846,15 +850,17 @@ import Foundation
             cacheOffset: Int,
             currentTokens: [Int32],
             configurationMatches: Bool,
-            hasMedia: Bool
+            hasMedia: Bool,
+            canTrim: Bool
         ) -> Int {
             guard !hasMedia, configurationMatches,
                 prefillTokenCount > 0, cacheOffset == prefillTokenCount,
-                currentTokens.count > prefillTokenCount,
-                prefixTokens.count == prefillTokenCount,
-                currentTokens.starts(with: prefixTokens)
+                prefixTokens.count == prefillTokenCount
             else { return 0 }
-            return prefillTokenCount
+            let commonCount = zip(prefixTokens, currentTokens).prefix { $0 == $1 }.count
+            let reusableCount = min(commonCount, currentTokens.count - 1)
+            guard reusableCount > 0, reusableCount == prefillTokenCount || canTrim else { return 0 }
+            return reusableCount
         }
 
         /// Returns the tokens and mask that follow a cached prefix of `count` tokens.
@@ -891,10 +897,17 @@ import Foundation
                         cacheOffset: entry.kvCache.first?.offset ?? 0,
                         currentTokens: fullTokens,
                         configurationMatches: entry.cacheConfigSignature == signature,
-                        hasMedia: lmInput.image != nil || lmInput.video != nil
+                        hasMedia: lmInput.image != nil || lmInput.video != nil,
+                        canTrim: MLXLMCommon.canTrimPromptCache(entry.kvCache)
                     )
                 } ?? 0
             if let existingEntry, cachedCount > 0 {
+                if cachedCount < existingEntry.prefillTokenCount {
+                    MLXLMCommon.trimPromptCache(
+                        existingEntry.kvCache,
+                        numTokens: existingEntry.prefillTokenCount - cachedCount
+                    )
+                }
                 let partialText = Self.droppingCachedPrefix(of: lmInput.text, count: cachedCount)
                 return (existingEntry.kvCache, MLXLMCommon.LMInput(text: partialText), fullTokens, cachedCount)
             }
@@ -1501,47 +1514,63 @@ import Foundation
             for session: LanguageModelSession,
             promptPrefix: Prompt?
         ) {
+            Task {
+                await prewarmSessionCache(for: session)
+            }
+        }
+
+        /// Fills the session cache with the session's instructions.
+        internal func prewarmSessionCache(for session: LanguageModelSession) async {
             let modelId = self.modelId
             let hub = self.hub
             let directory = self.directory
 
-            Task {
-                guard Self.acquireGenerationSlot(for: session) else {
+            guard Self.acquireGenerationSlot(for: session) else {
+                return
+            }
+            defer { Self.releaseGenerationSlot(for: session) }
+
+            let generationScope = beginGenerationScope()
+            defer { endGenerationScope(generationScope) }
+
+            do {
+                let loaded = try await loadContext(modelId: modelId, hub: hub, directory: directory)
+                defer { withExtendedLifetime(loaded) {} }
+                let context = loaded.context
+                guard let instructions = session.instructions?.description, !instructions.isEmpty else {
                     return
                 }
-                defer { Self.releaseGenerationSlot(for: session) }
 
-                let generationScope = beginGenerationScope()
-                defer { endGenerationScope(generationScope) }
+                let toolSpecs = mlxToolSpecs(for: session)
 
-                do {
-                    let loaded = try await loadContext(modelId: modelId, hub: hub, directory: directory)
-                    defer { withExtendedLifetime(loaded) {} }
-                    let context = loaded.context
-                    guard let instructions = session.instructions?.description, !instructions.isEmpty else {
-                        return
-                    }
-
-                    let toolSpecs = mlxToolSpecs(for: session)
-
-                    let params = toGenerateParameters(.init())
-                    let newCache = try context.model.newCache(parameters: params)
-                    let userInput = MLXLMCommon.UserInput(
-                        chat: [.init(role: .system, content: instructions)],
-                        processing: .init(resize: nil),
-                        tools: toolSpecs
-                    )
-                    let lmInput = try await context.processor.prepare(input: userInput)
-                    _ = try context.model.prepare(lmInput, cache: newCache, state: nil, prefill: params.prefill)
-                    storeSessionCache(
-                        cache: newCache,
-                        fullTokens: tokens(from: lmInput),
-                        generateParameters: params,
-                        session: session
-                    )
-                } catch {
-                    // Ignore errors during prewarm
+                let params = toGenerateParameters(.init())
+                let newCache = try context.model.newCache(parameters: params)
+                let userInput = MLXLMCommon.UserInput(
+                    chat: [.init(role: .system, content: instructions)],
+                    processing: .init(resize: nil),
+                    tools: toolSpecs
+                )
+                let lmInput = try await context.processor.prepare(input: userInput)
+                let prepareResult = try context.model.prepare(
+                    lmInput,
+                    cache: newCache,
+                    state: nil,
+                    prefill: params.prefill
+                )
+                // `prepare` can leave the last chunk for the first decoding step;
+                // evaluate it so that the cache holds every token.
+                if case .tokens(let remaining) = prepareResult, remaining.tokens.size > 0 {
+                    _ = context.model(remaining[text: .newAxis], cache: newCache, state: nil)
+                    eval(newCache)
                 }
+                storeSessionCache(
+                    cache: newCache,
+                    fullTokens: tokens(from: lmInput),
+                    generateParameters: params,
+                    session: session
+                )
+            } catch {
+                // Ignore errors during prewarm
             }
         }
     }

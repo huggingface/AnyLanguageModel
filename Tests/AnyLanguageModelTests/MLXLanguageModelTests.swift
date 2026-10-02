@@ -90,6 +90,22 @@ import Testing
             #expect(remaining.mask?.shape == shape.dropLast() + [2])
         }
 
+        @Test func prewarmedCacheIsReused() async throws {
+            let options = GenerationOptions(sampling: .greedy, maximumResponseTokens: 16)
+            let session = LanguageModelSession(
+                model: model,
+                instructions: "You are a terse assistant. Answer in one short sentence."
+            )
+            await model.prewarmSessionCache(for: session)
+
+            // Output isn't compared with a fresh session's:
+            // evaluating the prompt in two chunks changes logits slightly,
+            // which can change greedy output after several tokens.
+            let response = try await session.respond(to: "Name three primary colors.", options: options)
+            #expect(response.usage.input.cachedTokenCount > 0)
+            #expect(!response.content.isEmpty)
+        }
+
         @Test func tokenUsageAndCacheReuse() async throws {
             let options = GenerationOptions(sampling: .greedy, maximumResponseTokens: 8)
             let session = LanguageModelSession(model: model)

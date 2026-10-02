@@ -103,7 +103,8 @@ struct LocalGenerationUsageTests {
                 cacheOffset: Int = 2,
                 current: [Int32] = [1, 2, 3],
                 configurationMatches: Bool = true,
-                hasMedia: Bool = false
+                hasMedia: Bool = false,
+                canTrim: Bool = false
             ) -> Int {
                 MLXLanguageModel.reusablePrefixTokenCount(
                     prefixTokens: prefix,
@@ -111,7 +112,8 @@ struct LocalGenerationUsageTests {
                     cacheOffset: cacheOffset,
                     currentTokens: current,
                     configurationMatches: configurationMatches,
-                    hasMedia: hasMedia
+                    hasMedia: hasMedia,
+                    canTrim: canTrim
                 )
             }
             #expect(cachedCount() == 2)
@@ -120,6 +122,14 @@ struct LocalGenerationUsageTests {
             #expect(cachedCount(current: [1]) == 0)
             #expect(cachedCount(prefill: 1) == 0)
             #expect(cachedCount(cacheOffset: 5) == 0)
+
+            // A trimmable cache can reuse the longest common prefix,
+            // leaving at least one token to evaluate.
+            #expect(cachedCount(current: [1, 9, 3], canTrim: true) == 1)
+            #expect(cachedCount(current: [1, 2], canTrim: true) == 1)
+            #expect(cachedCount(current: [1], canTrim: true) == 0)
+            #expect(cachedCount(current: [9, 2, 3], canTrim: true) == 0)
+            #expect(cachedCount(canTrim: true) == 2)
             #expect(cachedCount(prefix: [], prefill: 0) == 0)
             #expect(cachedCount(configurationMatches: false) == 0)
             #expect(cachedCount(hasMedia: true) == 0)
