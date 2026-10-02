@@ -13,7 +13,7 @@ import struct Foundation.UUID
 /// }
 ///
 /// struct PeopleView: View {
-///     @State private var session = LanguageModelSession()
+///     @State private var session = LanguageModelSession(model: SystemLanguageModel.default)
 ///     @State private var people = [Person.PartiallyGenerated]()
 ///
 ///     var body: some View {
