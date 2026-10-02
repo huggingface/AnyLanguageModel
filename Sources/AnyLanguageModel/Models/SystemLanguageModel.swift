@@ -64,6 +64,11 @@
         #endif
 
         /// Whether the model accepts image input.
+        ///
+        /// - Note: This property is exclusive to AnyLanguageModel
+        ///   and using it means your code is no longer drop-in compatible
+        ///   with the Foundation Models framework.
+        ///   In Foundation Models 27, check whether `capabilities` contains `.vision` instead.
         public var supportsImageInput: Bool {
             #if compiler(>=6.4) && !os(tvOS) && !os(watchOS)
                 if #available(macOS 27.0, iOS 27.0, visionOS 27.0, *) {

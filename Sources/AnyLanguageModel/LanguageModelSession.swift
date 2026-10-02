@@ -52,6 +52,10 @@ public final class LanguageModelSession: @unchecked Sendable {
     ///
     /// Counts increase as responses and streaming snapshots report usage.
     /// Restoring a transcript does not restore usage from previous sessions.
+    ///
+    /// - Note: This property is exclusive to AnyLanguageModel on OS 26.
+    ///   It follows the Foundation Models 27 `LanguageModelSession.usage` API,
+    ///   so code that uses it ports to Foundation Models on OS 27.
     public var usage: Usage {
         access(keyPath: \.usage)
         return state.withLock { $0.usage }
@@ -481,6 +485,10 @@ public final class LanguageModelSession: @unchecked Sendable {
 
         /// Provider-reported token usage,
         /// with zero counts for values the provider does not report.
+        ///
+        /// - Note: This property is exclusive to AnyLanguageModel on OS 26.
+        ///   It follows the Foundation Models 27 `Response.usage` API,
+        ///   so code that uses it ports to Foundation Models on OS 27.
         public let usage: Usage
 
         internal let providerMetadata: [String: String]?
@@ -1288,10 +1296,18 @@ extension LanguageModelSession {
             /// Transcript entries (tool calls and outputs) produced so far while streaming.
             /// Cumulative across tool rounds;
             /// empty for providers that don't stream tool activity.
+            ///
+            /// - Note: This property is exclusive to AnyLanguageModel on OS 26.
+            ///   It follows the Foundation Models 27 `ResponseStream.Snapshot.transcriptEntries` API,
+            ///   so code that uses it ports to Foundation Models on OS 27.
             public var transcriptEntries: ArraySlice<Transcript.Entry>
 
             /// Provider-reported counts so far,
             /// with zero counts for values the provider does not report.
+            ///
+            /// - Note: This property is exclusive to AnyLanguageModel on OS 26.
+            ///   It follows the Foundation Models 27 `ResponseStream.Snapshot.usage` API,
+            ///   so code that uses it ports to Foundation Models on OS 27.
             public var usage: Usage
 
             internal var providerMetadata: [String: String]?
