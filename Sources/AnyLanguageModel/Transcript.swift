@@ -44,6 +44,10 @@ public struct Transcript: Sendable, Equatable, Codable {
         case toolOutput(ToolOutput)
 
         /// Provider reasoning, separate from the person-facing response.
+        ///
+        /// - Note: This API is exclusive to AnyLanguageModel on OS 26.
+        ///   It follows the Foundation Models 27 `Transcript.Entry.reasoning` API,
+        ///   so code that uses it ports to Foundation Models on OS 27.
         case reasoning(Reasoning)
 
         /// A response from the model.
@@ -446,12 +450,20 @@ public struct Transcript: Sendable, Equatable, Codable {
     }
 
     /// A provider cannot safely replay a reasoning entry in this transcript.
+    ///
+    /// - Note: This API is exclusive to AnyLanguageModel
+    ///   and using it means your code is no longer drop-in compatible
+    ///   with the Foundation Models framework.
     public enum ReasoningReplayError: Error, Sendable, Equatable {
         case unsupportedProvider(String)
         case invalidSignature
     }
 
     /// Model reasoning and opaque state needed to continue a conversation.
+    ///
+    /// - Note: This API is exclusive to AnyLanguageModel on OS 26.
+    ///   It follows the Foundation Models 27 `Transcript.Reasoning` API,
+    ///   so code that uses it ports to Foundation Models on OS 27.
     public struct Reasoning: Sendable, Identifiable, Equatable, Codable {
         public var id: String
         public var segments: [Segment]

@@ -582,12 +582,15 @@ say which API they follow.
 - `Usage` and the `usage` properties:
   [token usage](#token-usage),
   which follows the Foundation Models 27 API.
+- `Transcript.Entry.reasoning` and `Transcript.Reasoning`:
+  [reasoning in the transcript](#reasoning-in-the-transcript),
+  which follows the Foundation Models 27 API.
 - Public initializers for `Response`, `ResponseStream`, `ResponseStream.Snapshot`,
   `GenerationGuide`, and `LanguageModelFeedback`,
   for language models defined outside AnyLanguageModel.
 - `Codable` conformance for `GeneratedContent`, `GenerationID`, `Usage`,
   and the types nested in `Transcript`.
-- `GeneratedContentError` and each provider's error type.
+- `GeneratedContentError`, `Transcript.ReasoningReplayError`, and each provider's error type.
 - `JSONValue`:
   JSON values for provider options such as `extraBody`.
 - Smaller additions to existing types,
