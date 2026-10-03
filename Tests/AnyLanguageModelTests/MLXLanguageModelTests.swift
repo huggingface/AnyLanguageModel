@@ -4,6 +4,9 @@ import Testing
 @testable import AnyLanguageModel
 
 #if MLX
+    import class MLX.MLXArray
+    import struct MLXLMCommon.LMInput
+
     private let shouldRunMLXTests = {
         // Enable when explicitly requested via environment variable
         if ProcessInfo.processInfo.environment["ENABLE_MLX_TESTS"] != nil {
@@ -37,6 +40,9 @@ import Testing
             directory: ProcessInfo.processInfo.environment["MLX_MODEL_DIRECTORY"].map { URL(fileURLWithPath: $0) }
         )
         let visionModel = MLXLanguageModel(modelId: "mlx-community/Qwen2-VL-2B-Instruct-4bit")
+        // Text generation has no default token limit, and a model that never emits an end token
+        // would keep generating. Bound every response so that one can't stall the suite.
+        let boundedOptions = GenerationOptions(maximumResponseTokens: 512)
 
         @Test func availabilityBecomesAvailableAfterSuccessfulLoad() async throws {
             await model.removeFromCache()
@@ -45,7 +51,7 @@ import Testing
             #expect(model.isAvailable == false)
 
             let session = LanguageModelSession(model: model)
-            let response = try await session.respond(to: "Say hello")
+            let response = try await session.respond(to: "Say hello", options: boundedOptions)
             #expect(!response.content.isEmpty)
 
             #expect(model.availability == .available)
@@ -55,14 +61,14 @@ import Testing
         @Test func basicResponse() async throws {
             let session = LanguageModelSession(model: model)
 
-            let response = try await session.respond(to: "Say hello")
+            let response = try await session.respond(to: "Say hello", options: boundedOptions)
             #expect(!response.content.isEmpty)
         }
 
         @Test func streamingResponse() async throws {
             let session = LanguageModelSession(model: model)
 
-            let stream = session.streamResponse(to: "Count to 5")
+            let stream = session.streamResponse(to: "Count to 5", options: boundedOptions)
             var chunks: [String] = []
 
             for try await response in stream {
@@ -70,6 +76,61 @@ import Testing
             }
 
             #expect(!chunks.isEmpty)
+        }
+
+        // Text-only processors return rank-1 tokens; some VLM processors return `[1, L]`.
+        // This test needs no model, but it stays in this gated suite:
+        // creating an `MLXArray` loads the Metal library, which `swift build` doesn't produce.
+        @Test(arguments: [[6], [1, 6]])
+        func droppingCachedPrefixKeepsLeadingAxes(shape: [Int]) {
+            let text = LMInput.Text(
+                tokens: MLXArray([Int32](0 ..< 6), shape),
+                mask: MLXArray([Int32](repeating: 1, count: 6), shape)
+            )
+            let remaining = MLXLanguageModel.droppingCachedPrefix(of: text, count: 4)
+            #expect(remaining.tokens.shape == shape.dropLast() + [2])
+            #expect(remaining.tokens.asArray(Int32.self) == [4, 5])
+            #expect(remaining.mask?.shape == shape.dropLast() + [2])
+        }
+
+        @Test func prewarmedCacheIsReused() async throws {
+            let options = GenerationOptions(sampling: .greedy, maximumResponseTokens: 16)
+            let session = LanguageModelSession(
+                model: model,
+                instructions: "You are a terse assistant. Answer in one short sentence."
+            )
+            await model.prewarmSessionCache(for: session)
+
+            // Output isn't compared with a fresh session's:
+            // evaluating the prompt in two chunks changes logits slightly,
+            // which can change greedy output after several tokens.
+            let response = try await session.respond(to: "Name three primary colors.", options: options)
+            #expect(response.usage.input.cachedTokenCount > 0)
+            #expect(!response.content.isEmpty)
+        }
+
+        @Test func continuationStateIsKeptWithTheSessionCache() async throws {
+            // Qwen3-VL needs the model state from the request that filled the cache to continue it.
+            let model = MLXLanguageModel(modelId: "mlx-community/Qwen3-VL-2B-Instruct-4bit")
+            let options = GenerationOptions(sampling: .greedy, maximumResponseTokens: 8)
+            let session = LanguageModelSession(model: model)
+            _ = try await session.respond(to: "Name three primary colors.", options: options)
+            let response = try await session.respond(to: "Which of those is your favorite?", options: options)
+            #expect(response.usage.input.cachedTokenCount > 0)
+            #expect(!response.content.isEmpty)
+        }
+
+        @Test func continuationStateIsKeptWithAPrewarmedCache() async throws {
+            let model = MLXLanguageModel(modelId: "mlx-community/Qwen3-VL-2B-Instruct-4bit")
+            let options = GenerationOptions(sampling: .greedy, maximumResponseTokens: 8)
+            let session = LanguageModelSession(
+                model: model,
+                instructions: "You are a terse assistant. Answer in one short sentence."
+            )
+            await model.prewarmSessionCache(for: session)
+            let response = try await session.respond(to: "Name three primary colors.", options: options)
+            #expect(response.usage.input.cachedTokenCount > 0)
+            #expect(!response.content.isEmpty)
         }
 
         @Test func tokenUsageAndCacheReuse() async throws {
@@ -98,6 +159,22 @@ import Testing
             #expect(snapshots.count >= 2)
             #expect(snapshots.dropLast().last?.rawContent == final.rawContent)
             #expect(snapshots.dropLast().last?.usage == .zero)
+        }
+
+        @Test func sessionCacheReuseMatchesFreshSession() async throws {
+            // The second turn reuses the first turn's cache,
+            // so it should match a fresh session with the same history.
+            let options = GenerationOptions(sampling: .greedy, maximumResponseTokens: 48)
+            let session = LanguageModelSession(model: model)
+            _ = try await session.respond(to: "Name three primary colors.", options: options)
+            let history = session.transcript
+            let reused = try await session.respond(to: "Which of those is your favorite?", options: options)
+            #expect(reused.usage.input.cachedTokenCount > 0)
+
+            let fresh = try await LanguageModelSession(model: model, transcript: history)
+                .respond(to: "Which of those is your favorite?", options: options)
+            #expect(fresh.usage.input.cachedTokenCount == 0)
+            #expect(reused.content == fresh.content)
         }
 
         @Test func tokenUsageStructuredResponseStreamParity() async throws {
@@ -191,10 +268,13 @@ import Testing
 
         @Test func multiTurnSameSession() async throws {
             let session = LanguageModelSession(model: model)
-            let first = try await session.respond(to: "Say hello in one sentence.")
+            let first = try await session.respond(to: "Say hello in one sentence.", options: boundedOptions)
             #expect(!first.content.isEmpty)
 
-            let second = try await session.respond(to: "Now answer with one more short sentence.")
+            let second = try await session.respond(
+                to: "Now answer with one more short sentence.",
+                options: boundedOptions
+            )
             #expect(!second.content.isEmpty)
         }
 
@@ -247,7 +327,10 @@ import Testing
                 instructions: "You are a helpful assistant. Use available tools when needed."
             )
 
-            let response = try await session.respond(to: "How's the weather in San Francisco?")
+            let response = try await session.respond(
+                to: "How's the weather in San Francisco?",
+                options: GenerationOptions(sampling: .greedy, maximumResponseTokens: 512)
+            )
 
             var foundToolOutput = false
             for case let .toolOutput(toolOutput) in response.transcriptEntries {
@@ -275,7 +358,10 @@ import Testing
                 instructions: "You are a helpful assistant. Use available tools when needed."
             )
 
-            let stream = session.streamResponse(to: "How's the weather in San Francisco?")
+            let stream = session.streamResponse(
+                to: "How's the weather in San Francisco?",
+                options: GenerationOptions(sampling: .greedy, maximumResponseTokens: 512)
+            )
 
             // Iterate the stream, keeping the last snapshot as the final state.
             var snapshotCount = 0
@@ -319,7 +405,7 @@ import Testing
                 )
             ])
             let session = LanguageModelSession(model: visionModel, transcript: transcript)
-            var options = GenerationOptions()
+            var options = boundedOptions
             var mlxOptions = MLXLanguageModel.CustomGenerationOptions.default
             mlxOptions.userInputProcessing = .resize(to: CGSize(width: 512, height: 512))
             options[custom: MLXLanguageModel.self] = mlxOptions
@@ -337,7 +423,7 @@ import Testing
                 )
             ])
             let session = LanguageModelSession(model: visionModel, transcript: transcript)
-            var options = GenerationOptions()
+            var options = boundedOptions
             var mlxOptions = MLXLanguageModel.CustomGenerationOptions.default
             mlxOptions.userInputProcessing = .resize(to: CGSize(width: 512, height: 512))
             options[custom: MLXLanguageModel.self] = mlxOptions
@@ -473,7 +559,7 @@ import Testing
         @Test func removeAllFromCacheThenRespond() async throws {
             await MLXLanguageModel.removeAllFromCache()
             let session = LanguageModelSession(model: model)
-            let response = try await session.respond(to: "Say hello after cache clear")
+            let response = try await session.respond(to: "Say hello after cache clear", options: boundedOptions)
             #expect(!response.content.isEmpty)
         }
     }

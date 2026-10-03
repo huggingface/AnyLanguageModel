@@ -211,4 +211,50 @@ struct TranscriptTests {
             }
         }
     }
+
+    @Test(arguments: [
+        (GenerationOptions.SamplingMode.greedy, #"{"greedy":{}}"#),
+        (.random(top: 40, seed: 7), #"{"topK":{"_0":40,"seed":7}}"#),
+        (.random(probabilityThreshold: 0.9), #"{"nucleus":{"_0":0.9}}"#),
+    ])
+    func promptEncodesOptionsWithoutCustomOptions(
+        sampling: GenerationOptions.SamplingMode,
+        encodedMode: String
+    ) throws {
+        var options = GenerationOptions(sampling: sampling, temperature: 0.5, maximumResponseTokens: 64)
+        options[custom: OpenAILanguageModel.self] = .init(extraBody: ["key": "value"])
+        let prompt = Transcript.Prompt(id: "p", segments: [.text(.init(id: "s", content: "Hi"))], options: options)
+
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = .sortedKeys
+        let json = String(decoding: try encoder.encode(prompt), as: UTF8.self)
+        #expect(
+            json
+                == #"{"id":"p","options":{"maximumResponseTokens":64,"sampling":{"mode":"#
+                + encodedMode
+                + #"},"temperature":0.5},"segments":[{"text":{"_0":{"content":"Hi","id":"s"}}}]}"#
+        )
+
+        let decoded = try JSONDecoder().decode(Transcript.Prompt.self, from: Data(json.utf8))
+        #expect(decoded.options == GenerationOptions(sampling: sampling, temperature: 0.5, maximumResponseTokens: 64))
+        #expect(decoded.options[custom: OpenAILanguageModel.self] == nil)
+    }
+
+    @Test func promptDecodesOptionsWithEncodedCustomOptions() throws {
+        // Earlier releases encoded `GenerationOptions` with a `customOptionsStorage` key.
+        let json = #"""
+            {"id":"p","options":{"customOptionsStorage":{"AnyLanguageModel.OpenAILanguageModel.CustomGenerationOptions":
+            {"extra_body":{"key":"value"}}},"maximumResponseTokens":64,"sampling":{"mode":{"greedy":{}}},
+            "temperature":0.5},"segments":[]}
+            """#
+        let decoded = try JSONDecoder().decode(Transcript.Prompt.self, from: Data(json.utf8))
+        #expect(decoded.options == GenerationOptions(sampling: .greedy, temperature: 0.5, maximumResponseTokens: 64))
+        #expect(decoded.options[custom: OpenAILanguageModel.self] == nil)
+    }
+
+    @Test func promptRoundTripsDefaultOptions() throws {
+        let prompt = Transcript.Prompt(id: "p", segments: [])
+        let data = try JSONEncoder().encode(prompt)
+        #expect(try JSONDecoder().decode(Transcript.Prompt.self, from: data) == prompt)
+    }
 }

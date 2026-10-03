@@ -1,11 +1,46 @@
 import Foundation
 import Observation
 
+/// Controls transcript retention when generation fails or is cancelled.
+///
+/// - Note: This API is exclusive to AnyLanguageModel
+///   and using it means your code is no longer drop-in compatible
+///   with the Foundation Models framework.
+public struct TranscriptErrorHandlingPolicy: Sendable, Equatable {
+    private let shouldRevert: Bool
+
+    /// Retain the prompt and the latest cumulative streaming checkpoint.
+    /// Nonstreaming failures have no checkpoint and retain only the prompt.
+    public static let preserveTranscript = Self(shouldRevert: false)
+    /// Remove entries added by the failing request, preserving other requests.
+    /// Tool side effects are not undone.
+    public static let revertTranscript = Self(shouldRevert: true)
+}
+
 @Observable
 public final class LanguageModelSession: @unchecked Sendable {
     public var isResponding: Bool {
         access(keyPath: \.isResponding)
         return state.withLock { $0.isResponding }
+    }
+
+    /// On failure, `nil` retains the prompt without committing streaming checkpoints.
+    /// Streaming cancellation never commits the partial answer as a completed response, regardless
+    /// of this policy. These defaults do not claim Foundation Models behavioral parity.
+    ///
+    /// - Note: This property is exclusive to AnyLanguageModel
+    ///   and using it means your code is no longer drop-in compatible
+    ///   with the Foundation Models framework.
+    public var transcriptErrorHandlingPolicy: TranscriptErrorHandlingPolicy? {
+        get {
+            access(keyPath: \.transcriptErrorHandlingPolicy)
+            return state.withLock { $0.transcriptErrorHandlingPolicy }
+        }
+        set {
+            withMutation(keyPath: \.transcriptErrorHandlingPolicy) {
+                state.withLock { $0.transcriptErrorHandlingPolicy = newValue }
+            }
+        }
     }
 
     public var transcript: Transcript {
@@ -17,6 +52,10 @@ public final class LanguageModelSession: @unchecked Sendable {
     ///
     /// Counts increase as responses and streaming snapshots report usage.
     /// Restoring a transcript does not restore usage from previous sessions.
+    ///
+    /// - Note: This property is exclusive to AnyLanguageModel on OS 26.
+    ///   It follows the Foundation Models 27 `LanguageModelSession.usage` API,
+    ///   so code that uses it ports to Foundation Models on OS 27.
     public var usage: Usage {
         access(keyPath: \.usage)
         return state.withLock { $0.usage }
@@ -24,8 +63,42 @@ public final class LanguageModelSession: @unchecked Sendable {
 
     @ObservationIgnored private let state: Locked<State>
 
+    @ObservationIgnored private let responseRelays = Locked<[UUID: Task<Void, Never>]>([:])
+
+    /// Waits for transcript cleanup of all streaming relays registered when this call begins.
+    ///
+    /// Relays started later are excluded.
+    /// Cancelling this wait does not cancel generation.
+    /// Call after cancelling consumers and before persisting the transcript.
+    /// Nonstreaming operations must be awaited separately.
+    /// Do not call from a tool executing within one of the included responses.
+    ///
+    /// - Note: This API is exclusive to AnyLanguageModel
+    ///   and using it means your code is no longer drop-in compatible
+    ///   with the Foundation Models framework.
+    nonisolated public func waitForResponseCompletion() async {
+        let tasks = responseRelays.withLock { Array($0.values) }
+        for task in tasks { await task.value }
+    }
+
     private let model: any LanguageModel
+
+    /// The tools that the model can call during the session.
+    ///
+    /// - Note: This property is exclusive to AnyLanguageModel
+    ///   and using it means your code is no longer drop-in compatible
+    ///   with the Foundation Models framework.
+    ///   It's public so that language models outside this module
+    ///   can read the session's tools.
     public let tools: [any Tool]
+
+    /// The instructions for the session, if any.
+    ///
+    /// - Note: This property is exclusive to AnyLanguageModel
+    ///   and using it means your code is no longer drop-in compatible
+    ///   with the Foundation Models framework.
+    ///   It's public so that language models outside this module
+    ///   can read the session's instructions.
     public let instructions: Instructions?
 
     /// A delegate that observes and controls tool execution.
@@ -38,6 +111,17 @@ public final class LanguageModelSession: @unchecked Sendable {
     ///   with the Foundation Models framework.
     @ObservationIgnored public var toolExecutionDelegate: (any ToolExecutionDelegate)?
 
+    /// Creates a session with a model, tools,
+    /// and instructions that you build with a result builder.
+    ///
+    /// - Note: Unlike Foundation Models,
+    ///   which defaults `model` to `SystemLanguageModel.default`,
+    ///   AnyLanguageModel requires the `model` argument
+    ///   and accepts any type that conforms to ``LanguageModel``.
+    ///   Code that omits `model` doesn't compile with AnyLanguageModel;
+    ///   pass `SystemLanguageModel.default` to use the system model.
+    ///   Code that passes another model
+    ///   is no longer drop-in compatible with the Foundation Models framework.
     public convenience init(
         model: any LanguageModel,
         tools: [any Tool] = [],
@@ -46,6 +130,11 @@ public final class LanguageModelSession: @unchecked Sendable {
         try self.init(model: model, tools: tools, instructions: instructions())
     }
 
+    /// Creates a session with a model, tools, and instructions as a string.
+    ///
+    /// - Note: Unlike Foundation Models,
+    ///   AnyLanguageModel requires the `model` argument
+    ///   and accepts any ``LanguageModel``.
     public convenience init(
         model: any LanguageModel,
         tools: [any Tool] = [],
@@ -54,6 +143,11 @@ public final class LanguageModelSession: @unchecked Sendable {
         self.init(model: model, tools: tools, instructions: Instructions(instructions), transcript: Transcript())
     }
 
+    /// Creates a session with a model, tools, and optional instructions.
+    ///
+    /// - Note: Unlike Foundation Models,
+    ///   AnyLanguageModel requires the `model` argument
+    ///   and accepts any ``LanguageModel``.
     public convenience init(
         model: any LanguageModel,
         tools: [any Tool] = [],
@@ -62,6 +156,12 @@ public final class LanguageModelSession: @unchecked Sendable {
         self.init(model: model, tools: tools, instructions: instructions, transcript: Transcript())
     }
 
+    /// Creates a session with a model and tools
+    /// that continues from an existing transcript.
+    ///
+    /// - Note: Unlike Foundation Models,
+    ///   AnyLanguageModel requires the `model` argument
+    ///   and accepts any ``LanguageModel``.
     public convenience init(
         model: any LanguageModel,
         tools: [any Tool] = [],
@@ -140,16 +240,49 @@ public final class LanguageModelSession: @unchecked Sendable {
         }
     }
 
-    nonisolated private func wrapRespond<T>(_ operation: () async throws -> T) async throws -> T {
+    // The prompt is the only entry committed before a request succeeds. Checkpoints and
+    // the final response commit atomically at completion, so rollback owns only this ID.
+    nonisolated private func removePrompt(id: String) {
+        withMutation(keyPath: \.transcript) {
+            state.withLock { state in
+                state.transcript = Transcript(entries: state.transcript.filter { $0.id != id })
+            }
+        }
+    }
+
+    nonisolated private func wrapRespond<T>(_ operation: (String) async throws -> T) async throws -> T {
+        let promptID = UUID().uuidString
         beginResponding()
         do {
-            let result = try await operation()
+            let result = try await operation(promptID)
             endResponding()
             return result
         } catch {
+            if transcriptErrorHandlingPolicy == .revertTranscript {
+                removePrompt(id: promptID)
+            }
             endResponding()
             throw error
         }
+    }
+
+    /// Returns the response with a `null` value for each omitted optional property
+    /// when the response format's schema represents `nil` explicitly.
+    nonisolated private static func representingNilExplicitly<Content>(
+        in response: Response<Content>,
+        responseFormat: Transcript.ResponseFormat?
+    ) -> Response<Content> where Content: Generable {
+        guard let responseFormat else { return response }
+        let rawContent = responseFormat.schema.representingNilExplicitly(in: response.rawContent)
+        guard rawContent != response.rawContent else { return response }
+        return Response(
+            // Schema-based responses return the generated content itself.
+            content: (rawContent as? Content) ?? response.content,
+            rawContent: rawContent,
+            transcriptEntries: response.transcriptEntries,
+            usage: response.usage,
+            providerMetadata: response.providerMetadata
+        )
     }
 
     nonisolated private func wrapStream<Content>(
@@ -159,28 +292,57 @@ public final class LanguageModelSession: @unchecked Sendable {
         let session = self
         let relay = AsyncThrowingStream<ResponseStream<Content>.Snapshot, any Error> { continuation in
             let stream = upstream
-            let task = Task {
-                session.beginResponding()
-                var lastSnapshot: ResponseStream<Content>.Snapshot?
-                var accountedUsage = Usage.zero
-                do {
-                    for try await snapshot in stream {
-                        lastSnapshot = snapshot
-                        session.recordUsage(snapshot.usage.increment(since: &accountedUsage))
-                        continuation.yield(snapshot)
-                    }
+            let relayID = UUID()
+            // Publish the task under the same lock used by completion removal, so a
+            // fast relay cannot finish before registration and leave a stale handle.
+            let task = session.responseRelays.withLock { relays in
+                let task = Task {
+                    defer { session.responseRelays.withLock { _ = $0.removeValue(forKey: relayID) } }
+                    session.beginResponding()
+                    var lastSnapshot: ResponseStream<Content>.Snapshot?
+                    var accountedUsage = Usage.zero
+                    do {
+                        for try await snapshot in stream {
+                            lastSnapshot = snapshot
+                            session.recordUsage(snapshot.usage.increment(since: &accountedUsage))
+                            continuation.yield(snapshot)
+                        }
 
-                    // Commit the response to the transcript
-                    // before the stream reports completion,
-                    // so a caller that drains the stream
-                    // and starts the next turn sees the full history.
-                    if let lastSnapshot {
+                        // AsyncThrowingStream may end normally when its task is cancelled.
+                        // A partial snapshot must not become a completed transcript response.
+                        try Task.checkCancellation()
+
+                        // Commit the response to the transcript
+                        // before the stream reports completion,
+                        // so a caller that drains the stream
+                        // and starts the next turn sees the full history.
+                        guard let lastSnapshot else {
+                            throw ResponseStreamError.noSnapshots
+                        }
+                        // Fill in `null` for omitted optional properties when the schema asks for it,
+                        // and yield the result so that consumers and `collect()` see it.
+                        var rawContent = lastSnapshot.rawContent
+                        if case .prompt(let prompt) = promptEntry, let responseFormat = prompt.responseFormat {
+                            rawContent = responseFormat.schema.representingNilExplicitly(in: rawContent)
+                        }
+                        if rawContent != lastSnapshot.rawContent {
+                            continuation.yield(
+                                ResponseStream<Content>.Snapshot(
+                                    content: (try? Content.PartiallyGenerated(rawContent)) ?? lastSnapshot.content,
+                                    rawContent: rawContent,
+                                    transcriptEntries: lastSnapshot.transcriptEntries,
+                                    usage: lastSnapshot.usage,
+                                    providerMetadata: lastSnapshot.providerMetadata
+                                )
+                            )
+                        }
+
                         // Extract text content from the generated content
                         let textContent: String
-                        if case .string(let str) = lastSnapshot.rawContent.kind {
+                        if case .string(let str) = rawContent.kind {
                             textContent = str
                         } else {
-                            textContent = lastSnapshot.rawContent.jsonString
+                            textContent = rawContent.jsonString
                         }
 
                         let responseEntry = Transcript.Entry.response(
@@ -196,13 +358,26 @@ public final class LanguageModelSession: @unchecked Sendable {
                                 $0.transcript.append(responseEntry)
                             }
                         }
+                        session.endResponding()
+                        continuation.finish()
+                    } catch {
+                        session.withMutation(keyPath: \.transcript) {
+                            session.state.withLock { state in
+                                if state.transcriptErrorHandlingPolicy == .preserveTranscript {
+                                    state.transcript.append(contentsOf: lastSnapshot?.transcriptEntries ?? [])
+                                } else if state.transcriptErrorHandlingPolicy == .revertTranscript {
+                                    state.transcript = Transcript(
+                                        entries: state.transcript.filter { $0.id != promptEntry.id }
+                                    )
+                                }
+                            }
+                        }
+                        session.endResponding()
+                        continuation.finish(throwing: error)
                     }
-                    session.endResponding()
-                    continuation.finish()
-                } catch {
-                    session.endResponding()
-                    continuation.finish(throwing: error)
                 }
+                relays[relayID] = task
+                return task
             }
             continuation.onTermination = { termination in
                 if case .cancelled = termination {
@@ -218,6 +393,12 @@ public final class LanguageModelSession: @unchecked Sendable {
     /// Matches the token-usage API in Foundation Models 27.
     /// Counts default to zero when the provider does not report them.
     /// Usage is cumulative across the response's tool rounds.
+    ///
+    /// - Note: This API is exclusive to AnyLanguageModel on OS 26.
+    ///   It follows the Foundation Models 27 `Usage` API,
+    ///   so code that uses it ports to Foundation Models on OS 27.
+    ///   The `Codable` and `Equatable` conformances are exclusive to AnyLanguageModel;
+    ///   Foundation Models 27 doesn't provide them.
     public struct Usage: Sendable, Equatable, Codable {
         /// Token counts for the input submitted to the model.
         public struct Input: Sendable, Equatable, Codable {
@@ -341,6 +522,10 @@ public final class LanguageModelSession: @unchecked Sendable {
 
         /// Provider-reported token usage,
         /// with zero counts for values the provider does not report.
+        ///
+        /// - Note: This property is exclusive to AnyLanguageModel on OS 26.
+        ///   It follows the Foundation Models 27 `Response.usage` API,
+        ///   so code that uses it ports to Foundation Models on OS 27.
         public let usage: Usage
 
         internal let providerMetadata: [String: String]?
@@ -351,6 +536,11 @@ public final class LanguageModelSession: @unchecked Sendable {
         ///   - rawContent: The raw content produced by the model.
         ///   - transcriptEntries: Transcript entries associated with the response.
         ///   - usage: Provider-reported token usage.
+        ///
+        /// - Note: This initializer is exclusive to AnyLanguageModel.
+        ///   It's public so that language models outside this module
+        ///   can create responses;
+        ///   Foundation Models doesn't make it public.
         public init(
             content: Content,
             rawContent: GeneratedContent,
@@ -415,10 +605,11 @@ public final class LanguageModelSession: @unchecked Sendable {
         options: GenerationOptions,
         generate: () async throws -> Response<Content>
     ) async throws -> Response<Content> {
-        try await wrapRespond {
+        try await wrapRespond { promptID in
             // Add prompt to transcript
             let promptEntry = Transcript.Entry.prompt(
                 Transcript.Prompt(
+                    id: promptID,
                     segments: [.text(.init(content: prompt.description))],
                     options: options,
                     responseFormat: responseFormat
@@ -428,7 +619,7 @@ public final class LanguageModelSession: @unchecked Sendable {
                 state.withLock { $0.transcript.append(promptEntry) }
             }
 
-            let response = try await generate()
+            let response = Self.representingNilExplicitly(in: try await generate(), responseFormat: responseFormat)
 
             recordUsage(response.usage)
 
@@ -731,6 +922,11 @@ extension LanguageModelSession {
 // MARK: - Image Convenience Methods
 
 extension LanguageModelSession {
+    /// Produces a text response to a prompt and an image.
+    ///
+    /// - Note: This API is exclusive to AnyLanguageModel
+    ///   and will change to match Foundation Models 27 prompt attachments
+    ///   in AnyLanguageModel 2.0.
     @discardableResult
     nonisolated public func respond(
         to prompt: String,
@@ -744,6 +940,11 @@ extension LanguageModelSession {
         )
     }
 
+    /// Produces a text response to a prompt and images.
+    ///
+    /// - Note: This API is exclusive to AnyLanguageModel
+    ///   and will change to match Foundation Models 27 prompt attachments
+    ///   in AnyLanguageModel 2.0.
     @discardableResult
     nonisolated public func respond(
         to prompt: String,
@@ -759,6 +960,11 @@ extension LanguageModelSession {
         )
     }
 
+    /// Produces a response of the specified type to a prompt and an image.
+    ///
+    /// - Note: This API is exclusive to AnyLanguageModel
+    ///   and will change to match Foundation Models 27 prompt attachments
+    ///   in AnyLanguageModel 2.0.
     @discardableResult
     nonisolated public func respond<Content>(
         to prompt: String,
@@ -776,6 +982,11 @@ extension LanguageModelSession {
         )
     }
 
+    /// Produces a response of the specified type to a prompt and images.
+    ///
+    /// - Note: This API is exclusive to AnyLanguageModel
+    ///   and will change to match Foundation Models 27 prompt attachments
+    ///   in AnyLanguageModel 2.0.
     @discardableResult
     nonisolated public func respond<Content>(
         to prompt: String,
@@ -784,7 +995,7 @@ extension LanguageModelSession {
         includeSchemaInPrompt: Bool = true,
         options: GenerationOptions = GenerationOptions()
     ) async throws -> Response<Content> where Content: Generable {
-        try await wrapRespond {
+        try await wrapRespond { promptID in
             // Build segments from text and images
             var segments: [Transcript.Segment] = []
             if !prompt.isEmpty {
@@ -795,6 +1006,7 @@ extension LanguageModelSession {
             // Add prompt to transcript
             let promptEntry = Transcript.Entry.prompt(
                 Transcript.Prompt(
+                    id: promptID,
                     segments: segments,
                     options: options,
                     responseFormat: type == String.self ? nil : .init(type: type)
@@ -807,12 +1019,15 @@ extension LanguageModelSession {
             // Extract text content for the Prompt parameter
             let textPrompt = Prompt(prompt)
 
-            let response = try await model.respond(
-                within: self,
-                to: textPrompt,
-                generating: type,
-                includeSchemaInPrompt: includeSchemaInPrompt,
-                options: options
+            let response = Self.representingNilExplicitly(
+                in: try await model.respond(
+                    within: self,
+                    to: textPrompt,
+                    generating: type,
+                    includeSchemaInPrompt: includeSchemaInPrompt,
+                    options: options
+                ),
+                responseFormat: type == String.self ? nil : .init(type: type)
             )
 
             recordUsage(response.usage)
@@ -845,6 +1060,11 @@ extension LanguageModelSession {
         }
     }
 
+    /// Streams a text response to a prompt and an image.
+    ///
+    /// - Note: This API is exclusive to AnyLanguageModel
+    ///   and will change to match Foundation Models 27 prompt attachments
+    ///   in AnyLanguageModel 2.0.
     public func streamResponse(
         to prompt: String,
         image: Transcript.ImageSegment,
@@ -857,6 +1077,11 @@ extension LanguageModelSession {
         )
     }
 
+    /// Streams a text response to a prompt and images.
+    ///
+    /// - Note: This API is exclusive to AnyLanguageModel
+    ///   and will change to match Foundation Models 27 prompt attachments
+    ///   in AnyLanguageModel 2.0.
     public func streamResponse(
         to prompt: String,
         images: [Transcript.ImageSegment],
@@ -871,6 +1096,11 @@ extension LanguageModelSession {
         )
     }
 
+    /// Streams a response of the specified type to a prompt and an image.
+    ///
+    /// - Note: This API is exclusive to AnyLanguageModel
+    ///   and will change to match Foundation Models 27 prompt attachments
+    ///   in AnyLanguageModel 2.0.
     nonisolated public func streamResponse<Content>(
         to prompt: String,
         image: Transcript.ImageSegment,
@@ -887,6 +1117,11 @@ extension LanguageModelSession {
         )
     }
 
+    /// Streams a response of the specified type to a prompt and images.
+    ///
+    /// - Note: This API is exclusive to AnyLanguageModel
+    ///   and will change to match Foundation Models 27 prompt attachments
+    ///   in AnyLanguageModel 2.0.
     nonisolated public func streamResponse<Content>(
         to prompt: String,
         images: [Transcript.ImageSegment],
@@ -945,6 +1180,52 @@ extension LanguageModelSession {
             desiredOutput: desiredOutput
         )
     }
+
+    /// Logs feedback about the most recent response, with the text you wanted instead.
+    ///
+    /// - Parameters:
+    ///   - sentiment: Whether the response was positive, negative, or neutral.
+    ///   - issues: The problems with the response.
+    ///   - desiredResponseText: The text that the model should have generated.
+    /// - Returns: The feedback attachment data.
+    @discardableResult
+    public func logFeedbackAttachment(
+        sentiment: LanguageModelFeedback.Sentiment?,
+        issues: [LanguageModelFeedback.Issue] = [],
+        desiredResponseText: String?
+    ) -> Data {
+        let entry = desiredResponseText.map { content in
+            Transcript.Entry.response(
+                Transcript.Response(assetIDs: [], segments: [.text(.init(content: content))])
+            )
+        }
+        return logFeedbackAttachment(sentiment: sentiment, issues: issues, desiredOutput: entry)
+    }
+
+    /// Logs feedback about the most recent response, with the content you wanted instead.
+    ///
+    /// - Parameters:
+    ///   - sentiment: Whether the response was positive, negative, or neutral.
+    ///   - issues: The problems with the response.
+    ///   - desiredResponseContent: The content that the model should have generated.
+    /// - Returns: The feedback attachment data.
+    @discardableResult
+    public func logFeedbackAttachment(
+        sentiment: LanguageModelFeedback.Sentiment?,
+        issues: [LanguageModelFeedback.Issue] = [],
+        desiredResponseContent: (any ConvertibleToGeneratedContent)?
+    ) -> Data {
+        let entry = desiredResponseContent.map { content in
+            let segment = Transcript.StructuredSegment(
+                source: String(describing: type(of: content)),
+                content: content.generatedContent
+            )
+            return Transcript.Entry.response(
+                Transcript.Response(assetIDs: [], segments: [.structure(segment)])
+            )
+        }
+        return logFeedbackAttachment(sentiment: sentiment, issues: issues, desiredOutput: entry)
+    }
 }
 
 // MARK: -
@@ -960,6 +1241,13 @@ extension LanguageModelSession {
         }
 
         public struct Refusal: Sendable {
+            /// The transcript entries associated with the refusal.
+            ///
+            /// - Note: This property is exclusive to AnyLanguageModel
+            ///   and using it means your code is no longer drop-in compatible
+            ///   with the Foundation Models framework.
+            ///   Foundation Models takes transcript entries in the initializer
+            ///   but doesn't make this property public.
             public let transcriptEntries: [Transcript.Entry]
 
             public init(transcriptEntries: [Transcript.Entry]) {
@@ -1049,6 +1337,11 @@ extension LanguageModelSession {
         ///   - content: The complete response content.
         ///   - rawContent: The raw content produced by the model.
         ///   - usage: Provider-reported token usage.
+        ///
+        /// - Note: This initializer is exclusive to AnyLanguageModel.
+        ///   It's public so that language models outside this module
+        ///   can create response streams;
+        ///   Foundation Models doesn't make it public.
         public init(
             content: Content,
             rawContent: GeneratedContent,
@@ -1067,6 +1360,11 @@ extension LanguageModelSession {
 
         /// Creates a response stream that yields snapshots from an async stream.
         /// - Parameter stream: The snapshot stream to relay.
+        ///
+        /// - Note: This initializer is exclusive to AnyLanguageModel.
+        ///   It's public so that language models outside this module
+        ///   can create response streams;
+        ///   Foundation Models doesn't make it public.
         public init(stream: AsyncThrowingStream<Snapshot, any Error>) {
             // When streaming, snapshots arrive from the upstream sequence, so no fallback is required.
             self.fallbackSnapshot = nil
@@ -1084,10 +1382,18 @@ extension LanguageModelSession {
             /// Transcript entries (reasoning, tool calls and outputs) produced so far while streaming.
             /// Cumulative across tool rounds;
             /// empty for providers that don't stream tool activity.
+            ///
+            /// - Note: This property is exclusive to AnyLanguageModel on OS 26.
+            ///   It follows the Foundation Models 27 `ResponseStream.Snapshot.transcriptEntries` API,
+            ///   so code that uses it ports to Foundation Models on OS 27.
             public var transcriptEntries: ArraySlice<Transcript.Entry>
 
             /// Provider-reported counts so far,
             /// with zero counts for values the provider does not report.
+            ///
+            /// - Note: This property is exclusive to AnyLanguageModel on OS 26.
+            ///   It follows the Foundation Models 27 `ResponseStream.Snapshot.usage` API,
+            ///   so code that uses it ports to Foundation Models on OS 27.
             public var usage: Usage
 
             internal var providerMetadata: [String: String]?
@@ -1098,6 +1404,11 @@ extension LanguageModelSession {
             ///   - rawContent: The raw content produced by the model.
             ///   - transcriptEntries: Transcript entries accumulated so far (reasoning/tool calls/outputs).
             ///   - usage: Provider-reported token usage so far.
+            ///
+            /// - Note: This initializer is exclusive to AnyLanguageModel.
+            ///   It's public so that language models outside this module
+            ///   can create snapshots;
+            ///   Foundation Models doesn't make it public.
             public init(
                 content: Content.PartiallyGenerated,
                 rawContent: GeneratedContent,
@@ -1235,6 +1546,7 @@ private enum ResponseStreamError: Error, LocalizedError {
 
 private struct State: Equatable, Sendable {
     var transcript: Transcript
+    var transcriptErrorHandlingPolicy: TranscriptErrorHandlingPolicy?
     var usage = LanguageModelSession.Usage.zero
 
     var isResponding: Bool { count > 0 }

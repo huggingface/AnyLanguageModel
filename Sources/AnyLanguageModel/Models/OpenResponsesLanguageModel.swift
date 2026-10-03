@@ -27,6 +27,9 @@ public struct OpenResponsesLanguageModel: LanguageModel {
 
     /// Custom generation options for Open Responses–compatible APIs.
     ///
+    /// Reached through `GenerationOptions[custom: OpenResponsesLanguageModel.self]`,
+    /// an AnyLanguageModel extension.
+    ///
     /// Includes Open Responses–specific fields such as ``toolChoice`` (including
     /// ``ToolChoice/allowedTools(tools:mode:)``), ``allowedTools``, and
     /// reasoning/text options. Use ``extraBody`` for parameters not yet modeled.
@@ -1243,6 +1246,10 @@ private enum OpenResponsesStreamEvent: Decodable, Sendable {
 // MARK: - Errors
 
 /// Errors that can occur when using ``OpenResponsesLanguageModel``.
+///
+/// - Note: This API is exclusive to AnyLanguageModel
+///   and using it means your code is no longer drop-in compatible
+///   with the Foundation Models framework.
 public enum OpenResponsesLanguageModelError: LocalizedError, Sendable {
     /// The response contained no output to use.
     ///

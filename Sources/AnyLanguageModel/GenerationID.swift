@@ -13,7 +13,7 @@ import struct Foundation.UUID
 /// }
 ///
 /// struct PeopleView: View {
-///     @State private var session = LanguageModelSession()
+///     @State private var session = LanguageModelSession(model: SystemLanguageModel.default)
 ///     @State private var people = [Person.PartiallyGenerated]()
 ///
 ///     var body: some View {
@@ -41,6 +41,10 @@ import struct Foundation.UUID
 ///     }
 /// }
 /// ```
+///
+/// - Note: The `Codable` conformance is exclusive to AnyLanguageModel
+///   and using it means your code is no longer drop-in compatible
+///   with the Foundation Models framework.
 public struct GenerationID: Sendable, Hashable, Codable {
     private let uuid: UUID
 

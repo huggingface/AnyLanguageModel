@@ -20,6 +20,9 @@ public struct OllamaLanguageModel: LanguageModel {
 
     /// Custom generation options specific to Ollama.
     ///
+    /// Reached through `GenerationOptions[custom: OllamaLanguageModel.self]`,
+    /// an AnyLanguageModel extension.
+    ///
     /// Use this type to pass additional model parameters that are not part
     /// of the standard ``GenerationOptions``.
     ///
@@ -148,7 +151,7 @@ public struct OllamaLanguageModel: LanguageModel {
         )
 
         let url = baseURL.appendingPathComponent("api/chat")
-        let body = try JSONEncoder().encode(params)
+        let body = try encodeChatParams(params)
         let chatResponse: ChatResponse = try await httpSession.fetch(
             .post,
             url: url,
@@ -268,7 +271,7 @@ public struct OllamaLanguageModel: LanguageModel {
                             format: format,
                             parameters: extractTopLevelChatParameters(options)
                         )
-                        let body = try JSONEncoder().encode(params)
+                        let body = try encodeChatParams(params)
                         let chunks: AsyncThrowingStream<ChatResponse, any Error> = httpSession.fetchStream(
                             .post,
                             url: url,
@@ -521,6 +524,14 @@ private func convertToolToOllamaFormat(_ tool: any Tool) throws -> [String: JSON
             "parameters": try JSONValue(resolvedSchema),
         ]),
     ]
+}
+
+private func encodeChatParams(_ params: [String: JSONValue]) throws -> Data {
+    let encoder = JSONEncoder()
+    // Ollama reuses prompt prefixes only when their serialized bytes match.
+    // Dictionary iteration order must not vary between equivalent requests.
+    encoder.outputFormatting = [.sortedKeys]
+    return try encoder.encode(params)
 }
 
 private func convertSchemaToOllamaFormat(_ schema: GenerationSchema) throws -> JSONSchema {

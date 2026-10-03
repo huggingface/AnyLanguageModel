@@ -1,3 +1,4 @@
+import Foundation
 import Testing
 @testable import AnyLanguageModel
 
@@ -96,6 +97,37 @@ import Testing
         .enabled(if: isSystemLanguageModelAvailable)
     )
     struct SystemLanguageModelTests {
+        @available(macOS 26.0, iOS 26.0, tvOS 26.0, visionOS 26.0, *)
+        @Test func supportedLanguagesIncludeEnglish() {
+            let model = SystemLanguageModel()
+            #expect(model.supportedLanguages.contains { $0.languageCode == .english })
+            #expect(model.supportsLocale(Locale(identifier: "en_US")))
+        }
+
+        #if compiler(>=6.3) && !os(tvOS)
+            @available(macOS 26.0, iOS 26.0, tvOS 26.0, visionOS 26.0, *)
+            @Test func tokenCountsArePositive() async throws {
+                guard #available(macOS 26.4, iOS 26.4, visionOS 26.4, *) else { return }
+                let model = SystemLanguageModel()
+
+                let short = try await model.tokenCount(for: "Hello")
+                let long = try await model.tokenCount(for: Prompt("How's the weather in Cupertino today?"))
+                #expect(short > 0)
+                #expect(long > short)
+
+                #expect(try await model.tokenCount(for: Instructions("Answer in one sentence.")) > 0)
+
+                #expect(try await model.tokenCount(for: [WeatherTool()]) > 0)
+                #expect(try await model.tokenCount(for: Person.generationSchema) > 0)
+
+                let entries: [Transcript.Entry] = [
+                    .prompt(Transcript.Prompt(segments: [.text(.init(content: "Hello"))])),
+                    .response(Transcript.Response(assetIDs: [], segments: [.text(.init(content: "Hi there!"))])),
+                ]
+                #expect(try await model.tokenCount(for: entries) > 0)
+            }
+        #endif
+
         @available(macOS 26.0, iOS 26.0, tvOS 26.0, visionOS 26.0, *)
         @Test func basicResponse() async throws {
             let model: SystemLanguageModel = SystemLanguageModel()

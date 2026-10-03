@@ -38,6 +38,9 @@ public struct OpenAILanguageModel: LanguageModel {
 
     /// Custom generation options specific to OpenAI-compatible APIs.
     ///
+    /// Reached through `GenerationOptions[custom: OpenAILanguageModel.self]`,
+    /// an AnyLanguageModel extension.
+    ///
     /// Use this type to pass additional parameters that are not part of the
     /// standard ``GenerationOptions``, such as sampling parameters, penalties,
     /// and vendor-specific extensions.
@@ -2012,6 +2015,10 @@ private func extractToolCallsFromOutput(_ output: [JSONValue]?) -> [OpenAIToolCa
 // MARK: - Errors
 
 /// Errors that can occur when using ``OpenAILanguageModel``.
+///
+/// - Note: This API is exclusive to AnyLanguageModel
+///   and using it means your code is no longer drop-in compatible
+///   with the Foundation Models framework.
 public enum OpenAILanguageModelError: LocalizedError {
     /// The response contained no output to use.
     ///

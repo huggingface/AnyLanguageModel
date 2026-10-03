@@ -10,6 +10,12 @@ All you need to do is change your import statement:
 + import AnyLanguageModel
 ```
 
+Anything AnyLanguageModel adds beyond Apple's API
+is marked as an extension in its documentation.
+[Differences from Foundation Models](#differences-from-foundation-models)
+summarizes these extensions
+and lists the few Foundation Models APIs it doesn't implement yet.
+
 ```swift
 struct WeatherTool: Tool {
     let name = "getWeather"
@@ -83,15 +89,8 @@ session.toolExecutionDelegate = ToolExecutionObserver()
 
 ## Requirements
 
-- Swift 6.1+
+- Swift 6.3+ (Xcode 26.4+)
 - iOS 17.0+ / macOS 14.0+ / visionOS 1.0+ / Linux
-
-> [!IMPORTANT]
-> A bug in Xcode 26 may cause build errors
-> when targeting macOS 15 / iOS 18 or earlier
-> (e.g. `Conformance of 'String' to 'Generable' is only available in macOS 26.0 or newer`).
-> As a workaround, build your project with Xcode 16.
-> For more information, see [issue #15](https://github.com/huggingface/AnyLanguageModel/issues/15).
 
 ## Installation
 
@@ -99,7 +98,7 @@ Add this package to your `Package.swift`:
 
 ```swift
 dependencies: [
-    .package(url: "https://github.com/huggingface/AnyLanguageModel", from: "0.14.0")
+    .package(url: "https://github.com/huggingface/AnyLanguageModel", from: "0.15.0")
 ]
 ```
 
@@ -127,7 +126,7 @@ To enable specific traits, specify them in your package's dependencies:
 dependencies: [
     .package(
         url: "https://github.com/huggingface/AnyLanguageModel.git",
-        from: "0.14.0",
+        from: "0.15.0",
         traits: ["CoreML", "MLX"] // Enable CoreML and MLX support
     )
 ]
@@ -144,7 +143,7 @@ dependencies: [
 > dependencies: [
 >     .package(
 >         url: "https://github.com/huggingface/AnyLanguageModel.git",
->         from: "0.14.0",
+>         from: "0.15.0",
 >         traits: ["CoreML", "MLX", "Llama"]
 >     ),
 >     .package(url: "https://github.com/huggingface/swift-transformers", from: "1.0.0"), // CoreML
@@ -380,6 +379,10 @@ use a vision-capable model
 For llama.cpp,
 pass the model's multimodal projector with `mmprojPath:`.
 
+> [!NOTE]
+> Image inputs are an AnyLanguageModel extension.
+> See [Differences from Foundation Models](#differences-from-foundation-models).
+
 ### Tool Calling
 
 Tool calling is supported by all providers.
@@ -438,6 +441,10 @@ actor ToolExecutionObserver: ToolExecutionDelegate {
 
 session.toolExecutionDelegate = ToolExecutionObserver()
 ```
+
+> [!NOTE]
+> Tool execution delegates are an AnyLanguageModel extension.
+> See [Differences from Foundation Models](#differences-from-foundation-models).
 
 ### Reasoning in the transcript
 
@@ -542,6 +549,69 @@ the latest value is kept for each metadata key.
 > [Foundation Models 27 usage API](https://developer.apple.com/documentation/foundationmodels/languagemodelsession/usage-swift.struct).
 > `Codable` and `Equatable` support are AnyLanguageModel extensions.
 
+## Differences from Foundation Models
+
+Code that uses an extension doesn't compile with Foundation Models on OS 26.
+Each extension's documentation comment says so,
+and extensions that follow a Foundation Models 27 API,
+such as token usage,
+say which API they follow.
+
+### Extensions
+
+- `LanguageModel` and `Availability`:
+  the protocol that lets a session use any model provider.
+  Foundation Models 27 adds its own `LanguageModel` protocol
+  with different requirements.
+  Session initializers require a `model:` argument
+  instead of defaulting to `SystemLanguageModel.default`.
+- `GenerationOptions[custom:]` and `CustomGenerationOptions`:
+  options for one provider,
+  described in that provider's section under [Providers](#providers).
+- `respond(to:images:)`, `Transcript.ImageSegment`, and `Transcript.Segment.image`:
+  [image inputs](#image-inputs).
+  Foundation Models 27 adds prompt attachments,
+  and AnyLanguageModel 2.0 will change to match them.
+- `ToolExecutionDelegate`, `ToolExecutionDecision`, and `toolExecutionDelegate`:
+  [observing and controlling tool calls](#tool-calling).
+- `transcriptErrorHandlingPolicy` and `waitForResponseCompletion()`:
+  what a transcript keeps when a request fails or is cancelled.
+- `LanguageModelSession.tools` and `instructions`:
+  the session's tools and instructions,
+  for language models defined outside AnyLanguageModel.
+- `Usage` and the `usage` properties:
+  [token usage](#token-usage),
+  which follows the Foundation Models 27 API.
+- Public initializers for `Response`, `ResponseStream`, `ResponseStream.Snapshot`,
+  `GenerationGuide`, and `LanguageModelFeedback`,
+  for language models defined outside AnyLanguageModel.
+- `Codable` conformance for `GeneratedContent`, `GenerationID`, `Usage`,
+  and the types nested in `Transcript`.
+- `GeneratedContentError` and each provider's error type.
+- `JSONValue`:
+  JSON values for provider options such as `extraBody`.
+- Smaller additions to existing types,
+  such as `LanguageModel.isAvailable`, `SystemLanguageModel.supportsImageInput`,
+  `Transcript.ToolCall.providerMetadata`, and `GenerationError.Refusal.transcriptEntries`.
+
+### Behavior differences
+
+- A session adds the prompt to its transcript before the model responds,
+  as a single text segment.
+- A structured response is recorded in the transcript as JSON text,
+  not as a structured segment.
+- A session created from a transcript restores `instructions`
+  only when the first entry is instructions with a single text segment.
+
+### Not yet implemented
+
+- `@Generable(description:representNilExplicitlyInGeneratedContent:)`
+  and the matching `GenerationSchema` and `DynamicGenerationSchema` initializers
+- `DynamicGenerationSchema.null`
+- `logFeedbackAttachment(sentiment:issues:desiredResponseText:)`
+  and `logFeedbackAttachment(sentiment:issues:desiredResponseContent:)`
+- `SystemLanguageModel.supportedLanguages`, `supportsLocale(_:)`, and `tokenCount(for:)`
+
 ## Providers
 
 ### Apple Foundation Models
@@ -636,7 +706,7 @@ Enable the trait in Package.swift:
 ```swift
 .package(
     url: "https://github.com/huggingface/AnyLanguageModel.git",
-    from: "0.14.0",
+    from: "0.15.0",
     traits: ["CoreML"]
 )
 ```
@@ -733,7 +803,7 @@ Enable the trait in Package.swift:
 ```swift
 .package(
     url: "https://github.com/huggingface/AnyLanguageModel.git",
-    from: "0.14.0",
+    from: "0.15.0",
     traits: ["MLX"]
 )
 ```
@@ -757,7 +827,7 @@ Enable the trait in Package.swift:
 ```swift
 .package(
     url: "https://github.com/huggingface/AnyLanguageModel.git",
-    from: "0.14.0",
+    from: "0.15.0",
     traits: ["Llama"]
 )
 ```

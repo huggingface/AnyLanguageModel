@@ -4,6 +4,10 @@ import CoreFoundation
 /// A type that represents structured, generated content.
 ///
 /// Generated content may contain a single value, an array, or key-value pairs with unique keys.
+///
+/// - Note: The `Codable` conformance is exclusive to AnyLanguageModel
+///   and using it means your code is no longer drop-in compatible
+///   with the Foundation Models framework.
 public struct GeneratedContent: Sendable, Equatable, Generable, CustomDebugStringConvertible, Codable {
     /// An instance of the generation schema.
     public static var generationSchema: GenerationSchema {
@@ -338,6 +342,10 @@ extension GeneratedContent {
     ///
     /// `Kind` represents the various types of JSON-compatible data that can be held within
     /// a `GeneratedContent` instance, including primitive types, arrays, and structured objects.
+    ///
+    /// - Note: The `Codable` conformance is exclusive to AnyLanguageModel
+    ///   and using it means your code is no longer drop-in compatible
+    ///   with the Foundation Models framework.
     public enum Kind: Equatable, Sendable {
 
         /// Represents a null value.
@@ -393,6 +401,11 @@ extension GeneratedContent {
 
 // MARK: - GeneratedContentError
 
+/// Errors that can occur when converting generated content to a value.
+///
+/// - Note: This API is exclusive to AnyLanguageModel
+///   and using it means your code is no longer drop-in compatible
+///   with the Foundation Models framework.
 public enum GeneratedContentError: Error, Hashable {
     case propertyNotFound(String)
     case typeMismatch

@@ -8,6 +8,11 @@ public struct GenerationGuide<Value>: Sendable {
     var minimum: Double?
     var maximum: Double?
 
+    /// Creates a guide with no constraints.
+    ///
+    /// - Note: This initializer is exclusive to AnyLanguageModel.
+    ///   It's public for language models outside this module;
+    ///   Foundation Models doesn't make it public.
     public init() {}
 
     init(minimumCount: Int?, maximumCount: Int?) {

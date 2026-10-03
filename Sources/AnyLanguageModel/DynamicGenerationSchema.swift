@@ -22,9 +22,11 @@ public struct DynamicGenerationSchema: Sendable {
         case number
         case integer
         case decimal
+        case null
     }
 
     internal let body: Body
+    internal private(set) var representsNilExplicitly = false
     internal var name: String? {
         switch body {
         case .object(let name, _, _), .anyOf(let name, _, _), .stringEnum(let name, _, _):
@@ -46,6 +48,26 @@ public struct DynamicGenerationSchema: Sendable {
         properties: [DynamicGenerationSchema.Property]
     ) {
         self.body = .object(name: name, description: description, properties: properties)
+    }
+
+    /// Creates an object schema.
+    ///
+    /// - Parameters:
+    ///   - name: A name this dynamic schema can be referenced by.
+    ///   - description: A natural language description of this schema.
+    ///   - explicitNil: Whether generated content has a `null` value
+    ///     for each optional property that it would otherwise leave out.
+    ///     Like Foundation Models,
+    ///     the encoded form of a schema built from this one doesn't include this setting.
+    ///   - properties: The properties associated with this schema.
+    public init(
+        name: String,
+        description: String? = nil,
+        representNilExplicitlyInGeneratedContent explicitNil: Bool,
+        properties: [DynamicGenerationSchema.Property]
+    ) {
+        self.body = .object(name: name, description: description, properties: properties)
+        self.representsNilExplicitly = explicitNil
     }
 
     /// Creates an any-of schema.
@@ -113,6 +135,35 @@ public struct DynamicGenerationSchema: Sendable {
             let typeName = String(reflecting: Value.self)
             self.body = .reference(typeName)
         }
+    }
+
+    /// A schema that represents a null value.
+    ///
+    /// Use a null schema to express a value that can't be absent but can be empty.
+    /// For example, combine it with another schema in an any-of schema:
+    ///
+    /// ```swift
+    /// let person = DynamicGenerationSchema(
+    ///     name: "Person",
+    ///     properties: [
+    ///         DynamicGenerationSchema.Property(
+    ///             name: "fullName",
+    ///             schema: DynamicGenerationSchema(type: String.self)
+    ///         )
+    ///     ]
+    /// )
+    /// let nullablePerson = DynamicGenerationSchema(
+    ///     name: "NullablePerson",
+    ///     anyOf: [person, .null]
+    /// )
+    /// let schema = try GenerationSchema(root: nullablePerson, dependencies: [])
+    /// ```
+    public static var null: DynamicGenerationSchema {
+        DynamicGenerationSchema(body: .scalar(.null))
+    }
+
+    private init(body: Body) {
+        self.body = body
     }
 
     /// Creates an refrence schema.

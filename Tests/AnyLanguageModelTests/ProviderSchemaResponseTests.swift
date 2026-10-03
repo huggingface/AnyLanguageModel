@@ -115,6 +115,62 @@ import Testing
             }
         }
 
+        @Test(arguments: [false, true])
+        func ollamaRequestBytesAreStable(_ streaming: Bool) async throws {
+            SchemaURLProtocol.reset()
+            defer { SchemaURLProtocol.reset() }
+            let content = #"{"alpha":{"count":1,"name":"a"},"beta":{"enabled":true,"score":2}}"#
+            let optionEntries: [(String, JSONValue)] = [
+                ("seed", 42), ("temperature", 0.5), ("stop", ["END", "STOP"]),
+                ("think", false), ("keep_alive", .null),
+            ]
+            for (index, schema) in try DynamicGenerationSchemaTests.schemasInDifferentInsertionOrders().enumerated() {
+                var customOptions: [String: JSONValue] = [:]
+                for (key, value) in index == 0 ? optionEntries : Array(optionEntries.reversed()) {
+                    customOptions[key] = value
+                }
+                var options = GenerationOptions()
+                options[custom: OllamaLanguageModel.self] = customOptions
+                SchemaURLProtocol.enqueue(
+                    json: try streaming
+                        ? Provider.ollama.stream(text: content) : json(Provider.ollama.response(text: content))
+                )
+                let session = Provider.ollama.session()
+                if streaming {
+                    _ = try await session.streamResponse(
+                        to: "Return a result",
+                        schema: schema,
+                        includeSchemaInPrompt: false,
+                        options: options
+                    )
+                    .collect()
+                } else {
+                    _ = try await session.respond(
+                        to: "Return a result",
+                        schema: schema,
+                        includeSchemaInPrompt: false,
+                        options: options
+                    )
+                }
+            }
+            let bodies = SchemaURLProtocol.recordedBodies
+            #expect(bodies.count == 2)
+            let first = try #require(bodies.first)
+            #expect(bodies.last == first)
+
+            // Check the actual request encoder's sorted-key setting, including nested objects.
+            let encoder = JSONEncoder()
+            encoder.outputFormatting = .sortedKeys
+            for body in bodies {
+                let params = try JSONDecoder().decode([String: JSONValue].self, from: body)
+                #expect(try encoder.encode(params) == body)
+                #expect(params["stream"] == .bool(streaming))
+                #expect(params["think"] == .bool(false))
+                #expect(params["keep_alive"] == .null)
+                #expect(params["options"] == .object(["seed": 42, "temperature": 0.5, "stop": ["END", "STOP"]]))
+            }
+        }
+
         @Test(arguments: Provider.allCases, [false, true])
         func callerSchemaReachesRequest(_ provider: Provider, _ streaming: Bool) async throws {
             SchemaURLProtocol.reset()

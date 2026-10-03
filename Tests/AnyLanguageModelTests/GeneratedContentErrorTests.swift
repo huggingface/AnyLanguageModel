@@ -4,12 +4,12 @@ import AnyLanguageModel
 
 @Suite("Generated content errors")
 struct GeneratedContentErrorTests {
-    @Test func conversionErrorAliasPreservesEqualityAndHashing() {
-        let error = GeneratedContentConversionError.typeMismatch
+    @Test func errorsSupportEqualityAndHashing() {
+        let error = GeneratedContentError.typeMismatch
         #expect(error == .typeMismatch)
         #expect(error != .neverCannotBeInstantiated)
 
-        let errors: Set<GeneratedContentConversionError> = [
+        let errors: Set<GeneratedContentError> = [
             .typeMismatch, .typeMismatch, .neverCannotBeInstantiated,
         ]
         #expect(errors.count == 2)

@@ -126,15 +126,21 @@
             issues: [LanguageModelFeedback.Issue],
             desiredOutput: Transcript.Entry?
         ) -> Data {
+            // Attach the feedback to the session's conversation, including its latest response.
             let fmSession = FoundationModels.LanguageModelSession(
                 model: pccModel,
                 tools: session.tools.toFoundationModels(),
-                instructions: session.instructions?.toFoundationModels()
+                transcript: session.transcript.toFoundationModels(
+                    instructions: session.instructions,
+                    toolDefinitions: session.tools
+                        .filter(\.includesSchemaInInstructions)
+                        .map { Transcript.ToolDefinition(tool: $0) }
+                )
             )
             return fmSession.logFeedbackAttachment(
                 sentiment: sentiment?.toFoundationModels(),
                 issues: issues.map { $0.toFoundationModels() },
-                desiredOutput: nil
+                desiredOutput: desiredOutput?.toFoundationModels()
             )
         }
     }

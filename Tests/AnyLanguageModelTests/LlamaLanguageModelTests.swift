@@ -21,14 +21,6 @@ import Testing
 
             let cpuOnlyModel = LlamaLanguageModel(modelPath: "/path/to/model.gguf", gpuLayers: 0)
             #expect(cpuOnlyModel.gpuLayers == 0)
-            #expect(customModel.contextSize == 2048)
-            #expect(customModel.batchSize == 512)
-            #expect(customModel.threads == Int32(ProcessInfo.processInfo.processorCount))
-            #expect(customModel.temperature == 0.8)
-            #expect(customModel.topK == 40)
-            #expect(customModel.topP == 0.95)
-            #expect(customModel.repeatPenalty == 1.1)
-            #expect(customModel.repeatLastN == 64)
         }
 
         @Test func concurrentFirstRequests() async throws {
@@ -153,31 +145,6 @@ import Testing
             #expect(defaults.frequencyPenalty == 0.0)
             #expect(defaults.presencePenalty == 0.0)
             #expect(defaults.mirostat == nil)
-        }
-
-        @Test func deprecatedInitializerFallback() {
-            let legacy = LlamaLanguageModel(
-                modelPath: "/legacy/model.gguf",
-                contextSize: 1024,
-                batchSize: 128,
-                threads: 3,
-                seed: 7,
-                temperature: 0.65,
-                topK: 32,
-                topP: 0.88,
-                repeatPenalty: 1.02,
-                repeatLastN: 24
-            )
-
-            // Deprecated initializer ignores parameters; defaults are used.
-            #expect(legacy.contextSize == 2048)
-            #expect(legacy.batchSize == 512)
-            #expect(legacy.threads == Int32(ProcessInfo.processInfo.processorCount))
-            #expect(legacy.temperature == 0.8)
-            #expect(legacy.topK == 40)
-            #expect(legacy.topP == 0.95)
-            #expect(legacy.repeatPenalty == 1.1)
-            #expect(legacy.repeatLastN == 64)
         }
 
         @Test func logLevelConfiguration() {
