@@ -445,9 +445,10 @@ public struct AnthropicLanguageModel: LanguageModel {
     ) async throws -> LanguageModelSession.Response<Content> where Content: Generable {
         let url = baseURL.appendingPathComponent("v1/messages")
         let headers = buildHeaders()
+        let requestContext = session.resolvedRequestContext()
 
         // Convert available tools to Anthropic format
-        let anthropicTools: [AnthropicTool] = try session.tools.map { tool in
+        let anthropicTools: [AnthropicTool] = try requestContext.tools.map { tool in
             try convertToolToAnthropicFormat(tool)
         }
 
@@ -455,7 +456,7 @@ public struct AnthropicLanguageModel: LanguageModel {
         let params = try createMessageParams(
             model: model,
             system: nil,
-            messages: try session.transcript.toAnthropicMessages(),
+            messages: try requestContext.transcript.toAnthropicMessages(),
             tools: anthropicTools.isEmpty ? nil : anthropicTools,
             responseSchema: responseSchema,
             options: options
@@ -486,7 +487,11 @@ public struct AnthropicLanguageModel: LanguageModel {
         }
 
         if !toolUses.isEmpty {
-            let resolution = try await resolveToolUses(toolUses, session: session)
+            let resolution = try await resolveToolUses(
+                toolUses,
+                tools: requestContext.tools,
+                session: session
+            )
             switch resolution {
             case .stop(let calls):
                 if !calls.isEmpty {
@@ -584,19 +589,18 @@ public struct AnthropicLanguageModel: LanguageModel {
             let task = Task { @Sendable in
                 do {
                     let headers = buildHeaders()
-
-                    // Convert available tools to Anthropic format
-                    let anthropicTools: [AnthropicTool] = try session.tools.map { tool in
-                        try convertToolToAnthropicFormat(tool)
-                    }
-
                     let responseSchema =
                         type == String.self ? nil : try convertSchemaToAnthropicFormat(schema)
-                    var messages = try session.transcript.toAnthropicMessages()
+                    var inFlightMessages: [AnthropicMessage] = []
                     var state = StreamingResponseState<Content>()
                     var toolRounds = ToolRoundLimit(provider: "Anthropic")
                     while true {
                         try Task.checkCancellation()
+                        let requestContext = session.resolvedRequestContext()
+                        let anthropicTools: [AnthropicTool] = try requestContext.tools.map {
+                            try convertToolToAnthropicFormat($0)
+                        }
+                        let messages = try requestContext.transcript.toAnthropicMessages() + inFlightMessages
                         var params = try createMessageParams(
                             model: model,
                             system: nil,
@@ -692,14 +696,18 @@ public struct AnthropicLanguageModel: LanguageModel {
                         guard !toolUses.isEmpty else { break }
                         try Task.checkCancellation()
                         try toolRounds.record(toolUses.map(\.roundCall))
-                        switch try await resolveToolUses(toolUses, session: session) {
+                        switch try await resolveToolUses(
+                            toolUses,
+                            tools: requestContext.tools,
+                            session: session
+                        ) {
                         case .stop(let calls):
                             state.entries.append(.toolCalls(Transcript.ToolCalls(calls)))
                             continuation.yield(try state.stoppedSnapshot())
                             continuation.finish()
                             return
                         case .invocations(let invocations):
-                            messages.append(.init(role: .assistant, content: content))
+                            inFlightMessages.append(.init(role: .assistant, content: content))
                             state.entries.append(.toolCalls(Transcript.ToolCalls(invocations.map(\.call))))
                             var results: [AnthropicContent] = []
                             for invocation in invocations {
@@ -713,7 +721,7 @@ public struct AnthropicLanguageModel: LanguageModel {
                                     )
                                 )
                             }
-                            messages.append(.init(role: .user, content: results))
+                            inFlightMessages.append(.init(role: .user, content: results))
                         }
                         if let snapshot = snapshot() { continuation.yield(snapshot) }
                         state.beginNextRound()
@@ -893,12 +901,13 @@ private func convertSchemaToAnthropicFormat(_ schema: GenerationSchema) throws -
 
 private func resolveToolUses(
     _ toolUses: [AnthropicToolUse],
+    tools: [any Tool],
     session: LanguageModelSession
 ) async throws -> ToolResolutionOutcome {
     if toolUses.isEmpty { return .invocations([]) }
 
     var toolsByName: [String: any Tool] = [:]
-    for tool in session.tools {
+    for tool in tools {
         if toolsByName[tool.name] == nil {
             toolsByName[tool.name] = tool
         }

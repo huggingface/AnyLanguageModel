@@ -76,7 +76,10 @@ struct MockLanguageModel: LanguageModel {
             $0.append(Request(schema: schema, includeSchemaInPrompt: includeSchemaInPrompt, options: options))
         }
 
-        let promptWithInstructions = Prompt("Instructions: \(session.instructions?.description ?? "N/A")\n\(prompt)")
+        let requestContext = session.resolvedRequestContext()
+        let promptWithInstructions = Prompt(
+            "Instructions: \(requestContext.instructions?.description ?? "N/A")\n\(prompt)"
+        )
         let text = try await responseProvider(promptWithInstructions, options)
 
         let rawContent = try type == String.self ? GeneratedContent(text) : GeneratedContent(json: text)
@@ -134,7 +137,10 @@ struct MockLanguageModel: LanguageModel {
             $0.append(Request(schema: schema, includeSchemaInPrompt: includeSchemaInPrompt, options: options))
         }
 
-        let promptWithInstructions = Prompt("Instructions: \(session.instructions?.description ?? "N/A")\n\(prompt)")
+        let requestContext = session.resolvedRequestContext()
+        let promptWithInstructions = Prompt(
+            "Instructions: \(requestContext.instructions?.description ?? "N/A")\n\(prompt)"
+        )
 
         let stream = AsyncThrowingStream<LanguageModelSession.ResponseStream<Content>.Snapshot, any Error> {
             continuation in

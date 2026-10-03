@@ -119,19 +119,7 @@ public struct OllamaLanguageModel: LanguageModel {
         includeSchemaInPrompt: Bool,
         options: GenerationOptions
     ) async throws -> LanguageModelSession.Response<Content> where Content: Generable {
-        let userSegments = extractPromptSegments(from: session, fallbackText: prompt.description)
-        let (ollamaText, ollamaImages) = convertSegmentsToOllama(userSegments)
-        let messages = [
-            OllamaMessage(
-                role: .user,
-                content: ollamaText,
-                images: ollamaImages.isEmpty ? nil : ollamaImages
-            )
-        ]
         let ollamaOptions = convertOptions(options)
-        let ollamaTools = try session.tools.map { tool in
-            try convertToolToOllamaFormat(tool)
-        }
         let ollamaFormat: JSONValue?
         if type == String.self {
             ollamaFormat = nil
@@ -140,6 +128,12 @@ public struct OllamaLanguageModel: LanguageModel {
             ollamaFormat = try JSONValue(schema)
         }
 
+        let requestContext = session.resolvedRequestContext()
+        let ollamaTools = try requestContext.tools.map(convertToolToOllamaFormat)
+        var messages = try requestContext.transcript.toOllamaMessages()
+        if messages.isEmpty {
+            messages.append(.init(role: .user, content: prompt.description))
+        }
         let params = try createChatParams(
             model: model,
             messages: messages,
@@ -163,7 +157,11 @@ public struct OllamaLanguageModel: LanguageModel {
         let usage = chatResponse.reportedUsage?.value ?? .zero
 
         if let toolCalls = chatResponse.message.toolCalls, !toolCalls.isEmpty {
-            let resolution = try await resolveToolCalls(toolCalls, session: session)
+            let resolution = try await resolveToolCalls(
+                toolCalls,
+                tools: requestContext.tools,
+                session: session
+            )
             switch resolution {
             case .stop(let calls):
                 if !calls.isEmpty {
@@ -252,16 +250,19 @@ public struct OllamaLanguageModel: LanguageModel {
             continuation in
             let task = Task {
                 do {
-                    let tools = try session.tools.map { try convertToolToOllamaFormat($0) }
                     let format = type == String.self ? nil : try JSONValue(convertSchemaToOllamaFormat(schema))
-                    var messages = try session.transcript.toOllamaMessages()
-                    if messages.isEmpty {
-                        messages.append(.init(role: .user, content: prompt.description))
-                    }
+                    var inFlightMessages: [OllamaMessage] = []
                     var state = StreamingResponseState<Content>()
                     var toolRounds = ToolRoundLimit(provider: "Ollama")
                     while true {
                         try Task.checkCancellation()
+                        let requestContext = session.resolvedRequestContext()
+                        let tools = try requestContext.tools.map(convertToolToOllamaFormat)
+                        var messages = try requestContext.transcript.toOllamaMessages()
+                        if messages.isEmpty {
+                            messages.append(.init(role: .user, content: prompt.description))
+                        }
+                        messages.append(contentsOf: inFlightMessages)
                         let params = try createChatParams(
                             model: model,
                             messages: messages,
@@ -291,14 +292,18 @@ public struct OllamaLanguageModel: LanguageModel {
                         guard !toolCalls.isEmpty else { break }
                         try Task.checkCancellation()
                         try toolRounds.record(toolCalls.map(\.roundCall))
-                        switch try await resolveToolCalls(toolCalls, session: session) {
+                        switch try await resolveToolCalls(
+                            toolCalls,
+                            tools: requestContext.tools,
+                            session: session
+                        ) {
                         case .stop(let calls):
                             state.entries.append(.toolCalls(Transcript.ToolCalls(calls)))
                             continuation.yield(try state.stoppedSnapshot())
                             continuation.finish()
                             return
                         case .invocations(let invocations):
-                            messages.append(
+                            inFlightMessages.append(
                                 .init(
                                     role: .assistant,
                                     content: state.text,
@@ -309,7 +314,7 @@ public struct OllamaLanguageModel: LanguageModel {
                             for invocation in invocations {
                                 state.entries.append(.toolOutput(invocation.output))
                                 let (text, images) = convertSegmentsToOllama(invocation.output.segments)
-                                messages.append(
+                                inFlightMessages.append(
                                     .init(
                                         role: .tool,
                                         content: text,
@@ -347,6 +352,7 @@ private enum ToolResolutionOutcome {
 
 private func resolveToolCalls(
     _ toolCalls: [OllamaToolCall],
+    tools: [any Tool],
     session: LanguageModelSession
 ) async throws -> ToolResolutionOutcome {
     if toolCalls.isEmpty {
@@ -354,7 +360,7 @@ private func resolveToolCalls(
     }
 
     var toolsByName: [String: any Tool] = [:]
-    for tool in session.tools {
+    for tool in tools {
         if toolsByName[tool.name] == nil {
             toolsByName[tool.name] = tool
         }
@@ -678,15 +684,6 @@ private func convertSegmentsToOllama(_ segments: [Transcript.Segment]) -> (Strin
         }
     }
     return (textParts.joined(separator: "\n"), images)
-}
-
-private func extractPromptSegments(from session: LanguageModelSession, fallbackText: String) -> [Transcript.Segment] {
-    for entry in session.transcript.reversed() {
-        if case .prompt(let p) = entry {
-            return p.segments
-        }
-    }
-    return [.text(.init(content: fallbackText))]
 }
 
 private struct ChatResponse: Decodable, Sendable {

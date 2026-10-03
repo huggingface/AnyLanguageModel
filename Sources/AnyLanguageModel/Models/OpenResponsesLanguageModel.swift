@@ -435,11 +435,7 @@ public struct OpenResponsesLanguageModel: LanguageModel {
         includeSchemaInPrompt: Bool,
         options: GenerationOptions
     ) async throws -> LanguageModelSession.Response<Content> where Content: Generable {
-        let tools: [OpenResponsesTool]? =
-            session.tools.isEmpty ? nil : session.tools.map { convertToolToOpenResponsesFormat($0) }
         return try await respondWithOpenResponses(
-            messages: session.transcript.toOpenResponsesMessages(),
-            tools: tools,
             generating: type,
             schema: schema,
             options: options,
@@ -489,18 +485,21 @@ public struct OpenResponsesLanguageModel: LanguageModel {
         includeSchemaInPrompt: Bool,
         options: GenerationOptions
     ) -> sending LanguageModelSession.ResponseStream<Content> where Content: Generable {
-        let tools: [OpenResponsesTool]? =
-            session.tools.isEmpty ? nil : session.tools.map { convertToolToOpenResponsesFormat($0) }
         let url = baseURL.appendingPathComponent("responses")
         let stream = AsyncThrowingStream<LanguageModelSession.ResponseStream<Content>.Snapshot, any Error> {
             continuation in
             let task = Task {
                 do {
-                    var messages = session.transcript.toOpenResponsesMessages()
+                    var inFlightMessages: [OpenResponsesMessage] = []
                     var state = StreamingResponseState<Content>()
                     var toolRounds = ToolRoundLimit(provider: "Open Responses")
                     while true {
                         try Task.checkCancellation()
+                        let requestContext = session.resolvedRequestContext()
+                        let tools: [OpenResponsesTool]? =
+                            requestContext.tools.isEmpty
+                            ? nil : requestContext.tools.map(convertToolToOpenResponsesFormat)
+                        let messages = requestContext.transcript.toOpenResponsesMessages() + inFlightMessages
                         let params = try OpenResponsesAPI.createRequestBody(
                             model: model,
                             messages: messages,
@@ -531,7 +530,9 @@ public struct OpenResponsesLanguageModel: LanguageModel {
                                 toolCalls = extractToolCallsFromOutput(response?.output)
                                 if !toolCalls.isEmpty, let output = response?.output {
                                     for item in output {
-                                        messages.append(.init(role: .raw(rawContent: item), content: .text("")))
+                                        inFlightMessages.append(
+                                            .init(role: .raw(rawContent: item), content: .text(""))
+                                        )
                                     }
                                 }
                                 if let snapshot = state.snapshot() { continuation.yield(snapshot) }
@@ -548,7 +549,11 @@ public struct OpenResponsesLanguageModel: LanguageModel {
                         guard !toolCalls.isEmpty else { break }
                         try Task.checkCancellation()
                         try toolRounds.record(toolCalls.map(\.roundCall))
-                        switch try await resolveToolCalls(toolCalls, session: session) {
+                        switch try await resolveToolCalls(
+                            toolCalls,
+                            tools: requestContext.tools,
+                            session: session
+                        ) {
                         case .stop(let calls):
                             state.entries.append(.toolCalls(Transcript.ToolCalls(calls)))
                             continuation.yield(try state.stoppedSnapshot())
@@ -558,7 +563,7 @@ public struct OpenResponsesLanguageModel: LanguageModel {
                             state.entries.append(.toolCalls(Transcript.ToolCalls(invocations.map(\.call))))
                             for invocation in invocations {
                                 state.entries.append(.toolOutput(invocation.output))
-                                messages.append(
+                                inFlightMessages.append(
                                     .init(
                                         role: .tool(id: invocation.call.id),
                                         content: .text(
@@ -583,8 +588,6 @@ public struct OpenResponsesLanguageModel: LanguageModel {
 
     /// Sends a non-streaming request to the Open Responses API and returns the parsed response.
     private func respondWithOpenResponses<Content>(
-        messages: [OpenResponsesMessage],
-        tools: [OpenResponsesTool]?,
         generating type: Content.Type,
         schema: GenerationSchema,
         options: GenerationOptions,
@@ -596,11 +599,16 @@ public struct OpenResponsesLanguageModel: LanguageModel {
         // The text of earlier tool rounds, which string responses include.
         var earlierText = ""
         var lastOutput: [JSONValue]?
-        var messages = messages
+        var inFlightMessages: [OpenResponsesMessage] = []
         let url = baseURL.appendingPathComponent("responses")
 
         var toolRounds = ToolRoundLimit(provider: "Open Responses")
         while true {
+            let requestContext = session.resolvedRequestContext()
+            let tools: [OpenResponsesTool]? =
+                requestContext.tools.isEmpty
+                ? nil : requestContext.tools.map(convertToolToOpenResponsesFormat)
+            let messages = requestContext.transcript.toOpenResponsesMessages() + inFlightMessages
             let params = try OpenResponsesAPI.createRequestBody(
                 model: model,
                 messages: messages,
@@ -625,11 +633,17 @@ public struct OpenResponsesLanguageModel: LanguageModel {
             if !toolCalls.isEmpty {
                 if let output = resp.output {
                     for item in output {
-                        messages.append(OpenResponsesMessage(role: .raw(rawContent: item), content: .text("")))
+                        inFlightMessages.append(
+                            OpenResponsesMessage(role: .raw(rawContent: item), content: .text(""))
+                        )
                     }
                 }
                 try toolRounds.record(toolCalls.map(\.roundCall))
-                let resolution = try await resolveToolCalls(toolCalls, session: session)
+                let resolution = try await resolveToolCalls(
+                    toolCalls,
+                    tools: requestContext.tools,
+                    session: session
+                )
                 switch resolution {
                 case .stop(let calls):
                     if !calls.isEmpty {
@@ -647,7 +661,7 @@ public struct OpenResponsesLanguageModel: LanguageModel {
                         entries.append(.toolCalls(Transcript.ToolCalls(invocations.map { $0.call })))
                         for inv in invocations {
                             entries.append(.toolOutput(inv.output))
-                            messages.append(
+                            inFlightMessages.append(
                                 OpenResponsesMessage(
                                     role: .tool(id: inv.call.id),
                                     content: .text(openResponsesConvertSegmentsToToolContentString(inv.output.segments))
@@ -1160,11 +1174,12 @@ private enum OpenResponsesToolResolutionOutcome: Sendable {
 
 private func resolveToolCalls(
     _ toolCalls: [OpenResponsesToolCall],
+    tools: [any Tool],
     session: LanguageModelSession
 ) async throws -> OpenResponsesToolResolutionOutcome {
     if toolCalls.isEmpty { return .invocations([]) }
     var byName: [String: any Tool] = [:]
-    for t in session.tools { if byName[t.name] == nil { byName[t.name] = t } }
+    for t in tools { if byName[t.name] == nil { byName[t.name] = t } }
     var transcriptCalls: [Transcript.ToolCall] = []
     for c in toolCalls {
         let args = (c.arguments.flatMap { try? GeneratedContent(json: $0) } ?? GeneratedContent(properties: [:]))

@@ -576,8 +576,8 @@ say which API they follow.
   [observing and controlling tool calls](#tool-calling).
 - `transcriptErrorHandlingPolicy` and `waitForResponseCompletion()`:
   what a transcript keeps when a request fails or is cancelled.
-- `LanguageModelSession.tools` and `instructions`:
-  the session's tools and instructions,
+- `LanguageModelSession.tools`, `instructions`, and `resolvedRequestContext()`:
+  the session's tools, instructions, and the inputs for each request,
   for language models defined outside AnyLanguageModel.
 - `Usage` and the `usage` properties:
   [token usage](#token-usage),

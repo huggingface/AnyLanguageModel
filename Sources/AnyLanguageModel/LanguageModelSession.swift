@@ -111,6 +111,49 @@ public final class LanguageModelSession: @unchecked Sendable {
     ///   with the Foundation Models framework.
     @ObservationIgnored public var toolExecutionDelegate: (any ToolExecutionDelegate)?
 
+    /// The transcript, instructions, and tools for one model request.
+    ///
+    /// A language model creates one context immediately before each request it sends,
+    /// by calling ``LanguageModelSession/resolvedRequestContext()``.
+    /// If that request produces tool calls,
+    /// run them with the ``tools`` from the same context,
+    /// and resolve a new context only before the continuation request.
+    ///
+    /// - Note: This API is exclusive to AnyLanguageModel
+    ///   and using it means your code is no longer drop-in compatible
+    ///   with the Foundation Models framework.
+    ///   It's public so that language models outside this module
+    ///   can read the inputs for each request.
+    public struct RequestContext: Sendable {
+        /// The transcript to send with the request.
+        public let transcript: Transcript
+
+        /// The instructions for the request, if any.
+        public let instructions: Instructions?
+
+        /// The tools that the model can call in response to the request.
+        public let tools: [any Tool]
+
+        fileprivate init(transcript: Transcript, instructions: Instructions?, tools: [any Tool]) {
+            self.transcript = transcript
+            self.instructions = instructions
+            self.tools = tools
+        }
+    }
+
+    /// Returns the transcript, instructions, and tools for the next model request.
+    ///
+    /// Calling this method doesn't change the session.
+    ///
+    /// - Note: This API is exclusive to AnyLanguageModel
+    ///   and using it means your code is no longer drop-in compatible
+    ///   with the Foundation Models framework.
+    ///   It's public so that language models outside this module
+    ///   can read the inputs for each request.
+    nonisolated public func resolvedRequestContext() -> RequestContext {
+        RequestContext(transcript: transcript, instructions: instructions, tools: tools)
+    }
+
     /// Creates a session with a model, tools,
     /// and instructions that you build with a result builder.
     ///

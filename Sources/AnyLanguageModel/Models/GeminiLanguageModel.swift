@@ -230,12 +230,10 @@ public struct GeminiLanguageModel: LanguageModel {
             .appendingPathComponent("models/\(model):generateContent")
         let headers = buildHeaders()
 
-        let geminiTools = try buildTools(from: session.tools, serverTools: effectiveServerTools)
+        var inFlightEntries: [Transcript.Entry] = []
 
-        var transcript = session.transcript
-
-        // The entries this call adds, which is what the response reports. `transcript` keeps the
-        // full conversation because each iteration rebuilds the request from it.
+        // The entries this call adds, which is what the response reports. `inFlightEntries`
+        // preserves tool rounds while each iteration rebuilds the request from a fresh context.
         var entries: [Transcript.Entry] = []
         var usage = ReportedUsage()
         // The text of earlier tool rounds, which string responses include.
@@ -244,8 +242,17 @@ public struct GeminiLanguageModel: LanguageModel {
         var toolRounds = ToolRoundLimit(provider: "Gemini")
         // Multi-turn conversation loop for tool calling
         while true {
+            let requestContext = session.resolvedRequestContext()
+            let geminiTools = try buildTools(
+                from: requestContext.tools,
+                serverTools: effectiveServerTools
+            )
+            var requestTranscript = requestContext.transcript
+            for entry in inFlightEntries {
+                requestTranscript.append(entry)
+            }
             let params = try createGenerateContentParams(
-                contents: transcript.toGeminiContent(),
+                contents: requestTranscript.toGeminiContent(),
                 tools: geminiTools,
                 generating: type,
                 schema: schema,
@@ -282,7 +289,11 @@ public struct GeminiLanguageModel: LanguageModel {
             if !functionCalls.isEmpty {
                 // Resolve function calls
                 try toolRounds.record(functionCalls.map(\.roundCall))
-                let resolution = try await resolveFunctionCalls(functionCalls, session: session)
+                let resolution = try await resolveFunctionCalls(
+                    functionCalls,
+                    tools: requestContext.tools,
+                    session: session
+                )
                 switch resolution {
                 case .stop(let calls):
                     if !calls.isEmpty {
@@ -300,12 +311,12 @@ public struct GeminiLanguageModel: LanguageModel {
                         let calls = Transcript.Entry.toolCalls(
                             Transcript.ToolCalls(invocations.map(\.call), providerMetadata: providerMetadata)
                         )
-                        transcript.append(calls)
+                        inFlightEntries.append(calls)
                         entries.append(calls)
 
                         for invocation in invocations {
                             let output = Transcript.Entry.toolOutput(invocation.output)
-                            transcript.append(output)
+                            inFlightEntries.append(output)
                             entries.append(output)
                         }
                     }
@@ -402,16 +413,22 @@ public struct GeminiLanguageModel: LanguageModel {
             let task = Task { @Sendable in
                 do {
                     let headers = buildHeaders()
-
-                    let geminiTools = try buildTools(from: session.tools, serverTools: effectiveServerTools)
-
-                    var transcript = session.transcript
+                    var inFlightEntries: [Transcript.Entry] = []
                     var state = StreamingResponseState<Content>()
                     var toolRounds = ToolRoundLimit(provider: "Gemini")
                     while true {
                         try Task.checkCancellation()
+                        let requestContext = session.resolvedRequestContext()
+                        let geminiTools = try buildTools(
+                            from: requestContext.tools,
+                            serverTools: effectiveServerTools
+                        )
+                        var requestTranscript = requestContext.transcript
+                        for entry in inFlightEntries {
+                            requestTranscript.append(entry)
+                        }
                         let params = try createGenerateContentParams(
-                            contents: transcript.toGeminiContent(),
+                            contents: requestTranscript.toGeminiContent(),
                             tools: geminiTools,
                             generating: type,
                             schema: schema,
@@ -452,7 +469,11 @@ public struct GeminiLanguageModel: LanguageModel {
                         try Task.checkCancellation()
                         let metadata = try textPartMetadata(parts, includeUnsignedText: true)
                         try toolRounds.record(functionCalls.map(\.roundCall))
-                        switch try await resolveFunctionCalls(functionCalls, session: session) {
+                        switch try await resolveFunctionCalls(
+                            functionCalls,
+                            tools: requestContext.tools,
+                            session: session
+                        ) {
                         case .stop(let calls):
                             state.entries.append(.toolCalls(Transcript.ToolCalls(calls, providerMetadata: metadata)))
                             continuation.yield(try state.stoppedSnapshot())
@@ -462,11 +483,11 @@ public struct GeminiLanguageModel: LanguageModel {
                             let calls = Transcript.Entry.toolCalls(
                                 Transcript.ToolCalls(invocations.map(\.call), providerMetadata: metadata)
                             )
-                            transcript.append(calls)
+                            inFlightEntries.append(calls)
                             state.entries.append(calls)
                             for invocation in invocations {
                                 let output = Transcript.Entry.toolOutput(invocation.output)
-                                transcript.append(output)
+                                inFlightEntries.append(output)
                                 state.entries.append(output)
                             }
                         }
@@ -613,12 +634,13 @@ private enum ToolResolutionOutcome {
 
 private func resolveFunctionCalls(
     _ functionCalls: [GeminiFunctionCall],
+    tools: [any Tool],
     session: LanguageModelSession
 ) async throws -> ToolResolutionOutcome {
     if functionCalls.isEmpty { return .invocations([]) }
 
     var toolsByName: [String: any Tool] = [:]
-    for tool in session.tools {
+    for tool in tools {
         if toolsByName[tool.name] == nil {
             toolsByName[tool.name] = tool
         }

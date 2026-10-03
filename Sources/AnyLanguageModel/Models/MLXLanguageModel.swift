@@ -1039,8 +1039,8 @@ import Foundation
             GPUMemoryManager.shared.markIdle(scope: id)
         }
 
-        private func mlxToolSpecs(for session: LanguageModelSession) -> [ToolSpec]? {
-            session.tools.isEmpty ? nil : session.tools.map { convertToolToMLXSpec($0) }
+        private func mlxToolSpecs(for tools: [any Tool]) -> [ToolSpec]? {
+            tools.isEmpty ? nil : tools.map { convertToolToMLXSpec($0) }
         }
 
         private func makeUserInput(
@@ -1112,10 +1112,11 @@ import Foundation
             defer { endGenerationScope(generationScope) }
 
             if type != String.self {
+                let requestContext = session.resolvedRequestContext()
                 let (jsonString, usage) = try await generateStructuredJSON(
                     context: context,
                     tokenCache: loaded.tokenCache,
-                    session: session,
+                    requestContext: requestContext,
                     prompt: prompt,
                     schema: schema,
                     options: options,
@@ -1131,8 +1132,6 @@ import Foundation
                 )
             }
 
-            let toolSpecs = mlxToolSpecs(for: session)
-
             // Map AnyLanguageModel GenerationOptions to MLX GenerateParameters
             let generateParameters = toGenerateParameters(options)
 
@@ -1142,8 +1141,7 @@ import Foundation
                 options[custom: MLXLanguageModel.self]?.processingForUserInput
                 ?? .init(resize: nil)
 
-            // Build chat history from full transcript
-            var chat = convertTranscriptToMLXChat(session: session, fallbackPrompt: prompt.description)
+            var pendingChat: [MLXLMCommon.Chat.Message] = []
 
             var usage = LanguageModelSession.Usage.zero
             var allTextChunks: [String] = []
@@ -1154,6 +1152,13 @@ import Foundation
 
             // Loop until no more tool calls
             while true {
+                let requestContext = session.resolvedRequestContext()
+                let toolSpecs = mlxToolSpecs(for: requestContext.tools)
+                let chat =
+                    convertTranscriptToMLXChat(
+                        requestContext: requestContext,
+                        fallbackPrompt: prompt.description
+                    ) + pendingChat
                 // Build user input with current chat history and tools
                 let userInput = makeUserInput(
                     chat: chat,
@@ -1210,7 +1215,7 @@ import Foundation
 
                 // Add assistant response to chat history
                 if !assistantText.isEmpty {
-                    chat.append(.assistant(assistantText))
+                    pendingChat.append(.assistant(assistantText))
                 }
 
                 // If there are tool calls, execute them and continue
@@ -1233,7 +1238,11 @@ import Foundation
                     }
                     previousToolCallSignature = signature
 
-                    let resolution = try await resolveToolCalls(collectedToolCalls, session: session)
+                    let resolution = try await resolveToolCalls(
+                        collectedToolCalls,
+                        tools: requestContext.tools,
+                        session: session
+                    )
                     switch resolution {
                     case .stop(let calls):
                         if !calls.isEmpty {
@@ -1255,7 +1264,7 @@ import Foundation
 
                                 // Convert tool output to JSON string for MLX
                                 let toolResultJSON = toolOutputToJSON(invocation.output)
-                                chat.append(.tool(toolResultJSON))
+                                pendingChat.append(.tool(toolResultJSON))
                             }
 
                             // Continue loop to generate with tool results
@@ -1382,11 +1391,7 @@ import Foundation
                         let userInputProcessing =
                             options[custom: MLXLanguageModel.self]?.processingForUserInput
                             ?? .init(resize: nil)
-                        let toolSpecs = mlxToolSpecs(for: session)
-                        var chat = convertTranscriptToMLXChat(
-                            session: session,
-                            fallbackPrompt: prompt.description
-                        )
+                        var pendingChat: [MLXLMCommon.Chat.Message] = []
 
                         // Accumulators live outside the tool loop so streamed snapshots stay
                         // monotonic across rounds: text never shrinks, entries only grow.
@@ -1414,6 +1419,13 @@ import Foundation
 
                         // Loop until the model stops without pending tool calls (mirrors `respond()`).
                         toolLoop: while true {
+                            let requestContext = session.resolvedRequestContext()
+                            let toolSpecs = mlxToolSpecs(for: requestContext.tools)
+                            let chat =
+                                convertTranscriptToMLXChat(
+                                    requestContext: requestContext,
+                                    fallbackPrompt: prompt.description
+                                ) + pendingChat
                             let userInput = makeUserInput(
                                 chat: chat,
                                 tools: toolSpecs,
@@ -1471,7 +1483,7 @@ import Foundation
                             // Feed this round's assistant text back into the chat history.
                             let roundText = String(accumulatedText.dropFirst(roundStartTextCount))
                             if !roundText.isEmpty {
-                                chat.append(.assistant(roundText))
+                                pendingChat.append(.assistant(roundText))
                             }
 
                             guard !collectedToolCalls.isEmpty else { break }
@@ -1490,7 +1502,11 @@ import Foundation
                             }
                             previousToolCallSignature = signature
 
-                            let resolution = try await resolveToolCalls(collectedToolCalls, session: session)
+                            let resolution = try await resolveToolCalls(
+                                collectedToolCalls,
+                                tools: requestContext.tools,
+                                session: session
+                            )
                             switch resolution {
                             case .stop(let calls):
                                 if !calls.isEmpty {
@@ -1506,7 +1522,7 @@ import Foundation
                                 )
                                 for invocation in invocations {
                                     accumulatedEntries.append(.toolOutput(invocation.output))
-                                    chat.append(.tool(toolOutputToJSON(invocation.output)))
+                                    pendingChat.append(.tool(toolOutputToJSON(invocation.output)))
                                 }
                                 yieldSnapshot()
                             }
@@ -1569,11 +1585,12 @@ import Foundation
                 let loaded = try await loadContext(modelId: modelId, hub: hub, directory: directory)
                 defer { withExtendedLifetime(loaded) {} }
                 let context = loaded.context
-                guard let instructions = session.instructions?.description, !instructions.isEmpty else {
+                let requestContext = session.resolvedRequestContext()
+                guard let instructions = requestContext.instructions?.description, !instructions.isEmpty else {
                     return
                 }
 
-                let toolSpecs = mlxToolSpecs(for: session)
+                let toolSpecs = mlxToolSpecs(for: requestContext.tools)
 
                 let params = toGenerateParameters(.init())
                 let newCache = try context.model.newCache(parameters: params)
@@ -1682,27 +1699,27 @@ import Foundation
     // MARK: - Transcript Conversion
 
     private func convertTranscriptToMLXChat(
-        session: LanguageModelSession,
+        requestContext: LanguageModelSession.RequestContext,
         fallbackPrompt: String
     ) -> [MLXLMCommon.Chat.Message] {
         var chat: [MLXLMCommon.Chat.Message] = []
 
         // Check if instructions are already in transcript
-        let hasInstructionsInTranscript = session.transcript.contains {
+        let hasInstructionsInTranscript = requestContext.transcript.contains {
             if case .instructions = $0 { return true }
             return false
         }
 
         // Add instructions from session if present and not in transcript
         if !hasInstructionsInTranscript,
-            let instructions = session.instructions?.description,
+            let instructions = requestContext.instructions?.description,
             !instructions.isEmpty
         {
             chat.append(.init(role: .system, content: instructions))
         }
 
         // Convert each transcript entry
-        for entry in session.transcript {
+        for entry in requestContext.transcript {
             switch entry {
             case .instructions(let instr):
                 chat.append(makeMLXChatMessage(from: instr.segments, role: .system))
@@ -1894,12 +1911,13 @@ import Foundation
 
     private func resolveToolCalls(
         _ toolCalls: [MLXLMCommon.ToolCall],
+        tools: [any Tool],
         session: LanguageModelSession
     ) async throws -> ToolResolutionOutcome {
         if toolCalls.isEmpty { return .invocations([]) }
 
         var toolsByName: [String: any Tool] = [:]
-        for tool in session.tools {
+        for tool in tools {
             if toolsByName[tool.name] == nil {
                 toolsByName[tool.name] = tool
             }
@@ -2065,7 +2083,7 @@ import Foundation
     private func generateStructuredJSON(
         context: ModelContext,
         tokenCache: StructuredGenerationTokenCache,
-        session: LanguageModelSession,
+        requestContext: LanguageModelSession.RequestContext,
         prompt: Prompt,
         schema: GenerationSchema,
         options: GenerationOptions,
@@ -2074,7 +2092,10 @@ import Foundation
         let maxTokens = options.maximumResponseTokens ?? 512
         let generateParameters = toStructuredGenerateParameters(options)
 
-        let baseChat = convertTranscriptToMLXChat(session: session, fallbackPrompt: prompt.description)
+        let baseChat = convertTranscriptToMLXChat(
+            requestContext: requestContext,
+            fallbackPrompt: prompt.description
+        )
         let schemaPrompt = includeSchemaInPrompt ? schemaPrompt(for: schema) : nil
         let chat = normalizeChatForStructuredGeneration(baseChat, schemaPrompt: schemaPrompt)
 
