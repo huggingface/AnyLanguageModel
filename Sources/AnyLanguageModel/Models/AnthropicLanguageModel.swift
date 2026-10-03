@@ -1046,7 +1046,7 @@ extension Transcript {
                 }
                 let text = try reasoning.segments.map { segment -> String in
                     guard case .text(let text) = segment else {
-                        throw Transcript.ReasoningReplayError.unsupportedProvider("Anthropic reasoning segment")
+                        throw Transcript.ReasoningReplayError.unsupportedSegment
                     }
                     return text.content
                 }.joined()

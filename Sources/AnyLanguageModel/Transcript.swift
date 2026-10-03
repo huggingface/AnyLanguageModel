@@ -455,7 +455,9 @@ public struct Transcript: Sendable, Equatable, Codable {
     ///   and using it means your code is no longer drop-in compatible
     ///   with the Foundation Models framework.
     public enum ReasoningReplayError: Error, Sendable, Equatable {
-        case unsupportedProvider(String)
+        /// The reasoning entry contains a segment that the provider can't replay.
+        case unsupportedSegment
+        /// The reasoning entry's signature is missing or invalid.
         case invalidSignature
     }
 
