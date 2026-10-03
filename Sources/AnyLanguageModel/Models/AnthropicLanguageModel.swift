@@ -30,6 +30,9 @@ import OrderedCollections
 public struct AnthropicLanguageModel: LanguageModel {
     /// Custom generation options specific to Anthropic's Claude API.
     ///
+    /// Reached through `GenerationOptions[custom: AnthropicLanguageModel.self]`,
+    /// an AnyLanguageModel extension.
+    ///
     /// Use this type to pass additional parameters that are not part of the
     /// standard ``GenerationOptions``, such as Anthropic-specific sampling
     /// parameters and metadata.
@@ -999,10 +1002,17 @@ extension Transcript {
                     )
                 )
             case .response(let response):
+                // Anthropic rejects text blocks without non-whitespace text,
+                // such as the empty response of a turn that only called tools.
+                let content = convertSegmentsToAnthropicContent(response.segments).filter { block in
+                    guard case .text(let text) = block else { return true }
+                    return !text.text.allSatisfy(\.isWhitespace)
+                }
+                guard !content.isEmpty else { continue }
                 messages.append(
                     .init(
                         role: .assistant,
-                        content: convertSegmentsToAnthropicContent(response.segments)
+                        content: content
                     )
                 )
             case .toolCalls(let toolCalls):

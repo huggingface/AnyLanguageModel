@@ -15,6 +15,7 @@ public struct GenerationSchema: Equatable, Codable, CustomDebugStringConvertible
         case string(StringNode)
         case number(NumberNode)
         case boolean
+        case null
         case anyOf([Node])
         case ref(String)
 
@@ -22,7 +23,7 @@ public struct GenerationSchema: Equatable, Codable, CustomDebugStringConvertible
 
         static func == (lhs: GenerationSchema.Node, rhs: GenerationSchema.Node) -> Bool {
             switch (lhs, rhs) {
-            case (.boolean, .boolean):
+            case (.boolean, .boolean), (.null, .null):
                 return true
             case (.ref(let lhsName), .ref(let rhsName)):
                 return lhsName == rhsName
@@ -43,6 +44,8 @@ public struct GenerationSchema: Equatable, Codable, CustomDebugStringConvertible
             case (.object(let lhsObject), .object(let rhsObject)):
                 return lhsObject.description == rhsObject.description
                     && lhsObject.required == rhsObject.required
+                    && lhsObject.representsNilExplicitly == rhsObject.representsNilExplicitly
+                    && (!lhsObject.representsNilExplicitly || lhsObject.propertyOrder == rhsObject.propertyOrder)
                     && lhsObject.properties.keys == rhsObject.properties.keys
                     && lhsObject.properties.allSatisfy { key, lhsNode in
                         guard let rhsNode = rhsObject.properties[key] else { return false }
@@ -79,10 +82,11 @@ public struct GenerationSchema: Equatable, Codable, CustomDebugStringConvertible
                     keyedBy: GenerationSchema.DynamicCodingKey.self,
                     forKey: .properties
                 )
-                for (name, node) in obj.properties {
+                for name in obj.properties.keys.sorted() {
+                    guard let node = obj.properties[name] else { continue }
                     try propsContainer.encode(node, forKey: GenerationSchema.DynamicCodingKey(stringValue: name)!)
                 }
-                try container.encode(Array(obj.required), forKey: .required)
+                try container.encode(obj.required.sorted(), forKey: .required)
 
                 // Check userInfo to see if additionalProperties should be omitted
                 let shouldOmit = encoder.userInfo[GenerationSchema.omitAdditionalPropertiesKey] as? Bool ?? false
@@ -129,6 +133,9 @@ public struct GenerationSchema: Equatable, Codable, CustomDebugStringConvertible
 
             case .boolean:
                 try container.encode("boolean", forKey: .type)
+
+            case .null:
+                try container.encode("null", forKey: .type)
 
             case .anyOf(let nodes):
                 try container.encode(nodes, forKey: .anyOf)
@@ -208,6 +215,9 @@ public struct GenerationSchema: Equatable, Codable, CustomDebugStringConvertible
             case "boolean":
                 self = .boolean
 
+            case "null":
+                self = .null
+
             default:
                 throw DecodingError.dataCorruptedError(
                     forKey: .type,
@@ -222,6 +232,15 @@ public struct GenerationSchema: Equatable, Codable, CustomDebugStringConvertible
         var description: String?
         var properties: [String: Node]
         var required: Set<String>
+        /// Whether generated content has a `null` value for each optional property
+        /// that it would otherwise leave out.
+        var representsNilExplicitly = false
+        /// The property names in declaration order, when known.
+        var propertyOrder: [String] = []
+
+        private enum CodingKeys: String, CodingKey {
+            case description, properties, required
+        }
     }
 
     struct ArrayNode: Sendable, Codable {
@@ -280,6 +299,8 @@ public struct GenerationSchema: Equatable, Codable, CustomDebugStringConvertible
             return num.integerOnly ? "integer" : "number"
         case .boolean:
             return "boolean"
+        case .null:
+            return "null"
         case .anyOf(let nodes):
             return "anyOf(\(nodes.count) choices)"
         case .ref(let name):
@@ -296,6 +317,34 @@ public struct GenerationSchema: Equatable, Codable, CustomDebugStringConvertible
     public init(
         type: any Generable.Type,
         description: String? = nil,
+        properties: [GenerationSchema.Property]
+    ) {
+        self.init(type: type, description: description, explicitNil: false, properties: properties)
+    }
+
+    /// Creates a schema by providing an array of properties.
+    ///
+    /// - Parameters:
+    ///   - type: The type this schema represents.
+    ///   - description: A natural language description of this schema.
+    ///   - explicitNil: Whether generated content has a `null` value
+    ///     for each optional property that it would otherwise leave out.
+    ///     Like Foundation Models,
+    ///     the schema's encoded form doesn't include this setting.
+    ///   - properties: An array of properties.
+    public init(
+        type: any Generable.Type,
+        description: String? = nil,
+        representNilExplicitlyInGeneratedContent explicitNil: Bool,
+        properties: [GenerationSchema.Property]
+    ) {
+        self.init(type: type, description: description, explicitNil: explicitNil, properties: properties)
+    }
+
+    private init(
+        type: any Generable.Type,
+        description: String?,
+        explicitNil: Bool,
         properties: [GenerationSchema.Property]
     ) {
         let typeName = String(reflecting: type)
@@ -316,7 +365,13 @@ public struct GenerationSchema: Equatable, Codable, CustomDebugStringConvertible
             }
         }
 
-        let objectNode = ObjectNode(description: description, properties: props, required: required)
+        let objectNode = ObjectNode(
+            description: description,
+            properties: props,
+            required: required,
+            representsNilExplicitly: explicitNil,
+            propertyOrder: properties.map(\.name)
+        )
         allDefs[typeName] = .object(objectNode)
 
         self.root = .ref(typeName)
@@ -480,7 +535,15 @@ public struct GenerationSchema: Equatable, Codable, CustomDebugStringConvertible
                     required.insert(prop.name)
                 }
             }
-            let node = Node.object(ObjectNode(description: desc, properties: props, required: required))
+            let node = Node.object(
+                ObjectNode(
+                    description: desc,
+                    properties: props,
+                    required: required,
+                    representsNilExplicitly: dynamic.representsNilExplicitly,
+                    propertyOrder: properties.map(\.name)
+                )
+            )
             if let name = name {
                 defs[name] = node
                 return .ref(name)
@@ -520,6 +583,8 @@ public struct GenerationSchema: Equatable, Codable, CustomDebugStringConvertible
             switch scalar {
             case .bool:
                 return .boolean
+            case .null:
+                return .null
             case .string:
                 return .string(StringNode(description: dynamicProp?.description, pattern: nil, enumChoices: nil))
             case .number:
@@ -614,7 +679,7 @@ public struct GenerationSchema: Equatable, Codable, CustomDebugStringConvertible
 
         if !defs.isEmpty {
             var defsContainer = container.nestedContainer(keyedBy: DynamicCodingKey.self, forKey: .defs)
-            for (name, node) in defs {
+            for (name, node) in defs.sorted(by: { $0.key < $1.key }) {
                 try defsContainer.encode(node, forKey: DynamicCodingKey(stringValue: name)!)
             }
         }
@@ -880,5 +945,96 @@ extension GenerationSchema {
             return "Respond with valid JSON only."
         }
         return "Respond with valid JSON matching this schema:\n\(schemaJSON)"
+    }
+}
+
+// MARK: - Explicit nil
+
+extension GenerationSchema {
+    /// Returns generated content with a `null` value for each optional property
+    /// that the content leaves out,
+    /// in objects whose schema represents `nil` explicitly.
+    ///
+    /// Content for a schema without such objects is returned unchanged.
+    func representingNilExplicitly(in content: GeneratedContent) -> GeneratedContent {
+        let representsNilExplicitly = ([root] + Array(defs.values)).contains { node in
+            if case .object(let object) = node { return object.representsNilExplicitly }
+            return false
+        }
+        guard representsNilExplicitly else { return content }
+        return representingNilExplicitly(in: content, node: root, depth: 0)
+    }
+
+    private func representingNilExplicitly(
+        in content: GeneratedContent,
+        node: Node,
+        depth: Int
+    ) -> GeneratedContent {
+        guard depth < 64 else { return content }
+        switch node {
+        case .ref(let name):
+            guard let resolved = defs[name] else { return content }
+            return representingNilExplicitly(in: content, node: resolved, depth: depth + 1)
+        case .object(let object):
+            guard case .structure(var properties, var orderedKeys) = content.kind else { return content }
+            for (key, value) in properties {
+                if let child = object.properties[key] {
+                    properties[key] = representingNilExplicitly(in: value, node: child, depth: depth + 1)
+                }
+            }
+            if object.representsNilExplicitly {
+                let declaredKeys = object.propertyOrder.isEmpty ? object.properties.keys.sorted() : object.propertyOrder
+                for key in declaredKeys
+                where properties[key] == nil && !object.required.contains(key) {
+                    properties[key] = GeneratedContent(kind: .null)
+                    orderedKeys.append(key)
+                }
+                // Put declared properties in declaration order, followed by any others.
+                if !object.propertyOrder.isEmpty {
+                    let declared = Set(object.propertyOrder)
+                    orderedKeys =
+                        object.propertyOrder.filter { properties[$0] != nil }
+                        + orderedKeys.filter { !declared.contains($0) }
+                }
+            }
+            return GeneratedContent(kind: .structure(properties: properties, orderedKeys: orderedKeys), id: content.id)
+        case .array(let array):
+            guard case .array(let elements) = content.kind else { return content }
+            let items = elements.map { representingNilExplicitly(in: $0, node: array.items, depth: depth + 1) }
+            return GeneratedContent(kind: .array(items), id: content.id)
+        case .anyOf(let variants):
+            guard let variant = variant(matching: content, among: variants, depth: depth) else { return content }
+            return representingNilExplicitly(in: content, node: variant, depth: depth + 1)
+        case .string, .number, .boolean, .null:
+            return content
+        }
+    }
+
+    /// Returns the first variant whose shape matches the content:
+    /// an object that declares every property in a structure
+    /// and whose required properties the structure has,
+    /// an array for an array,
+    /// or a nested union with a matching variant.
+    private func variant(matching content: GeneratedContent, among variants: [Node], depth: Int) -> Node? {
+        variants.first { variant in
+            switch (resolving(variant, depth: depth), content.kind) {
+            case (.object(let object)?, .structure(let properties, _)):
+                return properties.keys.allSatisfy { object.properties[$0] != nil }
+                    && object.required.allSatisfy { properties[$0] != nil }
+            case (.array?, .array):
+                return true
+            case (.anyOf(let nested)?, _):
+                guard depth < 64 else { return false }
+                return self.variant(matching: content, among: nested, depth: depth + 1) != nil
+            default:
+                return false
+            }
+        }
+    }
+
+    private func resolving(_ node: Node, depth: Int) -> Node? {
+        guard depth < 64 else { return nil }
+        guard case .ref(let name) = node else { return node }
+        return defs[name].flatMap { resolving($0, depth: depth + 1) }
     }
 }

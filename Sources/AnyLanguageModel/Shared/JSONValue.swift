@@ -17,6 +17,10 @@ import Foundation
 ///     "manager": nil,
 /// ]
 /// ```
+///
+/// - Note: This API is exclusive to AnyLanguageModel
+///   and using it means your code is no longer drop-in compatible
+///   with the Foundation Models framework.
 @frozen public enum JSONValue: Sendable, Hashable {
     /// A JSON null value.
     case null

@@ -387,6 +387,8 @@ struct ConstrainedJSONGenerator<Backend: TokenBackend> {
             return try await generateNumber(numberNode)
         case .boolean:
             return try await generateChoice(["true", "false"])
+        case .null:
+            return try await emit("null")
         case .ref(let typeName):
             guard let referenced = schema.defs[typeName] else {
                 throw ConstrainedGenerationError.missingReference(typeName)
@@ -611,6 +613,8 @@ struct ConstrainedJSONGenerator<Backend: TokenBackend> {
             return tokensStarting(with: "[")
         case .boolean:
             return tokensPrefixing(anyOf: ["true", "false"])
+        case .null:
+            return tokensPrefixing(anyOf: ["null"])
         case .number(let numberNode):
             let numeric =
                 numberNode.integerOnly

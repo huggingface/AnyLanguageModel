@@ -63,7 +63,76 @@
             }
         #endif
 
+        /// The languages that the model supports.
+        public var supportedLanguages: Set<Locale.Language> {
+            systemModel.supportedLanguages
+        }
+
+        /// Returns a Boolean value that indicates whether the model supports a locale.
+        ///
+        /// - Parameter locale: The locale to check. Defaults to the current locale.
+        /// - Returns: `true` if the model supports the locale's language.
+        public func supportsLocale(_ locale: Locale = Locale.current) -> Bool {
+            systemModel.supportsLocale(locale)
+        }
+
+        #if compiler(>=6.3) && !os(tvOS) && !os(watchOS)
+            /// Returns the number of tokens in a prompt.
+            ///
+            /// - Parameter prompt: The prompt to count.
+            /// - Returns: The number of tokens.
+            @available(macOS 26.4, iOS 26.4, visionOS 26.4, *)
+            public func tokenCount(for prompt: some PromptRepresentable) async throws -> Int {
+                try await systemModel.tokenCount(for: prompt.promptRepresentation.toFoundationModels())
+            }
+
+            /// Returns the number of tokens in instructions.
+            ///
+            /// - Parameter instructions: The instructions to count.
+            /// - Returns: The number of tokens.
+            @available(macOS 26.4, iOS 26.4, visionOS 26.4, *)
+            public func tokenCount(for instructions: Instructions) async throws -> Int {
+                try await systemModel.tokenCount(for: instructions.toFoundationModels())
+            }
+
+            /// Returns the number of tokens that the definitions of tools use.
+            ///
+            /// - Parameter tools: The tools to count.
+            /// - Returns: The number of tokens.
+            @available(macOS 26.4, iOS 26.4, visionOS 26.4, *)
+            public func tokenCount(for tools: [any Tool]) async throws -> Int {
+                try await systemModel.tokenCount(for: tools.toFoundationModels())
+            }
+
+            /// Returns the number of tokens in a generation schema.
+            ///
+            /// - Parameter schema: The schema to count.
+            /// - Returns: The number of tokens.
+            @available(macOS 26.4, iOS 26.4, visionOS 26.4, *)
+            public func tokenCount(for schema: GenerationSchema) async throws -> Int {
+                try await systemModel.tokenCount(for: FoundationModels.GenerationSchema(schema))
+            }
+
+            /// Returns the number of tokens in transcript entries.
+            ///
+            /// - Parameter transcriptEntries: The entries to count.
+            /// - Returns: The number of tokens.
+            @available(macOS 26.4, iOS 26.4, visionOS 26.4, *)
+            public func tokenCount(
+                for transcriptEntries: some Collection<Transcript.Entry>
+            ) async throws -> Int {
+                let transcript = Transcript(entries: Array(transcriptEntries))
+                    .toFoundationModels(instructions: nil, toolDefinitions: [])
+                return try await systemModel.tokenCount(for: Array(transcript))
+            }
+        #endif
+
         /// Whether the model accepts image input.
+        ///
+        /// - Note: This property is exclusive to AnyLanguageModel
+        ///   and using it means your code is no longer drop-in compatible
+        ///   with the Foundation Models framework.
+        ///   In Foundation Models 27, check whether `capabilities` contains `.vision` instead.
         public var supportsImageInput: Bool {
             #if compiler(>=6.4) && !os(tvOS) && !os(watchOS)
                 if #available(macOS 27.0, iOS 27.0, visionOS 27.0, *) {
@@ -221,15 +290,21 @@
             issues: [LanguageModelFeedback.Issue],
             desiredOutput: Transcript.Entry?
         ) -> Data {
+            // Attach the feedback to the session's conversation, including its latest response.
             let fmSession = FoundationModels.LanguageModelSession(
                 model: systemModel,
                 tools: session.tools.toFoundationModels(),
-                instructions: session.instructions?.toFoundationModels()
+                transcript: session.transcript.toFoundationModels(
+                    instructions: session.instructions,
+                    toolDefinitions: session.tools
+                        .filter(\.includesSchemaInInstructions)
+                        .map { Transcript.ToolDefinition(tool: $0) }
+                )
             )
 
             let fmSentiment = sentiment?.toFoundationModels()
             let fmIssues = issues.map { $0.toFoundationModels() }
-            let fmDesiredOutput: FoundationModels.Transcript.Entry? = nil
+            let fmDesiredOutput = desiredOutput?.toFoundationModels()
 
             return fmSession.logFeedbackAttachment(
                 sentiment: fmSentiment,
@@ -515,7 +590,21 @@
             return .init(type: Bool.self)
 
         case .anyOf(let schemas):
-            return .init(name: name ?? "", anyOf: schemas.map { convertToDynamicSchema($0) })
+            // Before OS 26.4, Foundation Models has no null schema.
+            // Leave out null variants there,
+            // so that the model generates another variant instead of an unconstrained string.
+            var choices = schemas
+            if !supportsNullSchema {
+                let nonNull = schemas.filter { schema in
+                    if case .null = schema { return false }
+                    return true
+                }
+                if !nonNull.isEmpty { choices = nonNull }
+            }
+            if choices.count == 1 {
+                return convertToDynamicSchema(choices[0], name: name)
+            }
+            return .init(name: name ?? "", anyOf: choices.map { convertToDynamicSchema($0) })
 
         case .array(_, _, _, _, _, _, items: let items, minItems: let minItems, maxItems: let maxItems, _):
             let itemsSchema =
@@ -528,9 +617,28 @@
             let typeName = name.hasPrefix(prefix) ? String(name.dropFirst(prefix.count)) : name
             return .init(referenceTo: typeName)
 
-        case .allOf, .oneOf, .not, .null, .empty, .any:
+        case .null:
+            #if compiler(>=6.3) && !os(tvOS)
+                if #available(macOS 26.4, iOS 26.4, watchOS 27.0, visionOS 26.4, *) {
+                    return .null
+                }
+            #endif
+            return .init(type: String.self)
+
+        case .allOf, .oneOf, .not, .empty, .any:
             return .init(type: String.self)
         }
+    }
+
+    /// Whether Foundation Models supports `DynamicGenerationSchema.null` at run time.
+    @available(macOS 26.0, iOS 26.0, watchOS 27.0, tvOS 26.0, visionOS 26.0, *)
+    private var supportsNullSchema: Bool {
+        #if compiler(>=6.3) && !os(tvOS)
+            if #available(macOS 26.4, iOS 26.4, watchOS 27.0, visionOS 26.4, *) {
+                return true
+            }
+        #endif
+        return false
     }
 
     @available(macOS 26.0, iOS 26.0, watchOS 27.0, tvOS 26.0, visionOS 26.0, *)
@@ -560,6 +668,14 @@
             .init(type: String.self, guides: [.constant(stringValue)])
         case .null, .object, .bool, .array:
             nil
+        }
+    }
+
+    @available(macOS 26.0, iOS 26.0, watchOS 27.0, tvOS 26.0, visionOS 26.0, *)
+    extension Transcript.Entry {
+        /// Converts the entry to a Foundation Models transcript entry.
+        func toFoundationModels() -> FoundationModels.Transcript.Entry? {
+            Transcript(entries: [self]).toFoundationModels(instructions: nil, toolDefinitions: []).first
         }
     }
 
@@ -1052,6 +1168,9 @@
 
         case .boolean:
             return GeneratedContent(true)
+
+        case .null:
+            return GeneratedContent(kind: .null)
 
         case .anyOf(let nodes):
             if let first = nodes.first {
