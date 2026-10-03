@@ -85,6 +85,9 @@ public final class LanguageModelSession: @unchecked Sendable {
 
     /// The tools that the model can call during the session.
     ///
+    /// For a session created with dynamic instructions, this is empty.
+    /// Call ``resolvedRequestContext()`` to get the tools for the next request.
+    ///
     /// - Note: This property is exclusive to AnyLanguageModel
     ///   and using it means your code is no longer drop-in compatible
     ///   with the Foundation Models framework.
@@ -94,12 +97,23 @@ public final class LanguageModelSession: @unchecked Sendable {
 
     /// The instructions for the session, if any.
     ///
+    /// For a session created with dynamic instructions, this is `nil`.
+    /// Call ``resolvedRequestContext()`` to get the instructions for the next request.
+    ///
     /// - Note: This property is exclusive to AnyLanguageModel
     ///   and using it means your code is no longer drop-in compatible
     ///   with the Foundation Models framework.
     ///   It's public so that language models outside this module
     ///   can read the session's instructions.
     public let instructions: Instructions?
+
+    private let dynamicInstructions: AnyDynamicInstructions?
+    private let dynamicInstructionsLock = NSLock()
+
+    /// Whether the session resolves its instructions and tools before each request.
+    nonisolated var usesDynamicInstructions: Bool {
+        dynamicInstructions != nil
+    }
 
     /// A delegate that observes and controls tool execution.
     ///
@@ -151,7 +165,29 @@ public final class LanguageModelSession: @unchecked Sendable {
     ///   It's public so that language models outside this module
     ///   can read the inputs for each request.
     nonisolated public func resolvedRequestContext() -> RequestContext {
-        RequestContext(transcript: transcript, instructions: instructions, tools: tools)
+        guard let dynamicInstructions else {
+            return RequestContext(transcript: transcript, instructions: instructions, tools: tools)
+        }
+
+        // Evaluate the body for this request.
+        // The resolved instructions go into the request's transcript,
+        // never into the session's.
+        let resolved = dynamicInstructionsLock.withLock {
+            dynamicInstructions.resolveForRequest()
+        }
+        var requestTranscript = transcript
+        if let instructions = resolved.instructions {
+            let instructionsEntry = Transcript.Entry.instructions(
+                Transcript.Instructions(
+                    segments: [.text(Transcript.TextSegment(content: instructions.description))],
+                    toolDefinitions: resolved.tools
+                        .filter(\.includesSchemaInInstructions)
+                        .map { Transcript.ToolDefinition(tool: $0) }
+                )
+            )
+            requestTranscript = Transcript(entries: [instructionsEntry] + requestTranscript)
+        }
+        return RequestContext(transcript: requestTranscript, instructions: resolved.instructions, tools: resolved.tools)
     }
 
     /// Creates a session with a model, tools,
@@ -213,14 +249,53 @@ public final class LanguageModelSession: @unchecked Sendable {
         self.init(model: model, tools: tools, instructions: nil, transcript: transcript)
     }
 
+    /// Creates a session whose instructions and tools are resolved before each model request.
+    ///
+    /// The session evaluates the body of `dynamicInstructions`
+    /// before every request to the model,
+    /// including the request that continues a response after tool calls.
+    /// The resolved instructions are sent with each request
+    /// but never become part of the session's transcript.
+    ///
+    /// - Parameters:
+    ///   - model: The language model to use.
+    ///   - dynamicInstructions: The instructions and tools to resolve for each request.
+    ///   - history: Earlier transcript entries to continue from.
+    ///     Instructions entries in the history are left out,
+    ///     because the dynamic instructions take their place.
+    ///
+    /// - Note: This API is exclusive to AnyLanguageModel on OS 26.
+    ///   It follows the Foundation Models 27 `LanguageModelSession.init(model:dynamicInstructions:history:)` API,
+    ///   so code that uses it ports to Foundation Models on OS 27.
+    ///   Unlike Foundation Models, AnyLanguageModel requires the `model` argument.
+    public convenience init(
+        model: any LanguageModel,
+        dynamicInstructions: sending some DynamicInstructions,
+        history: some Collection<Transcript.Entry> = []
+    ) {
+        let history = history.filter { entry in
+            if case .instructions = entry { return false }
+            return true
+        }
+        self.init(
+            model: model,
+            tools: [],
+            instructions: nil,
+            transcript: Transcript(entries: history),
+            dynamicInstructions: AnyDynamicInstructions(dynamicInstructions)
+        )
+    }
+
     private init(
         model: any LanguageModel,
         tools: [any Tool],
         instructions: Instructions?,
-        transcript: Transcript
+        transcript: Transcript,
+        dynamicInstructions: AnyDynamicInstructions? = nil
     ) {
         self.model = model
         self.tools = tools
+        self.dynamicInstructions = dynamicInstructions
         let resolvedInstructions = instructions ?? Self.instructions(from: transcript)
         self.instructions = resolvedInstructions
 

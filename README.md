@@ -446,6 +446,47 @@ session.toolExecutionDelegate = ToolExecutionObserver()
 > Tool execution delegates are an AnyLanguageModel extension.
 > See [Differences from Foundation Models](#differences-from-foundation-models).
 
+### Dynamic Instructions
+
+`DynamicInstructions` lets a session change the instructions and tools
+for each request to the model,
+without creating a new session:
+
+```swift
+final class CurrentAppState {
+    var canCheckWeather = false
+}
+
+struct CurrentAppInstructions: DynamicInstructions {
+    let state: CurrentAppState
+
+    var body: some DynamicInstructions {
+        Instructions("Help with the currently visible app.")
+        if state.canCheckWeather {
+            WeatherTool()
+        }
+    }
+}
+
+let state = CurrentAppState()
+let session = LanguageModelSession(
+    model: model,
+    dynamicInstructions: CurrentAppInstructions(state: state),
+    history: savedHistory
+)
+```
+
+The session evaluates the body before every request to the model,
+including the request that continues a response after tool calls.
+The resolved instructions are sent with each request
+but never become part of the session's transcript.
+
+> [!NOTE]
+> Dynamic instructions follow the Foundation Models 27 API.
+> On OS 26, `SystemLanguageModel` throws
+> `SystemLanguageModelError.dynamicInstructionsUnavailable`
+> for a session with dynamic instructions.
+
 ### Reasoning in the transcript
 
 Reasoning is transcript content, separate from the answer in `response.content`.
@@ -582,6 +623,9 @@ say which API they follow.
 - `Usage` and the `usage` properties:
   [token usage](#token-usage),
   which follows the Foundation Models 27 API.
+- `DynamicInstructions`, its builder, and `LanguageModelSession.init(model:dynamicInstructions:history:)`:
+  [dynamic instructions](#dynamic-instructions),
+  which follow the Foundation Models 27 API.
 - `Transcript.Entry.reasoning` and `Transcript.Reasoning`:
   [reasoning in the transcript](#reasoning-in-the-transcript),
   which follows the Foundation Models 27 API.
@@ -590,7 +634,8 @@ say which API they follow.
   for language models defined outside AnyLanguageModel.
 - `Codable` conformance for `GeneratedContent`, `GenerationID`, `Usage`,
   and the types nested in `Transcript`.
-- `GeneratedContentError`, `Transcript.ReasoningReplayError`, and each provider's error type.
+- `GeneratedContentError`, `Transcript.ReasoningReplayError`, `SystemLanguageModelError`,
+  and each provider's error type.
 - `JSONValue`:
   JSON values for provider options such as `extraBody`.
 - Smaller additions to existing types,
