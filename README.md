@@ -484,7 +484,7 @@ but never become part of the session's transcript.
 > [!NOTE]
 > Dynamic instructions follow the Foundation Models 27 API.
 > On OS 26, `SystemLanguageModel` throws
-> `SystemLanguageModelError.dynamicInstructionsUnavailable`
+> `SystemLanguageModel.Error.dynamicInstructionsUnavailable`
 > for a session with dynamic instructions.
 
 ### Reasoning in the transcript
@@ -634,7 +634,7 @@ say which API they follow.
   for language models defined outside AnyLanguageModel.
 - `Codable` conformance for `GeneratedContent`, `GenerationID`, `Usage`,
   and the types nested in `Transcript`.
-- `GeneratedContentError`, `Transcript.ReasoningReplayError`, `SystemLanguageModelError`,
+- `GeneratedContentError`, `Transcript.ReasoningReplayError`, `SystemLanguageModel.Error`,
   and each provider's error type.
 - `JSONValue`:
   JSON values for provider options such as `extraBody`.

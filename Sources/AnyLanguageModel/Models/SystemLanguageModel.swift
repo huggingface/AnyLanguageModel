@@ -309,7 +309,7 @@
             // Before OS 27, Foundation Models can't resolve instructions and tools
             // again for the request that continues after tool calls.
             guard !session.usesDynamicInstructions else {
-                throw SystemLanguageModelError.dynamicInstructionsUnavailable
+                throw SystemLanguageModel.Error.dynamicInstructionsUnavailable
             }
             let requestContext = session.resolvedRequestContext()
             return FoundationModels.LanguageModelSession(
@@ -346,20 +346,25 @@
         return Transcript(entries: transcript.dropLast())
     }
 
-    /// An error from the system language model.
-    ///
-    /// - Note: This API is exclusive to AnyLanguageModel
-    ///   and using it means your code is no longer drop-in compatible
-    ///   with the Foundation Models framework.
-    public enum SystemLanguageModelError: LocalizedError, Sendable, Equatable {
-        /// The session uses dynamic instructions,
-        /// which the system language model supports only on OS 27 and later.
-        case dynamicInstructionsUnavailable
+    @available(macOS 26.0, iOS 26.0, tvOS 26.0, visionOS 26.0, *)
+    @available(watchOS, unavailable)
+    extension SystemLanguageModel {
+        /// An error from the system language model.
+        ///
+        /// - Note: This API is exclusive to AnyLanguageModel
+        ///   and using it means your code is no longer drop-in compatible
+        ///   with the Foundation Models framework.
+        ///   Foundation Models 27 has a `SystemLanguageModel.Error` type with other cases.
+        public enum Error: LocalizedError, Sendable, Equatable {
+            /// The session uses dynamic instructions,
+            /// which the system language model supports only on OS 27 and later.
+            case dynamicInstructionsUnavailable
 
-        public var errorDescription: String? {
-            switch self {
-            case .dynamicInstructionsUnavailable:
-                "Dynamic instructions require Foundation Models on OS 27 or later."
+            public var errorDescription: String? {
+                switch self {
+                case .dynamicInstructionsUnavailable:
+                    "Dynamic instructions require Foundation Models on OS 27 or later."
+                }
             }
         }
     }
