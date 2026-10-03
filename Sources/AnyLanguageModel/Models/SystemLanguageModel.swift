@@ -285,10 +285,16 @@
             issues: [LanguageModelFeedback.Issue],
             desiredOutput: Transcript.Entry?
         ) -> Data {
+            // Attach the feedback to the session's conversation, including its latest response.
             let fmSession = FoundationModels.LanguageModelSession(
                 model: systemModel,
                 tools: session.tools.toFoundationModels(),
-                instructions: session.instructions?.toFoundationModels()
+                transcript: session.transcript.toFoundationModels(
+                    instructions: session.instructions,
+                    toolDefinitions: session.tools
+                        .filter(\.includesSchemaInInstructions)
+                        .map { Transcript.ToolDefinition(tool: $0) }
+                )
             )
 
             let fmSentiment = sentiment?.toFoundationModels()

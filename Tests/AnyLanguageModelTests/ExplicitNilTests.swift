@@ -24,6 +24,12 @@ private struct ExplicitNilPlace {
     var alias: String?
 }
 
+@Generable(description: "A greeting", representNilExplicitlyInGeneratedContent: true)
+private struct ExplicitNilGreeting {
+    var salutation: String?
+    var name: String
+}
+
 @Suite("Explicit nil")
 struct ExplicitNilTests {
     @Test func nilOptionalPropertiesAreLeftOutByDefault() throws {
@@ -195,6 +201,32 @@ struct ExplicitNilTests {
         let content = try GeneratedContent(json: #"{"name": "Home"}"#)
         let filled = ExplicitNilPlace.generationSchema.representingNilExplicitly(in: content)
         #expect(filled == ExplicitNilPlace(name: "Home", zone: nil, alias: nil).generatedContent)
+    }
+
+    @Test func filledInPropertiesKeepDeclarationOrderAroundPresentProperties() throws {
+        let content = try GeneratedContent(json: #"{"name": "Alice"}"#)
+        let filled = ExplicitNilGreeting.generationSchema.representingNilExplicitly(in: content)
+        #expect(filled == ExplicitNilGreeting(salutation: nil, name: "Alice").generatedContent)
+    }
+
+    @Test func propertyOrderIsPartOfExplicitNilSchemaEquality() {
+        let name = GenerationSchema.Property(name: "name", type: String.self)
+        let nickname = GenerationSchema.Property(name: "nickname", type: String?.self)
+        let first = GenerationSchema(
+            type: ImplicitNilContact.self,
+            representNilExplicitlyInGeneratedContent: true,
+            properties: [name, nickname]
+        )
+        let second = GenerationSchema(
+            type: ImplicitNilContact.self,
+            representNilExplicitlyInGeneratedContent: true,
+            properties: [nickname, name]
+        )
+        #expect(first != second)
+        #expect(
+            GenerationSchema(type: ImplicitNilContact.self, properties: [name, nickname])
+                == GenerationSchema(type: ImplicitNilContact.self, properties: [nickname, name])
+        )
     }
 
     @Test func flagIsPartOfSchemaEquality() {

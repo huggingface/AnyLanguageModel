@@ -45,6 +45,7 @@ public struct GenerationSchema: Equatable, Codable, CustomDebugStringConvertible
                 return lhsObject.description == rhsObject.description
                     && lhsObject.required == rhsObject.required
                     && lhsObject.representsNilExplicitly == rhsObject.representsNilExplicitly
+                    && (!lhsObject.representsNilExplicitly || lhsObject.propertyOrder == rhsObject.propertyOrder)
                     && lhsObject.properties.keys == rhsObject.properties.keys
                     && lhsObject.properties.allSatisfy { key, lhsNode in
                         guard let rhsNode = rhsObject.properties[key] else { return false }
@@ -987,6 +988,13 @@ extension GenerationSchema {
                 where properties[key] == nil && !object.required.contains(key) {
                     properties[key] = GeneratedContent(kind: .null)
                     orderedKeys.append(key)
+                }
+                // Put declared properties in declaration order, followed by any others.
+                if !object.propertyOrder.isEmpty {
+                    let declared = Set(object.propertyOrder)
+                    orderedKeys =
+                        object.propertyOrder.filter { properties[$0] != nil }
+                        + orderedKeys.filter { !declared.contains($0) }
                 }
             }
             return GeneratedContent(kind: .structure(properties: properties, orderedKeys: orderedKeys), id: content.id)
