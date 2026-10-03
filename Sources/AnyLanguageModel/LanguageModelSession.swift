@@ -1381,7 +1381,7 @@ extension LanguageModelSession {
 
             /// Transcript entries (reasoning, tool calls and outputs) produced so far while streaming.
             /// Cumulative across tool rounds;
-            /// empty for providers that don't stream tool activity.
+            /// empty for providers that don't stream reasoning or tool activity.
             ///
             /// - Note: This property is exclusive to AnyLanguageModel on OS 26.
             ///   It follows the Foundation Models 27 `ResponseStream.Snapshot.transcriptEntries` API,
