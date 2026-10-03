@@ -234,6 +234,8 @@ public struct GenerationSchema: Equatable, Codable, CustomDebugStringConvertible
         /// Whether generated content has a `null` value for each optional property
         /// that it would otherwise leave out.
         var representsNilExplicitly = false
+        /// The property names in declaration order, when known.
+        var propertyOrder: [String] = []
 
         private enum CodingKeys: String, CodingKey {
             case description, properties, required
@@ -366,7 +368,8 @@ public struct GenerationSchema: Equatable, Codable, CustomDebugStringConvertible
             description: description,
             properties: props,
             required: required,
-            representsNilExplicitly: explicitNil
+            representsNilExplicitly: explicitNil,
+            propertyOrder: properties.map(\.name)
         )
         allDefs[typeName] = .object(objectNode)
 
@@ -536,7 +539,8 @@ public struct GenerationSchema: Equatable, Codable, CustomDebugStringConvertible
                     description: desc,
                     properties: props,
                     required: required,
-                    representsNilExplicitly: dynamic.representsNilExplicitly
+                    representsNilExplicitly: dynamic.representsNilExplicitly,
+                    propertyOrder: properties.map(\.name)
                 )
             )
             if let name = name {
@@ -978,7 +982,8 @@ extension GenerationSchema {
                 }
             }
             if object.representsNilExplicitly {
-                for key in object.properties.keys.sorted()
+                let declaredKeys = object.propertyOrder.isEmpty ? object.properties.keys.sorted() : object.propertyOrder
+                for key in declaredKeys
                 where properties[key] == nil && !object.required.contains(key) {
                     properties[key] = GeneratedContent(kind: .null)
                     orderedKeys.append(key)

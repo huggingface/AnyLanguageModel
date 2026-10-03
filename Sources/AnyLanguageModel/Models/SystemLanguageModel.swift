@@ -607,7 +607,7 @@
             return .init(referenceTo: typeName)
 
         case .null:
-            #if compiler(>=6.3)
+            #if compiler(>=6.3) && !os(tvOS)
                 if #available(macOS 26.4, iOS 26.4, watchOS 27.0, visionOS 26.4, *) {
                     return .null
                 }
@@ -622,7 +622,7 @@
     /// Whether Foundation Models supports `DynamicGenerationSchema.null` at run time.
     @available(macOS 26.0, iOS 26.0, watchOS 27.0, tvOS 26.0, visionOS 26.0, *)
     private var supportsNullSchema: Bool {
-        #if compiler(>=6.3)
+        #if compiler(>=6.3) && !os(tvOS)
             if #available(macOS 26.4, iOS 26.4, watchOS 27.0, visionOS 26.4, *) {
                 return true
             }

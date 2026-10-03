@@ -17,6 +17,13 @@ private struct ExplicitNilContact {
     var tags: [String]?
 }
 
+@Generable(description: "A place", representNilExplicitlyInGeneratedContent: true)
+private struct ExplicitNilPlace {
+    var name: String
+    var zone: String?
+    var alias: String?
+}
+
 @Suite("Explicit nil")
 struct ExplicitNilTests {
     @Test func nilOptionalPropertiesAreLeftOutByDefault() throws {
@@ -182,6 +189,12 @@ struct ExplicitNilTests {
             return
         }
         #expect(properties["nickname"]?.kind == .null)
+    }
+
+    @Test func filledInPropertiesFollowDeclarationOrder() throws {
+        let content = try GeneratedContent(json: #"{"name": "Home"}"#)
+        let filled = ExplicitNilPlace.generationSchema.representingNilExplicitly(in: content)
+        #expect(filled == ExplicitNilPlace(name: "Home", zone: nil, alias: nil).generatedContent)
     }
 
     @Test func flagIsPartOfSchemaEquality() {
