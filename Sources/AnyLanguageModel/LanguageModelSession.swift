@@ -267,8 +267,7 @@ public final class LanguageModelSession: @unchecked Sendable {
                         if rawContent != lastSnapshot.rawContent {
                             continuation.yield(
                                 ResponseStream<Content>.Snapshot(
-                                    // Schema-based streams yield the generated content itself.
-                                    content: (rawContent as? Content.PartiallyGenerated) ?? lastSnapshot.content,
+                                    content: (try? Content.PartiallyGenerated(rawContent)) ?? lastSnapshot.content,
                                     rawContent: rawContent,
                                     transcriptEntries: lastSnapshot.transcriptEntries,
                                     usage: lastSnapshot.usage,

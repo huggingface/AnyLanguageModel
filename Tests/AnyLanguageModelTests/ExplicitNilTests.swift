@@ -233,6 +233,23 @@ struct ExplicitNilTests {
         #expect(streamed.content == streamed.rawContent)
     }
 
+    @Test func finalStreamedSnapshotHasNullInPartialContent() async throws {
+        // Providers build partial content from the raw JSON, without normalizing it.
+        let session = LanguageModelSession(model: RawPartialStreamingModel(json: #"{"name": "Alice"}"#))
+
+        var last: LanguageModelSession.ResponseStream<ExplicitNilContact>.Snapshot?
+        for try await snapshot in session.streamResponse(to: "Who?", generating: ExplicitNilContact.self) {
+            last = snapshot
+        }
+        let snapshot = try #require(last)
+        guard case .structure(let properties, _) = snapshot.content.generatedContent.kind else {
+            Issue.record("Expected structured content")
+            return
+        }
+        #expect(properties["nickname"]?.kind == .null)
+        #expect(snapshot.content.generatedContent == snapshot.rawContent)
+    }
+
     @Test func sessionRecordsNullForOmittedOptionalProperties() async throws {
         let model = MockLanguageModel { _, _ in #"{"name": "Alice"}"# }
 
@@ -252,5 +269,45 @@ struct ExplicitNilTests {
             case .text(let text)? = response.segments.first
         else { return nil }
         return text.content
+    }
+}
+
+/// A model that streams one snapshot whose partial content comes straight from the raw JSON.
+private struct RawPartialStreamingModel: LanguageModel {
+    typealias UnavailableReason = Never
+
+    let json: String
+
+    func respond<Content>(
+        within session: LanguageModelSession,
+        to prompt: Prompt,
+        generating type: Content.Type,
+        includeSchemaInPrompt: Bool,
+        options: GenerationOptions
+    ) async throws -> LanguageModelSession.Response<Content> where Content: Generable {
+        fatalError("Not used")
+    }
+
+    func streamResponse<Content>(
+        within session: LanguageModelSession,
+        to prompt: Prompt,
+        generating type: Content.Type,
+        includeSchemaInPrompt: Bool,
+        options: GenerationOptions
+    ) -> sending LanguageModelSession.ResponseStream<Content> where Content: Generable {
+        let json = json
+        let stream = AsyncThrowingStream<LanguageModelSession.ResponseStream<Content>.Snapshot, any Error> {
+            continuation in
+            do {
+                let rawContent = try GeneratedContent(json: json)
+                continuation.yield(
+                    .init(content: try Content.PartiallyGenerated(rawContent), rawContent: rawContent)
+                )
+                continuation.finish()
+            } catch {
+                continuation.finish(throwing: error)
+            }
+        }
+        return LanguageModelSession.ResponseStream(stream: stream)
     }
 }
