@@ -92,6 +92,33 @@ import Testing
         #expect(schema.defs[nestedTypeName] != nil)
     }
 
+    private struct BriefInstructions: DynamicInstructions {
+        var body: some DynamicInstructions {
+            Instructions("Be brief.")
+        }
+    }
+
+    /// Before OS 27, and on tvOS, the system model rejects dynamic instructions
+    /// before it uses the model, so this runs even where the model is unavailable.
+    @available(macOS 26.0, iOS 26.0, tvOS 26.0, visionOS 26.0, *)
+    @Test func dynamicInstructionsAreUnavailableWithoutNativeSupport() async throws {
+        var hasNativeSupport = false
+        #if compiler(>=6.4) && !os(tvOS)
+            if #available(macOS 27.0, iOS 27.0, visionOS 27.0, *) {
+                hasNativeSupport = true
+            }
+        #endif
+        guard !hasNativeSupport else { return }
+
+        let session = LanguageModelSession(model: SystemLanguageModel(), dynamicInstructions: BriefInstructions())
+        await #expect(throws: SystemLanguageModel.Error.dynamicInstructionsUnavailable) {
+            try await session.respond(to: "Hello")
+        }
+        await #expect(throws: SystemLanguageModel.Error.dynamicInstructionsUnavailable) {
+            for try await _ in session.streamResponse(to: "Hello") {}
+        }
+    }
+
     @Suite(
         "SystemLanguageModel",
         .enabled(if: isSystemLanguageModelAvailable)

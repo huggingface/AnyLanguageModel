@@ -483,7 +483,7 @@ but never become part of the session's transcript.
 
 > [!NOTE]
 > Dynamic instructions follow the Foundation Models 27 API.
-> On OS 26, `SystemLanguageModel` throws
+> On OS 26, and on tvOS, `SystemLanguageModel` throws
 > `SystemLanguageModel.Error.dynamicInstructionsUnavailable`
 > for a session with dynamic instructions.
 

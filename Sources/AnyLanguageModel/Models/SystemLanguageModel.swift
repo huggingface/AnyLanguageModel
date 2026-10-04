@@ -357,13 +357,14 @@
         ///   Foundation Models 27 has a `SystemLanguageModel.Error` type with other cases.
         public enum Error: LocalizedError, Sendable, Equatable {
             /// The session uses dynamic instructions,
-            /// which the system language model supports only on OS 27 and later.
+            /// which the system language model supports only on OS 27 and later,
+            /// and not on tvOS.
             case dynamicInstructionsUnavailable
 
             public var errorDescription: String? {
                 switch self {
                 case .dynamicInstructionsUnavailable:
-                    "Dynamic instructions require Foundation Models on OS 27 or later."
+                    "Dynamic instructions require Foundation Models on OS 27 or later, and aren't available on tvOS."
                 }
             }
         }
