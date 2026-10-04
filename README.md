@@ -13,8 +13,7 @@ All you need to do is change your import statement:
 Anything AnyLanguageModel adds beyond Apple's API
 is marked as an extension in its documentation.
 [Differences from Foundation Models](#differences-from-foundation-models)
-summarizes these extensions
-and lists the few Foundation Models APIs it doesn't implement yet.
+summarizes these extensions.
 
 ```swift
 struct WeatherTool: Tool {
@@ -651,15 +650,6 @@ say which API they follow.
   not as a structured segment.
 - A session created from a transcript restores `instructions`
   only when the first entry is instructions with a single text segment.
-
-### Not yet implemented
-
-- `@Generable(description:representNilExplicitlyInGeneratedContent:)`
-  and the matching `GenerationSchema` and `DynamicGenerationSchema` initializers
-- `DynamicGenerationSchema.null`
-- `logFeedbackAttachment(sentiment:issues:desiredResponseText:)`
-  and `logFeedbackAttachment(sentiment:issues:desiredResponseContent:)`
-- `SystemLanguageModel.supportedLanguages`, `supportsLocale(_:)`, and `tokenCount(for:)`
 
 ## Providers
 
