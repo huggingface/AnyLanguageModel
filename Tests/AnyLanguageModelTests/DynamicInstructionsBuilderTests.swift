@@ -26,6 +26,14 @@ struct DynamicInstructionsBuilderTests {
         #expect(dynamic.resolveForRequest().instructions?.description == "Request 2")
     }
 
+    @Test func nestingDoesNotChangeWhitespace() {
+        let flat = AnyDynamicInstructions(erasing: Flat()).resolveForRequest()
+        let nested = AnyDynamicInstructions(erasing: Outer()).resolveForRequest()
+
+        #expect(flat.instructions?.description == "A\nB  \nC")
+        #expect(nested.instructions?.description == flat.instructions?.description)
+    }
+
     @Test func emptyBuilderResolvesToNothing() {
         let resolved = AnyDynamicInstructions(erasing: EmptyDynamicInstructions()).resolveForRequest()
 
@@ -46,6 +54,28 @@ private struct Composition: DynamicInstructions {
         ForEach([Item(id: 1, text: "For each")]) { item in
             Instructions(item.text)
         }
+    }
+}
+
+private struct Flat: DynamicInstructions {
+    var body: some DynamicInstructions {
+        Instructions("A")
+        Instructions("B  ")
+        Instructions("C")
+    }
+}
+
+private struct Outer: DynamicInstructions {
+    var body: some DynamicInstructions {
+        Instructions("A")
+        Inner()
+    }
+}
+
+private struct Inner: DynamicInstructions {
+    var body: some DynamicInstructions {
+        Instructions("B  ")
+        Instructions("C")
     }
 }
 

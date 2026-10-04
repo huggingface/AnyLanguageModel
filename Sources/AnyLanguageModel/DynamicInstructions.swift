@@ -229,33 +229,30 @@ extension Instructions: DynamicInstructions {
 }
 
 struct ResolvedDynamicInstructions: Sendable {
-    let instructions: Instructions?
-    let tools: [any Tool]
+    /// The text of each instructions component, in order.
+    private var instructionTexts: [String]
 
-    fileprivate init(instructions: Instructions?, tools: [any Tool]) {
-        self.instructions = instructions
+    /// The tools, in order.
+    private(set) var tools: [any Tool]
+
+    fileprivate init(instructionTexts: [String], tools: [any Tool]) {
+        self.instructionTexts = instructionTexts
         self.tools = tools
     }
 
-    fileprivate static let empty = Self(instructions: nil, tools: [])
+    fileprivate static let empty = Self(instructionTexts: [], tools: [])
 
-    fileprivate func appending(_ other: Self) -> Self {
-        let combinedInstructions: Instructions?
-        switch (instructions, other.instructions) {
-        case (nil, nil):
-            combinedInstructions = nil
-        case (let instructions?, nil), (nil, let instructions?):
-            combinedInstructions = instructions
-        case (let first?, let second?):
-            combinedInstructions = Instructions {
-                first
-                second
-            }
-        }
-        return Self(
-            instructions: combinedInstructions,
-            tools: tools + other.tools
-        )
+    /// The instructions components joined by newlines, or `nil` if there are none.
+    ///
+    /// Each component keeps its whitespace,
+    /// so the result doesn't depend on how the components are nested.
+    var instructions: Instructions? {
+        instructionTexts.isEmpty ? nil : Instructions(instructionTexts.joined(separator: "\n"))
+    }
+
+    fileprivate mutating func append(_ other: Self) {
+        instructionTexts += other.instructionTexts
+        tools += other.tools
     }
 }
 
@@ -277,7 +274,7 @@ private struct DynamicTool: DynamicInstructions, PrimitiveDynamicInstructions {
     }
 
     func resolve() -> ResolvedDynamicInstructions {
-        ResolvedDynamicInstructions(instructions: nil, tools: [tool])
+        ResolvedDynamicInstructions(instructionTexts: [], tools: [tool])
     }
 }
 
@@ -290,7 +287,7 @@ extension AnyDynamicInstructions: PrimitiveDynamicInstructions {
 extension TupleDynamicInstructions: PrimitiveDynamicInstructions {
     fileprivate func resolve() -> ResolvedDynamicInstructions {
         var result = ResolvedDynamicInstructions.empty
-        repeat result = result.appending(resolveDynamicInstructions(each contents))
+        repeat result.append(resolveDynamicInstructions(each contents))
         return result
     }
 }
@@ -326,15 +323,17 @@ extension EmptyDynamicInstructions: PrimitiveDynamicInstructions {
 
 extension DynamicInstructionsForEach: PrimitiveDynamicInstructions {
     fileprivate func resolve() -> ResolvedDynamicInstructions {
-        data.reduce(into: .empty) { result, element in
-            result = result.appending(resolveDynamicInstructions(content(element)))
+        var result = ResolvedDynamicInstructions.empty
+        for element in data {
+            result.append(resolveDynamicInstructions(content(element)))
         }
+        return result
     }
 }
 
 extension Instructions: PrimitiveDynamicInstructions {
     fileprivate func resolve() -> ResolvedDynamicInstructions {
-        ResolvedDynamicInstructions(instructions: self, tools: [])
+        ResolvedDynamicInstructions(instructionTexts: [description], tools: [])
     }
 }
 
