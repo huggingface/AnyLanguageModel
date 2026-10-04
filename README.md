@@ -483,8 +483,9 @@ but never become part of the session's transcript.
 
 > [!NOTE]
 > Dynamic instructions follow the Foundation Models 27 API.
-> On OS 26, and on tvOS, `SystemLanguageModel` throws
-> `SystemLanguageModel.Error.dynamicInstructionsUnavailable`
+> `SystemLanguageModel` supports them only in apps built with Swift 6.4 or later
+> that run on OS 27 or later, and not on tvOS.
+> Otherwise, it throws `SystemLanguageModel.Error.dynamicInstructionsUnavailable`
 > for a session with dynamic instructions.
 
 ### Reasoning in the transcript

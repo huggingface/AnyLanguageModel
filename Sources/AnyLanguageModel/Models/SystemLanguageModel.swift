@@ -357,14 +357,14 @@
         ///   Foundation Models 27 has a `SystemLanguageModel.Error` type with other cases.
         public enum Error: LocalizedError, Sendable, Equatable {
             /// The session uses dynamic instructions,
-            /// which the system language model supports only on OS 27 and later,
-            /// and not on tvOS.
+            /// which the system language model supports only in apps built with Swift 6.4 or later
+            /// that run on OS 27 or later, and not on tvOS.
             case dynamicInstructionsUnavailable
 
             public var errorDescription: String? {
                 switch self {
                 case .dynamicInstructionsUnavailable:
-                    "Dynamic instructions require Foundation Models on OS 27 or later, and aren't available on tvOS."
+                    "Dynamic instructions require an app built with Swift 6.4 or later that runs Foundation Models on OS 27 or later, and aren't available on tvOS."
                 }
             }
         }
