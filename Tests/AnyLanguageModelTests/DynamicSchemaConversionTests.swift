@@ -5,7 +5,7 @@ import Foundation
 
 #if canImport(FoundationModels)
     import FoundationModels
-    import JSONSchema
+    import enum JSONSchema.JSONSchema
 
     private let isFoundationModelsAvailable: Bool = {
         if #available(macOS 26.0, iOS 26.0, watchOS 27.0, tvOS 26.0, visionOS 26.0, *) {
