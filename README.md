@@ -445,6 +445,91 @@ session.toolExecutionDelegate = ToolExecutionObserver()
 > Tool execution delegates are an AnyLanguageModel extension.
 > See [Differences from Foundation Models](#differences-from-foundation-models).
 
+### Dynamic Instructions
+
+`DynamicInstructions` lets a session change the instructions and tools
+for each request to the model,
+without creating a new session:
+
+```swift
+final class CurrentAppState {
+    var canCheckWeather = false
+}
+
+struct CurrentAppInstructions: DynamicInstructions {
+    let state: CurrentAppState
+
+    var body: some DynamicInstructions {
+        Instructions("Help with the currently visible app.")
+        if state.canCheckWeather {
+            WeatherTool()
+        }
+    }
+}
+
+let state = CurrentAppState()
+let session = LanguageModelSession(
+    model: model,
+    dynamicInstructions: CurrentAppInstructions(state: state),
+    history: savedHistory
+)
+```
+
+The session evaluates the body before every request to the model,
+including the request that continues a response after tool calls.
+The resolved instructions are sent with each request
+but never become part of the session's transcript.
+
+> [!NOTE]
+> Dynamic instructions follow the Foundation Models 27 API.
+> `SystemLanguageModel` supports them only in apps built with Swift 6.4 or later
+> that run on OS 27 or later, and not on tvOS.
+> Otherwise, it throws `SystemLanguageModel.Error.dynamicInstructionsUnavailable`
+> for a session with dynamic instructions.
+
+### Reasoning in the transcript
+
+Reasoning is transcript content, separate from the answer in `response.content`.
+A provider can emit `Transcript.Entry.reasoning` through the existing cumulative
+`transcriptEntries` on responses and streaming snapshots. Each `Transcript.Reasoning`
+contains a stable `id`, display `segments`, opaque `signature: Data?`, and metadata.
+Treat successive snapshots as updates to the same entries, not new history rows.
+
+The built-in Anthropic provider populates these entries for thinking and redacted
+thinking, in streaming and nonstreaming responses, including tool rounds:
+
+```swift
+let model = AnthropicLanguageModel(apiKey: apiKey, model: modelID)
+let session = LanguageModelSession(model: model)
+var options = GenerationOptions(maximumResponseTokens: 4096)
+options[custom: AnthropicLanguageModel.self] = .init(thinking: .init(budgetTokens: 1024))
+for try await snapshot in session.streamResponse(to: "Explain your approach", options: options) {
+    let reasoning = snapshot.transcriptEntries.compactMap { entry -> String? in
+        guard case .reasoning(let value) = entry else { return nil }
+        return value.segments.compactMap { segment -> String? in
+            guard case .text(let text) = segment else { return nil }
+            return text.content
+        }.joined()
+    }.joined()
+    // Replace the displayed reasoning and answer independently.
+    print(reasoning)
+    print(snapshot.content)
+}
+let savedTranscript = try JSONEncoder().encode(session.transcript)
+```
+
+Choose an Anthropic model and thinking budget that support this configuration.
+Redacted thinking has no display segments. Signatures and metadata are opaque
+replay state; preserve them with the transcript, and do not display them as text.
+The Anthropic adapter can replay its own reasoning entries after Codable restoration.
+When switching providers, adapters that cannot replay reasoning omit those entries
+from their requests; Anthropic likewise skips reasoning from other providers.
+The original reasoning remains in the transcript for display and persistence.
+Anthropic still validates its own replay signatures. CoreML keeps its existing
+prompt-only behavior and does not send transcript history. For structured scalar outputs that
+cannot represent an absent partial value, reasoning updates wait until a valid
+partial answer is available. Cancellation behavior is unchanged.
+
 ### Token Usage
 
 Inspect token counts with `response.usage`
@@ -532,18 +617,25 @@ say which API they follow.
   [observing and controlling tool calls](#tool-calling).
 - `transcriptErrorHandlingPolicy` and `waitForResponseCompletion()`:
   what a transcript keeps when a request fails or is cancelled.
-- `LanguageModelSession.tools` and `instructions`:
-  the session's tools and instructions,
+- `LanguageModelSession.tools`, `instructions`, and `resolvedRequestContext()`:
+  the session's tools, instructions, and the inputs for each request,
   for language models defined outside AnyLanguageModel.
 - `Usage` and the `usage` properties:
   [token usage](#token-usage),
+  which follows the Foundation Models 27 API.
+- `DynamicInstructions`, its builder, and `LanguageModelSession.init(model:dynamicInstructions:history:)`:
+  [dynamic instructions](#dynamic-instructions),
+  which follow the Foundation Models 27 API.
+- `Transcript.Entry.reasoning` and `Transcript.Reasoning`:
+  [reasoning in the transcript](#reasoning-in-the-transcript),
   which follows the Foundation Models 27 API.
 - Public initializers for `Response`, `ResponseStream`, `ResponseStream.Snapshot`,
   `GenerationGuide`, and `LanguageModelFeedback`,
   for language models defined outside AnyLanguageModel.
 - `Codable` conformance for `GeneratedContent`, `GenerationID`, `Usage`,
   and the types nested in `Transcript`.
-- `GeneratedContentError` and each provider's error type.
+- `GeneratedContentError`, `Transcript.ReasoningReplayError`, `SystemLanguageModel.Error`,
+  and each provider's error type.
 - `JSONValue`:
   JSON values for provider options such as `extraBody`.
 - Smaller additions to existing types,
