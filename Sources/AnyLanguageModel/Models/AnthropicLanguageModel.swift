@@ -371,6 +371,10 @@ public struct AnthropicLanguageModel: LanguageModel {
     /// The model identifier to use for generation.
     public let model: String
 
+    /// How long to wait for a streamed response to start. With URLSession, it's how long to
+    /// wait for each part of the response, so it applies while the response streams too.
+    public let responseStartTimeout: Duration
+
     private let httpSession: any HTTPTransport
 
     /// Creates an Anthropic language model.
@@ -381,6 +385,7 @@ public struct AnthropicLanguageModel: LanguageModel {
     ///   - apiVersion: The API version to use for requests. Defaults to `2023-06-01`.
     ///   - betas: Optional beta version(s) of the API to use.
     ///   - model: The model identifier (for example, "claude-3-5-sonnet-20241022").
+    ///   - responseStartTimeout: How long to wait for a streamed response to start. Defaults to 60 seconds.
     ///   - session: How it sends its requests: by default AnyLanguageModel's default session.
     public init(
         baseURL: URL = defaultBaseURL,
@@ -388,6 +393,7 @@ public struct AnthropicLanguageModel: LanguageModel {
         apiVersion: String = defaultAPIVersion,
         betas: [String]? = nil,
         model: String,
+        responseStartTimeout: Duration = .seconds(60),
         session: any HTTPTransport = makeDefaultSession(),
     ) {
         var baseURL = baseURL
@@ -400,6 +406,7 @@ public struct AnthropicLanguageModel: LanguageModel {
         self.apiVersion = apiVersion
         self.betas = betas
         self.model = model
+        self.responseStartTimeout = responseStartTimeout
         self.httpSession = session
     }
 
@@ -609,7 +616,7 @@ public struct AnthropicLanguageModel: LanguageModel {
                         params["stream"] = .bool(true)
                         let body = try JSONEncoder().encode(params)
                         let events: AsyncThrowingStream<AnthropicStreamEvent, any Error> =
-                            httpSession.fetchEventStream(HTTPRequest(method: .post, url: url, headerFields: headers), body: body)
+                            httpSession.fetchEventStream(HTTPRequest(method: .post, url: url, headerFields: headers), body: body, timeout: responseStartTimeout)
                         var blocks: [Int: AnthropicStreamBlock] = [:]
                         var lastSnapshot: LanguageModelSession.ResponseStream<Content>.Snapshot?
 

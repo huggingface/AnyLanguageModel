@@ -9,7 +9,9 @@ import Testing
         enum Provider: CaseIterable, Equatable, Sendable {
             case chat, responses, openResponses, anthropic, gemini, ollama
 
-            func makeSession(tools: [any Tool] = []) -> LanguageModelSession {
+            func makeSession(tools: [any Tool] = [], responseStartTimeout: Duration = .seconds(60))
+                -> LanguageModelSession
+            {
                 let http = UsageURLProtocol.makeSession()
                 let model: any LanguageModel
                 switch self {
@@ -18,6 +20,7 @@ import Testing
                         apiKey: "test",
                         model: "test",
                         apiVariant: self == .chat ? .chatCompletions : .responses,
+                        responseStartTimeout: responseStartTimeout,
                         session: http
                     )
                 case .openResponses:
@@ -25,14 +28,29 @@ import Testing
                         baseURL: URL(string: "https://example.com/v1")!,
                         apiKey: "test",
                         model: "test",
+                        responseStartTimeout: responseStartTimeout,
                         session: http
                     )
                 case .anthropic:
-                    model = AnthropicLanguageModel(apiKey: "test", model: "test", session: http)
+                    model = AnthropicLanguageModel(
+                        apiKey: "test",
+                        model: "test",
+                        responseStartTimeout: responseStartTimeout,
+                        session: http
+                    )
                 case .gemini:
-                    model = GeminiLanguageModel(apiKey: "test", model: "test", session: http)
+                    model = GeminiLanguageModel(
+                        apiKey: "test",
+                        model: "test",
+                        responseStartTimeout: responseStartTimeout,
+                        session: http
+                    )
                 case .ollama:
-                    model = OllamaLanguageModel(model: "test", session: http)
+                    model = OllamaLanguageModel(
+                        model: "test",
+                        responseStartTimeout: responseStartTimeout,
+                        session: http
+                    )
                 }
                 return LanguageModelSession(model: model, tools: tools)
             }
@@ -315,6 +333,16 @@ import Testing
                 UsageURLProtocol.enqueue(json: try Self.json(provider.response(counts: counts)))
                 #expect(try await provider.makeSession().respond(to: "Hi").usage == .zero)
             }
+        }
+
+        /// A streamed request waits as long as the model's `responseStartTimeout` for the response.
+        @Test(arguments: Provider.allCases)
+        func streamingWaitsForTheResponseStartTimeout(_ provider: Provider) async throws {
+            UsageURLProtocol.reset()
+            UsageURLProtocol.enqueue(json: try provider.stream())
+            _ = try await provider.makeSession(responseStartTimeout: .milliseconds(2500)).streamResponse(to: "Hi")
+                .collect()
+            #expect(UsageURLProtocol.recordedTimeoutIntervals == [2.5])
         }
 
         @Test(arguments: Provider.allCases)
@@ -918,6 +946,7 @@ import Testing
         private struct State: Sendable {
             var pending: [Exchange] = []
             var recordedBodies: [Data] = []
+            var recordedTimeoutIntervals: [TimeInterval] = []
         }
 
         private static let state = Locked(State())
@@ -939,6 +968,12 @@ import Testing
             state.withLock { $0.recordedBodies }
         }
 
+        /// The timeout intervals of the requests seen so far,
+        /// in order.
+        static var recordedTimeoutIntervals: [TimeInterval] {
+            state.withLock { $0.recordedTimeoutIntervals }
+        }
+
         /// A session that routes every request to this protocol.
         static func makeSession() -> URLSession {
             let configuration = URLSessionConfiguration.ephemeral
@@ -957,6 +992,7 @@ import Testing
 
             let exchange = Self.state.withLock { state -> Exchange? in
                 state.recordedBodies.append(body)
+                state.recordedTimeoutIntervals.append(request.timeoutInterval)
                 return state.pending.isEmpty ? nil : state.pending.removeFirst()
             }
 
