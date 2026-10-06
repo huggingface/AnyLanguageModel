@@ -14,6 +14,21 @@ struct GeneratedContentJSONTests {
 
     // MARK: - init(json: Data)
 
+    @Test func jsonStringsPreserveLeadingBOM() throws {
+        // JSONSerialization drops a leading U+FEFF from string values on Darwin.
+        // Apple's GeneratedContent and JSONDecoder retain it as ordinary content.
+        let json = #"{"content":"\ufefffile body","nested":["\ufeffnested"]}"#
+        for content in [try GeneratedContent(json: json), try GeneratedContent(json: Data(json.utf8))] {
+            #expect(try content.value(String.self, forProperty: "content") == "\u{FEFF}file body")
+            let nested: [String] = try content.value(forProperty: "nested")
+            #expect(nested == ["\u{FEFF}nested"])
+        }
+        let partial = try GeneratedContent(json: #"{"content":"\ufefffile body"#)
+        #expect(try partial.value(String.self, forProperty: "content") == "\u{FEFF}file body")
+        let fragment = try GeneratedContent(json: #""\ufefffragment""#)
+        #expect(try String(fragment) == "\u{FEFF}fragment")
+    }
+
     @Test func dataInitializerParsesCompleteJSON() throws {
         let data = Data(#"{"title": "Dune", "pages": 412, "tags": ["sci-fi", "classic"]}"#.utf8)
         let content = try GeneratedContent(json: data)
