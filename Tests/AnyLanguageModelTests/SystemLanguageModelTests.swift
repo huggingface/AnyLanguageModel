@@ -97,6 +97,35 @@ import Testing
 
     // MARK: - Test Suite
 
+    /// A tool called for Foundation Models asks the delegate first, and a stop ends the call
+    /// without running the tool. No model is involved, so this runs wherever Foundation Models builds.
+    @available(macOS 26.0, iOS 26.0, tvOS 26.0, visionOS 26.0, *)
+    @Test func stoppedToolCallDoesNotRunTheTool() async throws {
+        let weatherTool = spy(on: WeatherTool())
+        let session = LanguageModelSession(model: SystemLanguageModel.default, tools: [weatherTool])
+        let delegate = StoppingDelegate()
+        session.toolExecutionDelegate = delegate
+        await #expect(throws: ToolCallStopped.self) {
+            _ = try await callTool(weatherTool, with: try GeneratedContent(json: #"{"city":"Cupertino"}"#), in: session)
+        }
+        #expect(await weatherTool.calls.isEmpty)
+        let generated = await delegate.generated
+        #expect(generated.map(\.toolName) == [weatherTool.name])
+        #expect(generated.first?.arguments.jsonString.contains("Cupertino") == true)
+    }
+
+    /// A stop is found inside an error that wraps it, as tool errors are wrapped.
+    @available(macOS 26.0, iOS 26.0, tvOS 26.0, visionOS 26.0, *)
+    @Test func stopIsFoundInsideToolCallErrors() {
+        let call = Transcript.ToolCall(id: "call", toolName: "getWeather", arguments: GeneratedContent(properties: [:]))
+        let wrapped = LanguageModelSession.ToolCallError(
+            tool: WeatherTool(),
+            underlyingError: ToolCallStopped(call: call)
+        )
+        #expect(stoppedToolCall(in: wrapped)?.id == "call")
+        #expect(stoppedToolCall(in: CancellationError()) == nil)
+    }
+
     @Test("GenerationSchema merges duplicate defs for the same type")
     func generationSchemaMergesDuplicateDefsForSameType() {
         let schema = ContainerWithDuplicateNestedType.generationSchema

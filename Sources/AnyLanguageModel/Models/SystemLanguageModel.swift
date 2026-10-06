@@ -634,49 +634,54 @@
         }
 
         func call(arguments: FoundationModels.GeneratedContent) async throws -> Output {
-            guard let session, let delegate = session.toolExecutionDelegate else {
-                let output = try await wrappedTool.callFunction(arguments: arguments)
-                return output.promptRepresentation.description
-            }
-            let call = Transcript.ToolCall(
-                id: UUID().uuidString,
-                toolName: name,
-                arguments: try GeneratedContent(arguments)
+            try await callTool(wrappedTool, with: GeneratedContent(arguments), in: session)
+        }
+    }
+
+    /// Runs `tool` for Foundation Models, which calls tools itself: asks the session's tool
+    /// execution delegate first, if it has one, as other models do before running a tool. A stop
+    /// throws ``ToolCallStopped``, which ends the request with the call.
+    @available(macOS 26.0, iOS 26.0, watchOS 27.0, tvOS 26.0, visionOS 26.0, *)
+    func callTool(_ tool: any Tool, with arguments: GeneratedContent, in session: LanguageModelSession?) async throws
+        -> String
+    {
+        guard let session, let delegate = session.toolExecutionDelegate else {
+            return try await tool.callFunction(content: arguments).promptRepresentation.description
+        }
+        let call = Transcript.ToolCall(id: UUID().uuidString, toolName: tool.name, arguments: arguments)
+        await delegate.didGenerateToolCalls([call], in: session)
+        switch await delegate.toolCallDecision(for: call, in: session) {
+        case .stop:
+            throw ToolCallStopped(call: call)
+        case .provideOutput(let segments):
+            await delegate.didExecuteToolCall(
+                call,
+                output: Transcript.ToolOutput(id: call.id, toolName: tool.name, segments: segments),
+                in: session
             )
-            await delegate.didGenerateToolCalls([call], in: session)
-            switch await delegate.toolCallDecision(for: call, in: session) {
-            case .stop:
-                throw ToolCallStopped(call: call)
-            case .provideOutput(let segments):
+            return segments.map { segment in
+                switch segment {
+                case .text(let text): text.content
+                case .structure(let structure): structure.content.jsonString
+                default: ""
+                }
+            }.joined(separator: "\n")
+        case .execute:
+            do {
+                let text = try await tool.callFunction(content: arguments).promptRepresentation.description
                 await delegate.didExecuteToolCall(
                     call,
-                    output: Transcript.ToolOutput(id: call.id, toolName: name, segments: segments),
+                    output: Transcript.ToolOutput(
+                        id: call.id,
+                        toolName: tool.name,
+                        segments: [.text(.init(content: text))]
+                    ),
                     in: session
                 )
-                return segments.map { segment in
-                    switch segment {
-                    case .text(let text): text.content
-                    case .structure(let structure): structure.content.jsonString
-                    default: ""
-                    }
-                }.joined(separator: "\n")
-            case .execute:
-                do {
-                    let text = try await wrappedTool.callFunction(arguments: arguments).promptRepresentation.description
-                    await delegate.didExecuteToolCall(
-                        call,
-                        output: Transcript.ToolOutput(
-                            id: call.id,
-                            toolName: name,
-                            segments: [.text(.init(content: text))]
-                        ),
-                        in: session
-                    )
-                    return text
-                } catch {
-                    await delegate.didFailToolCall(call, error: error, in: session)
-                    throw error
-                }
+                return text
+            } catch {
+                await delegate.didFailToolCall(call, error: error, in: session)
+                throw error
             }
         }
     }
@@ -744,11 +749,8 @@
 
     @available(macOS 26.0, iOS 26.0, watchOS 27.0, tvOS 26.0, visionOS 26.0, *)
     extension Tool {
-        fileprivate func callFunction(arguments: FoundationModels.GeneratedContent) async throws
-            -> any PromptRepresentable
-        {
-            let content = try GeneratedContent(arguments)
-            return try await call(arguments: Self.Arguments(content))
+        fileprivate func callFunction(content: GeneratedContent) async throws -> any PromptRepresentable {
+            try await call(arguments: Self.Arguments(content))
         }
     }
 
