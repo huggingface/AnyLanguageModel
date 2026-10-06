@@ -303,6 +303,51 @@ import Testing
             #expect(content.contains("72°F"))
         }
 
+        /// A delegate that stops at tool calls gets them back instead of Foundation Models running them,
+        /// as with other models.
+        @available(macOS 26.0, iOS 26.0, tvOS 26.0, visionOS 26.0, *)
+        @Test func delegateStopsToolCalls() async throws {
+            let weatherTool = spy(on: WeatherTool())
+            let session = LanguageModelSession(model: SystemLanguageModel.default, tools: [weatherTool])
+            let delegate = StoppingDelegate()
+            session.toolExecutionDelegate = delegate
+
+            let response = try await session.respond(to: "How's the weather in San Francisco? Use the tool.")
+
+            #expect(await weatherTool.calls.isEmpty)
+            let generated = await delegate.generated
+            #expect(generated.map(\.toolName) == [weatherTool.name])
+            #expect(
+                response.transcriptEntries.contains { entry in
+                    if case .toolCalls(let calls) = entry { return calls.map(\.id) == generated.map(\.id) }
+                    return false
+                }
+            )
+        }
+
+        @available(macOS 26.0, iOS 26.0, tvOS 26.0, visionOS 26.0, *)
+        @Test func delegateStopsToolCallsWhileStreaming() async throws {
+            let weatherTool = spy(on: WeatherTool())
+            let session = LanguageModelSession(model: SystemLanguageModel.default, tools: [weatherTool])
+            let delegate = StoppingDelegate()
+            session.toolExecutionDelegate = delegate
+
+            var last: LanguageModelSession.ResponseStream<String>.Snapshot?
+            for try await snapshot in session.streamResponse(to: "How's the weather in San Francisco? Use the tool.") {
+                last = snapshot
+            }
+
+            #expect(await weatherTool.calls.isEmpty)
+            #expect(await delegate.generated.map(\.toolName) == [weatherTool.name])
+            let entries = try #require(last).transcriptEntries
+            #expect(
+                entries.contains { entry in
+                    if case .toolCalls = entry { return true }
+                    return false
+                }
+            )
+        }
+
         @available(macOS 26.0, iOS 26.0, tvOS 26.0, visionOS 26.0, *)
         @Test func conversationContext() async throws {
             let model: SystemLanguageModel = SystemLanguageModel()
@@ -523,6 +568,21 @@ import Testing
             if let lastSnapshot = snapshots.last {
                 #expect(!lastSnapshot.rawContent.jsonString.isEmpty)
             }
+        }
+    }
+
+    /// Stops at every tool call, recording it.
+    private actor StoppingDelegate: ToolExecutionDelegate {
+        private(set) var generated: [Transcript.ToolCall] = []
+
+        func didGenerateToolCalls(_ toolCalls: [Transcript.ToolCall], in session: LanguageModelSession) async {
+            generated.append(contentsOf: toolCalls)
+        }
+
+        func toolCallDecision(for toolCall: Transcript.ToolCall, in session: LanguageModelSession) async
+            -> ToolExecutionDecision
+        {
+            .stop
         }
     }
 #endif

@@ -277,7 +277,7 @@
             // Attach the feedback to the session's conversation, including its latest response.
             let fmSession = FoundationModels.LanguageModelSession(
                 model: systemModel,
-                tools: requestContext.tools.toFoundationModels(),
+                tools: requestContext.tools.toFoundationModels(in: session),
                 transcript: requestContext.transcript.toFoundationModels(
                     instructions: requestContext.instructions,
                     toolDefinitions: requestContext.tools
@@ -319,7 +319,7 @@
             let requestContext = session.resolvedRequestContext()
             return FoundationModels.LanguageModelSession(
                 model: systemModel,
-                tools: requestContext.tools.toFoundationModels(),
+                tools: requestContext.tools.toFoundationModels(in: session),
                 transcript: fmTranscriptDroppingDuplicatePrompt(
                     requestContext.transcript,
                     prompt: prompt
@@ -388,7 +388,7 @@
                 if let instructions = requestContext.instructions {
                     instructions.toFoundationModels()
                 }
-                requestContext.tools.toFoundationModels()
+                requestContext.tools.toFoundationModels(in: session)
             }
         }
 
@@ -420,7 +420,7 @@
             let requestContext = session.resolvedRequestContext()
             return FoundationModels.LanguageModelSession(
                 model: model,
-                tools: requestContext.tools.toFoundationModels(),
+                tools: requestContext.tools.toFoundationModels(in: session),
                 transcript: fmTranscriptDroppingDuplicatePrompt(
                     requestContext.transcript,
                     prompt: prompt
@@ -552,8 +552,11 @@
 
     @available(macOS 26.0, iOS 26.0, watchOS 27.0, tvOS 26.0, visionOS 26.0, *)
     extension Array where Element == (any Tool) {
-        func toFoundationModels() -> [any FoundationModels.Tool] {
-            map { AnyToolWrapper($0) }
+        /// The tools as Foundation Models tools, which Foundation Models calls itself.
+        /// With `session`, each call asks the session's tool execution delegate first,
+        /// as other models do before running a tool.
+        func toFoundationModels(in session: LanguageModelSession? = nil) -> [any FoundationModels.Tool] {
+            map { AnyToolWrapper($0, session: session) }
         }
     }
 
@@ -573,6 +576,40 @@
         }
     }
 
+    @available(macOS 26.0, iOS 26.0, watchOS 27.0, tvOS 26.0, visionOS 26.0, *)
+    /// A tool call a session's tool execution delegate stopped at,
+    /// thrown from inside Foundation Models to end the request there.
+    struct ToolCallStopped: Error {
+        let call: Transcript.ToolCall
+    }
+
+    @available(macOS 26.0, iOS 26.0, watchOS 27.0, tvOS 26.0, visionOS 26.0, *)
+    /// The tool call the delegate stopped at, when `error` is that stop.
+    /// Foundation Models wraps errors that tools throw in its own `ToolCallError`.
+    func stoppedToolCall(in error: any Error) -> Transcript.ToolCall? {
+        if let stopped = error as? ToolCallStopped { return stopped.call }
+        if let toolError = error as? FoundationModels.LanguageModelSession.ToolCallError {
+            return stoppedToolCall(in: toolError.underlyingError)
+        }
+        if let toolError = error as? LanguageModelSession.ToolCallError {
+            return stoppedToolCall(in: toolError.underlyingError)
+        }
+        return nil
+    }
+
+    @available(macOS 26.0, iOS 26.0, watchOS 27.0, tvOS 26.0, visionOS 26.0, *)
+    /// The emptiest content of `type`, for a response that stopped at tool calls before any content.
+    func stoppedContent<Content: Generable>(of type: Content.Type) -> (content: Content, raw: GeneratedContent)? {
+        let candidates: [GeneratedContent.Kind] = [
+            .string(""), .structure(properties: [:], orderedKeys: []), .array([]), .null, .number(0), .bool(false),
+        ]
+        for kind in candidates {
+            let raw = GeneratedContent(kind: kind)
+            if let content = try? Content(raw) { return (content, raw) }
+        }
+        return nil
+    }
+
     /// A type-erased wrapper that bridges any `Tool` to `FoundationModels.Tool`.
     @available(macOS 26.0, iOS 26.0, watchOS 27.0, tvOS 26.0, visionOS 26.0, *)
     private struct AnyToolWrapper: FoundationModels.Tool {
@@ -585,9 +622,11 @@
         let includesSchemaInInstructions: Bool
 
         private let wrappedTool: any Tool
+        private let session: LanguageModelSession?
 
-        init(_ tool: any Tool) {
+        init(_ tool: any Tool, session: LanguageModelSession?) {
             self.wrappedTool = tool
+            self.session = session
             self.name = tool.name
             self.description = tool.description
             self.parameters = FoundationModels.GenerationSchema(tool.parameters)
@@ -595,8 +634,50 @@
         }
 
         func call(arguments: FoundationModels.GeneratedContent) async throws -> Output {
-            let output = try await wrappedTool.callFunction(arguments: arguments)
-            return output.promptRepresentation.description
+            guard let session, let delegate = session.toolExecutionDelegate else {
+                let output = try await wrappedTool.callFunction(arguments: arguments)
+                return output.promptRepresentation.description
+            }
+            let call = Transcript.ToolCall(
+                id: UUID().uuidString,
+                toolName: name,
+                arguments: try GeneratedContent(arguments)
+            )
+            await delegate.didGenerateToolCalls([call], in: session)
+            switch await delegate.toolCallDecision(for: call, in: session) {
+            case .stop:
+                throw ToolCallStopped(call: call)
+            case .provideOutput(let segments):
+                await delegate.didExecuteToolCall(
+                    call,
+                    output: Transcript.ToolOutput(id: call.id, toolName: name, segments: segments),
+                    in: session
+                )
+                return segments.map { segment in
+                    switch segment {
+                    case .text(let text): text.content
+                    case .structure(let structure): structure.content.jsonString
+                    default: ""
+                    }
+                }.joined(separator: "\n")
+            case .execute:
+                do {
+                    let text = try await wrappedTool.callFunction(arguments: arguments).promptRepresentation.description
+                    await delegate.didExecuteToolCall(
+                        call,
+                        output: Transcript.ToolOutput(
+                            id: call.id,
+                            toolName: name,
+                            segments: [.text(.init(content: text))]
+                        ),
+                        in: session
+                    )
+                    return text
+                } catch {
+                    await delegate.didFailToolCall(call, error: error, in: session)
+                    throw error
+                }
+            }
         }
     }
 
@@ -1018,6 +1099,35 @@
         schema: GenerationSchema,
         includeSchemaInPrompt: Bool
     ) async throws -> LanguageModelSession.Response<Content> where Content: Generable {
+        do {
+            return try await fmRespondRunningTools(
+                makeSession: makeSession,
+                fmPrompt: fmPrompt,
+                fmOptions: fmOptions,
+                type: type,
+                schema: schema,
+                includeSchemaInPrompt: includeSchemaInPrompt
+            )
+        } catch {
+            // The delegate stopped at a tool call: the response ends there, with the call.
+            guard let call = stoppedToolCall(in: error), let stopped = stoppedContent(of: type) else { throw error }
+            return LanguageModelSession.Response(
+                content: stopped.content,
+                rawContent: stopped.raw,
+                transcriptEntries: [.toolCalls(Transcript.ToolCalls([call]))]
+            )
+        }
+    }
+
+    @available(macOS 26.0, iOS 26.0, watchOS 27.0, tvOS 26.0, visionOS 26.0, *)
+    private func fmRespondRunningTools<Content>(
+        makeSession: @Sendable () async throws -> FoundationModels.LanguageModelSession,
+        fmPrompt: FoundationModels.Prompt,
+        fmOptions: FoundationModels.GenerationOptions,
+        type: Content.Type,
+        schema: GenerationSchema,
+        includeSchemaInPrompt: Bool
+    ) async throws -> LanguageModelSession.Response<Content> where Content: Generable {
         let fmSession = try await makeSession()
         if type == String.self {
             let fmResponse = try await fmSession.respond(to: fmPrompt, options: fmOptions)
@@ -1079,6 +1189,60 @@
 
     @available(macOS 26.0, iOS 26.0, watchOS 27.0, tvOS 26.0, visionOS 26.0, *)
     func fmStreamResponse<Content>(
+        makeSession: @escaping @Sendable () async throws -> FoundationModels.LanguageModelSession,
+        fmPrompt: FoundationModels.Prompt,
+        fmOptions: FoundationModels.GenerationOptions,
+        type: Content.Type,
+        schema: GenerationSchema,
+        includeSchemaInPrompt: Bool
+    ) -> LanguageModelSession.ResponseStream<Content> where Content: Generable {
+        let running = fmStreamResponseRunningTools(
+            makeSession: makeSession,
+            fmPrompt: fmPrompt,
+            fmOptions: fmOptions,
+            type: type,
+            schema: schema,
+            includeSchemaInPrompt: includeSchemaInPrompt
+        )
+        let stream: AsyncThrowingStream<LanguageModelSession.ResponseStream<Content>.Snapshot, Error> =
+            AsyncThrowingStream { continuation in
+                let relaying = _Concurrency.Task {
+                    var last: LanguageModelSession.ResponseStream<Content>.Snapshot?
+                    do {
+                        for try await snapshot in running {
+                            last = snapshot
+                            continuation.yield(snapshot)
+                        }
+                        continuation.finish()
+                    } catch {
+                        // The delegate stopped at a tool call: the stream ends there, with the call.
+                        guard let call = stoppedToolCall(in: error) else {
+                            continuation.finish(throwing: error)
+                            return
+                        }
+                        let entries: [Transcript.Entry] = [.toolCalls(Transcript.ToolCalls([call]))]
+                        if var last {
+                            last.transcriptEntries += entries
+                            continuation.yield(last)
+                        } else if let stopped = stoppedContent(of: type) {
+                            continuation.yield(
+                                .init(
+                                    content: stopped.content.asPartiallyGenerated(),
+                                    rawContent: stopped.raw,
+                                    transcriptEntries: ArraySlice(entries)
+                                )
+                            )
+                        }
+                        continuation.finish()
+                    }
+                }
+                continuation.onTermination = { _ in relaying.cancel() }
+            }
+        return LanguageModelSession.ResponseStream(stream: stream)
+    }
+
+    @available(macOS 26.0, iOS 26.0, watchOS 27.0, tvOS 26.0, visionOS 26.0, *)
+    private func fmStreamResponseRunningTools<Content>(
         makeSession: @escaping @Sendable () async throws -> FoundationModels.LanguageModelSession,
         fmPrompt: FoundationModels.Prompt,
         fmOptions: FoundationModels.GenerationOptions,
@@ -1228,7 +1392,7 @@
                         }
                         continuation.finish()
                     } catch {
-                        if didYield {
+                        if didYield || stoppedToolCall(in: error) != nil {
                             continuation.finish(throwing: error)
                         } else {
                             await processTextFallback()
