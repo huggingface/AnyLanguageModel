@@ -1,6 +1,10 @@
 import Foundation
 import Testing
 
+#if canImport(FoundationNetworking)
+    import FoundationNetworking
+#endif
+
 @testable import AnyLanguageModel
 
 @Suite("URLSession Extensions")
@@ -136,6 +140,100 @@ struct URLSessionExtensionsTests {
             try await Task.sleep(for: .milliseconds(20))
 
             #expect(await ranCancelledOperation.value == false)
+        }
+
+        /// Canceling a stream before its response starts cancels the request
+        /// and releases the gate, rather than holding it until a response arrives.
+        @Test func linuxStreamCancelledBeforeResponseReleasesGate() async throws {
+            struct Line: Decodable, Sendable {}
+
+            for eventStream in [false, true] {
+                SilentURLProtocol.reset()
+                let session = SilentURLProtocol.makeSession()
+                let url = URL(string: "https://example.com")!
+                let streaming = Task {
+                    let stream: AsyncThrowingStream<Line, any Error> =
+                        eventStream
+                        ? session.fetchEventStream(HTTP.Method.post, url: url)
+                        : session.fetchStream(HTTP.Method.post, url: url)
+                    for try await _ in stream {}
+                }
+
+                let deadline = ContinuousClock.now + .seconds(5)
+                while !SilentURLProtocol.didStartLoading, ContinuousClock.now < deadline {
+                    try await Task.sleep(for: .milliseconds(10))
+                }
+                #expect(SilentURLProtocol.didStartLoading)
+
+                streaming.cancel()
+                let acquired = try await withThrowingTaskGroup(of: Bool.self) { group in
+                    group.addTask {
+                        try await withLinuxRequestLock {}
+                        return true
+                    }
+                    group.addTask {
+                        try await Task.sleep(for: .seconds(2))
+                        return false
+                    }
+                    let first = try await group.next() ?? false
+                    group.cancelAll()
+                    return first
+                }
+                #expect(acquired, "fetchEventStream: \(eventStream)")
+
+                // If the request is still waiting, fail it so it releases the gate for other tests.
+                SilentURLProtocol.failPendingRequests()
+                _ = await streaming.result
+            }
+        }
+    }
+
+    /// Starts loading and never responds, like a server that hasn't sent headers yet.
+    private final class SilentURLProtocol: URLProtocol, @unchecked Sendable {
+        // URLProtocol isn't Sendable on Linux; every access goes through `state`'s lock.
+        private struct State: @unchecked Sendable {
+            var didStartLoading = false
+            var pending: [SilentURLProtocol] = []
+        }
+
+        private static let state = Locked(State())
+
+        static var didStartLoading: Bool { state.withLock { $0.didStartLoading } }
+
+        static func reset() {
+            state.withLock { $0 = State() }
+        }
+
+        static func failPendingRequests() {
+            let pending = state.withLock { state in
+                defer { state.pending = [] }
+                return state.pending
+            }
+            for request in pending {
+                request.client?.urlProtocol(request, didFailWithError: URLError(.timedOut))
+            }
+        }
+
+        static func makeSession() -> URLSession {
+            let configuration = URLSessionConfiguration.ephemeral
+            configuration.protocolClasses = [SilentURLProtocol.self]
+            return URLSession(configuration: configuration)
+        }
+
+        override class func canInit(with request: URLRequest) -> Bool { true }
+        override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+
+        override func startLoading() {
+            Self.state.withLock { state in
+                state.didStartLoading = true
+                state.pending.append(self)
+            }
+        }
+
+        override func stopLoading() {
+            Self.state.withLock { state in
+                state.pending.removeAll { $0 === self }
+            }
         }
     }
 #endif
