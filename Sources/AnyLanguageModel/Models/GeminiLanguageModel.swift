@@ -549,7 +549,8 @@ public struct GeminiLanguageModel: LanguageModel {
 }
 
 private func convertSchemaToGeminiFormat(_ schema: GenerationSchema) throws -> JSONSchema {
-    try schema.inlinedJSONSchema(omitAdditionalProperties: true)
+    // Gemini's schemas have no `const`.
+    try schema.inlinedJSONSchema(omitAdditionalProperties: true, constantsAsEnums: true)
 }
 
 private func createGenerateContentParams<Content: Generable>(

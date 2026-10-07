@@ -7,6 +7,8 @@ public struct GenerationGuide<Value>: Sendable {
     var maximumCount: Int?
     var minimum: Double?
     var maximum: Double?
+    var stringChoices: [String]?
+    var isConstant = false
 
     /// Creates a guide with no constraints.
     ///
@@ -24,6 +26,11 @@ public struct GenerationGuide<Value>: Sendable {
         self.minimum = minimum
         self.maximum = maximum
     }
+
+    init(stringChoices: [String], isConstant: Bool) {
+        self.stringChoices = stringChoices
+        self.isConstant = isConstant
+    }
 }
 
 // MARK: - String Guides
@@ -32,12 +39,12 @@ extension GenerationGuide where Value == String {
 
     /// Enforces that the string be precisely the given value.
     public static func constant(_ value: String) -> GenerationGuide<String> {
-        GenerationGuide<String>()
+        GenerationGuide<String>(stringChoices: [value], isConstant: true)
     }
 
     /// Enforces that the string be one of the provided values.
     public static func anyOf(_ values: [String]) -> GenerationGuide<String> {
-        GenerationGuide<String>()
+        GenerationGuide<String>(stringChoices: values, isConstant: false)
     }
 
     /// Enforces that the string follows the pattern.

@@ -219,6 +219,37 @@ import Testing
         }
     }
 
+    extension ProviderSchemaResponseTests {
+        /// A constant string reaches Anthropic as `const`, and the other providers,
+        /// whose schemas don't support `const`, as a one-choice `enum`.
+        @Test(arguments: Provider.allCases)
+        func constantStringReachesRequest(_ provider: Provider) async throws {
+            SchemaURLProtocol.reset()
+            defer { SchemaURLProtocol.reset() }
+            let content = #"{"kind":"fixed","described":"fixed","choice":"a"}"#
+            SchemaURLProtocol.enqueue(json: try json(provider.response(text: content)))
+            let response = try await provider.session().respond(
+                to: "Classify",
+                generating: StringChoiceGuided.self,
+                includeSchemaInPrompt: false
+            )
+            #expect(response.content.kind == "fixed")
+
+            let data = try #require(SchemaURLProtocol.recordedBodies.first)
+            let body = try #require(JSONSerialization.jsonObject(with: data) as? [String: Any])
+            let properties = try #require(provider.requestSchema(body)["properties"] as? [String: [String: Any]])
+            let kind = try #require(properties["kind"])
+            if provider == .anthropic {
+                #expect(kind["const"] as? String == "fixed")
+                #expect(kind["enum"] == nil)
+            } else {
+                #expect(kind["enum"] as? [String] == ["fixed"])
+                #expect(kind["const"] == nil)
+            }
+            #expect(properties["choice"]?["enum"] as? [String] == ["a", "b"])
+        }
+    }
+
     private func json(_ value: [String: Any]) throws -> String {
         String(decoding: try JSONSerialization.data(withJSONObject: value), as: UTF8.self)
     }

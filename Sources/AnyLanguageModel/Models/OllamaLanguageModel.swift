@@ -527,7 +527,7 @@ private func convertToolToOllamaFormat(_ tool: any Tool) throws -> [String: JSON
         "function": .object([
             "name": .string(tool.name),
             "description": .string(tool.description),
-            "parameters": try JSONValue(resolvedSchema),
+            "parameters": try resolvedSchema.jsonValue(constantsAsEnums: true),
         ]),
     ]
 }
@@ -541,7 +541,8 @@ private func encodeChatParams(_ params: [String: JSONValue]) throws -> Data {
 }
 
 private func convertSchemaToOllamaFormat(_ schema: GenerationSchema) throws -> JSONSchema {
-    try schema.inlinedJSONSchema()
+    // Ollama's documentation doesn't list `const`.
+    try schema.inlinedJSONSchema(constantsAsEnums: true)
 }
 
 func createChatParams(
