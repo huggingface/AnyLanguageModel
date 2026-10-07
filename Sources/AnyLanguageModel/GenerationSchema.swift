@@ -171,7 +171,7 @@ public struct GenerationSchema: Equatable, Codable, CustomDebugStringConvertible
                 self = .string(
                     GenerationSchema.StringNode(
                         description: try container.decodeIfPresent(String.self, forKey: .description),
-                        pattern: nil,
+                        pattern: try container.decodeIfPresent(String.self, forKey: .pattern),
                         enumChoices: [constant],
                         isConstant: true
                     )

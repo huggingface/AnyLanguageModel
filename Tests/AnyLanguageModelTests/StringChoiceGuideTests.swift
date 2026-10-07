@@ -137,6 +137,18 @@ struct StringChoiceGuideTests {
         }
     }
 
+    @Test func constantsKeepTheirPatternWhenDecoded() throws {
+        for json in [
+            #"{"type": "object", "properties": {"kind": {"type": "string", "const": "fixed", "pattern": "^f"}}}"#,
+            #"{"type": "object", "properties": {"kind": {"const": "fixed", "pattern": "^f"}}}"#,
+        ] {
+            let schema = try JSONDecoder().decode(GenerationSchema.self, from: Data(json.utf8))
+            let properties = try properties(encode(schema))
+            #expect(properties["kind"]?["const"] as? String == "fixed")
+            #expect(properties["kind"]?["pattern"] as? String == "^f")
+        }
+    }
+
     @Test func constantsAreNotEqualToOneChoiceEnums() {
         let constant = GenerationSchema.Node.string(.init(enumChoices: ["fixed"], isConstant: true))
         let oneChoice = GenerationSchema.Node.string(.init(enumChoices: ["fixed"]))
