@@ -1,3 +1,4 @@
+import Foundation
 import Testing
 
 @testable import AnyLanguageModel
@@ -136,5 +137,64 @@ struct URLSessionExtensionsTests {
 
             #expect(await ranCancelledOperation.value == false)
         }
+    }
+#endif
+
+#if canImport(Darwin) && !canImport(AsyncHTTPClient)
+    extension URLSessionExtensionsTests {
+        private struct Line: Decodable, Sendable, Equatable {
+            let n: Int
+        }
+
+        /// Each line arrives while the response is still loading, not when it ends.
+        @Test func jsonLinesStreamAsTheyArrive() async throws {
+            let session = ChunkedURLProtocol.makeSession()
+            var received: [Line] = []
+            let stream: AsyncThrowingStream<Line, any Error> = session.fetchStream(
+                .post,
+                url: URL(string: "https://example.com")!
+            )
+            for try await line in stream {
+                received.append(line)
+                // The second line is sent only once the first has been received.
+                if line.n == 1 { ChunkedURLProtocol.firstLineReceived.signal() }
+            }
+            #expect(received == [Line(n: 1), Line(n: 2), Line(n: 3)])
+            #expect(ChunkedURLProtocol.sentRestAfterFirstLine)
+        }
+    }
+
+    /// Sends `{"n":1}` and a newline, waits until the test has received it, then sends the rest,
+    /// with a last line that has no newline.
+    private final class ChunkedURLProtocol: URLProtocol, @unchecked Sendable {
+        static let firstLineReceived = DispatchSemaphore(value: 0)
+        nonisolated(unsafe) static var sentRestAfterFirstLine = false
+
+        static func makeSession() -> URLSession {
+            let configuration = URLSessionConfiguration.ephemeral
+            configuration.protocolClasses = [ChunkedURLProtocol.self]
+            return URLSession(configuration: configuration)
+        }
+
+        override class func canInit(with request: URLRequest) -> Bool { true }
+        override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+
+        override func startLoading() {
+            let response = HTTPURLResponse(
+                url: request.url!,
+                statusCode: 200,
+                httpVersion: "HTTP/1.1",
+                headerFields: ["Content-Type": "application/x-ndjson"]
+            )!
+            client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+            client?.urlProtocol(self, didLoad: Data(#"{"n":1}"#.utf8 + [UInt8(ascii: "\n")]))
+            DispatchQueue.global().async {
+                Self.sentRestAfterFirstLine = Self.firstLineReceived.wait(timeout: .now() + 5) == .success
+                self.client?.urlProtocol(self, didLoad: Data("{\"n\":2}\n{\"n\":3}".utf8))
+                self.client?.urlProtocolDidFinishLoading(self)
+            }
+        }
+
+        override func stopLoading() {}
     }
 #endif

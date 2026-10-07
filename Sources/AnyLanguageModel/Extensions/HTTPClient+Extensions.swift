@@ -99,21 +99,15 @@
                             )
                         }
 
-                        var buffer = Data()
-
+                        var lines = JSONLines()
                         for try await chunk in response.body {
                             try SwiftTask.checkCancellation()
-                            buffer.append(contentsOf: chunk.readableBytesView)
-
-                            while let newlineIndex = buffer.firstIndex(of: UInt8(ascii: "\n")) {
-                                let line = buffer[..<newlineIndex]
-                                buffer = buffer[buffer.index(after: newlineIndex)...]
-
-                                if !line.isEmpty {
-                                    let decoded = try decoder.decode(T.self, from: line)
-                                    continuation.yield(decoded)
-                                }
+                            for line in lines.append(contentsOf: chunk.readableBytesView) {
+                                continuation.yield(try decoder.decode(T.self, from: Data(line)))
                             }
+                        }
+                        if let line = lines.finish() {
+                            continuation.yield(try decoder.decode(T.self, from: Data(line)))
                         }
 
                         continuation.finish()

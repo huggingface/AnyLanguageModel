@@ -186,43 +186,23 @@ extension URLSession {
                     }
 
                     #if canImport(FoundationNetworking)
-                        var lockedData: Data?
+                        var lockedAsyncBytes: AsyncThrowingStream<UInt8, Error>?
                         var lockedResponse: URLResponse?
                         try await withLinuxRequestLock {
-                            let (data, response) = try await self.data(for: request)
-                            lockedData = data
+                            let (bytes, response) = try await self.linuxBytes(for: request)
+                            lockedAsyncBytes = bytes
                             lockedResponse = response
                         }
-                        guard let data = lockedData, let response = lockedResponse else {
+                        guard let asyncBytes = lockedAsyncBytes, let response = lockedResponse else {
                             throw URLSessionError.invalidResponse
                         }
+                        try await self.validateStreamingResponse(response, asyncBytes: asyncBytes)
+                        try await decodeAndYieldJSONLines(asyncBytes, using: decoder, to: continuation)
                     #else
-                        let (data, response) = try await self.data(for: request)
+                        let (asyncBytes, response) = try await self.bytes(for: request)
+                        try await validateStreamingResponse(response, asyncBytes: asyncBytes)
+                        try await decodeAndYieldJSONLines(asyncBytes, using: decoder, to: continuation)
                     #endif
-
-                    guard let httpResponse = response as? HTTPURLResponse else {
-                        throw URLSessionError.invalidResponse
-                    }
-
-                    guard (200 ..< 300).contains(httpResponse.statusCode) else {
-                        if let errorString = String(data: data, encoding: .utf8) {
-                            throw URLSessionError.httpError(statusCode: httpResponse.statusCode, detail: errorString)
-                        }
-                        throw URLSessionError.httpError(statusCode: httpResponse.statusCode, detail: "Invalid response")
-                    }
-
-                    var buffer = data
-
-                    while let newlineIndex = buffer.firstIndex(of: UInt8(ascii: "\n")) {
-                        let chunk = buffer[..<newlineIndex]
-                        buffer = buffer[buffer.index(after: newlineIndex)...]
-
-                        if !chunk.isEmpty {
-                            let decoded = try decoder.decode(T.self, from: chunk)
-                            continuation.yield(decoded)
-                        }
-                    }
-
                     continuation.finish()
                 } catch {
                     continuation.finish(throwing: error)
@@ -268,11 +248,11 @@ extension URLSession {
                         guard let asyncBytes = lockedAsyncBytes, let response = lockedResponse else {
                             throw URLSessionError.invalidResponse
                         }
-                        try await self.validateEventStreamResponse(response, asyncBytes: asyncBytes)
+                        try await self.validateStreamingResponse(response, asyncBytes: asyncBytes)
                         try await decodeAndYieldEventStream(asyncBytes, to: continuation)
                     #else
                         let (asyncBytes, response) = try await self.bytes(for: request)
-                        try await validateEventStreamResponse(response, asyncBytes: asyncBytes)
+                        try await validateStreamingResponse(response, asyncBytes: asyncBytes)
                         try await decodeAndYieldEventStream(asyncBytes, to: continuation)
                     #endif
                     continuation.finish()
@@ -287,7 +267,7 @@ extension URLSession {
         }
     }
 
-    private func validateEventStreamResponse<Bytes>(
+    private func validateStreamingResponse<Bytes>(
         _ response: URLResponse,
         asyncBytes: Bytes
     ) async throws where Bytes: AsyncSequence, Bytes.Element == UInt8 {
@@ -304,6 +284,23 @@ extension URLSession {
                 throw URLSessionError.httpError(statusCode: httpResponse.statusCode, detail: errorString)
             }
             throw URLSessionError.httpError(statusCode: httpResponse.statusCode, detail: "Invalid response")
+        }
+    }
+
+    /// Decodes each line as it arrives, the way the AsyncHTTPClient transport does.
+    private func decodeAndYieldJSONLines<T: Decodable & Sendable, Bytes>(
+        _ asyncBytes: Bytes,
+        using decoder: JSONDecoder,
+        to continuation: AsyncThrowingStream<T, any Error>.Continuation
+    ) async throws where Bytes: AsyncSequence, Bytes.Element == UInt8 {
+        var lines = JSONLines()
+        for try await byte in asyncBytes {
+            guard let line = lines.append(byte) else { continue }
+            try Task.checkCancellation()
+            continuation.yield(try decoder.decode(T.self, from: Data(line)))
+        }
+        if let line = lines.finish() {
+            continuation.yield(try decoder.decode(T.self, from: Data(line)))
         }
     }
 
