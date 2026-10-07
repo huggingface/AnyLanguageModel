@@ -31,6 +31,7 @@ public struct GenerationSchema: Equatable, Codable, CustomDebugStringConvertible
                 return lhsString.description == rhsString.description
                     && lhsString.pattern == rhsString.pattern
                     && lhsString.enumChoices == rhsString.enumChoices
+                    && lhsString.isConstant == rhsString.isConstant
             case (.number(let lhsNumber), .number(let rhsNumber)):
                 return lhsNumber.description == rhsNumber.description
                     && lhsNumber.integerOnly == rhsNumber.integerOnly
@@ -63,7 +64,7 @@ public struct GenerationSchema: Equatable, Codable, CustomDebugStringConvertible
         private enum CodingKeys: String, CodingKey {
             case type, properties, required, additionalProperties
             case items, minItems, maxItems
-            case pattern, `enum`, anyOf
+            case pattern, `enum`, const, anyOf
             case ref = "$ref"
             case description
             case minimum, maximum
@@ -115,7 +116,11 @@ public struct GenerationSchema: Equatable, Codable, CustomDebugStringConvertible
                 if let pattern = str.pattern {
                     try container.encode(pattern, forKey: .pattern)
                 }
-                if let choices = str.enumChoices {
+                if str.isConstant, let choices = str.enumChoices, choices.count == 1,
+                    encoder.userInfo[GenerationSchema.constantsAsEnumsKey] as? Bool != true
+                {
+                    try container.encode(choices[0], forKey: .const)
+                } else if let choices = str.enumChoices {
                     try container.encode(choices, forKey: .enum)
                 }
 
@@ -161,6 +166,19 @@ public struct GenerationSchema: Equatable, Codable, CustomDebugStringConvertible
                 return
             }
 
+            // Foundation Models encodes a constant string as `const` alone, without a `type`.
+            if !container.contains(.type), let constant = try? container.decode(String.self, forKey: .const) {
+                self = .string(
+                    GenerationSchema.StringNode(
+                        description: try container.decodeIfPresent(String.self, forKey: .description),
+                        pattern: try container.decodeIfPresent(String.self, forKey: .pattern),
+                        enumChoices: [constant],
+                        isConstant: true
+                    )
+                )
+                return
+            }
+
             let type = try container.decode(String.self, forKey: .type)
             let description = try container.decodeIfPresent(String.self, forKey: .description)
 
@@ -195,6 +213,17 @@ public struct GenerationSchema: Equatable, Codable, CustomDebugStringConvertible
 
             case "string":
                 let pattern = try container.decodeIfPresent(String.self, forKey: .pattern)
+                if let constant = try container.decodeIfPresent(String.self, forKey: .const) {
+                    self = .string(
+                        GenerationSchema.StringNode(
+                            description: description,
+                            pattern: pattern,
+                            enumChoices: [constant],
+                            isConstant: true
+                        )
+                    )
+                    return
+                }
                 let enumChoices = try container.decodeIfPresent([String].self, forKey: .enum)
                 self = .string(
                     GenerationSchema.StringNode(description: description, pattern: pattern, enumChoices: enumChoices)
@@ -254,6 +283,9 @@ public struct GenerationSchema: Equatable, Codable, CustomDebugStringConvertible
         var description: String?
         var pattern: String?
         var enumChoices: [String]?
+        /// Whether the string must be exactly its one choice,
+        /// which encodes as `const` rather than a one-choice `enum`.
+        var isConstant = false
     }
 
     struct NumberNode: Sendable, Codable {
@@ -289,7 +321,9 @@ public struct GenerationSchema: Equatable, Codable, CustomDebugStringConvertible
         case .array(let arr):
             return "array(items: \(debugString(for: arr.items, indent: 0)))"
         case .string(let str):
-            if let choices = str.enumChoices {
+            if str.isConstant, let constant = str.enumChoices?.first {
+                return "string(const: \(constant))"
+            } else if let choices = str.enumChoices {
                 return "string(enum: \(choices))"
             } else if str.pattern != nil {
                 return "string(pattern)"
@@ -587,6 +621,15 @@ public struct GenerationSchema: Equatable, Codable, CustomDebugStringConvertible
                 return .null
             case .string:
                 return .string(StringNode(description: dynamicProp?.description, pattern: nil, enumChoices: nil))
+            case .guidedString(let choices, let isConstant):
+                return .string(
+                    StringNode(
+                        description: dynamicProp?.description,
+                        pattern: nil,
+                        enumChoices: choices,
+                        isConstant: isConstant
+                    )
+                )
             case .number:
                 return .number(
                     NumberNode(description: dynamicProp?.description, minimum: nil, maximum: nil, integerOnly: false)
@@ -799,7 +842,12 @@ extension GenerationSchema {
             if type == Bool.self {
                 return (.boolean, [:])
             } else if type == String.self {
-                return (.string(StringNode(description: description, pattern: nil, enumChoices: nil)), [:])
+                var node = StringNode(description: description, pattern: nil, enumChoices: nil)
+                if let (choices, isConstant) = GenerationGuide.stringChoices(of: guides) {
+                    node.enumChoices = choices
+                    node.isConstant = isConstant
+                }
+                return (.string(node), [:])
             } else if type == Int.self {
                 var minimum: Double?
                 var maximum: Double?
@@ -935,6 +983,13 @@ extension GenerationSchema {
     /// let data = try encoder.encode(schema)
     /// ```
     static let omitAdditionalPropertiesKey = CodingUserInfoKey(rawValue: "GenerationSchema.omitAdditionalProperties")!
+
+    /// A key for the encoder's `userInfo` dictionary that indicates whether
+    /// a constant string should be encoded as a one-choice `enum` instead of `const`.
+    ///
+    /// Set this to `true` for providers whose schemas don't support `const`.
+    /// Defaults to `false` (encodes `const`, as Foundation Models does) if not specified.
+    static let constantsAsEnumsKey = CodingUserInfoKey(rawValue: "GenerationSchema.constantsAsEnums")!
 
     func schemaPrompt() -> String {
         let encoder = JSONEncoder()
