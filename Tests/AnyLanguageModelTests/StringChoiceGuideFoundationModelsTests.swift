@@ -45,6 +45,23 @@ import Testing
             )
             #expect(converted["kind"] == native["kind"])
             #expect(converted["choice"] == native["choice"])
+
+            let dynamic = try properties(
+                FoundationModels.GenerationSchema(
+                    AnyLanguageModel.GenerationSchema(
+                        root: AnyLanguageModel.DynamicGenerationSchema(
+                            name: "Dynamic",
+                            properties: [
+                                .init(name: "kind", schema: .init(type: String.self, guides: [.constant("fixed")])),
+                                .init(name: "choice", schema: .init(type: String.self, guides: [.anyOf(["a", "b"])])),
+                            ]
+                        ),
+                        dependencies: []
+                    )
+                )
+            )
+            #expect(dynamic["kind"] == native["kind"])
+            #expect(dynamic["choice"] == native["choice"])
         }
     }
 #endif

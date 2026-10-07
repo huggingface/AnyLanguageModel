@@ -105,6 +105,30 @@ struct StringChoiceGuideTests {
         #expect(properties["twoChoices"]?["enum"] as? [String] == ["b", "c"])
     }
 
+    @Test func dynamicSchemaGuidesReachTheSchema() throws {
+        let schema = try GenerationSchema(
+            root: DynamicGenerationSchema(
+                name: "Dynamic",
+                properties: [
+                    .init(name: "kind", schema: .init(type: String.self, guides: [.constant("fixed")])),
+                    .init(name: "choice", schema: .init(type: String.self, guides: [.anyOf(["a", "b"])])),
+                    .init(
+                        name: "combined",
+                        schema: .init(type: String.self, guides: [.anyOf(["a", "b"]), .constant("a")])
+                    ),
+                    .init(name: "plain", schema: .init(type: String.self)),
+                ]
+            ),
+            dependencies: []
+        )
+        let properties = try properties(encode(schema))
+        #expect(properties["kind"]?["const"] as? String == "fixed")
+        #expect(properties["choice"]?["enum"] as? [String] == ["a", "b"])
+        #expect(properties["combined"]?["const"] as? String == "a")
+        #expect(properties["plain"]?["const"] == nil)
+        #expect(properties["plain"]?["enum"] == nil)
+    }
+
     @Test func constantsAsEnumsEncodesAOneChoiceEnum() throws {
         let properties = try properties(encode(StringChoiceGuided.generationSchema, constantsAsEnums: true))
         #expect(properties["kind"]?["type"] as? String == "string")

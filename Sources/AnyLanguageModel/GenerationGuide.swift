@@ -31,6 +31,27 @@ public struct GenerationGuide<Value>: Sendable {
         self.stringChoices = stringChoices
         self.isConstant = isConstant
     }
+
+    /// The string choices that `guides` allow, if any of them is a `.constant(_:)` or `.anyOf(_:)` guide.
+    ///
+    /// As in Foundation Models, a constant takes precedence over `anyOf`,
+    /// and a later guide replaces an earlier one of the same kind.
+    static func stringChoices(of guides: [GenerationGuide<Value>]) -> (choices: [String], isConstant: Bool)? {
+        var constant: String?
+        var choices: [String]?
+        for guide in guides {
+            guard let guideChoices = guide.stringChoices else { continue }
+            if guide.isConstant {
+                constant = guideChoices.first
+            } else {
+                choices = guideChoices
+            }
+        }
+        if let constant {
+            return ([constant], true)
+        }
+        return choices.map { ($0, false) }
+    }
 }
 
 // MARK: - String Guides

@@ -621,6 +621,15 @@ public struct GenerationSchema: Equatable, Codable, CustomDebugStringConvertible
                 return .null
             case .string:
                 return .string(StringNode(description: dynamicProp?.description, pattern: nil, enumChoices: nil))
+            case .guidedString(let choices, let isConstant):
+                return .string(
+                    StringNode(
+                        description: dynamicProp?.description,
+                        pattern: nil,
+                        enumChoices: choices,
+                        isConstant: isConstant
+                    )
+                )
             case .number:
                 return .number(
                     NumberNode(description: dynamicProp?.description, minimum: nil, maximum: nil, integerOnly: false)
@@ -833,22 +842,10 @@ extension GenerationSchema {
             if type == Bool.self {
                 return (.boolean, [:])
             } else if type == String.self {
-                // As in Foundation Models, a constant takes precedence over `anyOf`,
-                // and a later guide replaces an earlier one of the same kind.
-                var constant: String?
-                var choices: [String]?
-                for guide in guides {
-                    guard let guideChoices = guide.stringChoices else { continue }
-                    if guide.isConstant {
-                        constant = guideChoices.first
-                    } else {
-                        choices = guideChoices
-                    }
-                }
-                var node = StringNode(description: description, pattern: nil, enumChoices: choices)
-                if let constant {
-                    node.enumChoices = [constant]
-                    node.isConstant = true
+                var node = StringNode(description: description, pattern: nil, enumChoices: nil)
+                if let (choices, isConstant) = GenerationGuide.stringChoices(of: guides) {
+                    node.enumChoices = choices
+                    node.isConstant = isConstant
                 }
                 return (.string(node), [:])
             } else if type == Int.self {

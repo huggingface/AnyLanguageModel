@@ -19,6 +19,8 @@ public struct DynamicGenerationSchema: Sendable {
     internal enum Scalar: Sendable {
         case bool
         case string
+        /// A string that `.constant(_:)` or `.anyOf(_:)` guides constrain to `choices`.
+        case guidedString(choices: [String], isConstant: Bool)
         case number
         case integer
         case decimal
@@ -123,7 +125,11 @@ public struct DynamicGenerationSchema: Sendable {
         if type == Bool.self {
             self.body = .scalar(.bool)
         } else if type == String.self {
-            self.body = .scalar(.string)
+            if let (choices, isConstant) = GenerationGuide.stringChoices(of: guides) {
+                self.body = .scalar(.guidedString(choices: choices, isConstant: isConstant))
+            } else {
+                self.body = .scalar(.string)
+            }
         } else if type == Int.self {
             self.body = .scalar(.integer)
         } else if type == Float.self || type == Double.self {
