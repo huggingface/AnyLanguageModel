@@ -1,4 +1,5 @@
 import Foundation
+import Observation
 
 extension Transcript {
     /// The mutable, instruction-free history exposed through session properties.
@@ -27,10 +28,11 @@ public macro SessionPropertyEntry() =
 ///
 /// - Note: This API is exclusive to AnyLanguageModel on OS 26 and mirrors
 ///   Foundation Models 27.
+@Observable
 public final class SessionPropertyValues: @unchecked Sendable {
-    private let customValues = Locked<[ObjectIdentifier: Any]>([:])
-    private let historyGetter: @Sendable () -> Transcript.HistoryView
-    private let historySetter: @Sendable (Transcript.HistoryView) -> Void
+    @ObservationIgnored private let customValues = Locked<[ObjectIdentifier: Any]>([:])
+    @ObservationIgnored private let historyGetter: @Sendable () -> Transcript.HistoryView
+    @ObservationIgnored private let historySetter: @Sendable (Transcript.HistoryView) -> Void
 
     init(
         historyGetter: @escaping @Sendable () -> Transcript.HistoryView,
@@ -50,6 +52,8 @@ public final class SessionPropertyValues: @unchecked Sendable {
                     "Session history is read-only while dynamic instructions or a Tool is active"
                 )
                 history.entries = newValue
+                history.persist(newValue)
+                return
             }
             historySetter(newValue)
         }
@@ -70,6 +74,28 @@ public final class SessionPropertyValues: @unchecked Sendable {
             }
         }
     }
+
+    func historyBinding(
+        _ entries: Transcript.HistoryView,
+        isWritable: Bool,
+        protecting protectedEntryIDs: Set<String> = []
+    ) -> SessionHistoryBinding {
+        let persist: (@Sendable (Transcript.HistoryView) -> Void)?
+        if isWritable {
+            persist = { [historySetter] updated in
+                historySetter(
+                    updated.filter { !protectedEntryIDs.contains($0.id) }
+                )
+            }
+        } else {
+            persist = nil
+        }
+        return SessionHistoryBinding(
+            entries,
+            isWritable: isWritable,
+            persist: persist
+        )
+    }
 }
 
 enum SessionPropertyBinding {
@@ -80,15 +106,25 @@ enum SessionPropertyBinding {
 final class SessionHistoryBinding: @unchecked Sendable {
     private let storage: Locked<Transcript.HistoryView>
     let isWritable: Bool
+    private let persistValue: (@Sendable (Transcript.HistoryView) -> Void)?
 
-    init(_ entries: Transcript.HistoryView, isWritable: Bool) {
+    init(
+        _ entries: Transcript.HistoryView,
+        isWritable: Bool,
+        persist: (@Sendable (Transcript.HistoryView) -> Void)? = nil
+    ) {
         storage = Locked(entries)
         self.isWritable = isWritable
+        self.persistValue = persist
     }
 
     var entries: Transcript.HistoryView {
         get { storage.withLock { $0 } }
         set { storage.withLock { $0 = newValue } }
+    }
+
+    func persist(_ entries: Transcript.HistoryView) {
+        persistValue?(entries)
     }
 }
 

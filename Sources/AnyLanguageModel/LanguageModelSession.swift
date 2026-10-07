@@ -163,6 +163,9 @@ public final class LanguageModelSession: @unchecked Sendable {
         /// Context options selected by the active profile.
         public let contextOptions: ContextOptions
 
+        /// Transcript failure behavior captured for this request.
+        public let transcriptErrorHandlingPolicy: TranscriptErrorHandlingPolicy?
+
         fileprivate let profile: ResolvedDynamicProfile?
         fileprivate let canonicalTranscript: [Transcript.Entry]
         fileprivate let callbackState: ProfileCallbackState
@@ -174,6 +177,7 @@ public final class LanguageModelSession: @unchecked Sendable {
             model: any LanguageModel,
             options: GenerationOptions = .init(),
             contextOptions: ContextOptions = .init(),
+            transcriptErrorHandlingPolicy: TranscriptErrorHandlingPolicy? = nil,
             profile: ResolvedDynamicProfile? = nil,
             canonicalTranscript: [Transcript.Entry]? = nil,
             callbackState: ProfileCallbackState = ProfileCallbackState()
@@ -184,6 +188,7 @@ public final class LanguageModelSession: @unchecked Sendable {
             self.model = model
             self.options = options
             self.contextOptions = contextOptions
+            self.transcriptErrorHandlingPolicy = transcriptErrorHandlingPolicy
             self.profile = profile
             self.canonicalTranscript = canonicalTranscript ?? Array(transcript)
             self.callbackState = callbackState
@@ -197,6 +202,7 @@ public final class LanguageModelSession: @unchecked Sendable {
                 model: model,
                 options: options,
                 contextOptions: contextOptions,
+                transcriptErrorHandlingPolicy: transcriptErrorHandlingPolicy,
                 profile: profile,
                 canonicalTranscript: canonicalTranscript,
                 callbackState: context.callbackState
@@ -256,7 +262,8 @@ public final class LanguageModelSession: @unchecked Sendable {
             try await profileLifecycle.prepare(
                 profile,
                 properties: properties,
-                history: context.canonicalTranscript
+                history: context.canonicalTranscript,
+                protectedEntryIDs: Set(additionalEntries.map(\.id))
             )
         }
         if let prepared, prepared.session === self {
@@ -270,6 +277,7 @@ public final class LanguageModelSession: @unchecked Sendable {
         options: GenerationOptions
     ) -> RequestContext {
         var canonical = Array(transcript) + additionalEntries
+        let sessionErrorPolicy = transcriptErrorHandlingPolicy
         guard let dynamicProfile else {
             guard let dynamicInstructions else {
                 return RequestContext(
@@ -278,13 +286,14 @@ public final class LanguageModelSession: @unchecked Sendable {
                     tools: tools,
                     model: model,
                     options: options,
+                    transcriptErrorHandlingPolicy: sessionErrorPolicy,
                     canonicalTranscript: canonical
                 )
             }
 
             // Dynamic instructions are request-only. Their body can observe
             // session properties and canonical history, but cannot rewrite history.
-            let history = SessionHistoryBinding(canonical, isWritable: false)
+            let history = properties.historyBinding(canonical, isWritable: false)
             let resolved = dynamicInstructionsLock.withLock {
                 SessionPropertyBinding.$values.withValue(properties) {
                     SessionPropertyBinding.$history.withValue(history) {
@@ -304,11 +313,17 @@ public final class LanguageModelSession: @unchecked Sendable {
                 tools: resolved.tools,
                 model: model,
                 options: options,
+                transcriptErrorHandlingPolicy: sessionErrorPolicy,
                 canonicalTranscript: canonical
             )
         }
 
-        let history = SessionHistoryBinding(canonical, isWritable: true)
+        let protectedEntryIDs = Set(additionalEntries.map(\.id))
+        let history = properties.historyBinding(
+            canonical,
+            isWritable: true,
+            protecting: protectedEntryIDs
+        )
         let resolved = dynamicProfileLock.withLock {
             SessionPropertyBinding.$values.withValue(properties) {
                 SessionPropertyBinding.$history.withValue(history) {
@@ -319,7 +334,11 @@ public final class LanguageModelSession: @unchecked Sendable {
         canonical = history.entries
         var projected = canonical
         for transform in resolved.historyTransforms {
-            let transformHistory = SessionHistoryBinding(canonical, isWritable: true)
+            let transformHistory = properties.historyBinding(
+                canonical,
+                isWritable: true,
+                protecting: protectedEntryIDs
+            )
             projected = SessionPropertyBinding.$values.withValue(properties) {
                 SessionPropertyBinding.$history.withValue(transformHistory) {
                     transform(projected)
@@ -347,9 +366,6 @@ public final class LanguageModelSession: @unchecked Sendable {
         if resolvedOptions.toolCallingMode == nil, resolved.hasToolCallingMode {
             resolvedOptions.toolCallingMode = resolved.toolCallingMode
         }
-        if resolved.hasTranscriptErrorHandlingPolicy {
-            state.withLock { $0.transcriptErrorHandlingPolicy = resolved.transcriptErrorHandlingPolicy }
-        }
         return RequestContext(
             transcript: requestTranscript,
             instructions: resolved.instructions,
@@ -357,6 +373,9 @@ public final class LanguageModelSession: @unchecked Sendable {
             model: resolved.model ?? model,
             options: resolvedOptions,
             contextOptions: .init(reasoningLevel: resolved.reasoningLevel),
+            transcriptErrorHandlingPolicy: resolved.hasTranscriptErrorHandlingPolicy
+                ? resolved.transcriptErrorHandlingPolicy
+                : sessionErrorPolicy,
             profile: resolved,
             canonicalTranscript: canonical
         )
@@ -385,7 +404,11 @@ public final class LanguageModelSession: @unchecked Sendable {
     ) async throws {
         guard let profile = requestContext.profile else { return }
         let history = Array(transcript) + currentRoundEntries
-        try await withSessionProperties(history: history, isHistoryWritable: true) {
+        try await withSessionProperties(
+            history: history,
+            isHistoryWritable: true,
+            protectedEntryIDs: Set(currentRoundEntries.map(\.id))
+        ) {
             for action in profile.onToolCall { try await action(call) }
         }
     }
@@ -399,7 +422,11 @@ public final class LanguageModelSession: @unchecked Sendable {
     ) async throws {
         guard let profile = requestContext.profile else { return }
         let history = Array(transcript) + currentRoundEntries
-        try await withSessionProperties(history: history, isHistoryWritable: true) {
+        try await withSessionProperties(
+            history: history,
+            isHistoryWritable: true,
+            protectedEntryIDs: Set(currentRoundEntries.map(\.id))
+        ) {
             for action in profile.onToolOutput { try await action(call, output) }
         }
     }
@@ -423,11 +450,19 @@ public final class LanguageModelSession: @unchecked Sendable {
             let history = Array(transcript) + currentRoundEntries
             switch entry {
             case .reasoning(let reasoning):
-                try await withSessionProperties(history: history, isHistoryWritable: true) {
+                try await withSessionProperties(
+                    history: history,
+                    isHistoryWritable: true,
+                    protectedEntryIDs: Set(currentRoundEntries.map(\.id))
+                ) {
                     for action in profile.onReasoning { try await action(reasoning) }
                 }
             case .response(let response):
-                try await withSessionProperties(history: history, isHistoryWritable: true) {
+                try await withSessionProperties(
+                    history: history,
+                    isHistoryWritable: true,
+                    protectedEntryIDs: Set(currentRoundEntries.map(\.id))
+                ) {
                     for action in profile.onResponse { try await action(response) }
                 }
             default:
@@ -446,7 +481,11 @@ public final class LanguageModelSession: @unchecked Sendable {
         operation: @Sendable () async throws -> Result
     ) async rethrows -> Result {
         let history = Array(transcript) + currentRoundEntries
-        return try await withSessionProperties(history: history, isHistoryWritable: false) {
+        return try await withSessionProperties(
+            history: history,
+            isHistoryWritable: false,
+            protectedEntryIDs: Set(currentRoundEntries.map(\.id))
+        ) {
             try await operation()
         }
     }
@@ -454,9 +493,14 @@ public final class LanguageModelSession: @unchecked Sendable {
     nonisolated private func withSessionProperties<Result: Sendable>(
         history: [Transcript.Entry],
         isHistoryWritable: Bool,
+        protectedEntryIDs: Set<String> = [],
         operation: @Sendable () async throws -> Result
     ) async rethrows -> Result {
-        let history = SessionHistoryBinding(history, isWritable: isHistoryWritable)
+        let history = properties.historyBinding(
+            history,
+            isWritable: isHistoryWritable,
+            protecting: protectedEntryIDs
+        )
         return try await SessionPropertyBinding.$values.withValue(properties) {
             try await SessionPropertyBinding.$history.withValue(history) {
                 try await operation()
@@ -693,11 +737,15 @@ public final class LanguageModelSession: @unchecked Sendable {
             endResponding()
             return result
         } catch {
-            if transcriptErrorHandlingPolicy == .revertTranscript {
+            let failure = error as? ProfiledModelFailure
+            let policy =
+                failure?.prepared.context.transcriptErrorHandlingPolicy
+                ?? transcriptErrorHandlingPolicy
+            if policy == .revertTranscript {
                 removePrompt(id: promptID)
             }
             endResponding()
-            throw error
+            throw failure?.underlyingError ?? error
         }
     }
 
@@ -817,9 +865,13 @@ public final class LanguageModelSession: @unchecked Sendable {
                                         }
                                     )
                                 }
-                                if state.transcriptErrorHandlingPolicy == .preserveTranscript {
+                                let policy =
+                                    profileTracker?.prepared?.context
+                                    .transcriptErrorHandlingPolicy
+                                    ?? state.transcriptErrorHandlingPolicy
+                                if policy == .preserveTranscript {
                                     state.transcript.append(contentsOf: lastSnapshot?.transcriptEntries ?? [])
-                                } else if state.transcriptErrorHandlingPolicy == .revertTranscript {
+                                } else if policy == .revertTranscript {
                                     state.transcript = Transcript(
                                         entries: state.transcript.filter { $0.id != promptEntry.id }
                                     )
@@ -1076,10 +1128,14 @@ public final class LanguageModelSession: @unchecked Sendable {
             context: context,
             callSiteOptions: options
         )
-        let response = try await ProfileRequestBinding.$prepared.withValue(prepared) {
-            try await generate(context.model, context.options, context.contextOptions)
+        do {
+            let response = try await ProfileRequestBinding.$prepared.withValue(prepared) {
+                try await generate(context.model, context.options, context.contextOptions)
+            }
+            return ProfiledModelResponse(response: response, prepared: prepared)
+        } catch {
+            throw ProfiledModelFailure(underlyingError: error, prepared: prepared)
         }
-        return ProfiledModelResponse(response: response, prepared: prepared)
     }
 
     nonisolated private func respond<Content: Generable>(
@@ -1164,7 +1220,7 @@ public final class LanguageModelSession: @unchecked Sendable {
                     )
                 }
             }
-            throw error
+            throw ProfiledModelFailure(underlyingError: error, prepared: prepared)
         }
     }
 
@@ -2191,6 +2247,11 @@ private enum ResponseStreamError: Error, LocalizedError {
 private struct ProfiledModelResponse<Content> where Content: Generable {
     let response: LanguageModelSession.Response<Content>
     let prepared: PreparedProfileRequest?
+}
+
+private struct ProfiledModelFailure: Error {
+    let underlyingError: any Error
+    let prepared: PreparedProfileRequest
 }
 
 fileprivate final class ProfileCallbackState: @unchecked Sendable {

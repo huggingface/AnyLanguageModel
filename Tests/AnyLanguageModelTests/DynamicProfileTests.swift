@@ -1,4 +1,5 @@
 import Foundation
+import Observation
 import Testing
 
 @_spi(Compatibility) @testable import AnyLanguageModel
@@ -75,6 +76,25 @@ struct DynamicProfileTests {
                 "outer-reasoning:B", "inner-reasoning:B", "outer-response:B", "inner-response:B",
             ]
         )
+    }
+
+    @MainActor
+    @Test func appleConcurrencyAndObservationSurfaceCompiles() {
+        var callbackCount = 0
+        _ = LanguageModelSession.Profile { Instructions("Actor callbacks") }
+            .model(LifecycleFixtureModel())
+            .onActivate { callbackCount += 1 }
+            .onDeactivate { callbackCount += 1 }
+            .onPrompt { (_: Transcript.Prompt) in callbackCount += 1 }
+            .onResponse { (_: Transcript.Response) in callbackCount += 1 }
+            .onReasoning { (_: Transcript.Reasoning) in callbackCount += 1 }
+            .onToolCall { (_: Transcript.ToolCall) in callbackCount += 1 }
+            .onToolOutput { (_: Transcript.ToolCall, _: Transcript.ToolOutput) in
+                callbackCount += 1
+            }
+
+        let session = LanguageModelSession(model: LifecycleFixtureModel())
+        let _: any Observable = session.properties
     }
 
     @Test(arguments: [false, true])
@@ -213,6 +233,57 @@ struct DynamicProfileTests {
         #expect(first.properties.profileRevision == 1)
         #expect(second.properties.profileRevision == 0)
         #expect(state.callbackEvents.withLock { $0 } == ["call:call", "output:call"])
+    }
+
+    @Test func continuationHistoryMutationDoesNotCommitPendingEntries() async throws {
+        let state = ProfileFixtureState()
+        let model = ProfileFixtureModel(id: "model", state: state)
+        let session = LanguageModelSession(profile: HistoryWritingProfile(model: model))
+        _ = try await session.respond(to: "Durable")
+        let durableBefore = session.transcript
+        let call = Transcript.ToolCall(
+            id: "pending-call",
+            toolName: "fixture",
+            arguments: GeneratedContent(properties: [:])
+        )
+        let output = Transcript.ToolOutput(
+            id: call.id,
+            toolName: call.toolName,
+            segments: [.text(.init(content: "pending"))]
+        )
+        let pending: [Transcript.Entry] = [
+            .toolCalls(.init([call])),
+            .toolOutput(output),
+        ]
+
+        let context = try await session.resolvedRequestContext(
+            including: pending,
+            options: .init()
+        )
+
+        #expect(context.transcript.contains { $0.id == output.id })
+        #expect(session.transcript == durableBefore)
+    }
+
+    @Test func profileErrorPolicyDoesNotLeakIntoTheNextProfile() async throws {
+        let state = LifecycleFixtureState()
+        let session = LanguageModelSession(
+            profile: ErrorPolicyProfile(state: state, model: FailingProfileModel())
+        )
+        session.transcriptErrorHandlingPolicy = .preserveTranscript
+
+        await #expect(throws: LifecycleFixtureError.self) {
+            _ = try await session.respond(to: "Revert")
+        }
+        #expect(session.transcript.isEmpty)
+
+        state.useSecond.withLock { $0 = true }
+        await #expect(throws: LifecycleFixtureError.self) {
+            _ = try await session.streamResponse(to: "Preserve").collect()
+        }
+        #expect(session.transcript.count == 1)
+        #expect(session.transcript.allSatisfy { if case .prompt = $0 { true } else { false } })
+        #expect(session.transcriptErrorHandlingPolicy == .preserveTranscript)
     }
 }
 
@@ -430,6 +501,57 @@ private struct ThrowingResponseProfile: LanguageModelSession.DynamicProfile {
         LanguageModelSession.Profile { Instructions("Throw after response") }
             .model(model)
             .onResponse { throw LifecycleFixtureError.rejected }
+    }
+}
+
+private struct HistoryWritingProfile: LanguageModelSession.DynamicProfile {
+    let model: ProfileFixtureModel
+    @SessionProperty(\.history) private var history
+
+    var body: some LanguageModelSession.DynamicProfile {
+        history = history
+        return LanguageModelSession.Profile { Instructions("History") }
+            .model(model)
+    }
+}
+
+private struct ErrorPolicyProfile: LanguageModelSession.DynamicProfile, @unchecked Sendable {
+    let state: LifecycleFixtureState
+    let model: FailingProfileModel
+
+    var body: some LanguageModelSession.DynamicProfile {
+        if state.useSecond.withLock({ $0 }) {
+            LanguageModelSession.Profile { Instructions("Caller policy") }
+                .model(model)
+        } else {
+            LanguageModelSession.Profile { Instructions("Profile policy") }
+                .model(model)
+                .transcriptErrorHandlingPolicy(.revertTranscript)
+        }
+    }
+}
+
+private struct FailingProfileModel: LanguageModel {
+    typealias UnavailableReason = Never
+
+    func respond<Content>(
+        within session: LanguageModelSession,
+        to prompt: Prompt,
+        generating type: Content.Type,
+        includeSchemaInPrompt: Bool,
+        options: GenerationOptions
+    ) async throws -> LanguageModelSession.Response<Content> where Content: Generable {
+        throw LifecycleFixtureError.rejected
+    }
+
+    func streamResponse<Content>(
+        within session: LanguageModelSession,
+        to prompt: Prompt,
+        generating type: Content.Type,
+        includeSchemaInPrompt: Bool,
+        options: GenerationOptions
+    ) -> sending LanguageModelSession.ResponseStream<Content> where Content: Generable {
+        .init(stream: AsyncThrowingStream { $0.finish(throwing: LifecycleFixtureError.rejected) })
     }
 }
 

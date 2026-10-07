@@ -65,26 +65,16 @@ import Testing
                 result = try await session.streamResponse(to: "Weather").collect()
             } else {
                 ReasoningURLProtocol.enqueue(json: response(tool: true))
+                ReasoningURLProtocol.enqueue(json: response())
                 result = try await session.respond(to: "Weather")
             }
-            #expect(result.content == (streaming ? "Answer" : ""))
-            #expect(result.transcriptEntries.count == (streaming ? 4 : 3))
+            #expect(result.content == "Answer")
+            #expect(result.transcriptEntries.count == 4)
             #expect(Set(result.transcriptEntries.map(\.id)).count == result.transcriptEntries.count)
-            #expect(ReasoningURLProtocol.recordedBodies.count == (streaming ? 2 : 1))
-            if streaming {
-                let body = String(decoding: ReasoningURLProtocol.recordedBodies[1], as: UTF8.self)
-                #expect(body.contains("opaque-signature"))
-                #expect(body.contains("tool_result"))
-            } else {
-                // Nonstreaming Anthropic keeps its existing one-request tool behavior.
-                let restored = try JSONDecoder().decode(Transcript.self, from: JSONEncoder().encode(session.transcript))
-                ReasoningURLProtocol.enqueue(json: response())
-                _ = try await LanguageModelSession(model: model(), tools: [WeatherTool()], transcript: restored)
-                    .respond(to: "Continue")
-                let body = String(decoding: ReasoningURLProtocol.recordedBodies[1], as: UTF8.self)
-                #expect(body.contains("opaque-signature"))
-                #expect(body.contains("tool_result"))
-            }
+            #expect(ReasoningURLProtocol.recordedBodies.count == 2)
+            let body = String(decoding: ReasoningURLProtocol.recordedBodies[1], as: UTF8.self)
+            #expect(body.contains("opaque-signature"))
+            #expect(body.contains("tool_result"))
         }
 
         @Test(arguments: [false, true])
