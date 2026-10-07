@@ -487,6 +487,64 @@ but never become part of the session's transcript.
 > Otherwise, it throws `SystemLanguageModel.Error.dynamicInstructionsUnavailable`
 > for a session with dynamic instructions.
 
+### Dynamic Profiles
+
+`LanguageModelSession.DynamicProfile` mirrors the Foundation Models 27 profile
+API on supported AnyLanguageModel deployment targets. A profile chooses one
+active `Profile` for each actual model request and can change its model,
+instructions, tools, generation and context options without rebuilding the
+session:
+
+```swift
+extension SessionPropertyValues {
+    @SessionPropertyEntry var isReviewing = false
+}
+
+struct EditingProfile: LanguageModelSession.DynamicProfile {
+    let model: any LanguageModel
+    @SessionProperty(\.isReviewing) private var isReviewing
+
+    var body: some LanguageModelSession.DynamicProfile {
+        if isReviewing {
+            Profile {
+                Instructions("Review the current draft.")
+                ReviewTool()
+            }
+            .model(model)
+            .temperature(0.1)
+        } else {
+            Profile {
+                Instructions("Help edit the current draft.")
+                EditTool()
+            }
+            .model(model)
+            .temperature(0.7)
+        }
+    }
+}
+
+let session = LanguageModelSession(
+    profile: EditingProfile(model: model),
+    history: savedHistory
+)
+session.properties.isReviewing = true
+```
+
+Value modifiers use call-site, inner-profile, then outer-profile precedence.
+Lifecycle callbacks accumulate. `historyTransform` changes only the transcript
+projection for that request; `session.transcript` remains the canonical history.
+`@SessionProperty` exposes isolated session state to profiles, dynamic
+instructions, and tools. The built-in `history` property is writable from a
+profile or lifecycle callback and read-only while dynamic instructions or a Tool
+is active.
+
+External compatibility models that own Tool continuation use
+`resolvedRequestContext(including:options:)` before every provider request. The
+`including:` entries are the canonical Tool calls and outputs completed in the
+current response but not yet committed to the session transcript. Execute calls
+against the tools in the producing request context and use the next resolved
+context only for the continuation request.
+
 ### Reasoning in the transcript
 
 Reasoning is transcript content, separate from the answer in `response.content`.
@@ -626,6 +684,12 @@ say which API they follow.
 - `DynamicInstructions`, its builder, and `LanguageModelSession.init(model:dynamicInstructions:history:)`:
   [dynamic instructions](#dynamic-instructions),
   which follow the Foundation Models 27 API.
+- `LanguageModelSession.DynamicProfile`, profile modifiers, lifecycle callbacks,
+  session properties, and `LanguageModelSession.init(profile:history:)`:
+  [dynamic profiles](#dynamic-profiles), which mirror Foundation Models 27 on
+  earlier deployment targets. `resolvedRequestContext(including:options:)` and
+  the explicit compatibility lifecycle hooks are AnyLanguageModel extensions for
+  external model implementations until the package adopts the executor contract.
 - `Transcript.Entry.reasoning` and `Transcript.Reasoning`:
   [reasoning in the transcript](#reasoning-in-the-transcript),
   which follows the Foundation Models 27 API.

@@ -93,6 +93,15 @@ public struct GenerationOptions: Sendable, Equatable {
     ///   a reasonable default on your behalf.
     public var sampling: SamplingMode?
 
+    /// The sampling strategy for generation.
+    ///
+    /// This is the Foundation Models 27 spelling. ``sampling`` remains for
+    /// source compatibility with earlier AnyLanguageModel releases.
+    public var samplingMode: SamplingMode? {
+        get { sampling }
+        set { sampling = newValue }
+    }
+
     /// Temperature influences the confidence of the models response.
     ///
     /// The value of this property must be a number between `0` and `1` inclusive.
@@ -120,6 +129,12 @@ public struct GenerationOptions: Sendable, Equatable {
     /// its context size supports. If the response exceeds that limit without terminating,
     /// an error will be thrown.
     public var maximumResponseTokens: Int?
+
+    /// Whether Tool calling is allowed, required, or disallowed.
+    ///
+    /// - Note: This API is exclusive to AnyLanguageModel on OS 26 and mirrors
+    ///   Foundation Models 27.
+    public var toolCallingMode: ToolCallingMode?
 
     /// Storage for model-specific custom options.
     private var customOptionsStorage: CustomOptionsStorage = .init()
@@ -169,6 +184,21 @@ public struct GenerationOptions: Sendable, Equatable {
         self.sampling = sampling
         self.temperature = temperature
         self.maximumResponseTokens = maximumResponseTokens
+        self.toolCallingMode = nil
+    }
+
+    public init(
+        samplingMode: SamplingMode? = nil,
+        temperature: Double? = nil,
+        maximumResponseTokens: Int? = nil,
+        toolCallingMode: ToolCallingMode?
+    ) {
+        self.init(
+            sampling: samplingMode,
+            temperature: temperature,
+            maximumResponseTokens: maximumResponseTokens
+        )
+        self.toolCallingMode = toolCallingMode
     }
 }
 
