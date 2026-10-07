@@ -833,12 +833,22 @@ extension GenerationSchema {
             if type == Bool.self {
                 return (.boolean, [:])
             } else if type == String.self {
-                var node = StringNode(description: description, pattern: nil, enumChoices: nil)
+                // As in Foundation Models, a constant takes precedence over `anyOf`,
+                // and a later guide replaces an earlier one of the same kind.
+                var constant: String?
+                var choices: [String]?
                 for guide in guides {
-                    if let choices = guide.stringChoices {
-                        node.enumChoices = choices
-                        node.isConstant = guide.isConstant
+                    guard let guideChoices = guide.stringChoices else { continue }
+                    if guide.isConstant {
+                        constant = guideChoices.first
+                    } else {
+                        choices = guideChoices
                     }
+                }
+                var node = StringNode(description: description, pattern: nil, enumChoices: choices)
+                if let constant {
+                    node.enumChoices = [constant]
+                    node.isConstant = true
                 }
                 return (.string(node), [:])
             } else if type == Int.self {

@@ -75,6 +75,36 @@ struct StringChoiceGuideTests {
         #expect(properties["single"]?["const"] == nil)
     }
 
+    /// As in Foundation Models, a constant takes precedence over `anyOf` in either order,
+    /// and a later guide replaces an earlier one of the same kind.
+    @Test func combinedGuidesDontDependOnOrder() throws {
+        let schema = GenerationSchema(
+            type: StringChoiceGuided.self,
+            properties: [
+                GenerationSchema.Property(
+                    name: "constantFirst",
+                    type: String.self,
+                    guides: [.constant("a"), .anyOf(["a", "b"])]
+                ),
+                GenerationSchema.Property(
+                    name: "constantLast",
+                    type: String.self,
+                    guides: [.anyOf(["a", "b"]), .constant("a")]
+                ),
+                GenerationSchema.Property(
+                    name: "twoChoices",
+                    type: String.self,
+                    guides: [.anyOf(["a", "b"]), .anyOf(["b", "c"])]
+                ),
+            ]
+        )
+        let properties = try properties(encode(schema))
+        #expect(properties["constantFirst"]?["const"] as? String == "a")
+        #expect(properties["constantFirst"]?["enum"] == nil)
+        #expect(properties["constantLast"]?["const"] as? String == "a")
+        #expect(properties["twoChoices"]?["enum"] as? [String] == ["b", "c"])
+    }
+
     @Test func constantsAsEnumsEncodesAOneChoiceEnum() throws {
         let properties = try properties(encode(StringChoiceGuided.generationSchema, constantsAsEnums: true))
         #expect(properties["kind"]?["type"] as? String == "string")
