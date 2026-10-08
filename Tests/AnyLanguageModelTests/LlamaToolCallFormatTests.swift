@@ -252,12 +252,12 @@ import Testing
                 }
             }
 
-            func wrap(_ schema: [String: Any]) -> [String: Any] {
+            func wrap(_ schema: [String: JSONValue]) -> [String: JSONValue] {
                 switch self {
                 case .root: return schema
-                case .property: return ["type": "object", "properties": ["value": schema]]
+                case .property: return ["type": "object", "properties": ["value": .object(schema)]]
                 case .arrayItem:
-                    return ["type": "object", "properties": ["values": ["type": "array", "items": schema]]]
+                    return ["type": "object", "properties": ["values": ["type": "array", "items": .object(schema)]]]
                 }
             }
         }
@@ -270,7 +270,7 @@ import Testing
             )
             let schema = try GenerationSchema(root: position.wrap(choice), dependencies: [])
             let data = try JSONEncoder().encode(schema)
-            let parameters = try #require(JSONSerialization.jsonObject(with: data) as? [String: Any])
+            let parameters = try #require(JSONDecoder().decode(JSONValue.self, from: data).objectValue)
             let tool = LlamaToolDefinition(name: "f", description: "", parameters: parameters)
             #expect(throws: LlamaToolCallFormat.SchemaRenderingError.unsupportedComposition("anyOf")) {
                 try LlamaToolCallFormat.gemma.systemMessage(existingText: "", tools: [tool])
@@ -488,6 +488,75 @@ import Testing
             #expect(text == "<|tool_call>call:get_weather{city:<|\"|>Paris<|\"|>}<tool_call|>")
             let (_, parsed) = LlamaToolCallFormat.gemma.parseToolCalls(in: text)
             #expect(parsed == [call])
+        }
+
+        @Test func qwenXMLReplaysScalarParametersAsJSON() {
+            let call = LlamaParsedToolCall(
+                name: "f",
+                argumentsJSON: #"{"note":null,"count":2,"flag":true,"ratio":1.5}"#
+            )
+            let text = LlamaToolCallFormat.qwenXML.assistantText(for: [call], precededByContent: false)
+            #expect(text.contains("<parameter=note>\nnull\n</parameter>"))
+            #expect(text.contains("<parameter=count>\n2\n</parameter>"))
+            #expect(text.contains("<parameter=flag>\ntrue\n</parameter>"))
+            #expect(text.contains("<parameter=ratio>\n1.5\n</parameter>"))
+        }
+
+        @Test func gemmaReplaysNumbersAndBooleansDistinctly() {
+            let call = LlamaParsedToolCall(name: "f", argumentsJSON: #"{"one":1,"zero":0,"yes":true,"half":0.5}"#)
+            let text = LlamaToolCallFormat.gemma.assistantText(for: [call], precededByContent: false)
+            #expect(text == "<|tool_call>call:f{half:0.5,one:1,yes:true,zero:0}<tool_call|>")
+        }
+
+        @Test(arguments: ["null", "3", "true"])
+        func hermesScalarArgumentsBecomeEmptyObject(arguments: String) {
+            let text = #"<tool_call>{"name": "f", "arguments": "# + arguments + "}</tool_call>"
+            let (_, calls) = LlamaToolCallFormat.hermesJSON.parseToolCalls(in: text)
+            #expect(calls == [LlamaParsedToolCall(name: "f", argumentsJSON: "{}")])
+        }
+
+        @Test func gemmaNonFiniteLiteralsStayStrings() {
+            let text = "<|tool_call>call:f{x:nan,y:inf,z:2}<tool_call|>"
+            let (_, calls) = LlamaToolCallFormat.gemma.parseToolCalls(in: text)
+            #expect(calls == [LlamaParsedToolCall(name: "f", argumentsJSON: #"{"x":"nan","y":"inf","z":2}"#)])
+        }
+
+        // MARK: - JSON text
+
+        @Test(arguments: [LlamaToolCallFormat.hermesJSON, .qwenXML])
+        func toolSpecsDontEscapeSlashes(format: LlamaToolCallFormat) throws {
+            let tool = LlamaToolDefinition(
+                name: "open",
+                description: "Opens a path like docs/index.md",
+                parameters: ["type": "object", "properties": ["path": ["type": "string", "pattern": "^[a-z]+/.*$"]]]
+            )
+            let message = try format.systemMessage(existingText: "", tools: [tool])
+            #expect(message.contains("Opens a path like docs/index.md"))
+            #expect(message.contains(#""pattern":"^[a-z]+/.*$""#))
+            #expect(!message.contains(#"\/"#))
+        }
+
+        @Test func parsedArgumentsKeepStringsAsWritten() {
+            let bom = "\u{FEFF}"
+            let hermes =
+                #"<tool_call>{"name": "f", "arguments": {"path": "a/b", "text": ""# + bom + #"hi"}}</tool_call>"#
+            #expect(
+                LlamaToolCallFormat.hermesJSON.parseToolCalls(in: hermes).calls.first?.argumentsJSON
+                    == #"{"path":"a/b","text":""# + bom + #"hi"}"#
+            )
+
+            let qwen =
+                "<tool_call>\n<function=f>\n<parameter=options>\n{\"path\": \"a/b\"}\n</parameter>\n</function>\n</tool_call>"
+            #expect(
+                LlamaToolCallFormat.qwenXML.parseToolCalls(in: qwen).calls.first?.argumentsJSON
+                    == #"{"options":{"path":"a/b"}}"#
+            )
+
+            let gemma = #"<|tool_call>call:f{path:<|"|>a/b<|"|>,text:<|"|>"# + bom + #"hi<|"|>}<tool_call|>"#
+            #expect(
+                LlamaToolCallFormat.gemma.parseToolCalls(in: gemma).calls.first?.argumentsJSON
+                    == #"{"path":"a/b","text":""# + bom + #"hi"}"#
+            )
         }
 
         // MARK: - Gemma thought channels
