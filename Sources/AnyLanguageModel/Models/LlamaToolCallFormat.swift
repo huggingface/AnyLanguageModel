@@ -141,7 +141,7 @@ enum LlamaToolCallFormat: Sendable, Equatable {
 struct LlamaToolDefinition {
     let name: String
     let description: String
-    let parameters: [String: Any]?
+    let parameters: [String: JSONValue]?
 }
 
 /// A tool call parsed out of generated text.
@@ -171,21 +171,14 @@ extension LlamaToolCallFormat {
     }
 
     private func toolSpecJSON(_ tool: LlamaToolDefinition) -> String {
-        var function: [String: Any] = [
-            "name": tool.name,
-            "description": tool.description,
+        var function: [String: JSONValue] = [
+            "name": .string(tool.name),
+            "description": .string(tool.description),
         ]
         if let parameters = tool.parameters {
-            function["parameters"] = parameters
+            function["parameters"] = .object(parameters)
         }
-        let spec: [String: Any] = ["type": "function", "function": function]
-        guard
-            let data = try? JSONSerialization.data(withJSONObject: spec, options: [.sortedKeys]),
-            let json = String(data: data, encoding: .utf8)
-        else {
-            return "{}"
-        }
-        return json
+        return llamaJSONString(["type": "function", "function": .object(function)]) ?? "{}"
     }
 
     private func hermesToolsBlock(tools: [LlamaToolDefinition]) -> String {
@@ -254,11 +247,11 @@ extension LlamaToolCallFormat {
     /// Gemma declarations cannot carry JSON Schema references. Inline them
     /// before rendering, and reject cycles and unsupported schema compositions.
     private func gemmaResolvedSchema(
-        _ schema: [String: Any],
-        definitions: [String: [String: Any]],
+        _ schema: [String: JSONValue],
+        definitions: [String: [String: JSONValue]],
         resolving: Set<String> = []
-    ) throws -> [String: Any] {
-        if let reference = schema["$ref"] as? String {
+    ) throws -> [String: JSONValue] {
+        if let reference = schema["$ref"]?.stringValue {
             guard !resolving.contains(reference) else {
                 throw SchemaRenderingError.recursiveReference(reference)
             }
@@ -284,13 +277,16 @@ extension LlamaToolCallFormat {
 
         var resolved = schema
         resolved.removeValue(forKey: "$defs")
-        if let properties = schema["properties"] as? [String: [String: Any]] {
-            resolved["properties"] = try properties.mapValues {
-                try gemmaResolvedSchema($0, definitions: definitions, resolving: resolving)
-            }
+        if let properties = schema["properties"]?.objectValue {
+            resolved["properties"] = .object(
+                try properties.mapValues { property in
+                    guard let property = property.objectValue else { return property }
+                    return .object(try gemmaResolvedSchema(property, definitions: definitions, resolving: resolving))
+                }
+            )
         }
-        if let items = schema["items"] as? [String: Any] {
-            resolved["items"] = try gemmaResolvedSchema(items, definitions: definitions, resolving: resolving)
+        if let items = schema["items"]?.objectValue {
+            resolved["items"] = .object(try gemmaResolvedSchema(items, definitions: definitions, resolving: resolving))
         }
         return resolved
     }
@@ -304,18 +300,18 @@ extension LlamaToolCallFormat {
         if let parameters = tool.parameters {
             let parameters = try gemmaResolvedSchema(
                 parameters,
-                definitions: parameters["$defs"] as? [String: [String: Any]] ?? [:]
+                definitions: parameters["$defs"]?.objectValue?.compactMapValues(\.objectValue) ?? [:]
             )
             rendered += ",parameters:{"
             var parts: [String] = []
-            if let properties = parameters["properties"] as? [String: Any], !properties.isEmpty {
+            if let properties = parameters["properties"]?.objectValue, !properties.isEmpty {
                 parts.append("properties:{" + gemmaProperties(properties) + "}")
             }
-            if let required = parameters["required"] as? [Any], !required.isEmpty {
-                let items = required.map { gemmaQuote("\($0)") }.joined(separator: ",")
+            if let required = parameters["required"]?.arrayValue, !required.isEmpty {
+                let items = required.map { gemmaQuote($0.stringValue ?? $0.description) }.joined(separator: ",")
                 parts.append("required:[\(items)]")
             }
-            if let type = parameters["type"] as? String {
+            if let type = parameters["type"]?.stringValue {
                 parts.append("type:\(gemmaQuote(type.uppercased()))")
             }
             rendered += parts.joined(separator: ",") + "}"
@@ -324,26 +320,26 @@ extension LlamaToolCallFormat {
         return rendered
     }
 
-    private func gemmaProperties(_ properties: [String: Any]) -> String {
+    private func gemmaProperties(_ properties: [String: JSONValue]) -> String {
         var parts: [String] = []
         for key in properties.keys.sorted() {
-            guard let value = properties[key] as? [String: Any] else { continue }
+            guard let value = properties[key]?.objectValue else { continue }
             var fields: [String] = []
-            if let description = value["description"] as? String {
+            if let description = value["description"]?.stringValue {
                 fields.append("description:\(gemmaQuote(description))")
             }
-            let type = (value["type"] as? String)?.uppercased() ?? "STRING"
-            if type == "STRING", let enumValues = value["enum"] as? [Any] {
+            let type = value["type"]?.stringValue?.uppercased() ?? "STRING"
+            if type == "STRING", let enumValues = value["enum"]?.arrayValue {
                 let items = enumValues.map { gemmaArgument($0) }.joined(separator: ",")
                 fields.append("enum:[\(items)]")
             }
-            if type == "ARRAY", let items = value["items"] as? [String: Any], !items.isEmpty {
+            if type == "ARRAY", let items = value["items"]?.objectValue, !items.isEmpty {
                 fields.append("items:{" + gemmaArrayItems(items) + "}")
             }
-            if type == "OBJECT", let nested = value["properties"] as? [String: Any] {
+            if type == "OBJECT", let nested = value["properties"]?.objectValue {
                 fields.append("properties:{" + gemmaProperties(nested) + "}")
-                if let required = value["required"] as? [Any], !required.isEmpty {
-                    let names = required.map { gemmaQuote("\($0)") }.joined(separator: ",")
+                if let required = value["required"]?.arrayValue, !required.isEmpty {
+                    let names = required.map { gemmaQuote($0.stringValue ?? $0.description) }.joined(separator: ",")
                     fields.append("required:[\(names)]")
                 }
             }
@@ -353,15 +349,15 @@ extension LlamaToolCallFormat {
         return parts.joined(separator: ",")
     }
 
-    private func gemmaArrayItems(_ items: [String: Any]) -> String {
+    private func gemmaArrayItems(_ items: [String: JSONValue]) -> String {
         var fields: [String] = []
         for key in items.keys.sorted() {
             guard let value = items[key] else { continue }
-            if key == "type", let type = value as? String {
+            if key == "type", let type = value.stringValue {
                 fields.append("type:\(gemmaQuote(type.uppercased()))")
-            } else if key == "properties", let nested = value as? [String: Any] {
+            } else if key == "properties", let nested = value.objectValue {
                 fields.append("properties:{" + gemmaProperties(nested) + "}")
-            } else if key == "items", let nested = value as? [String: Any] {
+            } else if key == "items", let nested = value.objectValue {
                 fields.append("items:{" + gemmaArrayItems(nested) + "}")
             } else {
                 fields.append("\(key):\(gemmaArgument(value))")
@@ -376,30 +372,26 @@ extension LlamaToolCallFormat {
 
     /// Renders one JSON value in Gemma 4 argument notation: unquoted keys,
     /// `<|"|>`-quoted strings, and dictionary keys in sorted order.
-    fileprivate func gemmaArgument(_ value: Any) -> String {
+    fileprivate func gemmaArgument(_ value: JSONValue) -> String {
         switch value {
-        case is NSNull:
+        case .null:
             return "null"
-        case let string as String:
+        case .string(let string):
             return gemmaQuote(string)
-        case let number as NSNumber:
-            if isBooleanNumber(number) {
-                return number.boolValue ? "true" : "false"
+        case .bool(let bool):
+            return bool ? "true" : "false"
+        case .int(let int):
+            return "\(int)"
+        case .double(let double):
+            if double == double.rounded(), double.magnitude < 1e15 {
+                return "\(Int64(double))"
             }
-            if number.doubleValue == number.doubleValue.rounded(),
-                number.doubleValue.magnitude < 1e15,
-                !"\(number)".contains(".")
-            {
-                return "\(number.int64Value)"
-            }
-            return "\(number)"
-        case let dictionary as [String: Any]:
-            let fields = dictionary.keys.sorted().map { "\($0):\(gemmaArgument(dictionary[$0]!))" }
+            return "\(double)"
+        case .object(let object):
+            let fields = object.keys.sorted().map { "\($0):\(gemmaArgument(object[$0]!))" }
             return "{" + fields.joined(separator: ",") + "}"
-        case let array as [Any]:
+        case .array(let array):
             return "[" + array.map { gemmaArgument($0) }.joined(separator: ",") + "]"
-        default:
-            return gemmaQuote("\(value)")
         }
     }
 
@@ -410,7 +402,7 @@ extension LlamaToolCallFormat {
         case .bool(let value):
             return value ? "true" : "false"
         case .number(let value):
-            return gemmaArgument(NSNumber(value: value))
+            return gemmaArgument(.double(value))
         case .string(let value):
             return gemmaQuote(value)
         case .array(let elements):
@@ -424,10 +416,7 @@ extension LlamaToolCallFormat {
     /// Renders a JSON object string as Gemma 4 call arguments (the text between
     /// the braces of `call:name{...}`).
     fileprivate func gemmaArgumentsBody(fromJSON json: String) -> String {
-        guard
-            let data = json.data(using: .utf8),
-            let object = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
-        else {
+        guard let object = llamaJSONValue(json)?.objectValue else {
             return ""
         }
         return object.keys.sorted().map { "\($0):\(gemmaArgument(object[$0]!))" }.joined(separator: ",")
@@ -449,9 +438,7 @@ extension LlamaToolCallFormat {
                 )
             case .qwenXML:
                 var block = "<tool_call>\n<function=\(call.name)>\n"
-                if let data = call.argumentsJSON.data(using: .utf8),
-                    let object = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
-                {
+                if let object = llamaJSONValue(call.argumentsJSON)?.objectValue {
                     for key in object.keys.sorted() {
                         block += "<parameter=\(key)>\n\(qwenXMLParameterValue(object[key]!))\n</parameter>\n"
                     }
@@ -471,21 +458,10 @@ extension LlamaToolCallFormat {
         return joined
     }
 
-    private func qwenXMLParameterValue(_ value: Any) -> String {
-        if let string = value as? String { return string }
-        if let number = value as? NSNumber {
-            if isBooleanNumber(number) {
-                return number.boolValue ? "true" : "false"
-            }
-            return "\(number)"
-        }
-        guard
-            let data = try? JSONSerialization.data(withJSONObject: value, options: [.sortedKeys]),
-            let json = String(data: data, encoding: .utf8)
-        else {
-            return "\(value)"
-        }
-        return json
+    /// Strings are written as raw text and every other value as JSON.
+    private func qwenXMLParameterValue(_ value: JSONValue) -> String {
+        if let string = value.stringValue { return string }
+        return llamaJSONString(value) ?? ""
     }
 
     /// Renders one tool output as the message that carries it back to the model.
@@ -582,21 +558,20 @@ extension LlamaToolCallFormat {
     private func parseHermesCall(_ body: String) -> LlamaParsedToolCall? {
         let trimmed = body.trimmingCharacters(in: .whitespacesAndNewlines)
         guard
-            let data = trimmed.data(using: .utf8),
-            let object = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
-            let name = object["name"] as? String
+            let object = llamaJSONValue(trimmed)?.objectValue,
+            let name = object["name"]?.stringValue
         else {
             return nil
         }
         var argumentsJSON = "{}"
         if let arguments = object["arguments"] {
-            if let nested = arguments as? String {
+            switch arguments {
+            case .string(let nested):
                 argumentsJSON = nested
-            } else if let argumentsData = try? JSONSerialization.data(
-                withJSONObject: arguments,
-                options: [.sortedKeys]
-            ), let json = String(data: argumentsData, encoding: .utf8) {
-                argumentsJSON = json
+            case .object, .array:
+                argumentsJSON = llamaJSONString(arguments) ?? argumentsJSON
+            default:
+                break
             }
         }
         return LlamaParsedToolCall(name: name, argumentsJSON: argumentsJSON)
@@ -614,7 +589,7 @@ extension LlamaToolCallFormat {
             nameEnd < functionEnd.lowerBound
         else { return nil }
 
-        var arguments: [String: Any] = [:]
+        var arguments: [String: JSONValue] = [:]
         var remainder = afterName[afterName.index(after: nameEnd) ..< functionEnd.lowerBound]
             .drop(while: \.isWhitespace)
         while !remainder.isEmpty {
@@ -633,10 +608,7 @@ extension LlamaToolCallFormat {
             remainder = afterParam[paramEnd.upperBound...].drop(while: \.isWhitespace)
         }
 
-        guard
-            let data = try? JSONSerialization.data(withJSONObject: arguments, options: [.sortedKeys]),
-            let json = String(data: data, encoding: .utf8)
-        else {
+        guard let json = llamaJSONString(.object(arguments)) else {
             return nil
         }
         return LlamaParsedToolCall(name: name, argumentsJSON: json)
@@ -645,16 +617,10 @@ extension LlamaToolCallFormat {
     /// The XML format writes objects and arrays as JSON but scalars as raw
     /// text, so structured values are decoded and everything else stays a
     /// string.
-    private func qwenXMLDecodedValue(_ raw: String) -> Any {
+    private func qwenXMLDecodedValue(_ raw: String) -> JSONValue {
         let trimmed = raw.trimmingCharacters(in: .whitespaces)
-        guard trimmed.hasPrefix("{") || trimmed.hasPrefix("[") else { return raw }
-        guard
-            let data = trimmed.data(using: .utf8),
-            let object = try? JSONSerialization.jsonObject(with: data, options: [.fragmentsAllowed])
-        else {
-            return raw
-        }
-        return object
+        guard trimmed.hasPrefix("{") || trimmed.hasPrefix("[") else { return .string(raw) }
+        return llamaJSONValue(trimmed) ?? .string(raw)
     }
 
     private func parseGemmaCalls(in text: String) -> (String, [LlamaParsedToolCall]) {
@@ -739,19 +705,14 @@ struct LlamaGemmaArgumentParser {
     /// it as a JSON object string, or `nil` if the input is malformed.
     mutating func parseObjectJSON() -> String? {
         guard let object = parseObjectBody(terminators: []) else { return nil }
-        guard
-            let data = try? JSONSerialization.data(withJSONObject: object, options: [.sortedKeys]),
-            let json = String(data: data, encoding: .utf8)
-        else {
-            return nil
-        }
+        guard let json = llamaJSONString(.object(object)) else { return nil }
         skipWhitespace()
         guard index >= characters.count else { return nil }
         return json
     }
 
-    private mutating func parseObjectBody(terminators: Set<Character>) -> [String: Any]? {
-        var object: [String: Any] = [:]
+    private mutating func parseObjectBody(terminators: Set<Character>) -> [String: JSONValue]? {
+        var object: [String: JSONValue] = [:]
         skipWhitespace()
         while index < characters.count, !terminators.contains(characters[index]) {
             guard let key = parseKey() else { return nil }
@@ -783,19 +744,19 @@ struct LlamaGemmaArgumentParser {
         return trimmed.isEmpty ? nil : trimmed
     }
 
-    private mutating func parseValue() -> Any? {
+    private mutating func parseValue() -> JSONValue? {
         skipWhitespace()
-        if let string = parseQuotedString() { return string }
+        if let string = parseQuotedString() { return .string(string) }
         guard index < characters.count else { return nil }
         switch characters[index] {
         case "{":
             index += 1
             guard let object = parseObjectBody(terminators: ["}"]) else { return nil }
             guard consume("}") else { return nil }
-            return object
+            return .object(object)
         case "[":
             index += 1
-            var array: [Any] = []
+            var array: [JSONValue] = []
             skipWhitespace()
             while index < characters.count, characters[index] != "]" {
                 guard let element = parseValue() else { return nil }
@@ -807,7 +768,7 @@ struct LlamaGemmaArgumentParser {
                 }
             }
             guard consume("]") else { return nil }
-            return array
+            return .array(array)
         default:
             var literal = ""
             while index < characters.count {
@@ -818,13 +779,13 @@ struct LlamaGemmaArgumentParser {
             }
             let trimmed = literal.trimmingCharacters(in: .whitespaces)
             switch trimmed {
-            case "true": return true
-            case "false": return false
-            case "null": return NSNull()
+            case "true": return .bool(true)
+            case "false": return .bool(false)
+            case "null": return .null
             default:
-                if let integer = Int64(trimmed) { return integer }
-                if let double = Double(trimmed) { return double }
-                return trimmed
+                if let integer = Int(trimmed) { return .int(integer) }
+                if let double = Double(trimmed), double.isFinite { return .double(double) }
+                return .string(trimmed)
             }
         }
     }
@@ -868,15 +829,18 @@ struct LlamaGemmaArgumentParser {
     }
 }
 
-/// Whether an `NSNumber` produced by JSON decoding holds a boolean.
+/// Decodes a JSON value, keeping string content exactly as written.
+func llamaJSONValue(_ json: String) -> JSONValue? {
+    try? JSONDecoder().decode(JSONValue.self, from: Data(json.utf8))
+}
+
+/// Encodes a JSON value with sorted keys and unescaped slashes,
+/// so the same value always renders the same text.
 ///
-/// Core Foundation type identity is the exact check on Darwin. swift-corelibs-foundation
-/// has no `CFBoolean`, so other platforms fall back to the encoded Objective-C type,
-/// which JSON decoding sets to `c` only for booleans.
-func isBooleanNumber(_ number: NSNumber) -> Bool {
-    #if canImport(Darwin)
-        return CFGetTypeID(number) == CFBooleanGetTypeID()
-    #else
-        return String(cString: number.objCType) == "c"
-    #endif
+/// Returns `nil` if the value contains a number that isn't finite.
+func llamaJSONString(_ value: JSONValue) -> String? {
+    let encoder = JSONEncoder()
+    encoder.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
+    guard let data = try? encoder.encode(value) else { return nil }
+    return String(decoding: data, as: UTF8.self)
 }

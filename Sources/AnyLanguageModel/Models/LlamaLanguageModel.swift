@@ -662,7 +662,7 @@ import Foundation
                 self.definitions = try tools.filter(\.includesSchemaInInstructions).map { tool in
                     let schema = tool.parameters.withResolvedRoot() ?? tool.parameters
                     let data = try JSONEncoder().encode(schema)
-                    let parameters = try JSONSerialization.jsonObject(with: data) as? [String: Any]
+                    let parameters = try JSONDecoder().decode(JSONValue.self, from: data).objectValue
                     return LlamaToolDefinition(
                         name: tool.name,
                         description: tool.description,
