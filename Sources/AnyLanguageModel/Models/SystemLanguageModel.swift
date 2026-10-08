@@ -638,27 +638,44 @@
         }
     }
 
+    /// The tool calls Foundation Models ran during one request, each with its output, in order.
+    /// Foundation Models runs tools inside the request, so this is where the response's
+    /// transcript entries for them come from, with the IDs the delegate saw.
+    @available(macOS 26.0, iOS 26.0, watchOS 27.0, tvOS 26.0, visionOS 26.0, *)
+    actor ToolCallRecord {
+        @TaskLocal static var current: ToolCallRecord?
+
+        private(set) var entries: [Transcript.Entry] = []
+
+        func ran(_ call: Transcript.ToolCall, output: Transcript.ToolOutput) {
+            entries += [.toolCalls(Transcript.ToolCalls([call])), .toolOutput(output)]
+        }
+    }
+
     /// Runs `tool` for Foundation Models, which calls tools itself: asks the session's tool
     /// execution delegate first, if it has one, as other models do before running a tool. A stop
-    /// throws ``ToolCallStopped``, which ends the request with the call.
+    /// throws ``ToolCallStopped``, which ends the request with the call. A call that runs, or whose
+    /// output the delegate provides, is recorded for the request's transcript.
     @available(macOS 26.0, iOS 26.0, watchOS 27.0, tvOS 26.0, visionOS 26.0, *)
     func callTool(_ tool: any Tool, with arguments: GeneratedContent, in session: LanguageModelSession?) async throws
         -> String
     {
-        guard let session, let delegate = session.toolExecutionDelegate else {
-            return try await tool.callFunction(content: arguments).promptRepresentation.description
-        }
         let call = Transcript.ToolCall(id: UUID().uuidString, toolName: tool.name, arguments: arguments)
+        func output(_ segments: [Transcript.Segment]) -> Transcript.ToolOutput {
+            Transcript.ToolOutput(id: call.id, toolName: tool.name, segments: segments)
+        }
+        guard let session, let delegate = session.toolExecutionDelegate else {
+            let text = try await tool.callFunction(content: arguments).promptRepresentation.description
+            await ToolCallRecord.current?.ran(call, output: output([.text(.init(content: text))]))
+            return text
+        }
         await delegate.didGenerateToolCalls([call], in: session)
         switch await delegate.toolCallDecision(for: call, in: session) {
         case .stop:
             throw ToolCallStopped(call: call)
         case .provideOutput(let segments):
-            await delegate.didExecuteToolCall(
-                call,
-                output: Transcript.ToolOutput(id: call.id, toolName: tool.name, segments: segments),
-                in: session
-            )
+            await delegate.didExecuteToolCall(call, output: output(segments), in: session)
+            await ToolCallRecord.current?.ran(call, output: output(segments))
             return segments.map { segment in
                 switch segment {
                 case .text(let text): text.content
@@ -669,15 +686,8 @@
         case .execute:
             do {
                 let text = try await tool.callFunction(content: arguments).promptRepresentation.description
-                await delegate.didExecuteToolCall(
-                    call,
-                    output: Transcript.ToolOutput(
-                        id: call.id,
-                        toolName: tool.name,
-                        segments: [.text(.init(content: text))]
-                    ),
-                    in: session
-                )
+                await delegate.didExecuteToolCall(call, output: output([.text(.init(content: text))]), in: session)
+                await ToolCallRecord.current?.ran(call, output: output([.text(.init(content: text))]))
                 return text
             } catch {
                 await delegate.didFailToolCall(call, error: error, in: session)
@@ -1101,22 +1111,33 @@
         schema: GenerationSchema,
         includeSchemaInPrompt: Bool
     ) async throws -> LanguageModelSession.Response<Content> where Content: Generable {
+        // The tool calls that run during the request come first in its transcript entries.
+        let record = ToolCallRecord()
         do {
-            return try await fmRespondRunningTools(
-                makeSession: makeSession,
-                fmPrompt: fmPrompt,
-                fmOptions: fmOptions,
-                type: type,
-                schema: schema,
-                includeSchemaInPrompt: includeSchemaInPrompt
+            let response = try await ToolCallRecord.$current.withValue(record) {
+                try await fmRespondRunningTools(
+                    makeSession: makeSession,
+                    fmPrompt: fmPrompt,
+                    fmOptions: fmOptions,
+                    type: type,
+                    schema: schema,
+                    includeSchemaInPrompt: includeSchemaInPrompt
+                )
+            }
+            return LanguageModelSession.Response(
+                content: response.content,
+                rawContent: response.rawContent,
+                transcriptEntries: ArraySlice(await record.entries) + response.transcriptEntries,
+                usage: response.usage
             )
         } catch {
-            // The delegate stopped at a tool call: the response ends there, with the call.
+            // The delegate stopped at a tool call: the response ends there, with the calls that ran
+            // before it and then the call.
             guard let call = stoppedToolCall(in: error), let stopped = stoppedContent(of: type) else { throw error }
             return LanguageModelSession.Response(
                 content: stopped.content,
                 rawContent: stopped.raw,
-                transcriptEntries: [.toolCalls(Transcript.ToolCalls([call]))]
+                transcriptEntries: ArraySlice(await record.entries + [.toolCalls(Transcript.ToolCalls([call]))])
             )
         }
     }
@@ -1198,14 +1219,18 @@
         schema: GenerationSchema,
         includeSchemaInPrompt: Bool
     ) -> LanguageModelSession.ResponseStream<Content> where Content: Generable {
-        let running = fmStreamResponseRunningTools(
-            makeSession: makeSession,
-            fmPrompt: fmPrompt,
-            fmOptions: fmOptions,
-            type: type,
-            schema: schema,
-            includeSchemaInPrompt: includeSchemaInPrompt
-        )
+        // The tool calls that run during the request come first in its last snapshot's entries.
+        let record = ToolCallRecord()
+        let running = ToolCallRecord.$current.withValue(record) {
+            fmStreamResponseRunningTools(
+                makeSession: makeSession,
+                fmPrompt: fmPrompt,
+                fmOptions: fmOptions,
+                type: type,
+                schema: schema,
+                includeSchemaInPrompt: includeSchemaInPrompt
+            )
+        }
         let stream: AsyncThrowingStream<LanguageModelSession.ResponseStream<Content>.Snapshot, Error> =
             AsyncThrowingStream { continuation in
                 let relaying = _Concurrency.Task {
@@ -1215,6 +1240,11 @@
                             last = snapshot
                             continuation.yield(snapshot)
                         }
+                        let ran = await record.entries
+                        if !ran.isEmpty, var last {
+                            last.transcriptEntries = ArraySlice(ran) + last.transcriptEntries
+                            continuation.yield(last)
+                        }
                         continuation.finish()
                     } catch {
                         // The delegate stopped at a tool call: the stream ends there, with the call.
@@ -1222,7 +1252,8 @@
                             continuation.finish(throwing: error)
                             return
                         }
-                        let entries: [Transcript.Entry] = [.toolCalls(Transcript.ToolCalls([call]))]
+                        let entries: [Transcript.Entry] =
+                            await record.entries + [.toolCalls(Transcript.ToolCalls([call]))]
                         if var last {
                             last.transcriptEntries += entries
                             continuation.yield(last)

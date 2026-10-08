@@ -3,6 +3,10 @@ import Testing
 @testable import AnyLanguageModel
 
 #if canImport(FoundationModels) && !os(watchOS)
+    import class FoundationModels.LanguageModelSession
+
+    private typealias LanguageModelSession = AnyLanguageModel.LanguageModelSession
+
     private let isSystemLanguageModelAvailable = {
         if #available(macOS 26.0, iOS 26.0, tvOS 26.0, visionOS 26.0, *) {
             return SystemLanguageModel.default.isAvailable
@@ -112,6 +116,95 @@ import Testing
         let generated = await delegate.generated
         #expect(generated.map(\.toolName) == [weatherTool.name])
         #expect(generated.first?.arguments.jsonString.contains("Cupertino") == true)
+    }
+
+    /// The calls that ran in a request before the delegate stopped at one stay in its transcript,
+    /// with their outputs and the IDs the delegate saw. No model is involved.
+    @available(macOS 26.0, iOS 26.0, tvOS 26.0, visionOS 26.0, *)
+    @Test func callsThatRanBeforeAStopAreRecorded() async throws {
+        let weatherTool = spy(on: WeatherTool())
+        let session = LanguageModelSession(model: SystemLanguageModel.default, tools: [weatherTool])
+        let delegate = ScriptedDelegate([.provideOutput([.text(.init(content: "Sunny"))]), .stop])
+        session.toolExecutionDelegate = delegate
+        let record = ToolCallRecord()
+        await ToolCallRecord.$current.withValue(record) {
+            _ = try? await callTool(
+                weatherTool,
+                with: try! GeneratedContent(json: #"{"city":"Cupertino"}"#),
+                in: session
+            )
+            _ = try? await callTool(weatherTool, with: try! GeneratedContent(json: #"{"city":"Paris"}"#), in: session)
+        }
+        let generated = await delegate.generated
+        let entries = await record.entries
+        #expect(entries.count == 2)
+        guard case .toolCalls(let calls) = entries.first, case .toolOutput(let output) = entries.last else {
+            Issue.record("Expected the first call and its output, got \(entries)")
+            return
+        }
+        #expect(calls.map(\.id) == [generated[0].id])
+        #expect(output.id == generated[0].id)
+        #expect(output.segments.description.contains("Sunny"))
+        #expect(await weatherTool.calls.isEmpty)
+    }
+
+    /// Exercise the response wrappers without requiring model inference.
+    @available(macOS 26.0, iOS 26.0, tvOS 26.0, visionOS 26.0, *)
+    @Test(arguments: [false, true])
+    func stoppedResponsePreservesCompletedToolCalls(streaming: Bool) async throws {
+        let weatherTool = spy(on: WeatherTool())
+        let session = AnyLanguageModel.LanguageModelSession(model: SystemLanguageModel.default, tools: [weatherTool])
+        let delegate = ScriptedDelegate([.execute, .provideOutput([.text(.init(content: "Sunny"))]), .stop])
+        session.toolExecutionDelegate = delegate
+        let makeSession: @Sendable () async throws -> FoundationModels.LanguageModelSession = {
+            for city in ["Cupertino", "Paris", "Berlin"] {
+                _ = try await callTool(weatherTool, with: GeneratedContent(properties: ["city": city]), in: session)
+            }
+            throw CancellationError()  // The third call must stop before reaching here.
+        }
+        let entries: [AnyLanguageModel.Transcript.Entry]
+        if streaming {
+            let stream = fmStreamResponse(
+                makeSession: makeSession,
+                fmPrompt: .init(""),
+                fmOptions: .init(),
+                type: String.self,
+                schema: String.generationSchema,
+                includeSchemaInPrompt: false
+            )
+            var last: AnyLanguageModel.LanguageModelSession.ResponseStream<String>.Snapshot?
+            for try await snapshot in stream { last = snapshot }
+            entries = Array(try #require(last).transcriptEntries)
+        } else {
+            let response = try await fmRespond(
+                makeSession: makeSession,
+                fmPrompt: .init(""),
+                fmOptions: .init(),
+                type: String.self,
+                schema: String.generationSchema,
+                includeSchemaInPrompt: false
+            )
+            entries = Array(response.transcriptEntries)
+        }
+        let generated = await delegate.generated
+        try #require(generated.count == 3)
+        try #require(entries.count == 5)
+        for index in 0 ..< 2 {
+            guard case .toolCalls(let calls) = entries[index * 2],
+                case .toolOutput(let output) = entries[index * 2 + 1]
+            else {
+                Issue.record("Expected a completed call followed by its output")
+                return
+            }
+            #expect(calls.map(\.id) == [generated[index].id])
+            #expect(output.id == generated[index].id)
+        }
+        guard case .toolCalls(let stopped) = entries[4] else {
+            Issue.record("Expected the stopped call last")
+            return
+        }
+        #expect(stopped.map(\.id) == [generated[2].id])
+        #expect(await weatherTool.calls.count == 1)
     }
 
     /// A stop is found inside an error that wraps it, as tool errors are wrapped.
@@ -318,14 +411,13 @@ import Testing
 
             let response = try await session.respond(to: "How's the weather in San Francisco?")
 
-            #if false  // Disabled for now because transcript entries are not converted from FoundationModels for now
-                var foundToolOutput = false
-                for case let .toolOutput(toolOutput) in response.transcriptEntries {
-                    #expect(toolOutput.id == "getWeather")
-                    foundToolOutput = true
-                }
-                #expect(foundToolOutput)
-            #endif
+            // The calls Foundation Models ran are in the response's transcript, with their outputs.
+            var foundToolOutput = false
+            for case let .toolOutput(toolOutput) in response.transcriptEntries {
+                #expect(toolOutput.toolName == weatherTool.name)
+                foundToolOutput = true
+            }
+            #expect(foundToolOutput)
 
             let content = response.content
             #expect(content.contains("San Francisco"))
@@ -352,6 +444,50 @@ import Testing
                     return false
                 }
             )
+        }
+
+        /// Output the delegate provides is what Foundation Models goes on with, in the same request,
+        /// and the call and its output are in the response's transcript, with the delegate's IDs.
+        @available(macOS 26.0, iOS 26.0, tvOS 26.0, visionOS 26.0, *)
+        @Test func delegateProvidesToolOutput() async throws {
+            let weatherTool = spy(on: WeatherTool())
+            let session = LanguageModelSession(model: SystemLanguageModel.default, tools: [weatherTool])
+            let delegate = ScriptedDelegate([])
+            session.toolExecutionDelegate = delegate
+
+            let response = try await session.respond(to: "How's the weather in San Francisco? Use the tool.")
+
+            #expect(await weatherTool.calls.isEmpty)
+            let generated = await delegate.generated
+            #expect(!generated.isEmpty)
+            let outputs = response.transcriptEntries.compactMap { entry -> Transcript.ToolOutput? in
+                if case .toolOutput(let output) = entry { return output }
+                return nil
+            }
+            #expect(outputs.map(\.id) == generated.map(\.id))
+            #expect(response.content.contains("20°F"))
+        }
+
+        @available(macOS 26.0, iOS 26.0, tvOS 26.0, visionOS 26.0, *)
+        @Test func delegateProvidesToolOutputWhileStreaming() async throws {
+            let weatherTool = spy(on: WeatherTool())
+            let session = LanguageModelSession(model: SystemLanguageModel.default, tools: [weatherTool])
+            let delegate = ScriptedDelegate([])
+            session.toolExecutionDelegate = delegate
+
+            var last: LanguageModelSession.ResponseStream<String>.Snapshot?
+            for try await snapshot in session.streamResponse(to: "How's the weather in San Francisco? Use the tool.") {
+                last = snapshot
+            }
+
+            #expect(await weatherTool.calls.isEmpty)
+            let generated = await delegate.generated
+            let outputs = try #require(last).transcriptEntries.compactMap { entry -> Transcript.ToolOutput? in
+                if case .toolOutput(let output) = entry { return output }
+                return nil
+            }
+            #expect(!generated.isEmpty)
+            #expect(outputs.map(\.id) == generated.map(\.id))
         }
 
         @available(macOS 26.0, iOS 26.0, tvOS 26.0, visionOS 26.0, *)
@@ -597,6 +733,27 @@ import Testing
             if let lastSnapshot = snapshots.last {
                 #expect(!lastSnapshot.rawContent.jsonString.isEmpty)
             }
+        }
+    }
+
+    /// Decides each tool call in turn from `decisions`, then provides "Snowing" for the rest,
+    /// recording each call.
+    private actor ScriptedDelegate: ToolExecutionDelegate {
+        private var decisions: [ToolExecutionDecision]
+        private(set) var generated: [Transcript.ToolCall] = []
+
+        init(_ decisions: [ToolExecutionDecision]) {
+            self.decisions = decisions
+        }
+
+        func didGenerateToolCalls(_ toolCalls: [Transcript.ToolCall], in session: LanguageModelSession) async {
+            generated.append(contentsOf: toolCalls)
+        }
+
+        func toolCallDecision(for toolCall: Transcript.ToolCall, in session: LanguageModelSession) async
+            -> ToolExecutionDecision
+        {
+            decisions.isEmpty ? .provideOutput([.text(.init(content: "Snowing, 20°F"))]) : decisions.removeFirst()
         }
     }
 
