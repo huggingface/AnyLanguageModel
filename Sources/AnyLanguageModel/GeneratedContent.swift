@@ -198,6 +198,14 @@ public struct GeneratedContent: Sendable, Equatable, Generable, CustomDebugStrin
 
     /// Returns a JSON string representation of the generated content.
     ///
+    /// Structure properties appear in the order of their keys,
+    /// which for ``Generable`` types is the order of the properties in the type's schema.
+    /// The JSON has no whitespace between tokens,
+    /// and strings escape only the characters that JSON requires.
+    ///
+    /// If the content cannot be serialized, for example because it contains a number
+    /// that isn't finite, this returns the JSON for an empty object.
+    ///
     /// ## Examples
     ///
     /// ```swift
@@ -207,10 +215,16 @@ public struct GeneratedContent: Sendable, Equatable, Generable, CustomDebugStrin
     ///     "age": 30,
     /// ])
     /// print(content.jsonString)
-    /// // Output: {"name": "Johnny Appleseed", "age": 30}
+    /// // Output: {"name":"Johnny Appleseed","age":30}
     /// ```
     public var jsonString: String {
-        String(decoding: jsonData, as: UTF8.self)
+        var json = ""
+        do {
+            try writeJSON(to: &json)
+        } catch {
+            return "{}"
+        }
+        return json
     }
 
     /// Returns a UTF-8 encoded JSON representation of the generated content.
@@ -219,37 +233,100 @@ public struct GeneratedContent: Sendable, Equatable, Generable, CustomDebugStrin
     /// or hand it to a `JSONDecoder`,
     /// to avoid converting it to a `String` first.
     ///
+    /// The JSON is the same as ``jsonString``.
     /// If the content cannot be serialized, this returns the JSON for an empty object.
     public var jsonData: Data {
-        do {
-            let jsonObject = try toJSONObject()
-            return try JSONSerialization.data(withJSONObject: jsonObject, options: [.fragmentsAllowed])
-        } catch {
-            return Data("{}".utf8)
+        Data(jsonString.utf8)
+    }
+
+    /// Appends the JSON for this content,
+    /// writing structure properties in the order of their keys.
+    ///
+    /// - Throws: An error if the content contains a number that isn't finite.
+    private func writeJSON(to json: inout String) throws {
+        switch kind {
+        case .null:
+            json += "null"
+        case .bool(let value):
+            json += value ? "true" : "false"
+        case .number(let value):
+            try Self.writeJSONNumber(value, to: &json)
+        case .string(let value):
+            Self.writeJSONString(value, to: &json)
+        case .array(let elements):
+            json += "["
+            for (index, element) in elements.enumerated() {
+                if index > 0 {
+                    json += ","
+                }
+                try element.writeJSON(to: &json)
+            }
+            json += "]"
+        case .structure(let properties, let orderedKeys):
+            json += "{"
+            var writtenKeys: Set<String> = []
+            for key in orderedKeys {
+                guard let value = properties[key], writtenKeys.insert(key).inserted else {
+                    continue
+                }
+                if writtenKeys.count > 1 {
+                    json += ","
+                }
+                Self.writeJSONString(key, to: &json)
+                json += ":"
+                try value.writeJSON(to: &json)
+            }
+            json += "}"
         }
     }
 
-    private func toJSONObject() throws -> Any {
-        switch kind {
-        case .null:
-            return NSNull()
-        case .bool(let value):
-            return value
-        case .number(let value):
-            return value
-        case .string(let value):
-            return value
-        case .array(let elements):
-            return try elements.map { try $0.toJSONObject() }
-        case .structure(let properties, let orderedKeys):
-            var dict: [String: Any] = [:]
-            for key in orderedKeys {
-                if let value = properties[key] {
-                    dict[key] = try value.toJSONObject()
-                }
-            }
-            return dict
+    /// Appends a JSON number.
+    ///
+    /// Numbers use the shortest representation that reads back as the same value,
+    /// and whole numbers below 10^16 are written without a fraction.
+    private static func writeJSONNumber(_ value: Double, to json: inout String) throws {
+        guard value.isFinite else {
+            throw GeneratedContentError.typeMismatch
         }
+        // Below 10^16, `description` uses positional notation and adds ".0" to whole numbers;
+        // every whole number in that range fits in an `Int64`.
+        // Negative zero keeps its sign, as in Foundation Models.
+        if value == 0, value.sign == .minus {
+            json += "-0"
+        } else if value.rounded(.towardZero) == value, value.magnitude < 1e16 {
+            json += String(Int64(value))
+        } else {
+            json += value.description
+        }
+    }
+
+    /// Appends a JSON string, escaping quotation marks, backslashes, and control characters.
+    private static func writeJSONString(_ value: String, to json: inout String) {
+        json += "\""
+        for scalar in value.unicodeScalars {
+            switch scalar {
+            case "\"":
+                json += "\\\""
+            case "\\":
+                json += "\\\\"
+            case "\n":
+                json += "\\n"
+            case "\r":
+                json += "\\r"
+            case "\t":
+                json += "\\t"
+            case "\u{08}":
+                json += "\\b"
+            case "\u{0C}":
+                json += "\\f"
+            case "\u{00}" ... "\u{1F}":
+                let hex = String(scalar.value, radix: 16)
+                json += "\\u" + String(repeating: "0", count: 4 - hex.count) + hex
+            default:
+                json.unicodeScalars.append(scalar)
+            }
+        }
+        json += "\""
     }
 
     /// Reads a top level, concrete partially generable type.

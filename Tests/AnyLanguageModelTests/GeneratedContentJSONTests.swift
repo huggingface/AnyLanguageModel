@@ -117,6 +117,83 @@ struct GeneratedContentJSONTests {
         #expect(object?["active"] as? Bool == true)
     }
 
+    @Test func jsonStringKeepsPropertyOrder() throws {
+        let content = GeneratedContent(properties: [
+            "zeta": "z",
+            "alpha": 1,
+            "mid": true,
+            "beta": GeneratedContent(properties: ["y": 2, "x": 1]),
+            "list": [GeneratedContent(properties: ["b": 2, "a": 1])],
+        ])
+        #expect(
+            content.jsonString == #"{"zeta":"z","alpha":1,"mid":true,"beta":{"y":2,"x":1},"list":[{"b":2,"a":1}]}"#
+        )
+        #expect(content.jsonData == Data(content.jsonString.utf8))
+
+        let idea = try NovelIdea(GeneratedContent(json: #"{"tags":["sci-fi"],"pages":412,"title":"Dune"}"#))
+        #expect(idea.generatedContent.jsonString == #"{"title":"Dune","pages":412,"tags":["sci-fi"]}"#)
+    }
+
+    @Test func jsonStringWritesEachKeyOnce() {
+        let content = GeneratedContent(
+            kind: .structure(
+                properties: ["a": GeneratedContent(kind: .number(1)), "b": GeneratedContent(kind: .number(2))],
+                orderedKeys: ["b", "a", "b", "missing"]
+            )
+        )
+        #expect(content.jsonString == #"{"b":2,"a":1}"#)
+    }
+
+    @Test func jsonStringEscapesOnlyWhatJSONRequires() throws {
+        let backslash = "\\"
+        let text = "a/b \"quoted\" back\\slash\nline\ttab\r\u{08}\u{0C}\u{01}\u{1F}\u{7F} é 🦆 \u{FEFF}"
+        let expected =
+            #""a/b \"quoted\" back\\slash\nline\ttab\r\b\f"# + backslash + "u0001" + backslash + "u001f"
+            + "\u{7F} é 🦆 \u{FEFF}\""
+
+        let content = GeneratedContent(kind: .string(text))
+        #expect(content.jsonString == expected)
+        #expect(try String(GeneratedContent(json: content.jsonString)) == text)
+        #expect(try JSONDecoder().decode(String.self, from: content.jsonData) == text)
+    }
+
+    @Test func jsonStringWritesNumbersThatReadBackExactly() throws {
+        let cases: [(Double, String)] = [
+            (0, "0"),
+            (-0.0, "-0"),
+            (1, "1"),
+            (-1, "-1"),
+            (30, "30"),
+            (1.5, "1.5"),
+            (0.1, "0.1"),
+            (-2.25, "-2.25"),
+            (1e15, "1000000000000000"),
+            (9_007_199_254_740_991, "9007199254740991"),
+            (9_007_199_254_740_992, "9007199254740992"),
+            (9_999_999_999_999_998, "9999999999999998"),
+            (1e16, "1e+16"),
+            (-1e16, "-1e+16"),
+            (12_345_678_901_234_567_890, "1.2345678901234567e+19"),
+            (1e-7, "1e-07"),
+            (.greatestFiniteMagnitude, "1.7976931348623157e+308"),
+            (.leastNonzeroMagnitude, "5e-324"),
+        ]
+        for (value, expected) in cases {
+            let json = GeneratedContent(kind: .number(value)).jsonString
+            #expect(json == expected)
+            #expect(try JSONDecoder().decode(Double.self, from: Data(json.utf8)) == value)
+        }
+    }
+
+    @Test func jsonStringOfNonFiniteNumberIsEmptyObject() {
+        let nan = GeneratedContent(properties: ["value": GeneratedContent(kind: .number(.nan))])
+        #expect(nan.jsonString == "{}")
+        #expect(nan.jsonData == Data("{}".utf8))
+
+        let infinity = GeneratedContent(kind: .array([GeneratedContent(kind: .number(-.infinity))]))
+        #expect(infinity.jsonString == "{}")
+    }
+
     // MARK: - JSONValue bridging
 
     @Test func initFromJSONValue() throws {
