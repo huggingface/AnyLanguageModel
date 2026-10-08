@@ -431,6 +431,55 @@ public struct GenerationSchema: Equatable, Codable, CustomDebugStringConvertible
         self.defs = [:]
     }
 
+    /// Creates a schema for an enumeration whose cases carry values, the way Foundation Models
+    /// describes one: one object for each case, with a `type` property that names the case and a
+    /// property for each of its values.
+    ///
+    /// - Parameters:
+    ///   - type: The type this schema represents.
+    ///   - description: A natural language description of this schema, given to each case.
+    ///   - cases: Each case's name, with a property for each of its values.
+    public init(
+        type: any Generable.Type,
+        description: String? = nil,
+        cases: [(name: String, properties: [GenerationSchema.Property])]
+    ) {
+        let typeName = String(reflecting: type)
+        var members: [Node] = []
+        var allDefs: [String: Node] = [:]
+
+        for (name, properties) in cases {
+            var props: [String: Node] = ["type": .string(StringNode(enumChoices: [name]))]
+            var required: Set<String> = ["type"]
+            for property in properties {
+                props[property.name] = property.node
+                if !property.isOptional {
+                    required.insert(property.name)
+                }
+                for (defName, defNode) in property.deps {
+                    if let existing = allDefs[defName], existing != defNode {
+                        fatalError("Duplicate type '\(defName)' with different structure")
+                    }
+                    allDefs[defName] = defNode
+                }
+            }
+            let caseName = "\(typeName).Discriminated\(name.prefix(1).uppercased() + name.dropFirst())"
+            allDefs[caseName] = .object(
+                ObjectNode(
+                    description: description,
+                    properties: props,
+                    required: required,
+                    propertyOrder: ["type"] + properties.map(\.name)
+                )
+            )
+            members.append(.ref(caseName))
+        }
+
+        allDefs[typeName] = .anyOf(members)
+        self.root = .ref(typeName)
+        self.defs = allDefs
+    }
+
     /// Creates a schema as the union of several other types.
     ///
     /// - Parameters:

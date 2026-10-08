@@ -1089,68 +1089,31 @@ public struct GenerableMacro: MemberMacro, ExtensionMacro {
         let hasAnyAssociatedValues = cases.contains { $0.hasAssociatedValues }
 
         if hasAnyAssociatedValues {
+            // Each case is an object whose `type` names it, with a property for each value,
+            // as Foundation Models generates it.
             let switchCases = cases.map { enumCase in
-                if enumCase.associatedValues.isEmpty {
-                    return """
-                        case "\(enumCase.name)":
-                            self = .\(enumCase.name)
-                        """
-                } else if enumCase.isSingleUnlabeledValue {
-                    let valueType = enumCase.associatedValues[0].type
-                    return generateSingleValueCase(caseName: enumCase.name, valueType: valueType)
-                } else {
-                    return generateMultipleValueCase(
-                        caseName: enumCase.name,
-                        associatedValues: enumCase.associatedValues
-                    )
+                let arguments = enumCase.payload.map { value in
+                    let read = "try generatedContent.value(\(value.type).self, forProperty: \"\(value.property)\")"
+                    return value.label.map { "\($0): \(read)" } ?? read
                 }
+                let construction =
+                    arguments.isEmpty ? ".\(enumCase.name)" : ".\(enumCase.name)(\(arguments.joined(separator: ", ")))"
+                return """
+                    case "\(enumCase.name)":
+                        self = \(construction)
+                    """
             }.joined(separator: "\n                ")
 
             return DeclSyntax(
                 stringLiteral: """
                     nonisolated public init(_ generatedContent: GeneratedContent) throws {
-                        do {
-                            guard case .structure(let properties, _) = generatedContent.kind else {
-                                throw DecodingError.typeMismatch(
-                                    \(enumName).self,
-                                    DecodingError.Context(codingPath: [], debugDescription: "Expected structure for enum \(enumName)")
-                                )
-                            }
-
-                            guard case .string(let caseValue) = properties["case"]?.kind else {
-                                struct Key: CodingKey {
-                                    var stringValue: String
-                                    var intValue: Int? { nil }
-                                    init(stringValue: String) { self.stringValue = stringValue }
-                                    init?(intValue: Int) { nil }
-                                }
-                                throw DecodingError.keyNotFound(
-                                    Key(stringValue: "case"),
-                                    DecodingError.Context(codingPath: [], debugDescription: "Missing 'case' property in enum data for \(enumName)")
-                                )
-                            }
-
-                            let valueContent = properties["value"]
-
-                            switch caseValue {
-                            \(switchCases)
-                            default:
-                                throw DecodingError.dataCorrupted(
-                                    DecodingError.Context(codingPath: [], debugDescription: "Invalid enum case '\\(caseValue)' for \(enumName). Valid cases: [\(cases.map { $0.name }.joined(separator: ", "))]")
-                                )
-                            }
-                        } catch {
-                            guard case .string(let value) = generatedContent.kind else {
-                                throw error
-                            }
-                            let trimmedValue = value.trimmingCharacters(in: .whitespacesAndNewlines)
-                            switch trimmedValue {
-                            \(cases.filter { !$0.hasAssociatedValues }.map { "case \"\($0.name)\": self = .\($0.name)" }.joined(separator: "\n                    "))
-                            default:
-                                throw DecodingError.dataCorrupted(
-                                    DecodingError.Context(codingPath: [], debugDescription: "Invalid enum case '\\(trimmedValue)' for \(enumName). Valid cases: [\(cases.map { $0.name }.joined(separator: ", "))]")
-                                )
-                            }
+                        let type = try generatedContent.value(String.self, forProperty: "type")
+                        switch type {
+                        \(switchCases)
+                        default:
+                            throw DecodingError.dataCorrupted(
+                                DecodingError.Context(codingPath: [], debugDescription: "Invalid enum case '\\(type)' for \(enumName). Valid cases: [\(cases.map { $0.name }.joined(separator: ", "))]")
+                            )
                         }
                     }
                     """
@@ -1184,116 +1147,6 @@ public struct GenerableMacro: MemberMacro, ExtensionMacro {
         }
     }
 
-    private static func generateSingleValueCase(caseName: String, valueType: String) -> String {
-        switch valueType {
-        case "String":
-            return """
-                case "\(caseName)":
-                    if let valueContent = valueContent,
-                       case .string(let stringValue) = valueContent.kind {
-                        self = .\(caseName)(stringValue)
-                    } else {
-                        self = .\(caseName)("")
-                    }
-                """
-        case "Int":
-            return """
-                case "\(caseName)":
-                    if let valueContent = valueContent {
-                        let intValue = try valueContent.value(Int.self)
-                        self = .\(caseName)(intValue)
-                    } else {
-                        self = .\(caseName)(0)
-                    }
-                """
-        case "Double":
-            return """
-                case "\(caseName)":
-                    if let valueContent = valueContent {
-                        let doubleValue = try valueContent.value(Double.self)
-                        self = .\(caseName)(doubleValue)
-                    } else {
-                        self = .\(caseName)(0.0)
-                    }
-                """
-        case "Bool":
-            return """
-                case "\(caseName)":
-                    if let valueContent = valueContent {
-                        let boolValue = try valueContent.value(Bool.self)
-                        self = .\(caseName)(boolValue)
-                    } else {
-                        self = .\(caseName)(false)
-                    }
-                """
-        default:
-            return """
-                case "\(caseName)":
-                    if let valueContent = valueContent {
-                        let associatedValue = try \(valueType)(valueContent)
-                        self = .\(caseName)(associatedValue)
-                    } else {
-                        throw DecodingError.valueNotFound(
-                            \(valueType).self,
-                            DecodingError.Context(codingPath: [], debugDescription: "Missing value for enum case '\(caseName)' with associated type \(valueType)")
-                        )
-                    }
-                """
-        }
-    }
-
-    private static func generateMultipleValueCase(
-        caseName: String,
-        associatedValues: [(label: String?, type: String)]
-    ) -> String {
-        let valueExtractions = associatedValues.enumerated().map { index, assocValue in
-            let label = assocValue.label ?? "param\(index)"
-            let type = assocValue.type
-
-            switch type {
-            case "String":
-                return "let \(label) = try valueProperties[\"\(label)\"]?.value(String.self) ?? \"\""
-            case "Int":
-                return "let \(label) = try valueProperties[\"\(label)\"]?.value(Int.self) ?? 0"
-            case "Double":
-                return "let \(label) = try valueProperties[\"\(label)\"]?.value(Double.self) ?? 0.0"
-            case "Bool":
-                return "let \(label) = try valueProperties[\"\(label)\"]?.value(Bool.self) ?? false"
-            default:
-                return
-                    "let \(label) = try \(type)(valueProperties[\"\(label)\"] ?? GeneratedContent(\"{}\"))"
-            }
-        }.joined(separator: "\n                    ")
-
-        let parameterList = associatedValues.enumerated().map { index, assocValue in
-            let label = assocValue.label ?? "param\(index)"
-            if assocValue.label != nil {
-                return "\(label): \(label)"
-            } else {
-                return label
-            }
-        }.joined(separator: ", ")
-
-        return """
-            case "\(caseName)":
-                if let valueContent = valueContent {
-                    guard case .structure(let valueProperties, _) = valueContent.kind else {
-                        throw DecodingError.typeMismatch(
-                            [String: Any].self,
-                            DecodingError.Context(codingPath: [], debugDescription: "Expected structure for enum case '\(caseName)' associated values")
-                        )
-                    }
-                    \(valueExtractions)
-                    self = .\(caseName)(\(parameterList))
-                } else {
-                    throw DecodingError.valueNotFound(
-                        [String: Any].self,
-                        DecodingError.Context(codingPath: [], debugDescription: "Missing value data for enum case '\(caseName)' with associated values")
-                    )
-                }
-            """
-    }
-
     private static func generateEnumGeneratedContentProperty(
         enumName: String,
         description: String?,
@@ -1303,28 +1156,25 @@ public struct GenerableMacro: MemberMacro, ExtensionMacro {
 
         if hasAnyAssociatedValues {
             let switchCases = cases.map { enumCase in
-                if enumCase.associatedValues.isEmpty {
-                    return """
-                        case .\(enumCase.name):
-                            return GeneratedContent(properties: [
-                                "case": GeneratedContent("\(enumCase.name)"),
-                                "value": GeneratedContent("")
-                            ])
+                let payload = enumCase.payload
+                let bindings = payload.indices.map { "let value\($0)" }.joined(separator: ", ")
+                let pattern = payload.isEmpty ? ".\(enumCase.name)" : ".\(enumCase.name)(\(bindings))"
+                // An optional value that's nil is left out, as for a structure's properties.
+                let assignments = payload.enumerated().map { index, value in
+                    let assignment = """
+                        properties["\(value.property)"] = value\(index).generatedContent
+                                    keys.append("\(value.property)")
                         """
-                } else if enumCase.isSingleUnlabeledValue {
-                    return """
-                        case .\\(enumCase.name)(let value):
-                            return GeneratedContent(properties: [
-                                "case": GeneratedContent("\\(enumCase.name)"),
-                                "value": GeneratedContent("\\\\(value)")
-                            ])
-                        """
-                } else {
-                    return generateMultipleValueSerialization(
-                        caseName: enumCase.name,
-                        associatedValues: enumCase.associatedValues
-                    )
-                }
+                    return value.isOptional
+                        ? "if let value\(index) {\n                \(assignment)\n            }" : assignment
+                }.joined(separator: "\n            ")
+                return """
+                    case \(pattern):
+                        var properties: [String: GeneratedContent] = ["type": GeneratedContent("\(enumCase.name)")]
+                        var keys = ["type"]
+                        \(assignments)
+                        return GeneratedContent(kind: .structure(properties: properties, orderedKeys: keys))
+                    """
             }.joined(separator: "\n            ")
 
             return DeclSyntax(
@@ -1353,61 +1203,6 @@ public struct GenerableMacro: MemberMacro, ExtensionMacro {
         }
     }
 
-    private static func generateSingleValueSerialization(caseName: String, valueType: String)
-        -> String
-    {
-        switch valueType {
-        case "String", "Int", "Double", "Bool":
-            return """
-                case .\(caseName)(let value):
-                    return GeneratedContent(properties: [
-                        "case": GeneratedContent("\(caseName)"),
-                        "value": GeneratedContent("\\(value)")
-                    ])
-                """
-        default:
-            return """
-                case .\(caseName)(let value):
-                    return GeneratedContent(properties: [
-                        "case": GeneratedContent("\(caseName)"),
-                        "value": value.generatedContent
-                    ])
-                """
-        }
-    }
-
-    private static func generateMultipleValueSerialization(
-        caseName: String,
-        associatedValues: [(label: String?, type: String)]
-    ) -> String {
-        let parameterList = associatedValues.enumerated().map { index, assocValue in
-            let label = assocValue.label ?? "param\(index)"
-            return "let \(label)"
-        }.joined(separator: ", ")
-
-        let propertyMappings = associatedValues.enumerated().map { index, assocValue in
-            let label = assocValue.label ?? "param\(index)"
-            let type = assocValue.type
-
-            switch type {
-            case "String", "Int", "Double", "Bool":
-                return "\"\(label)\": GeneratedContent(\"\\(\(label))\")"
-            default:
-                return "\"\(label)\": \(label).generatedContent"
-            }
-        }.joined(separator: ",\n                        ")
-
-        return """
-            case .\(caseName)(\(parameterList)):
-                return GeneratedContent(properties: [
-                    "case": GeneratedContent("\(caseName)"),
-                    "value": GeneratedContent(properties: [
-                        \(propertyMappings)
-                    ])
-                ])
-            """
-    }
-
     private static func generateEnumFromGeneratedContentMethod(enumName: String) -> DeclSyntax {
         return DeclSyntax(
             stringLiteral: """
@@ -1426,23 +1221,12 @@ public struct GenerableMacro: MemberMacro, ExtensionMacro {
         let hasAnyAssociatedValues = cases.contains { $0.hasAssociatedValues }
 
         if hasAnyAssociatedValues {
-
-            let caseProperty = """
-                GenerationSchema.Property(
-                                        name: "case",
-                                        description: "Enum case identifier",
-                                        type: String.self,
-                                        guides: []
-                                    )
-                """
-            let valueProperty = """
-                GenerationSchema.Property(
-                                        name: "value",
-                                        description: "Associated value data",
-                                        type: String.self,
-                                        guides: []
-                                    )
-                """
+            let caseSchemas = cases.map { enumCase in
+                let properties = enumCase.payload.map { value in
+                    "GenerationSchema.Property(name: \"\(value.property)\", type: \(value.type).self)"
+                }.joined(separator: ", ")
+                return "(name: \"\(enumCase.name)\", properties: [\(properties)])"
+            }.joined(separator: ",\n                    ")
 
             return DeclSyntax(
                 stringLiteral: """
@@ -1450,9 +1234,8 @@ public struct GenerableMacro: MemberMacro, ExtensionMacro {
                         return GenerationSchema(
                             type: Self.self,
                             description: \(description.map { "\"\($0)\"" } ?? "\"Generated \(enumName)\""),
-                            properties: [
-                                \(caseProperty),
-                                \(valueProperty)
+                            cases: [
+                                \(caseSchemas)
                             ]
                         )
                     }
@@ -1509,13 +1292,14 @@ private struct EnumCaseInfo {
         !associatedValues.isEmpty
     }
 
-    var isSingleUnlabeledValue: Bool {
-        associatedValues.count == 1 && associatedValues[0].label == nil
-    }
-
-    var isMultipleLabeledValues: Bool {
-        associatedValues.count > 1
-            || (associatedValues.count == 1 && associatedValues[0].label != nil)
+    /// Each value with the property it's generated as: its label, or `value`, `value1` and so on
+    /// for an unlabeled one, as Foundation Models names them.
+    var payload: [(label: String?, property: String, type: String, isOptional: Bool)] {
+        associatedValues.enumerated().map { index, value in
+            let type = value.type
+            let isOptional = type.hasSuffix("?") || type.hasPrefix("Optional<")
+            return (value.label, value.label ?? (index == 0 ? "value" : "value\(index)"), type, isOptional)
+        }
     }
 }
 

@@ -74,6 +74,19 @@ import Testing
     }
 
     @Generable
+    private enum CounterStep {
+        case add(amount: Int)
+        case reset
+        case report(String)
+    }
+
+    @Generable
+    private struct CounterPlan {
+        @Guide(description: "The steps, in order.")
+        var steps: [CounterStep]
+    }
+
+    @Generable
     private struct SentimentAnalysis {
         @Guide(description: "The sentiment classification", .anyOf(["positive", "negative", "neutral"]))
         var sentiment: String
@@ -445,6 +458,19 @@ import Testing
 
             #expect(["positive", "negative", "neutral"].contains(response.content.sentiment.lowercased()))
             #expect(response.content.confidence >= 0.0 && response.content.confidence <= 1.0)
+        }
+
+        /// An enum with associated values reaches Foundation Models as one object per case.
+        @available(macOS 26.0, iOS 26.0, tvOS 26.0, visionOS 26.0, *)
+        @Test func guidedGenerationWithEnumPayloads() async throws {
+            let session = LanguageModelSession(model: SystemLanguageModel.default)
+
+            let response = try await session.respond(
+                to: "Plan a counter: add 2, then add 3, then report the total.",
+                generating: CounterPlan.self
+            )
+
+            #expect(!response.content.steps.isEmpty)
         }
 
         @available(macOS 26.0, iOS 26.0, tvOS 26.0, visionOS 26.0, *)
