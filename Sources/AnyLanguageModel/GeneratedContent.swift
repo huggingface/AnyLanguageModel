@@ -178,49 +178,22 @@ public struct GeneratedContent: Sendable, Equatable, Generable, CustomDebugStrin
     /// - Parameter data: UTF-8 encoded JSON.
     public init(json data: Data) throws {
         // Try to parse as complete JSON first
-        if let parsed = try? JSONSerialization.jsonObject(with: data, options: [.fragmentsAllowed]) {
-            self = try Self.fromJSONObject(parsed)
+        if let parsed = try? JSONDecoder().decode(JSONValue.self, from: data) {
+            self = Self(parsed)
             return
         }
 
         // Handle incomplete JSON by completing it and parsing again
         let json = String(decoding: data, as: UTF8.self)
         if let completed = try? JSONCompleter().complete(json),
-            let parsed = try? JSONSerialization.jsonObject(with: Data(completed.utf8), options: [.fragmentsAllowed])
+            let parsed = try? JSONDecoder().decode(JSONValue.self, from: Data(completed.utf8))
         {
-            self = try Self.fromJSONObject(parsed)
+            self = Self(parsed)
             return
         }
 
         // If all else fails, treat it as a string
         self.init(kind: .string(json.trimmingCharacters(in: .whitespacesAndNewlines)))
-    }
-
-    private static func fromJSONObject(_ value: Any) throws -> GeneratedContent {
-        if let dict = value as? [String: Any] {
-            var properties: [String: GeneratedContent] = [:]
-            var keys: [String] = []
-            for (key, val) in dict {
-                properties[key] = try fromJSONObject(val)
-                keys.append(key)
-            }
-            return GeneratedContent(kind: .structure(properties: properties, orderedKeys: keys))
-        } else if let array = value as? [Any] {
-            let contents = try array.map { try fromJSONObject($0) }
-            return GeneratedContent(kind: .array(contents))
-        } else if let string = value as? String {
-            return GeneratedContent(kind: .string(string))
-        } else if let number = value as? NSNumber {
-            // Check if it's a boolean
-            if CFGetTypeID(number) == CFBooleanGetTypeID() {
-                return GeneratedContent(kind: .bool(number.boolValue))
-            }
-            return GeneratedContent(kind: .number(number.doubleValue))
-        } else if value is NSNull {
-            return GeneratedContent(kind: .null)
-        } else {
-            throw GeneratedContentError.typeMismatch
-        }
     }
 
     /// Returns a JSON string representation of the generated content.
