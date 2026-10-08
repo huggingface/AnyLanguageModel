@@ -398,15 +398,86 @@ struct ConstrainedJSONGenerator<Backend: TokenBackend> {
             guard !variants.isEmpty else {
                 throw ConstrainedGenerationError.emptyAnyOf
             }
-            if variants.count == 1 {
-                return try await generateNode(variants[0])
-            }
-            // Choose the first variant to keep selection deterministic.
-            return try await generateNode(variants[0])
+            return try await generateAnyOf(variants)
         }
     }
 
+    /// Lets the model choose a variant of an `anyOf`.
+    ///
+    /// Samples once, without decoding, among the tokens that can start each variant and
+    /// continues with the variants that can start with the sample, as
+    /// ``sampleWhetherToCloseEmptyArray(items:)`` does for an array's first item.
+    /// Object variants all start with `{`, so the keys the model emits tell them apart.
+    /// Other variants that start alike, like two strings, fall back to the first of them.
+    private mutating func generateAnyOf(_ variants: [GenerationSchema.Node]) async throws -> String {
+        let candidates = try flattenedVariants(variants, depth: 0)
+        guard let first = candidates.first else {
+            throw ConstrainedGenerationError.emptyAnyOf
+        }
+        guard candidates.count > 1 else {
+            return try await generateNode(first)
+        }
+
+        let matching = try await variantsStartingWithSample(candidates)
+        let objects = matching.compactMap { variant -> GenerationSchema.ObjectNode? in
+            if case .object(let object) = variant { return object }
+            return nil
+        }
+        if objects.count > 1, objects.count == matching.count {
+            return try await generateObject(oneOf: objects)
+        }
+        // Known limitation: variants that start alike but aren't all objects (two strings,
+        // integer and number, two arrays) can't be told apart by their first token, so the
+        // first of them is generated.
+        return try await generateNode(matching[0])
+    }
+
+    /// Resolves references and flattens nested unions, keeping declaration order.
+    private func flattenedVariants(_ variants: [GenerationSchema.Node], depth: Int) throws -> [GenerationSchema.Node] {
+        guard depth < 64 else { return [] }
+        var flattened: [GenerationSchema.Node] = []
+        for variant in variants {
+            switch variant {
+            case .ref(let typeName):
+                guard let referenced = schema.defs[typeName] else {
+                    throw ConstrainedGenerationError.missingReference(typeName)
+                }
+                flattened += try flattenedVariants([referenced], depth: depth + 1)
+            case .anyOf(let nested):
+                flattened += try flattenedVariants(nested, depth: depth + 1)
+            default:
+                flattened.append(variant)
+            }
+        }
+        return flattened
+    }
+
+    /// Samples among the tokens that can start each variant, without decoding the sample,
+    /// and returns the variants that can start with it. Returns every variant without
+    /// sampling when they all start alike.
+    private mutating func variantsStartingWithSample(
+        _ variants: [GenerationSchema.Node]
+    ) async throws -> [GenerationSchema.Node] {
+        let starts = try variants.map { try itemStartTokens(for: $0) }
+        guard starts.dropFirst().contains(where: { $0 != starts[0] }) else {
+            return variants
+        }
+        let allowed = starts.reduce(into: Set<Int>()) { $0.formUnion($1) }
+        guard !allowed.isEmpty else { return variants }
+        let token = try await backend.sample(from: allowed)
+        let matching = zip(variants, starts).filter { $0.1.contains(token) }.map(\.0)
+        return matching.isEmpty ? variants : matching
+    }
+
     private mutating func generateObject(_ node: GenerationSchema.ObjectNode) async throws -> String {
+        try await generateObject(oneOf: [node])
+    }
+
+    /// Generates an object matching one of `variants`.
+    ///
+    /// With several variants, the mask offers the keys of every variant still in play, and
+    /// each emitted key keeps only the variants that declare it.
+    private mutating func generateObject(oneOf variants: [GenerationSchema.ObjectNode]) async throws -> String {
         // Object *key set* is model-driven under the JSON grammar. The previous
         // implementation pre-filtered optional properties with a hash of the field
         // name XOR the token budget, so each optional was always-on or always-off
@@ -416,14 +487,20 @@ struct ConstrainedJSONGenerator<Backend: TokenBackend> {
         // `}` once every required property has been emitted. For schemas with no
         // required properties that makes `{}` reachable (schema-valid, and what the
         // model asked for) — a visible behaviour change for such schemas.
-        var remainingKeys = Set(node.properties.keys)
-        let required = node.required
+        var live = variants
+        var emittedKeys = Set<String>()
         var output = try await emit("{")
-        var emittedAnyProperty = false
 
-        while !remainingKeys.isEmpty {
-            let missingRequired = required.intersection(remainingKeys)
-            let canClose = missingRequired.isEmpty
+        while true {
+            let remainingKeys = live.reduce(into: Set<String>()) { $0.formUnion($1.properties.keys) }
+                .subtracting(emittedKeys)
+            if remainingKeys.isEmpty { break }
+            let missingRequired = live.reduce(into: Set<String>()) { $0.formUnion($1.required) }
+                .intersection(remainingKeys)
+            let canClose = live.contains { variant in
+                variant.required.allSatisfy { emittedKeys.contains($0) || variant.properties[$0] == nil }
+            }
+            let emittedAnyProperty = !emittedKeys.isEmpty
             let budgetAllowsMoreOptionals = hasBudgetForOptionalStructure()
 
             let keysToOffer: [String]
@@ -459,18 +536,66 @@ struct ConstrainedJSONGenerator<Backend: TokenBackend> {
                 return output
             }
 
-            guard let key = propertyKey(fromPropertyStart: choice),
-                let valueNode = node.properties[key]
-            else {
+            guard let key = propertyKey(fromPropertyStart: choice) else {
                 throw ConstrainedGenerationError.tokenizationFailed
             }
-            remainingKeys.remove(key)
-            output += try await generateNode(valueNode)
-            emittedAnyProperty = true
+            live = live.filter { $0.properties[key] != nil }
+            guard !live.isEmpty else {
+                throw ConstrainedGenerationError.tokenizationFailed
+            }
+            emittedKeys.insert(key)
+            output += try await generateValue(forKey: key, narrowing: &live)
         }
 
         output += try await emit("}")
         return output
+    }
+
+    /// Generates the value of `key`, keeping only the variants whose schema for it the value matches.
+    ///
+    /// Variants that agree on the key's schema all stay. Variants that name themselves with
+    /// a string choice, like the `type` of an enum case, are told apart by the choice.
+    /// Otherwise the value's first token chooses, and the first matching variant stays.
+    private mutating func generateValue(
+        forKey key: String,
+        narrowing live: inout [GenerationSchema.ObjectNode]
+    ) async throws -> String {
+        let nodes = live.compactMap { $0.properties[key] }
+        guard let first = nodes.first else {
+            throw ConstrainedGenerationError.tokenizationFailed
+        }
+        if nodes.allSatisfy({ $0 == first }) {
+            return try await generateNode(first)
+        }
+
+        let choices = try nodes.map { try stringChoices(of: $0) }
+        if choices.allSatisfy({ $0 != nil }) {
+            var all: [String] = []
+            for choice in choices.compactMap({ $0 }).joined() where !all.contains(choice) {
+                all.append(choice)
+            }
+            var output = try await emit("\"")
+            let value = try await generateChoice(all)
+            output += value
+            output += try await emit("\"")
+            live = zip(live, choices).filter { $0.1?.contains(value) == true }.map(\.0)
+            return output
+        }
+
+        // Same limitation as in `generateAnyOf(_:)`: among values that start alike, the first
+        // variant's schema is used.
+        let chosen = try await variantsStartingWithSample(nodes)[0]
+        live = zip(live, nodes).filter { $0.1 == chosen }.map(\.0)
+        return try await generateNode(chosen)
+    }
+
+    /// The choices of a string enum without a pattern, through references.
+    private func stringChoices(of node: GenerationSchema.Node) throws -> [String]? {
+        let flattened = try flattenedVariants([node], depth: 0)
+        guard flattened.count == 1, case .string(let string) = flattened[0], string.pattern == nil,
+            let choices = string.enumChoices, !choices.isEmpty
+        else { return nil }
+        return choices
     }
 
     private mutating func generateArray(_ node: GenerationSchema.ArrayNode) async throws -> String {
