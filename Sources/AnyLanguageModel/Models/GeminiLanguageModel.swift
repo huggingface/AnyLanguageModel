@@ -147,6 +147,10 @@ public struct GeminiLanguageModel: LanguageModel {
 
     public let model: String
 
+    /// How long to wait for a streamed response to start. With URLSession, it's how long to
+    /// wait for each part of the response, so it applies while the response streams too.
+    public let responseStartTimeout: Duration
+
     private let httpSession: HTTPSession
 
     /// Creates a new Gemini language model.
@@ -156,12 +160,14 @@ public struct GeminiLanguageModel: LanguageModel {
     ///   - tokenProvider: A closure that provides the API key.
     ///   - apiVersion: The API version to use.
     ///   - model: The model identifier.
+    ///   - responseStartTimeout: How long to wait for a streamed response to start. Defaults to 60 seconds.
     ///   - session: The HTTP session or client used for network requests.
     public init(
         baseURL: URL = defaultBaseURL,
         apiKey tokenProvider: @escaping @autoclosure @Sendable () -> String,
         apiVersion: String = defaultAPIVersion,
         model: String,
+        responseStartTimeout: Duration = .seconds(60),
         session: HTTPSession = makeDefaultSession(),
     ) {
         var baseURL = baseURL
@@ -173,6 +179,7 @@ public struct GeminiLanguageModel: LanguageModel {
         self.tokenProvider = tokenProvider
         self.apiVersion = apiVersion
         self.model = model
+        self.responseStartTimeout = responseStartTimeout
         self.httpSession = session
     }
 
@@ -438,7 +445,13 @@ public struct GeminiLanguageModel: LanguageModel {
                         )
                         let body = try JSONEncoder().encode(params)
                         let stream: AsyncThrowingStream<GeminiGenerateContentResponse, any Error> =
-                            httpSession.fetchEventStream(.post, url: url, headers: headers, body: body)
+                            httpSession.fetchEventStream(
+                                .post,
+                                url: url,
+                                headers: headers,
+                                body: body,
+                                responseStartTimeout: responseStartTimeout
+                            )
                         var parts: [GeminiPart] = []
                         var functionCalls: [GeminiFunctionCall] = []
                         for try await chunk in stream {

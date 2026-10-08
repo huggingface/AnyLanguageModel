@@ -54,6 +54,10 @@ public struct OllamaLanguageModel: LanguageModel {
     /// The model identifier to use for generation.
     public let model: String
 
+    /// How long to wait for a streamed response to start. With URLSession, it's how long to
+    /// wait for each part of the response, so it applies while the response streams too.
+    public let responseStartTimeout: Duration
+
     private let httpSession: HTTPSession
 
     /// Creates an Ollama language model.
@@ -61,10 +65,12 @@ public struct OllamaLanguageModel: LanguageModel {
     /// - Parameters:
     ///   - baseURL: The base URL for the Ollama server. Defaults to `http://localhost:11434`.
     ///   - model: The model identifier (for example, "qwen2.5" or "llama3.3").
+    ///   - responseStartTimeout: How long to wait for a streamed response to start. Defaults to 60 seconds.
     ///   - session: The HTTP session or client used for network requests.
     public init(
         baseURL: URL = defaultBaseURL,
         model: String,
+        responseStartTimeout: Duration = .seconds(60),
         session: HTTPSession = makeDefaultSession(),
     ) {
         var baseURL = baseURL
@@ -74,6 +80,7 @@ public struct OllamaLanguageModel: LanguageModel {
 
         self.baseURL = baseURL
         self.model = model
+        self.responseStartTimeout = responseStartTimeout
         self.httpSession = session
     }
 
@@ -277,7 +284,8 @@ public struct OllamaLanguageModel: LanguageModel {
                             .post,
                             url: url,
                             body: body,
-                            dateDecodingStrategy: .iso8601WithFractionalSeconds
+                            dateDecodingStrategy: .iso8601WithFractionalSeconds,
+                            responseStartTimeout: responseStartTimeout
                         )
                         var toolCalls: [OllamaToolCall] = []
                         for try await chunk in chunks {

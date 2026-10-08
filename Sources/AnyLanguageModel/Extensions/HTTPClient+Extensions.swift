@@ -62,7 +62,8 @@
             url: URL,
             headers: [String: String] = [:],
             body: Data? = nil,
-            dateDecodingStrategy: JSONDecoder.DateDecodingStrategy = .deferredToDate
+            dateDecodingStrategy: JSONDecoder.DateDecodingStrategy = .deferredToDate,
+            responseStartTimeout: Duration
         ) -> AsyncThrowingStream<T, any Error> {
             AsyncThrowingStream { continuation in
                 let task = SwiftTask { @Sendable in
@@ -83,7 +84,7 @@
                             request.headers.add(name: "Content-Type", value: "application/json")
                         }
 
-                        let response = try await self.execute(request, timeout: .seconds(60))
+                        let response = try await self.execute(request, timeout: TimeAmount(responseStartTimeout))
 
                         guard (200 ..< 300).contains(response.status.code) else {
                             let bodyData = try await Data(response.body.collect(upTo: 1024 * 1024).readableBytesView)
@@ -126,7 +127,8 @@
             _ method: HTTP.Method,
             url: URL,
             headers: [String: String] = [:],
-            body: Data? = nil
+            body: Data? = nil,
+            responseStartTimeout: Duration
         ) -> AsyncThrowingStream<T, any Error> {
             AsyncThrowingStream { continuation in
                 let bodyReaderBox = HTTPClientBodyReaderTaskBox()
@@ -146,7 +148,7 @@
                             request.headers.add(name: "Content-Type", value: "application/json")
                         }
 
-                        let response = try await self.execute(request, timeout: .seconds(60))
+                        let response = try await self.execute(request, timeout: TimeAmount(responseStartTimeout))
 
                         guard (200 ..< 300).contains(response.status.code) else {
                             let bodyData = try await Data(response.body.collect(upTo: 1024 * 1024).readableBytesView)

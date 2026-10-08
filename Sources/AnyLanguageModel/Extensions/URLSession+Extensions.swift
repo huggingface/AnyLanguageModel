@@ -164,7 +164,8 @@ extension URLSession {
         url: URL,
         headers: [String: String] = [:],
         body: Data? = nil,
-        dateDecodingStrategy: JSONDecoder.DateDecodingStrategy = .deferredToDate
+        dateDecodingStrategy: JSONDecoder.DateDecodingStrategy = .deferredToDate,
+        responseStartTimeout: Duration
     ) -> AsyncThrowingStream<T, any Error> {
         AsyncThrowingStream { continuation in
             let task = Task { @Sendable in
@@ -173,6 +174,7 @@ extension URLSession {
 
                 do {
                     var request = URLRequest(url: url)
+                    request.timeoutInterval = responseStartTimeout / .seconds(1)
                     request.httpMethod = method.rawValue
                     request.addValue("application/json", forHTTPHeaderField: "Accept")
 
@@ -219,12 +221,14 @@ extension URLSession {
         _ method: HTTP.Method,
         url: URL,
         headers: [String: String] = [:],
-        body: Data? = nil
+        body: Data? = nil,
+        responseStartTimeout: Duration
     ) -> AsyncThrowingStream<T, any Error> {
         AsyncThrowingStream { continuation in
             let task = Task { @Sendable in
                 do {
                     var request = URLRequest(url: url)
+                    request.timeoutInterval = responseStartTimeout / .seconds(1)
                     request.httpMethod = method.rawValue
                     request.addValue("text/event-stream", forHTTPHeaderField: "Accept")
 
