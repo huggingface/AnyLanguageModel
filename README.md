@@ -487,6 +487,28 @@ but never become part of the session's transcript.
 > Otherwise, it throws `SystemLanguageModel.Error.dynamicInstructionsUnavailable`
 > for a session with dynamic instructions.
 
+### Foundation Models 27 request options
+
+`ContextOptions` mirrors Foundation Models 27's schema-in-prompt and reasoning-level
+settings for compatibility-layer request construction. `GenerationOptions` also
+provides the OS 27 `samplingMode` spelling and `ToolCallingMode` values:
+
+```swift
+let context = ContextOptions(
+    includeSchemaInPrompt: true,
+    reasoningLevel: .moderate
+)
+let options = GenerationOptions(
+    samplingMode: .greedy,
+    toolCallingMode: .required
+)
+```
+
+The older `sampling` property and initializer remain source-compatible.
+Tool-calling mode is preserved in Codable transcripts and forwarded by the
+Foundation Models bridge on OS 27. Other model providers can read the same
+option from their request's `GenerationOptions`.
+
 ### Reasoning in the transcript
 
 Reasoning is transcript content, separate from the answer in `response.content`.
@@ -626,6 +648,11 @@ say which API they follow.
 - `DynamicInstructions`, its builder, and `LanguageModelSession.init(model:dynamicInstructions:history:)`:
   [dynamic instructions](#dynamic-instructions),
   which follow the Foundation Models 27 API.
+- `ContextOptions`, `GenerationOptions.samplingMode`, and
+  `GenerationOptions.ToolCallingMode`:
+  [request options](#foundation-models-27-request-options), which follow the
+  Foundation Models 27 API while remaining available on the package's existing
+  deployment targets.
 - `Transcript.Entry.reasoning` and `Transcript.Reasoning`:
   [reasoning in the transcript](#reasoning-in-the-transcript),
   which follows the Foundation Models 27 API.
