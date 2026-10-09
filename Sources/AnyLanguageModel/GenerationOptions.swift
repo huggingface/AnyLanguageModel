@@ -93,6 +93,15 @@ public struct GenerationOptions: Sendable, Equatable {
     ///   a reasonable default on your behalf.
     public var sampling: SamplingMode?
 
+    /// The sampling strategy for generation.
+    ///
+    /// This is the Foundation Models 27 spelling. ``sampling`` remains for
+    /// source compatibility with earlier AnyLanguageModel releases.
+    public var samplingMode: SamplingMode? {
+        get { sampling }
+        set { sampling = newValue }
+    }
+
     /// Temperature influences the confidence of the models response.
     ///
     /// The value of this property must be a number between `0` and `1` inclusive.
@@ -120,6 +129,9 @@ public struct GenerationOptions: Sendable, Equatable {
     /// its context size supports. If the response exceeds that limit without terminating,
     /// an error will be thrown.
     public var maximumResponseTokens: Int?
+
+    /// Whether tool calling is allowed, required, or disallowed.
+    public var toolCallingMode: ToolCallingMode?
 
     /// Storage for model-specific custom options.
     private var customOptionsStorage: CustomOptionsStorage = .init()
@@ -169,6 +181,43 @@ public struct GenerationOptions: Sendable, Equatable {
         self.sampling = sampling
         self.temperature = temperature
         self.maximumResponseTokens = maximumResponseTokens
+        self.toolCallingMode = nil
+    }
+
+    /// Creates Foundation Models 27-style generation options.
+    public init(
+        samplingMode: SamplingMode? = nil,
+        temperature: Double? = nil,
+        maximumResponseTokens: Int? = nil,
+        toolCallingMode: ToolCallingMode?
+    ) {
+        self.init(
+            sampling: samplingMode,
+            temperature: temperature,
+            maximumResponseTokens: maximumResponseTokens
+        )
+        self.toolCallingMode = toolCallingMode
+    }
+}
+
+extension GenerationOptions {
+    /// A tool-calling policy for a generation request.
+    public struct ToolCallingMode: Sendable, Equatable {
+        public enum Kind: Sendable, Equatable, Hashable {
+            case allowed
+            case required
+            case disallowed
+        }
+
+        public var kind: Kind
+
+        private init(kind: Kind) {
+            self.kind = kind
+        }
+
+        public static let allowed = Self(kind: .allowed)
+        public static let required = Self(kind: .required)
+        public static let disallowed = Self(kind: .disallowed)
     }
 }
 
@@ -180,7 +229,8 @@ extension GenerationOptions {
     /// `GenerationOptions` isn't `Codable`, matching Foundation Models,
     /// but ``Transcript/Prompt`` is, so it codes its options through this type.
     /// It codes the sampling mode, temperature, and maximum response tokens
-    /// in the same format as earlier releases.
+    /// in the same format as earlier releases, and adds the optional OS 27
+    /// tool-calling mode without changing older transcript payloads.
     /// Custom options aren't coded,
     /// because decoding them would need a registry of every model's option types.
     struct TranscriptCoding: Codable {
@@ -188,21 +238,43 @@ extension GenerationOptions {
             var mode: SamplingMode.Mode
         }
 
+        enum ToolCallingModeCoding: String, Codable {
+            case allowed
+            case required
+            case disallowed
+        }
+
         var sampling: Sampling?
         var temperature: Double?
         var maximumResponseTokens: Int?
+        var toolCallingMode: ToolCallingModeCoding?
 
         init(_ options: GenerationOptions) {
             self.sampling = options.sampling.map { Sampling(mode: $0.mode) }
             self.temperature = options.temperature
             self.maximumResponseTokens = options.maximumResponseTokens
+            self.toolCallingMode =
+                switch options.toolCallingMode?.kind {
+                case .allowed: .allowed
+                case .required: .required
+                case .disallowed: .disallowed
+                case nil: nil
+                }
         }
 
         var options: GenerationOptions {
-            GenerationOptions(
-                sampling: sampling.map { SamplingMode(mode: $0.mode) },
+            let toolCallingMode: GenerationOptions.ToolCallingMode? =
+                switch toolCallingMode {
+                case .allowed: .allowed
+                case .required: .required
+                case .disallowed: .disallowed
+                case nil: nil
+                }
+            return GenerationOptions(
+                samplingMode: sampling.map { SamplingMode(mode: $0.mode) },
                 temperature: temperature,
-                maximumResponseTokens: maximumResponseTokens
+                maximumResponseTokens: maximumResponseTokens,
+                toolCallingMode: toolCallingMode
             )
         }
     }
