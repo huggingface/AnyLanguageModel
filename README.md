@@ -382,6 +382,31 @@ pass the model's multimodal projector with `mmprojPath:`.
 > Image inputs are an AnyLanguageModel extension.
 > See [Differences from Foundation Models](#differences-from-foundation-models).
 
+### Prompt attachments
+
+Image attachments use the Foundation Models 27 prompt construction syntax:
+
+```swift
+let prompt = Prompt {
+    "Describe this image"
+    Attachment(imageURL: fileURL)
+}
+```
+
+On Apple platforms, `Attachment(CGImage, orientation:)` retains typed image
+content and orientation. Prompt builders preserve the order of text and images,
+and the OS 26 compatibility transcript continues to store images using its
+existing `Transcript.Segment.image` Codable representation.
+
+`SystemLanguageModel` and `FoundationLanguageModel` bridge prompt attachments
+to Foundation Models on OS 27. Earlier system runtimes reject them explicitly.
+The system bridge requires local file URLs; other provider adapters retain URL
+images in their existing transcript representation.
+
+This first compatibility surface covers prompt `CGImage` and `imageURL`
+attachments. Tool outputs, instruction attachments, labels, `CIImage`, pixel
+buffers, and newer data attachments remain outside this change.
+
 ### Tool Calling
 
 Tool calling is supported by all providers.
@@ -611,8 +636,8 @@ say which API they follow.
   described in that provider's section under [Providers](#providers).
 - `respond(to:images:)`, `Transcript.ImageSegment`, and `Transcript.Segment.image`:
   [image inputs](#image-inputs).
-  Foundation Models 27 adds prompt attachments,
-  and AnyLanguageModel 2.0 will change to match them.
+  Foundation Models 27-style [prompt attachments](#prompt-attachments) are also
+  available for ordered text and image prompt construction.
 - `ToolExecutionDelegate`, `ToolExecutionDecision`, and `toolExecutionDelegate`:
   [observing and controlling tool calls](#tool-calling).
 - `transcriptErrorHandlingPolicy` and `waitForResponseCompletion()`:
@@ -645,7 +670,7 @@ say which API they follow.
 ### Behavior differences
 
 - A session adds the prompt to its transcript before the model responds,
-  as a single text segment.
+  preserving its text and image segment order.
 - A structured response is recorded in the transcript as JSON text,
   not as a structured segment.
 - A session created from a transcript restores `instructions`

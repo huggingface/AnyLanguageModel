@@ -728,7 +728,7 @@ public final class LanguageModelSession: @unchecked Sendable {
             let promptEntry = Transcript.Entry.prompt(
                 Transcript.Prompt(
                     id: promptID,
-                    segments: [.text(.init(content: prompt.description))],
+                    segments: try prompt.makeTranscriptSegments(),
                     options: options,
                     responseFormat: responseFormat
                 )
@@ -776,9 +776,15 @@ public final class LanguageModelSession: @unchecked Sendable {
         options: GenerationOptions = GenerationOptions()
     ) -> sending ResponseStream<Content> where Content: Generable {
         // Add prompt to transcript
+        let segments: [Transcript.Segment]
+        do {
+            segments = try prompt.makeTranscriptSegments()
+        } catch {
+            return ResponseStream(stream: AsyncThrowingStream { $0.finish(throwing: error) })
+        }
         let promptEntry = Transcript.Entry.prompt(
             Transcript.Prompt(
-                segments: [.text(.init(content: prompt.description))],
+                segments: segments,
                 options: options,
                 responseFormat: type == String.self ? nil : .init(type: type)
             )
@@ -924,9 +930,15 @@ extension LanguageModelSession {
         includeSchemaInPrompt: Bool = true,
         options: GenerationOptions = GenerationOptions()
     ) -> sending ResponseStream<GeneratedContent> {
+        let segments: [Transcript.Segment]
+        do {
+            segments = try prompt.makeTranscriptSegments()
+        } catch {
+            return ResponseStream(stream: AsyncThrowingStream { $0.finish(throwing: error) })
+        }
         let promptEntry = Transcript.Entry.prompt(
             Transcript.Prompt(
-                segments: [.text(.init(content: prompt.description))],
+                segments: segments,
                 options: options,
                 responseFormat: .init(schema: schema)
             )
