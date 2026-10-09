@@ -410,6 +410,8 @@ import Testing
             expected.add(provider.expected)
             #expect(last.usage == expected)
             #expect(session.usage == expected)
+            // Usage adds the three rounds up; the context is only the latest request's input.
+            #expect(last.context == provider.expected.input)
             #expect(last.transcriptEntries.count == 4)
             #expect(session.transcript.count == 6)
             #expect(tool.cities.withLock { $0 } == ["Paris", "London"])

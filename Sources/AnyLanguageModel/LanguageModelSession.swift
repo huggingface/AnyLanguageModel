@@ -1530,6 +1530,16 @@ extension LanguageModelSession {
             ///   so code that uses it ports to Foundation Models on OS 27.
             public var usage: Usage
 
+            /// The input of the latest request, as the provider reports it: how much of the
+            /// model's context the response takes now.
+            /// A response that calls tools makes a request for each round,
+            /// each with the whole conversation so far,
+            /// so `usage` adds the rounds up and this is only the latest.
+            /// Zero counts for values the provider does not report.
+            ///
+            /// - Note: This property is exclusive to AnyLanguageModel.
+            public var context: Usage.Input
+
             internal var providerMetadata: [String: String]?
 
             /// Creates a snapshot from partially generated content and raw content.
@@ -1561,6 +1571,27 @@ extension LanguageModelSession {
                 )
             }
 
+            /// Creates a snapshot of a response that made more than one request, such as one that
+            /// called tools: `usage` adds the requests up, and `context` is the latest one's input.
+            ///
+            /// - Note: This initializer is exclusive to AnyLanguageModel.
+            public init(
+                content: Content.PartiallyGenerated,
+                rawContent: GeneratedContent,
+                transcriptEntries: ArraySlice<Transcript.Entry> = [],
+                usage: Usage,
+                context: Usage.Input
+            ) {
+                self.init(
+                    content: content,
+                    rawContent: rawContent,
+                    transcriptEntries: transcriptEntries,
+                    usage: usage,
+                    context: context,
+                    providerMetadata: nil
+                )
+            }
+
             internal init(
                 content: Content.PartiallyGenerated,
                 rawContent: GeneratedContent,
@@ -1569,12 +1600,14 @@ extension LanguageModelSession {
                     input: .init(totalTokenCount: 0, cachedTokenCount: 0),
                     output: .init(totalTokenCount: 0, reasoningTokenCount: 0)
                 ),
+                context: Usage.Input? = nil,
                 providerMetadata: [String: String]?
             ) {
                 self.content = content
                 self.rawContent = rawContent
                 self.transcriptEntries = transcriptEntries
                 self.usage = usage
+                self.context = context ?? usage.input
                 self.providerMetadata = providerMetadata
             }
         }

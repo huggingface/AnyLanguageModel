@@ -118,14 +118,20 @@ extension LanguageModelSession.ResponseStream.Snapshot {
     /// Builds a snapshot from accumulated text,
     /// including metadata-only updates.
     ///
-    /// - Parameter wrapperProperty: The property that holds the response,
-    ///   if the provider's response schema wraps it.
-    init?(text: String, usage: LanguageModelSession.Usage, wrapperProperty: String? = nil) {
+    /// - Parameters:
+    ///   - wrapperProperty: The property that holds the response,
+    ///     if the provider's response schema wraps it.
+    ///   - context: The latest request's input, when it differs from the usage's.
+    init?(
+        text: String, usage: LanguageModelSession.Usage, wrapperProperty: String? = nil,
+        context: LanguageModelSession.Usage.Input? = nil
+    ) {
         if Content.self == String.self {
             self.init(
                 content: (text as! Content).asPartiallyGenerated(),
                 rawContent: GeneratedContent(text),
-                usage: usage
+                usage: usage,
+                context: context ?? usage.input
             )
         } else {
             let raw = ProviderResponseSchema.unwrapping(
@@ -133,7 +139,7 @@ extension LanguageModelSession.ResponseStream.Snapshot {
                 fromProperty: wrapperProperty
             )
             guard let content = try? Content(raw) else { return nil }
-            self.init(content: content.asPartiallyGenerated(), rawContent: raw, usage: usage)
+            self.init(content: content.asPartiallyGenerated(), rawContent: raw, usage: usage, context: context ?? usage.input)
         }
     }
 }
