@@ -146,12 +146,13 @@ public struct OllamaLanguageModel: LanguageModel {
 
         let url = baseURL.appendingPathComponent("api/chat")
         let body = try encodeChatParams(params)
-        let chatResponse: ChatResponse = try await httpSession.fetch(
+        let reply: ChatReply = try await httpSession.fetch(
             .post,
             url: url,
             body: body,
             dateDecodingStrategy: .iso8601WithFractionalSeconds
         )
+        let chatResponse = try reply.response()
 
         var entries: [Transcript.Entry] = []
         let usage = chatResponse.reportedUsage?.value ?? .zero
@@ -273,14 +274,15 @@ public struct OllamaLanguageModel: LanguageModel {
                             parameters: extractTopLevelChatParameters(options)
                         )
                         let body = try encodeChatParams(params)
-                        let chunks: AsyncThrowingStream<ChatResponse, any Error> = httpSession.fetchStream(
+                        let chunks: AsyncThrowingStream<ChatReply, any Error> = httpSession.fetchStream(
                             .post,
                             url: url,
                             body: body,
                             dateDecodingStrategy: .iso8601WithFractionalSeconds
                         )
                         var toolCalls: [OllamaToolCall] = []
-                        for try await chunk in chunks {
+                        for try await reply in chunks {
+                            let chunk = try reply.response()
                             state.usage.merge(chunk.reportedUsage)
                             if let piece = chunk.message.content { state.text += piece }
                             toolCalls.append(contentsOf: chunk.message.toolCalls ?? [])
@@ -685,6 +687,40 @@ private func convertSegmentsToOllama(_ segments: [Transcript.Segment]) -> (Strin
         }
     }
     return (textParts.joined(separator: "\n"), images)
+}
+
+/// An error Ollama reported in place of a chat response, with its own message.
+public struct OllamaError: Error, Sendable, CustomStringConvertible {
+    public let message: String
+
+    public var description: String { "Ollama: \(message)" }
+}
+
+/// What Ollama's chat endpoint replies with: a response, or an error it reports instead, as a
+/// body or as a line of a stream.
+private enum ChatReply: Decodable, Sendable {
+    case response(ChatResponse)
+    case error(String)
+
+    private enum CodingKeys: String, CodingKey {
+        case error
+    }
+
+    init(from decoder: any Decoder) throws {
+        if let message = try decoder.container(keyedBy: CodingKeys.self).decodeIfPresent(String.self, forKey: .error) {
+            self = .error(message)
+        } else {
+            self = .response(try ChatResponse(from: decoder))
+        }
+    }
+
+    /// The response, or Ollama's error, thrown.
+    func response() throws -> ChatResponse {
+        switch self {
+        case .response(let response): response
+        case .error(let message): throw OllamaError(message: message)
+        }
+    }
 }
 
 private struct ChatResponse: Decodable, Sendable {
