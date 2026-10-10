@@ -564,7 +564,10 @@ struct ConstrainedJSONGenerator<Backend: TokenBackend> {
         guard let first = nodes.first else {
             throw ConstrainedGenerationError.tokenizationFailed
         }
-        if nodes.allSatisfy({ $0 == first }) {
+        // Descriptions don't change what gets generated, so variants whose schemas for
+        // this key differ only in their descriptions all stay live.
+        let comparable = nodes.map(Self.withoutDescriptions)
+        if comparable.allSatisfy({ $0 == comparable[0] }) {
             return try await generateNode(first)
         }
 
@@ -585,8 +588,33 @@ struct ConstrainedJSONGenerator<Backend: TokenBackend> {
         // Same limitation as in `generateAnyOf(_:)`: among values that start alike, the first
         // variant's schema is used.
         let chosen = try await variantsStartingWithSample(nodes)[0]
-        live = zip(live, nodes).filter { $0.1 == chosen }.map(\.0)
+        let chosenShape = Self.withoutDescriptions(chosen)
+        live = zip(live, comparable).filter { $0.1 == chosenShape }.map(\.0)
         return try await generateNode(chosen)
+    }
+
+    /// `node` without any descriptions, so nodes that generate the same values compare equal.
+    private static func withoutDescriptions(_ node: GenerationSchema.Node) -> GenerationSchema.Node {
+        switch node {
+        case .object(var object):
+            object.description = nil
+            object.properties = object.properties.mapValues { withoutDescriptions($0) }
+            return .object(object)
+        case .array(var array):
+            array.description = nil
+            array.items = withoutDescriptions(array.items)
+            return .array(array)
+        case .string(var string):
+            string.description = nil
+            return .string(string)
+        case .number(var number):
+            number.description = nil
+            return .number(number)
+        case .anyOf(let variants):
+            return .anyOf(variants.map { withoutDescriptions($0) })
+        case .boolean, .null, .ref:
+            return node
+        }
     }
 
     /// The choices of a string enum without a pattern, through references.

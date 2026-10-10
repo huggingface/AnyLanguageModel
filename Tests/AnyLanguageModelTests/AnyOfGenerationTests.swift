@@ -14,14 +14,17 @@ struct AnyOfGenerationTests {
     private let y = 11
     private let leftBrace = 15
     private let null = 70
+    private let one = 6
     private let eos = 50
 
     private func generate(_ schema: GenerationSchema, sampling queue: [Int]) async throws -> String {
         let tokenToText: [Int: String] = [
             quote: "\"", comma: ",", rightBrace: "}", 3: "]", colon: ":",
-            a: "a", b: "b", x: "x", y: "y", leftBrace: "{", null: "null", eos: "<eos>",
+            a: "a", b: "b", x: "x", y: "y", leftBrace: "{", null: "null", one: "1", eos: "<eos>",
         ]
         let textToTokens: [String: [Int]] = [
+            "\"": [quote], ",": [comma], "}": [rightBrace], ":": [colon], "{": [leftBrace],
+            "a": [a], "b": [b], "x": [x], "y": [y], "1": [one], "null": [null],
             "\"x\":": [quote, x, quote, colon],
             "\"y\":": [quote, y, quote, colon],
             ",\"x\":": [comma, quote, x, quote, colon],
@@ -98,6 +101,23 @@ struct AnyOfGenerationTests {
         // Only the second case declares `y`, so emitting it first already picks that case.
         let queue = [quote, y, quote, colon, a, comma, quote, x, quote, colon, b]
         #expect(try await generate(discriminatedUnion(), sampling: queue) == #"{"y":"a","x":"b"}"#)
+    }
+
+    @Test func sharedKeysThatDifferOnlyInDescriptionKeepBothVariants() async throws {
+        // Both variants declare `x` as the same integer except for its description, so
+        // emitting `x` must not decide the union; the later `y` picks the second variant.
+        let schema = GenerationSchema.primitive(
+            String.self,
+            node: .anyOf([
+                object(["x": .number(.init(description: "first", integerOnly: true))]),
+                object([
+                    "x": .number(.init(description: "second", integerOnly: true)),
+                    "y": letter(["a"]),
+                ]),
+            ])
+        )
+        let queue = [quote, x, quote, colon, one, comma, comma, quote, y, quote, colon, a]
+        #expect(try await generate(schema, sampling: queue) == #"{"x":1,"y":"a"}"#)
     }
 
     @Test func discriminatedUnionCanPickThePayloadlessCase() async throws {
