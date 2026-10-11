@@ -110,6 +110,9 @@ public final class LanguageModelSession: @unchecked Sendable {
     private let dynamicInstructions: AnyDynamicInstructions?
     private let dynamicInstructionsLock = NSLock()
 
+    /// Session-scoped values available to dynamic instructions.
+    public let properties: SessionPropertyValues
+
     /// Whether the session resolves its instructions and tools before each request.
     nonisolated var usesDynamicInstructions: Bool {
         dynamicInstructions != nil
@@ -172,8 +175,13 @@ public final class LanguageModelSession: @unchecked Sendable {
         // Evaluate the body for this request.
         // The resolved instructions go into the request's transcript,
         // never into the session's.
+        let canonicalHistory = Array(transcript)
         let resolved = dynamicInstructionsLock.withLock {
-            dynamicInstructions.resolveForRequest()
+            SessionPropertyBinding.$values.withValue(properties) {
+                SessionPropertyBinding.$history.withValue(canonicalHistory) {
+                    dynamicInstructions.resolveForRequest()
+                }
+            }
         }
         var requestTranscript = transcript
         if let instructions = resolved.instructions {
@@ -322,7 +330,27 @@ public final class LanguageModelSession: @unchecked Sendable {
             }
         }
 
-        self.state = .init(.init(finalTranscript))
+        let state = Locked(State(finalTranscript))
+        self.state = state
+        self.properties = SessionPropertyValues(
+            historyGetter: {
+                state.withLock { locked in
+                    locked.transcript.filter { entry in
+                        if case .instructions = entry { return false }
+                        return true
+                    }
+                }
+            },
+            historySetter: { history in
+                state.withLock { locked in
+                    let instructions = locked.transcript.prefix {
+                        if case .instructions = $0 { return true }
+                        return false
+                    }
+                    locked.transcript = Transcript(entries: Array(instructions) + history)
+                }
+            }
+        )
     }
 
     private static func instructions(from transcript: Transcript) -> Instructions? {

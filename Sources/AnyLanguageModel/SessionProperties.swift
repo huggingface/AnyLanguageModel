@@ -1,0 +1,114 @@
+import Foundation
+import Observation
+
+extension Transcript {
+    /// The mutable, instruction-free history exposed through session properties.
+    ///
+    /// - Note: This API is exclusive to AnyLanguageModel on OS 26. It mirrors
+    ///   Foundation Models 27's `Transcript.HistoryView` role with value semantics.
+    public typealias HistoryView = [Entry]
+}
+
+/// A type-keyed session property.
+///
+/// - Note: This API is exclusive to AnyLanguageModel on OS 26 and mirrors the
+///   Foundation Models 27 session-property contract.
+public protocol SessionPropertyKey: SendableMetatype {
+    associatedtype Value
+    static var defaultValue: Value { get }
+}
+
+/// Declares a stored value on ``SessionPropertyValues``.
+@attached(accessor)
+@attached(peer, names: prefixed(__Key_))
+public macro SessionPropertyEntry() =
+    #externalMacro(module: "AnyLanguageModelMacros", type: "SessionPropertyEntryMacro")
+
+/// Session-scoped storage available while dynamic instructions are evaluated.
+///
+/// - Note: This API is exclusive to AnyLanguageModel on OS 26 and mirrors
+///   Foundation Models 27.
+@Observable
+public final class SessionPropertyValues: @unchecked Sendable {
+    @ObservationIgnored private let customValues = Locked<[ObjectIdentifier: Any]>([:])
+    @ObservationIgnored private let historyGetter: @Sendable () -> Transcript.HistoryView
+    @ObservationIgnored private let historySetter: @Sendable (Transcript.HistoryView) -> Void
+
+    init(
+        historyGetter: @escaping @Sendable () -> Transcript.HistoryView,
+        historySetter: @escaping @Sendable (Transcript.HistoryView) -> Void
+    ) {
+        self.historyGetter = historyGetter
+        self.historySetter = historySetter
+    }
+
+    /// The session history without an instructions entry.
+    public var history: Transcript.HistoryView {
+        get { SessionPropertyBinding.history ?? historyGetter() }
+        set {
+            precondition(
+                SessionPropertyBinding.history == nil,
+                "Session history is read-only while dynamic instructions are active"
+            )
+            historySetter(newValue)
+        }
+    }
+
+    public subscript<Key>(key: Key.Type) -> Key.Value where Key: SessionPropertyKey {
+        get {
+            customValues.withLock { values in
+                if let value = values[ObjectIdentifier(key)] as? Key.Value { return value }
+                let value = Key.defaultValue
+                values[ObjectIdentifier(key)] = value
+                return value
+            }
+        }
+        set {
+            customValues.withLock { values in
+                values[ObjectIdentifier(key)] = newValue
+            }
+        }
+    }
+}
+
+enum SessionPropertyBinding {
+    @TaskLocal static var values: SessionPropertyValues?
+    @TaskLocal static var history: Transcript.HistoryView?
+}
+
+extension LanguageModelSession {
+    /// Accesses a value in the currently evaluating session.
+    @propertyWrapper
+    public struct SessionProperty<Value> {
+        private let keyPath: ReferenceWritableKeyPath<SessionPropertyValues, Value>
+
+        public init(_ keyPath: ReferenceWritableKeyPath<SessionPropertyValues, Value>) {
+            self.keyPath = keyPath
+        }
+
+        public var wrappedValue: Value {
+            get {
+                guard let values = SessionPropertyBinding.values else {
+                    preconditionFailure(
+                        "SessionProperty can only be accessed while dynamic instructions are active"
+                    )
+                }
+                return values[keyPath: keyPath]
+            }
+            nonmutating set {
+                guard let values = SessionPropertyBinding.values else {
+                    preconditionFailure(
+                        "SessionProperty can only be accessed while dynamic instructions are active"
+                    )
+                }
+                values[keyPath: keyPath] = newValue
+            }
+        }
+    }
+}
+
+extension LanguageModelSession.SessionProperty: @unchecked Sendable where Value: Sendable {}
+
+extension DynamicInstructions {
+    public typealias SessionProperty = LanguageModelSession.SessionProperty
+}

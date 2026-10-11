@@ -13,11 +13,17 @@ import Testing
     #if compiler(>=6.4)
         #if os(macOS) || os(iOS) || os(visionOS)
             @available(macOS 27.0, iOS 27.0, visionOS 27.0, *)
+            extension SessionPropertyValues {
+                @SessionPropertyEntry var compatibilityRevision = 0
+            }
+
+            @available(macOS 27.0, iOS 27.0, visionOS 27.0, *)
             private struct CompatibilityDynamicInstructions: DynamicInstructions {
                 let includeDetail: Bool
+                @SessionProperty(\.compatibilityRevision) private var revision
 
                 var body: some DynamicInstructions {
-                    Instructions("You are a helpful assistant.")
+                    Instructions("You are a helpful assistant. Revision \(revision).")
                     if includeDetail {
                         Instructions("Include useful detail.")
                     }
@@ -41,11 +47,13 @@ import Testing
         #if compiler(>=6.4)
             #if os(macOS) || os(iOS) || os(visionOS)
                 if #available(macOS 27.0, iOS 27.0, visionOS 27.0, *) {
-                    _ = LanguageModelSession(
+                    let dynamicSession = LanguageModelSession(
                         model: model,
                         dynamicInstructions: CompatibilityDynamicInstructions(includeDetail: true),
                         history: session.transcript
                     )
+                    dynamicSession.properties.compatibilityRevision = 1
+                    _ = dynamicSession.properties.history
                 }
             #endif
         #endif
