@@ -1,7 +1,7 @@
 import Foundation
 import Testing
 
-@testable import AnyLanguageModel
+@_spi(Compatibility) @testable import AnyLanguageModel
 
 #if canImport(CoreGraphics) && canImport(ImageIO)
     import CoreGraphics
@@ -82,6 +82,29 @@ struct PromptAttachmentTests {
             }
             #expect(recorded.segments == (try input.makeTranscriptSegments()))
         }
+    }
+
+    @Test func ordinaryToolReturnsOrderedImageSegments() async throws {
+        let segments = try await ImageTool(output: prompt()).makeOutputSegments(
+            from: AnyLanguageModel.GeneratedContent("read")
+        )
+        #expect(segments.count == 3)
+        guard case .text(let before) = segments[0],
+            case .image(let image) = segments[1],
+            case .text(let after) = segments[2]
+        else {
+            Issue.record("Tool output lost its ordered image")
+            return
+        }
+        #expect(before.content == "before")
+        #expect(after.content == "after")
+        #expect(image.source == .url(imageURL))
+
+        let transcript = AnyLanguageModel.Transcript(entries: [
+            .toolOutput(.init(id: "image-call", toolName: "image", segments: segments))
+        ])
+        let encoded = try JSONEncoder().encode(transcript)
+        #expect(try JSONDecoder().decode(AnyLanguageModel.Transcript.self, from: encoded) == transcript)
     }
 
     #if canImport(CoreGraphics) && canImport(ImageIO)
@@ -171,10 +194,40 @@ struct PromptAttachmentTests {
         }
 
         @available(macOS 27, iOS 27, visionOS 27, *)
+        @Test func nativeToolWrapperRetainsOrdinaryImageOutput() async throws {
+            let output = try AnyLanguageModel.Prompt {
+                "tool note"
+                AnyLanguageModel.Attachment(try image(), orientation: .right)
+            }
+            let tools: [any AnyLanguageModel.Tool] = [ImageTool(output: output)]
+            let session = FoundationModels.LanguageModelSession(
+                model: BridgeModel(callsTools: true),
+                tools: tools.toFoundationModels()
+            )
+            _ = try await session.respond(to: "read image")
+            let recorded = try #require(
+                session.transcript.compactMap { entry -> FoundationModels.Transcript.ToolOutput? in
+                    guard case .toolOutput(let output) = entry else { return nil }
+                    return output
+                }.first
+            )
+            #expect(recorded.id == "image-call")
+            #expect(recorded.segments.count == 2)
+            guard case .attachment(let segment) = recorded.segments[1],
+                case .image(let image) = segment.content
+            else {
+                Issue.record("Native Tool wrapper flattened image output")
+                return
+            }
+            #expect(image.orientation == .right)
+        }
+
+        @available(macOS 27, iOS 27, visionOS 27, *)
         private struct BridgeModel: FoundationModels.LanguageModel {
             typealias Executor = BridgeExecutor
+            var callsTools = false
             var capabilities: FoundationModels.LanguageModelCapabilities {
-                .init([.vision])
+                .init([.vision, .toolCalling])
             }
             var executorConfiguration: String {
                 "bridge-fixture"
@@ -190,6 +243,27 @@ struct PromptAttachmentTests {
                 model: BridgeModel,
                 streamingInto channel: FoundationModels.LanguageModelExecutorGenerationChannel
             ) async throws {
+                if model.callsTools,
+                    !request.transcript.contains(where: {
+                        if case .toolOutput = $0 { return true }
+                        return false
+                    })
+                {
+                    await channel.send(
+                        .toolCalls(
+                            action: .toolCall(
+                                id: "image-call",
+                                name: "image",
+                                action: .appendArguments(#""read""#, tokenCount: 1)
+                            )
+                        )
+                    )
+                    return
+                }
+                if model.callsTools {
+                    await channel.send(.response(action: .appendText("OK", tokenCount: 1)))
+                    return
+                }
                 let prompts = request.transcript.compactMap { entry -> FoundationModels.Transcript.Prompt? in
                     guard case .prompt(let prompt) = entry else { return nil }
                     return prompt
@@ -215,4 +289,18 @@ struct PromptAttachmentTests {
             }
         }
     #endif
+}
+
+private struct ImageTool: AnyLanguageModel.Tool {
+    let name = "image"
+    let description = "Return an image"
+    let output: AnyLanguageModel.Prompt
+
+    var parameters: AnyLanguageModel.GenerationSchema {
+        String.generationSchema
+    }
+
+    func call(arguments: String) async throws -> AnyLanguageModel.Prompt {
+        output
+    }
 }
