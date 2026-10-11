@@ -341,11 +341,9 @@
         guard let lastEntry = transcript.last, case .prompt(let lastPrompt) = lastEntry else {
             return transcript
         }
-        let lastText = lastPrompt.segments.compactMap { segment -> String? in
-            if case .text(let textSegment) = segment { return textSegment.content }
-            return nil
-        }.joined()
-        guard lastText == prompt.description else {
+        guard let promptSegments = try? prompt.makeTranscriptSegments(),
+            lastPrompt.segments == promptSegments
+        else {
             return transcript
         }
         return Transcript(entries: transcript.dropLast())
@@ -968,7 +966,15 @@
                     else {
                         return nil
                     }
-                    self.init(cgImage)
+                    let properties =
+                        CGImageSourceCopyPropertiesAtIndex(
+                            imageSource,
+                            0,
+                            nil
+                        ) as? [CFString: Any]
+                    let orientation = (properties?[kCGImagePropertyOrientation] as? NSNumber)
+                        .flatMap { CGImagePropertyOrientation(rawValue: $0.uint32Value) }
+                    self.init(cgImage, orientation: orientation)
                 }
             }
         }

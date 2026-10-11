@@ -155,6 +155,22 @@ struct PromptAttachmentTests {
         }
 
         @available(macOS 27, iOS 27, visionOS 27, *)
+        @Test func foundationWrapperDoesNotDuplicatePromptsAndReplaysOrientation() async throws {
+            let model = AnyLanguageModel.FoundationLanguageModel(BridgeModel())
+            let session = AnyLanguageModel.LanguageModelSession(model: model)
+            let input = try AnyLanguageModel.Prompt {
+                "before"
+                AnyLanguageModel.Attachment(try image(), orientation: .right)
+                "after"
+            }
+            let first = try await session.respond(to: input)
+            #expect(first.content == "prompts:1 images:1 right:1")
+
+            let second = try await session.respond(to: "follow-up")
+            #expect(second.content == "prompts:2 images:1 right:1")
+        }
+
+        @available(macOS 27, iOS 27, visionOS 27, *)
         private struct BridgeModel: FoundationModels.LanguageModel {
             typealias Executor = BridgeExecutor
             var capabilities: FoundationModels.LanguageModelCapabilities {
@@ -174,7 +190,28 @@ struct PromptAttachmentTests {
                 model: BridgeModel,
                 streamingInto channel: FoundationModels.LanguageModelExecutorGenerationChannel
             ) async throws {
-                await channel.send(.response(action: .appendText("OK", tokenCount: 1)))
+                let prompts = request.transcript.compactMap { entry -> FoundationModels.Transcript.Prompt? in
+                    guard case .prompt(let prompt) = entry else { return nil }
+                    return prompt
+                }
+                let images = prompts.flatMap { prompt in
+                    prompt.segments.compactMap {
+                        segment -> FoundationModels.Transcript.ImageAttachment? in
+                        guard case .attachment(let attachment) = segment,
+                            case .image(let image) = attachment.content
+                        else { return nil }
+                        return image
+                    }
+                }
+                let right = images.count { $0.orientation == .right }
+                await channel.send(
+                    .response(
+                        action: .appendText(
+                            "prompts:\(prompts.count) images:\(images.count) right:\(right)",
+                            tokenCount: 1
+                        )
+                    )
+                )
             }
         }
     #endif
