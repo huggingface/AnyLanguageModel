@@ -9,32 +9,34 @@ import Testing
         enum Provider: CaseIterable, Equatable, Sendable {
             case chat, responses, openResponses, anthropic, gemini, ollama
 
-            func makeSession(tools: [any Tool] = []) -> LanguageModelSession {
+            func makeModel() -> any LanguageModel {
                 let http = UsageURLProtocol.makeSession()
-                let model: any LanguageModel
                 switch self {
                 case .chat, .responses:
-                    model = OpenAILanguageModel(
+                    return OpenAILanguageModel(
                         apiKey: "test",
                         model: "test",
                         apiVariant: self == .chat ? .chatCompletions : .responses,
                         session: http
                     )
                 case .openResponses:
-                    model = OpenResponsesLanguageModel(
+                    return OpenResponsesLanguageModel(
                         baseURL: URL(string: "https://example.com/v1")!,
                         apiKey: "test",
                         model: "test",
                         session: http
                     )
                 case .anthropic:
-                    model = AnthropicLanguageModel(apiKey: "test", model: "test", session: http)
+                    return AnthropicLanguageModel(apiKey: "test", model: "test", session: http)
                 case .gemini:
-                    model = GeminiLanguageModel(apiKey: "test", model: "test", session: http)
+                    return GeminiLanguageModel(apiKey: "test", model: "test", session: http)
                 case .ollama:
-                    model = OllamaLanguageModel(model: "test", session: http)
+                    return OllamaLanguageModel(model: "test", session: http)
                 }
-                return LanguageModelSession(model: model, tools: tools)
+            }
+
+            func makeSession(tools: [any Tool] = []) -> LanguageModelSession {
+                LanguageModelSession(model: makeModel(), tools: tools)
             }
 
             var counts: [String: Any] {
@@ -458,6 +460,85 @@ import Testing
             #expect(UsageURLProtocol.recordedBodies.count == 2)
             let followUp = try #require(UsageURLProtocol.recordedBodies.last)
             #expect(String(decoding: followUp, as: UTF8.self).contains("Checking. "))
+        }
+
+        @Test(arguments: Provider.allCases, [false, true])
+        func providerProfileReevaluatesBeforeEveryToolContinuation(
+            _ provider: Provider,
+            _ streaming: Bool
+        ) async throws {
+            UsageURLProtocol.reset()
+            if streaming {
+                UsageURLProtocol.enqueue(json: try provider.toolStream())
+                UsageURLProtocol.enqueue(json: try provider.stream(text: "Profile done"))
+            } else {
+                UsageURLProtocol.enqueue(json: try Self.json(provider.response(text: "", tool: true)))
+                UsageURLProtocol.enqueue(json: try Self.json(provider.response(text: "Profile done")))
+            }
+            let model = provider.makeModel()
+            let state = ProviderProfileState()
+            let session = LanguageModelSession(
+                profile: ProviderProfile(state: state, model: model)
+            )
+
+            let response =
+                try await streaming
+                ? session.streamResponse(to: "Weather?").collect()
+                : session.respond(to: "Weather?")
+
+            #expect(response.content == "Profile done")
+            #expect(state.executions.withLock { $0 } == ["Paris"])
+            #expect(state.transformSawOutput.withLock { $0 } == [false, true])
+            #expect(
+                state.events.withLock { $0 } == [
+                    "call:A", "execute:A", "output:A",
+                ]
+            )
+            #expect(UsageURLProtocol.recordedBodies.count == 2)
+            let first = String(decoding: UsageURLProtocol.recordedBodies[0], as: UTF8.self)
+            let second = String(decoding: UsageURLProtocol.recordedBodies[1], as: UTF8.self)
+            #expect(first.contains("Profile A"))
+            #expect(first.contains("getWeather"))
+            #expect(first.contains("0.2"))
+            #expect(second.contains("Profile B"))
+            #expect(second.contains("otherTool"))
+            #expect(second.contains("0.8"))
+        }
+
+        @Test(arguments: Provider.allCases, [false, true])
+        func providerProfileCanSwitchModelForToolContinuation(
+            _ provider: Provider,
+            _ streaming: Bool
+        ) async throws {
+            UsageURLProtocol.reset()
+            if streaming {
+                UsageURLProtocol.enqueue(json: try provider.toolStream())
+            } else {
+                UsageURLProtocol.enqueue(json: try Self.json(provider.response(text: "", tool: true)))
+            }
+            let state = ProviderProfileState()
+            let session = LanguageModelSession(
+                profile: ProviderProfile(
+                    state: state,
+                    model: provider.makeModel(),
+                    continuationModel: ProviderProfileTerminalModel(state: state)
+                )
+            )
+
+            let response =
+                try await streaming
+                ? session.streamResponse(to: "Weather?").collect()
+                : session.respond(to: "Weather?")
+
+            #expect(response.content == "Switched")
+            #expect(UsageURLProtocol.recordedBodies.count == 1)
+            #expect(response.transcriptEntries.contains { if case .toolCalls = $0 { true } else { false } })
+            #expect(response.transcriptEntries.contains { if case .toolOutput = $0 { true } else { false } })
+            let selected = try #require(state.selectedRequests.withLock { $0.last })
+            #expect(selected.instructions == "Profile B")
+            #expect(selected.temperature == 0.8)
+            #expect(selected.tools == ["otherTool"])
+            #expect(selected.sawToolOutput)
         }
 
         @Test(arguments: Provider.allCases, [false, true])
@@ -904,6 +985,145 @@ import Testing
             #expect(response.content.isEmpty)
             #expect(response.usage == provider.expected)
             #expect(UsageURLProtocol.recordedBodies.count == 1)
+        }
+
+        private final class ProviderProfileState: @unchecked Sendable {
+            struct SelectedRequest: Sendable {
+                let instructions: String?
+                let temperature: Double?
+                let tools: [String]
+                let sawToolOutput: Bool
+            }
+
+            let useSecond = Locked(false)
+            let executions = Locked<[String]>([])
+            let transformSawOutput = Locked<[Bool]>([])
+            let events = Locked<[String]>([])
+            let selectedRequests = Locked<[SelectedRequest]>([])
+        }
+
+        private struct ProviderProfile: LanguageModelSession.DynamicProfile, @unchecked Sendable {
+            let state: ProviderProfileState
+            let model: any LanguageModel
+            var continuationModel: (any LanguageModel)? = nil
+
+            var body: some LanguageModelSession.DynamicProfile {
+                if state.useSecond.withLock({ $0 }) {
+                    LanguageModelSession.Profile {
+                        Instructions("Profile B")
+                        ProviderProfileOtherTool()
+                    }
+                    .model(continuationModel ?? model)
+                    .temperature(0.8)
+                    .historyTransform(transform)
+                    .onToolCall { _ in state.events.withLock { $0.append("call:B") } }
+                    .onToolOutput { _, _ in state.events.withLock { $0.append("output:B") } }
+                } else {
+                    LanguageModelSession.Profile {
+                        Instructions("Profile A")
+                        ProviderProfileWeatherTool(state: state)
+                    }
+                    .model(model)
+                    .temperature(0.2)
+                    .historyTransform(transform)
+                    .onToolCall { _ in state.events.withLock { $0.append("call:A") } }
+                    .onToolOutput { _, _ in state.events.withLock { $0.append("output:A") } }
+                }
+            }
+
+            private func transform(_ entries: [Transcript.Entry]) -> [Transcript.Entry] {
+                state.transformSawOutput.withLock { values in
+                    values.append(entries.contains { if case .toolOutput = $0 { true } else { false } })
+                }
+                return entries
+            }
+        }
+
+        private struct ProviderProfileWeatherTool: Tool {
+            let name = "getWeather"
+            let description = "Get weather"
+            let state: ProviderProfileState
+
+            func call(arguments: WeatherTool.Arguments) async throws -> String {
+                state.executions.withLock { $0.append(arguments.city) }
+                state.events.withLock { $0.append("execute:A") }
+                state.useSecond.withLock { $0 = true }
+                return "Sunny"
+            }
+        }
+
+        struct ProviderProfileOtherTool: Tool {
+            @Generable struct Arguments {}
+            let name = "otherTool"
+            let description = "Only available in profile B"
+            func call(arguments: Arguments) async throws -> String { "unused" }
+        }
+
+        private struct ProviderProfileTerminalModel: LanguageModel {
+            typealias UnavailableReason = Never
+            let state: ProviderProfileState
+
+            func respond<Content>(
+                within session: LanguageModelSession,
+                to prompt: Prompt,
+                generating type: Content.Type,
+                includeSchemaInPrompt: Bool,
+                options: GenerationOptions
+            ) async throws -> LanguageModelSession.Response<Content> where Content: Generable {
+                let context = session.resolvedRequestContext()
+                state.selectedRequests.withLock {
+                    $0.append(
+                        .init(
+                            instructions: context.instructions?.description,
+                            temperature: context.options.temperature,
+                            tools: context.tools.map(\.name),
+                            sawToolOutput: context.transcript.contains {
+                                if case .toolOutput = $0 { true } else { false }
+                            }
+                        )
+                    )
+                }
+                let raw = GeneratedContent("Switched")
+                return .init(
+                    content: try Content(raw),
+                    rawContent: raw,
+                    transcriptEntries: []
+                )
+            }
+
+            func streamResponse<Content>(
+                within session: LanguageModelSession,
+                to prompt: Prompt,
+                generating type: Content.Type,
+                includeSchemaInPrompt: Bool,
+                options: GenerationOptions
+            ) -> sending LanguageModelSession.ResponseStream<Content> where Content: Generable {
+                let stream = AsyncThrowingStream<LanguageModelSession.ResponseStream<Content>.Snapshot, any Error> {
+                    continuation in
+                    let task = Task {
+                        do {
+                            let response: LanguageModelSession.Response<Content> = try await respond(
+                                within: session,
+                                to: prompt,
+                                generating: type,
+                                includeSchemaInPrompt: includeSchemaInPrompt,
+                                options: options
+                            )
+                            continuation.yield(
+                                .init(
+                                    content: response.content.asPartiallyGenerated(),
+                                    rawContent: response.rawContent
+                                )
+                            )
+                            continuation.finish()
+                        } catch {
+                            continuation.finish(throwing: error)
+                        }
+                    }
+                    continuation.onTermination = { _ in task.cancel() }
+                }
+                return .init(stream: stream)
+            }
         }
     }
     /// A `URLProtocol` that answers requests from a queue of canned responses

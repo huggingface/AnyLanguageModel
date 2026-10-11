@@ -7,7 +7,7 @@ import OrderedCollections
     import FoundationNetworking
 #endif
 
-public struct GeminiLanguageModel: LanguageModel {
+public struct GeminiLanguageModel: LanguageModel, ProfileRequestIdentifiedLanguageModel {
     public typealias UnavailableReason = Never
 
     public static let defaultBaseURL = URL(string: "https://generativelanguage.googleapis.com")!
@@ -148,6 +148,7 @@ public struct GeminiLanguageModel: LanguageModel {
     public let model: String
 
     private let httpSession: HTTPSession
+    let profileRequestIdentity = UUID()
 
     /// Creates a new Gemini language model.
     ///
@@ -218,22 +219,13 @@ public struct GeminiLanguageModel: LanguageModel {
         includeSchemaInPrompt: Bool,
         options: GenerationOptions
     ) async throws -> LanguageModelSession.Response<Content> where Content: Generable {
-        // Extract effective configuration from custom options or fall back to model defaults
-        let customOptions = options[custom: GeminiLanguageModel.self]
-        let effectiveThinking = customOptions?.thinking ?? .disabled
-        let effectiveServerTools = customOptions?.serverTools ?? []
-        let effectiveJsonMode = customOptions?.jsonMode
-
         let url =
             baseURL
             .appendingPathComponent(apiVersion)
             .appendingPathComponent("models/\(model):generateContent")
         let headers = buildHeaders()
 
-        var inFlightEntries: [Transcript.Entry] = []
-
-        // The entries this call adds, which is what the response reports. `inFlightEntries`
-        // preserves tool rounds while each iteration rebuilds the request from a fresh context.
+        // The entries this call adds, which is what the response reports.
         var entries: [Transcript.Entry] = []
         var usage = ReportedUsage()
         // The text of earlier tool rounds, which string responses include.
@@ -242,21 +234,37 @@ public struct GeminiLanguageModel: LanguageModel {
         var toolRounds = ToolRoundLimit(provider: "Gemini")
         // Multi-turn conversation loop for tool calling
         while true {
-            let requestContext = session.resolvedRequestContext()
+            let requestContext = try await session.resolvedRequestContext(
+                including: entries,
+                options: options
+            )
+            if let continuation = try await session.profileContinuationResponse(
+                ifSelectedModelDiffersFrom: profileRequestIdentity,
+                requestContext: requestContext,
+                prompt: prompt,
+                generating: type,
+                schema: schema,
+                includeSchemaInPrompt: includeSchemaInPrompt,
+                prefixEntries: entries,
+                prefixUsage: usage.value,
+                prefixText: earlierText
+            ) {
+                return continuation
+            }
+            let customOptions = requestContext.options[custom: GeminiLanguageModel.self]
+            let effectiveThinking = customOptions?.thinking ?? .disabled
+            let effectiveServerTools = customOptions?.serverTools ?? []
+            let effectiveJsonMode = customOptions?.jsonMode
             let geminiTools = try buildTools(
                 from: requestContext.tools,
                 serverTools: effectiveServerTools
             )
-            var requestTranscript = requestContext.transcript
-            for entry in inFlightEntries {
-                requestTranscript.append(entry)
-            }
             let params = try createGenerateContentParams(
-                contents: requestTranscript.toGeminiContent(),
+                contents: requestContext.transcript.toGeminiContent(),
                 tools: geminiTools,
                 generating: type,
                 schema: schema,
-                options: options,
+                options: requestContext.options,
                 thinking: effectiveThinking,
                 jsonMode: effectiveJsonMode
             )
@@ -291,7 +299,8 @@ public struct GeminiLanguageModel: LanguageModel {
                 try toolRounds.record(functionCalls.map(\.roundCall))
                 let resolution = try await resolveFunctionCalls(
                     functionCalls,
-                    tools: requestContext.tools,
+                    requestContext: requestContext,
+                    currentRoundEntries: entries,
                     session: session
                 )
                 switch resolution {
@@ -311,12 +320,10 @@ public struct GeminiLanguageModel: LanguageModel {
                         let calls = Transcript.Entry.toolCalls(
                             Transcript.ToolCalls(invocations.map(\.call), providerMetadata: providerMetadata)
                         )
-                        inFlightEntries.append(calls)
                         entries.append(calls)
 
                         for invocation in invocations {
                             let output = Transcript.Entry.toolOutput(invocation.output)
-                            inFlightEntries.append(output)
                             entries.append(output)
                         }
                     }
@@ -396,11 +403,6 @@ public struct GeminiLanguageModel: LanguageModel {
         options: GenerationOptions
     ) -> sending LanguageModelSession.ResponseStream<Content> where Content: Generable {
         // Extract effective configuration from custom options or fall back to model defaults
-        let customOptions = options[custom: GeminiLanguageModel.self]
-        let effectiveThinking = customOptions?.thinking ?? .disabled
-        let effectiveServerTools = customOptions?.serverTools ?? []
-        let effectiveJsonMode = customOptions?.jsonMode
-
         var streamURL =
             baseURL
             .appendingPathComponent(apiVersion)
@@ -413,26 +415,43 @@ public struct GeminiLanguageModel: LanguageModel {
             let task = Task { @Sendable in
                 do {
                     let headers = buildHeaders()
-                    var inFlightEntries: [Transcript.Entry] = []
                     var state = StreamingResponseState<Content>()
                     var toolRounds = ToolRoundLimit(provider: "Gemini")
                     while true {
                         try Task.checkCancellation()
-                        let requestContext = session.resolvedRequestContext()
+                        let requestContext = try await session.resolvedRequestContext(
+                            including: state.entries,
+                            options: options
+                        )
+                        if let handoff = session.profileContinuationStream(
+                            ifSelectedModelDiffersFrom: profileRequestIdentity,
+                            requestContext: requestContext,
+                            prompt: prompt,
+                            generating: type,
+                            schema: schema,
+                            includeSchemaInPrompt: includeSchemaInPrompt,
+                            prefixEntries: state.entries,
+                            prefixUsage: state.totalUsage,
+                            prefixText: state.responseText
+                        ) {
+                            for try await snapshot in handoff { continuation.yield(snapshot) }
+                            continuation.finish()
+                            return
+                        }
+                        let customOptions = requestContext.options[custom: GeminiLanguageModel.self]
+                        let effectiveThinking = customOptions?.thinking ?? .disabled
+                        let effectiveServerTools = customOptions?.serverTools ?? []
+                        let effectiveJsonMode = customOptions?.jsonMode
                         let geminiTools = try buildTools(
                             from: requestContext.tools,
                             serverTools: effectiveServerTools
                         )
-                        var requestTranscript = requestContext.transcript
-                        for entry in inFlightEntries {
-                            requestTranscript.append(entry)
-                        }
                         let params = try createGenerateContentParams(
-                            contents: requestTranscript.toGeminiContent(),
+                            contents: requestContext.transcript.toGeminiContent(),
                             tools: geminiTools,
                             generating: type,
                             schema: schema,
-                            options: options,
+                            options: requestContext.options,
                             thinking: effectiveThinking,
                             jsonMode: effectiveJsonMode
                         )
@@ -471,7 +490,8 @@ public struct GeminiLanguageModel: LanguageModel {
                         try toolRounds.record(functionCalls.map(\.roundCall))
                         switch try await resolveFunctionCalls(
                             functionCalls,
-                            tools: requestContext.tools,
+                            requestContext: requestContext,
+                            currentRoundEntries: state.entries,
                             session: session
                         ) {
                         case .stop(let calls):
@@ -483,11 +503,9 @@ public struct GeminiLanguageModel: LanguageModel {
                             let calls = Transcript.Entry.toolCalls(
                                 Transcript.ToolCalls(invocations.map(\.call), providerMetadata: metadata)
                             )
-                            inFlightEntries.append(calls)
                             state.entries.append(calls)
                             for invocation in invocations {
                                 let output = Transcript.Entry.toolOutput(invocation.output)
-                                inFlightEntries.append(output)
                                 state.entries.append(output)
                             }
                         }
@@ -635,17 +653,11 @@ private enum ToolResolutionOutcome {
 
 private func resolveFunctionCalls(
     _ functionCalls: [GeminiFunctionCall],
-    tools: [any Tool],
+    requestContext: LanguageModelSession.RequestContext,
+    currentRoundEntries: [Transcript.Entry],
     session: LanguageModelSession
 ) async throws -> ToolResolutionOutcome {
     if functionCalls.isEmpty { return .invocations([]) }
-
-    var toolsByName: [String: any Tool] = [:]
-    for tool in tools {
-        if toolsByName[tool.name] == nil {
-            toolsByName[tool.name] = tool
-        }
-    }
 
     var transcriptCalls: [Transcript.ToolCall] = []
     transcriptCalls.reserveCapacity(functionCalls.count)
@@ -662,82 +674,18 @@ private func resolveFunctionCalls(
         )
     }
 
-    if let delegate = session.toolExecutionDelegate {
-        await delegate.didGenerateToolCalls(transcriptCalls, in: session)
-    }
-
     guard !transcriptCalls.isEmpty else { return .invocations([]) }
-
-    var decisions: [ToolExecutionDecision] = []
-    decisions.reserveCapacity(transcriptCalls.count)
-
-    if let delegate = session.toolExecutionDelegate {
-        for call in transcriptCalls {
-            let decision = await delegate.toolCallDecision(for: call, in: session)
-            if case .stop = decision {
-                return .stop(calls: transcriptCalls)
-            }
-            decisions.append(decision)
-        }
-    } else {
-        decisions = Array(repeating: .execute, count: transcriptCalls.count)
+    let entries = currentRoundEntries + [.toolCalls(.init(transcriptCalls))]
+    switch try await session.resolveProfileToolCalls(
+        transcriptCalls,
+        requestContext: requestContext,
+        currentRoundEntries: entries
+    ) {
+    case .stop(let calls):
+        return .stop(calls: calls)
+    case .invocations(let invocations):
+        return .invocations(invocations.map { .init(call: $0.call, output: $0.output) })
     }
-
-    var results: [ToolInvocationResult] = []
-    results.reserveCapacity(transcriptCalls.count)
-
-    for (index, call) in transcriptCalls.enumerated() {
-        switch decisions[index] {
-        case .stop:
-            // This branch should be unreachable because `.stop` returns during decision collection.
-            // Keep it as a defensive guard in case that logic changes.
-            return .stop(calls: transcriptCalls)
-        case .provideOutput(let segments):
-            let output = Transcript.ToolOutput(
-                id: call.id,
-                toolName: call.toolName,
-                segments: segments
-            )
-            if let delegate = session.toolExecutionDelegate {
-                await delegate.didExecuteToolCall(call, output: output, in: session)
-            }
-            results.append(ToolInvocationResult(call: call, output: output))
-        case .execute:
-            guard let tool = toolsByName[call.toolName] else {
-                let message = Transcript.Segment.text(.init(content: "Tool not found: \(call.toolName)"))
-                let output = Transcript.ToolOutput(
-                    id: call.id,
-                    toolName: call.toolName,
-                    segments: [message]
-                )
-                if let delegate = session.toolExecutionDelegate {
-                    await delegate.didExecuteToolCall(call, output: output, in: session)
-                }
-                results.append(ToolInvocationResult(call: call, output: output))
-                continue
-            }
-
-            do {
-                let segments = try await tool.makeOutputSegments(from: call.arguments)
-                let output = Transcript.ToolOutput(
-                    id: call.id,
-                    toolName: tool.name,
-                    segments: segments
-                )
-                if let delegate = session.toolExecutionDelegate {
-                    await delegate.didExecuteToolCall(call, output: output, in: session)
-                }
-                results.append(ToolInvocationResult(call: call, output: output))
-            } catch {
-                if let delegate = session.toolExecutionDelegate {
-                    await delegate.didFailToolCall(call, error: error, in: session)
-                }
-                throw LanguageModelSession.ToolCallError(tool: tool, underlyingError: error)
-            }
-        }
-    }
-
-    return .invocations(results)
 }
 
 /// Joins the text parts of a Gemini response.
