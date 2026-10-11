@@ -337,7 +337,7 @@ extension Instructions: PrimitiveDynamicInstructions {
     }
 }
 
-private func resolveDynamicInstructions(
+func resolveDynamicInstructions(
     _ dynamicInstructions: any DynamicInstructions
 ) -> ResolvedDynamicInstructions {
     func resolve<Content>(_ content: Content) -> ResolvedDynamicInstructions

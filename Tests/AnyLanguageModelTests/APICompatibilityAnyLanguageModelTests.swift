@@ -28,6 +28,26 @@ import Testing
         }
     }
 
+    @available(macOS 27.0, iOS 27.0, visionOS 27.0, *)
+    private struct CompatibilityDynamicProfile: LanguageModelSession.DynamicProfile {
+        let model: any LanguageModel
+        @SessionProperty(\.compatibilityRevision) private var revision
+
+        var body: some LanguageModelSession.DynamicProfile {
+            Profile {
+                Instructions("Revision \(revision)")
+            }
+            .model(model)
+            .samplingMode(.greedy)
+            .temperature(0.2)
+            .maximumResponseTokens(32)
+            .reasoningLevel(.light)
+            .toolCallingMode(.allowed)
+            .historyTransform { $0 }
+            .transcriptErrorHandlingPolicy(nil)
+        }
+    }
+
     @available(macOS 26.0, iOS 26.0, tvOS 26.0, visionOS 26.0, *)
     @Test("AnyLanguageModel Drop-In Compatibility", .enabled(if: isSystemLanguageModelAvailable))
     func anyLanguageModelCompatibility() async throws {
@@ -45,6 +65,10 @@ import Testing
             )
             dynamicSession.properties.compatibilityRevision = 1
             _ = dynamicSession.properties.history
+            _ = LanguageModelSession(
+                profile: CompatibilityDynamicProfile(model: model),
+                history: session.transcript
+            )
         }
 
         let options = GenerationOptions(temperature: 0.7)

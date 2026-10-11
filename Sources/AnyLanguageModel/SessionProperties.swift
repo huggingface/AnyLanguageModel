@@ -24,7 +24,7 @@ public protocol SessionPropertyKey: SendableMetatype {
 public macro SessionPropertyEntry() =
     #externalMacro(module: "AnyLanguageModelMacros", type: "SessionPropertyEntryMacro")
 
-/// Session-scoped storage available while dynamic instructions are evaluated.
+/// Session-scoped storage shared by profiles, dynamic instructions, and tools.
 ///
 /// - Note: This API is exclusive to AnyLanguageModel on OS 26 and mirrors
 ///   Foundation Models 27.
@@ -42,14 +42,17 @@ public final class SessionPropertyValues: @unchecked Sendable {
         self.historySetter = historySetter
     }
 
-    /// The session history without an instructions entry.
+    /// The canonical session history after dynamic instructions.
     public var history: Transcript.HistoryView {
-        get { SessionPropertyBinding.history ?? historyGetter() }
+        get { SessionPropertyBinding.history?.entries ?? historyGetter() }
         set {
-            precondition(
-                SessionPropertyBinding.history == nil,
-                "Session history is read-only while dynamic instructions are active"
-            )
+            if let history = SessionPropertyBinding.history {
+                precondition(
+                    history.isWritable,
+                    "Session history is read-only while dynamic instructions or a Tool is active"
+                )
+                history.entries = newValue
+            }
             historySetter(newValue)
         }
     }
@@ -73,7 +76,22 @@ public final class SessionPropertyValues: @unchecked Sendable {
 
 enum SessionPropertyBinding {
     @TaskLocal static var values: SessionPropertyValues?
-    @TaskLocal static var history: Transcript.HistoryView?
+    @TaskLocal static var history: SessionHistoryBinding?
+}
+
+final class SessionHistoryBinding: @unchecked Sendable {
+    private let storage: Locked<Transcript.HistoryView>
+    let isWritable: Bool
+
+    init(_ entries: Transcript.HistoryView, isWritable: Bool) {
+        storage = Locked(entries)
+        self.isWritable = isWritable
+    }
+
+    var entries: Transcript.HistoryView {
+        get { storage.withLock { $0 } }
+        set { storage.withLock { $0 = newValue } }
+    }
 }
 
 extension LanguageModelSession {
@@ -90,7 +108,7 @@ extension LanguageModelSession {
             get {
                 guard let values = SessionPropertyBinding.values else {
                     preconditionFailure(
-                        "SessionProperty can only be accessed while dynamic instructions are active"
+                        "SessionProperty can only be accessed while a session profile, dynamic instructions, or a Tool is active"
                     )
                 }
                 return values[keyPath: keyPath]
@@ -98,7 +116,7 @@ extension LanguageModelSession {
             nonmutating set {
                 guard let values = SessionPropertyBinding.values else {
                     preconditionFailure(
-                        "SessionProperty can only be accessed while dynamic instructions are active"
+                        "SessionProperty can only be accessed while a session profile, dynamic instructions, or a Tool is active"
                     )
                 }
                 values[keyPath: keyPath] = newValue
@@ -110,5 +128,9 @@ extension LanguageModelSession {
 extension LanguageModelSession.SessionProperty: @unchecked Sendable where Value: Sendable {}
 
 extension DynamicInstructions {
+    public typealias SessionProperty = LanguageModelSession.SessionProperty
+}
+
+extension Tool {
     public typealias SessionProperty = LanguageModelSession.SessionProperty
 }

@@ -29,6 +29,26 @@ import Testing
                     }
                 }
             }
+
+            @available(macOS 27.0, iOS 27.0, visionOS 27.0, *)
+            private struct CompatibilityDynamicProfile: LanguageModelSession.DynamicProfile {
+                let model: any LanguageModel
+                @SessionProperty(\.compatibilityRevision) private var revision
+
+                var body: some LanguageModelSession.DynamicProfile {
+                    Profile {
+                        Instructions("Revision \(revision)")
+                    }
+                    .model(model)
+                    .samplingMode(.greedy)
+                    .temperature(0.2)
+                    .maximumResponseTokens(32)
+                    .reasoningLevel(.light)
+                    .toolCallingMode(.allowed)
+                    .historyTransform { $0 }
+                    .transcriptErrorHandlingPolicy(nil)
+                }
+            }
         #endif
     #endif
 
@@ -54,6 +74,10 @@ import Testing
                     )
                     dynamicSession.properties.compatibilityRevision = 1
                     _ = dynamicSession.properties.history
+                    _ = LanguageModelSession(
+                        profile: CompatibilityDynamicProfile(model: model),
+                        history: session.transcript
+                    )
                 }
             #endif
         #endif
