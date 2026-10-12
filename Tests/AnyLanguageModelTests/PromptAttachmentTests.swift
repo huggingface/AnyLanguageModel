@@ -177,6 +177,17 @@ struct PromptAttachmentTests {
     #endif
 
     #if canImport(FoundationModels) && compiler(>=6.4) && !os(tvOS) && !os(watchOS)
+        @Test func promptBridgeErrorsHaveLocalizedDescriptions() {
+            #expect(
+                AnyLanguageModel.PromptBridgeError.attachmentsUnavailable.errorDescription
+                    == "Prompt attachments require an OS 27 Foundation Models runtime."
+            )
+            #expect(
+                AnyLanguageModel.PromptBridgeError.nonFileImageURL.errorDescription
+                    == "Foundation Models prompt attachments require a local file URL."
+            )
+        }
+
         @available(macOS 27, iOS 27, visionOS 27, *)
         @Test func nativeBridgeRetainsAttachment() async throws {
             let input = try AnyLanguageModel.Prompt {

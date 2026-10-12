@@ -403,9 +403,10 @@ to Foundation Models on OS 27. Earlier system runtimes reject them explicitly.
 The system bridge requires local file URLs; other provider adapters retain URL
 images in their existing transcript representation.
 
-This first compatibility surface covers prompt `CGImage` and `imageURL`
-attachments. Tool outputs, instruction attachments, labels, `CIImage`, pixel
-buffers, and newer data attachments remain outside this change.
+This compatibility surface covers prompt `CGImage` and `imageURL` attachments,
+including attachments returned from ordinary `Tool` output values. Instruction
+attachments, labels, `CIImage`, pixel buffers, and newer data attachments remain
+outside this change.
 
 ### Tool Calling
 

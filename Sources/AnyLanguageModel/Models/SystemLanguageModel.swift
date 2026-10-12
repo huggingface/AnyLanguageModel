@@ -572,9 +572,18 @@
         }
     }
 
-    enum PromptBridgeError: Error {
+    enum PromptBridgeError: LocalizedError, Sendable, Equatable {
         case attachmentsUnavailable
         case nonFileImageURL
+
+        var errorDescription: String? {
+            switch self {
+            case .attachmentsUnavailable:
+                "Prompt attachments require an OS 27 Foundation Models runtime."
+            case .nonFileImageURL:
+                "Foundation Models prompt attachments require a local file URL."
+            }
+        }
     }
 
     /// A type-erased wrapper that bridges any `Tool` to `FoundationModels.Tool`.
