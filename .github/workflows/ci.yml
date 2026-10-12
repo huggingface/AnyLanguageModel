@@ -101,8 +101,9 @@ jobs:
         run: swift format lint --strict --recursive .
 
       - name: Remove cached build descriptions
-        # Descriptions contain Metal compiler paths from the previous runner's
-        # temporary mount. Keep compiled outputs for incremental builds.
+        # Descriptions contain Metal compiler paths
+        # from the previous runner's temporary mount.
+        # Keep compiled outputs for incremental builds.
         if: matrix.swift == '6.4'
         run: rm -rf .build/out/Intermediates.noindex/XCBuildData/*.xcbuilddata
 
