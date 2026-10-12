@@ -14,7 +14,7 @@ jobs:
     permissions:
       contents: read
     name: Swift ${{ matrix.swift }} on macOS ${{ matrix.macos }} with Xcode ${{ matrix.xcode }}${{ matrix.traits != '' && format(' and --traits {0}', matrix.traits) || '' }}
-    runs-on: macos-${{ matrix.macos }}
+    runs-on: ${{ matrix.runner }}
     env:
       DEVELOPER_DIR: "/Applications/Xcode_${{ matrix.xcode }}.app/Contents/Developer"
     strategy:
@@ -22,25 +22,70 @@ jobs:
       matrix:
         include:
           - macos: "26"
+            runner: macos-26
             swift: "6.3.1"
             xcode: "26.4.1"
             traits: ""
           - macos: "26"
+            runner: macos-26
             swift: "6.3.1"
             xcode: "26.4.1"
             traits: "AsyncHTTPClient"
           - macos: "26"
+            runner: macos-26
             swift: "6.3"
             xcode: "26.6"
             traits: ""
           - macos: "26"
+            runner: macos-26
             swift: "6.3"
             xcode: "26.6"
+            traits: "AsyncHTTPClient"
+          - macos: "27"
+            runner: xcode-27
+            swift: "6.4"
+            xcode: "27.0"
+            traits: ""
+          - macos: "27"
+            runner: xcode-27
+            swift: "6.4"
+            xcode: "27.0"
             traits: "AsyncHTTPClient"
     timeout-minutes: 20
     steps:
       - name: Checkout code
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # Swift 6.4's default build system compiles MLX's Metal shaders,
+      # and the Xcode 27 runner image doesn't include the Metal toolchain.
+      - name: Identify Xcode build
+        if: matrix.swift == '6.4'
+        id: xcode
+        run: echo "build=$(xcodebuild -version | awk '/Build version/ { print $3 }')" >> "$GITHUB_OUTPUT"
+
+      - name: Cache Metal toolchain download
+        if: matrix.swift == '6.4'
+        id: metal-cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cache/metal-toolchain
+          key: ${{ runner.os }}-${{ runner.arch }}-metal-${{ steps.xcode.outputs.build }}
+
+      - name: Download Metal toolchain
+        if: matrix.swift == '6.4' && steps.metal-cache.outputs.cache-hit != 'true'
+        run: xcodebuild -downloadComponent MetalToolchain -exportPath "$HOME/.cache/metal-toolchain"
+
+      - name: Install Metal toolchain
+        if: matrix.swift == '6.4'
+        run: |
+          xcrun --kill-cache
+          if ! xcrun metal --version >/dev/null 2>&1; then
+            for bundle in "$HOME/.cache/metal-toolchain/"*.exportedBundle; do
+              xcodebuild -importComponent MetalToolchain -importPath "$bundle"
+            done
+            xcrun --kill-cache
+          fi
+          xcrun metal --version
 
       - name: Cache Swift Package Manager dependencies
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
@@ -54,6 +99,12 @@ jobs:
 
       - name: Lint
         run: swift format lint --strict --recursive .
+
+      - name: Remove cached build descriptions
+        # Descriptions contain Metal compiler paths from the previous runner's
+        # temporary mount. Keep compiled outputs for incremental builds.
+        if: matrix.swift == '6.4'
+        run: rm -rf .build/out/Intermediates.noindex/XCBuildData/*.xcbuilddata
 
       - name: Build
         run: swift build --build-tests --traits MLX,Llama,CoreML${{ matrix.traits != '' && format(',{0}', matrix.traits) || '' }}
@@ -90,6 +141,10 @@ jobs:
           - swift: "6.3.3"
             traits: ""
           - swift: "6.3.3"
+            traits: "AsyncHTTPClient"
+          - swift: "6.4.0"
+            traits: ""
+          - swift: "6.4.0"
             traits: "AsyncHTTPClient"
     timeout-minutes: 10
     steps:
