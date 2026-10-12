@@ -42,6 +42,71 @@ struct SessionPropertyTests {
         #expect(session.properties.history == [prompt])
     }
 
+    @Test func requestUsesOneHistorySnapshotDuringDynamicResolution() async {
+        let initial = Transcript.Entry.prompt(
+            Transcript.Prompt(segments: [.text(.init(content: "Initial"))])
+        )
+        let replacement = Transcript.Entry.prompt(
+            Transcript.Prompt(segments: [.text(.init(content: "Replacement"))])
+        )
+        let (started, startedContinuation) = AsyncStream<Void>.makeStream()
+        let resume = DispatchSemaphore(value: 0)
+        let session = LanguageModelSession(
+            model: SessionPropertyFixtureModel(),
+            dynamicInstructions: BlockingHistoryInstructions(
+                started: startedContinuation,
+                resume: resume
+            ),
+            history: [initial]
+        )
+
+        let request = Task.detached { session.resolvedRequestContext() }
+        for await _ in started.prefix(1) {}
+        session.properties.history = [replacement]
+        resume.signal()
+        let context = await request.value
+
+        #expect(context.instructions?.description == "History count 1")
+        #expect(
+            context.transcript.filter { entry in
+                if case .instructions = entry { return false }
+                return true
+            } == [initial]
+        )
+        #expect(session.properties.history == [replacement])
+    }
+
+    @Test func replacingHistoryNotifiesTranscriptObservers() {
+        let session = LanguageModelSession(model: SessionPropertyFixtureModel())
+        let changed = Locked(false)
+        let prompt = Transcript.Entry.prompt(
+            Transcript.Prompt(segments: [.text(.init(content: "Replacement"))])
+        )
+
+        withObservationTracking {
+            _ = session.transcript
+        } onChange: {
+            changed.withLock { $0 = true }
+        }
+        session.properties.history = [prompt]
+
+        #expect(changed.withLock { $0 })
+    }
+
+    @Test func generatedPropertiesParticipateInObservation() {
+        let session = LanguageModelSession(model: SessionPropertyFixtureModel())
+        let changed = Locked(false)
+
+        withObservationTracking {
+            _ = session.properties.revision
+        } onChange: {
+            changed.withLock { $0 = true }
+        }
+        session.properties.revision = 1
+
+        #expect(changed.withLock { $0 })
+    }
+
     @Test func propertiesAndHistoryAreIsolatedBetweenSessions() {
         let first = LanguageModelSession(model: SessionPropertyFixtureModel())
         let second = LanguageModelSession(model: SessionPropertyFixtureModel())
@@ -95,6 +160,19 @@ private struct SessionPropertyHistoryInstructions: DynamicInstructions {
 
     var body: some DynamicInstructions {
         Instructions("History count \(history.count)")
+    }
+}
+
+private struct BlockingHistoryInstructions: DynamicInstructions {
+    @SessionProperty(\.history) private var history
+    let started: AsyncStream<Void>.Continuation
+    let resume: DispatchSemaphore
+
+    var body: some DynamicInstructions {
+        let count = history.count
+        started.yield()
+        resume.wait()
+        return Instructions("History count \(count)")
     }
 }
 
