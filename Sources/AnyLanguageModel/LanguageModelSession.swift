@@ -665,6 +665,16 @@ public final class LanguageModelSession: @unchecked Sendable {
 
         let state = Locked(State(finalTranscript))
         self.state = state
+        let setHistory: @Sendable (Transcript.HistoryView) -> Void = { history in
+            state.withLock { locked in
+                let instructions = locked.transcript.prefix {
+                    if case .instructions = $0 { return true }
+                    return false
+                }
+                locked.transcript = Transcript(entries: Array(instructions) + history)
+            }
+        }
+        let observedHistorySetter = Locked<(@Sendable (Transcript.HistoryView) -> Void)?>(nil)
         self.properties = SessionPropertyValues(
             historyGetter: {
                 state.withLock { locked in
@@ -675,15 +685,24 @@ public final class LanguageModelSession: @unchecked Sendable {
                 }
             },
             historySetter: { history in
-                state.withLock { locked in
-                    let instructions = locked.transcript.prefix {
-                        if case .instructions = $0 { return true }
-                        return false
-                    }
-                    locked.transcript = Transcript(entries: Array(instructions) + history)
+                if let setter = observedHistorySetter.withLock({ $0 }) {
+                    setter(history)
+                } else {
+                    setHistory(history)
                 }
             }
         )
+        observedHistorySetter.withLock { setter in
+            setter = { [weak self] history in
+                guard let self else {
+                    setHistory(history)
+                    return
+                }
+                self.withMutation(keyPath: \.transcript) {
+                    setHistory(history)
+                }
+            }
+        }
     }
 
     private static func instructions(from transcript: Transcript) -> Instructions? {
