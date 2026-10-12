@@ -57,9 +57,9 @@ public struct Prompt: Sendable {
         try components.map { component in
             switch component {
             case .text(let text):
-                return .text(text)
-            case .image(let id, let content):
-                return .image(try content.makeSegment(id: id))
+                return .text(.init(content: text.content))
+            case .image(_, let content):
+                return .image(try content.makeSegment(id: UUID().uuidString))
             }
         }
     }

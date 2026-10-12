@@ -342,11 +342,29 @@
             return transcript
         }
         guard let promptSegments = try? prompt.makeTranscriptSegments(),
-            lastPrompt.segments == promptSegments
+            lastPrompt.segments.hasSamePayload(as: promptSegments)
         else {
             return transcript
         }
         return Transcript(entries: transcript.dropLast())
+    }
+
+    private extension Array where Element == Transcript.Segment {
+        func hasSamePayload(as other: [Transcript.Segment]) -> Bool {
+            guard count == other.count else { return false }
+            return zip(self, other).allSatisfy { lhs, rhs in
+                switch (lhs, rhs) {
+                case (.text(let lhs), .text(let rhs)):
+                    lhs.content == rhs.content
+                case (.structure(let lhs), .structure(let rhs)):
+                    lhs.source == rhs.source && lhs.content == rhs.content
+                case (.image(let lhs), .image(let rhs)):
+                    lhs.source == rhs.source
+                default:
+                    false
+                }
+            }
+        }
     }
 
     @available(macOS 26.0, iOS 26.0, tvOS 26.0, visionOS 26.0, *)
