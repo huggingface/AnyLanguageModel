@@ -13,7 +13,27 @@ import Testing
 
 @Suite("Prompt attachments")
 struct PromptAttachmentTests {
+    private enum SegmentPayload: Equatable {
+        case text(String)
+        case image(AnyLanguageModel.Transcript.ImageSegment.Source)
+    }
+
     private let imageURL = URL(fileURLWithPath: "/tmp/attachment-fixture.png")
+
+    private func payloads(
+        _ segments: [AnyLanguageModel.Transcript.Segment]
+    ) -> [SegmentPayload] {
+        segments.compactMap { segment in
+            switch segment {
+            case .text(let text):
+                .text(text.content)
+            case .image(let image):
+                .image(image.source)
+            case .structure:
+                nil
+            }
+        }
+    }
 
     private func prompt() -> AnyLanguageModel.Prompt {
         AnyLanguageModel.Prompt {
@@ -41,9 +61,12 @@ struct PromptAttachmentTests {
         }
 
         let expected = try original.makeTranscriptSegments()
-        #expect(try wrapped.makeTranscriptSegments() == expected)
+        let wrappedSegments = try wrapped.makeTranscriptSegments()
+        #expect(payloads(wrappedSegments) == payloads(expected))
+        #expect(Set(wrappedSegments.map(\.id)).isDisjoint(with: expected.map(\.id)))
         let combined = try composed.makeTranscriptSegments()
         #expect(combined.count == 5)
+        #expect(Set(combined.map(\.id)).count == combined.count)
         let sources: [AnyLanguageModel.Transcript.ImageSegment.Source] = combined.compactMap {
             if case .image(let value) = $0 {
                 return value.source
@@ -59,10 +82,10 @@ struct PromptAttachmentTests {
         #expect(sources == [.url(imageURL), .url(imageURL)])
         #expect(texts == ["before", "after\nbefore", "after"])
         #expect(original.description == "before\n<image>\nafter")
-        #expect(
-            try AnyLanguageModel.Prompt([original, original]).makeTranscriptSegments()
-                == combined
-        )
+        let repeated = try AnyLanguageModel.Prompt([original, original]).makeTranscriptSegments()
+        #expect(payloads(repeated) == payloads(combined))
+        #expect(Set(repeated.map(\.id)).count == repeated.count)
+        #expect(Set(repeated.map(\.id)).isDisjoint(with: combined.map(\.id)))
     }
 
     @Test func directSessionPromptsRetainImagesInBothModes() async throws {
@@ -80,7 +103,7 @@ struct PromptAttachmentTests {
                 Issue.record("Missing prompt")
                 return
             }
-            #expect(recorded.segments == (try input.makeTranscriptSegments()))
+            #expect(payloads(recorded.segments) == payloads(try input.makeTranscriptSegments()))
         }
     }
 
