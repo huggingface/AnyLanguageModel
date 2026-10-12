@@ -12,8 +12,19 @@ public struct SessionPropertyEntryMacro: AccessorMacro, PeerMacro {
     ) throws -> [AccessorDeclSyntax] {
         guard let name = propertyName(in: declaration) else { return [] }
         return [
-            "get { self[__Key_\(raw: name).self] }",
-            "set { self[__Key_\(raw: name).self] = newValue }",
+            """
+            get {
+                self._accessSessionProperty(keyPath: \\.\(raw: name))
+                return self[__Key_\(raw: name).self]
+            }
+            """,
+            """
+            set {
+                self._withSessionPropertyMutation(keyPath: \\.\(raw: name)) {
+                    self[__Key_\(raw: name).self] = newValue
+                }
+            }
+            """,
         ]
     }
 

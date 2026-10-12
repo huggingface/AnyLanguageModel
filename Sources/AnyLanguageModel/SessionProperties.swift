@@ -30,6 +30,7 @@ public macro SessionPropertyEntry() =
 ///   Foundation Models 27.
 @Observable
 public final class SessionPropertyValues: @unchecked Sendable {
+    @ObservationIgnored private let sessionPropertyRegistrar = ObservationRegistrar()
     @ObservationIgnored private let customValues = Locked<[ObjectIdentifier: Any]>([:])
     @ObservationIgnored private let historyGetter: @Sendable () -> Transcript.HistoryView
     @ObservationIgnored private let historySetter: @Sendable (Transcript.HistoryView) -> Void
@@ -94,6 +95,25 @@ public final class SessionPropertyValues: @unchecked Sendable {
             entries,
             isWritable: isWritable,
             persist: persist
+        )
+    }
+
+    @_documentation(visibility: internal)
+    public func _accessSessionProperty<Member>(
+        keyPath: KeyPath<SessionPropertyValues, Member>
+    ) {
+        sessionPropertyRegistrar.access(self, keyPath: keyPath)
+    }
+
+    @_documentation(visibility: internal)
+    public func _withSessionPropertyMutation<Member, Result>(
+        keyPath: KeyPath<SessionPropertyValues, Member>,
+        _ mutation: () throws -> Result
+    ) rethrows -> Result {
+        try sessionPropertyRegistrar.withMutation(
+            of: self,
+            keyPath: keyPath,
+            mutation
         )
     }
 }
