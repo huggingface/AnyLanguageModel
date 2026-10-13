@@ -399,7 +399,10 @@ and the OS 26 compatibility transcript continues to store images using its
 existing `Transcript.Segment.image` Codable representation.
 
 `SystemLanguageModel` and `FoundationLanguageModel` bridge prompt attachments
-to Foundation Models on OS 27. Earlier system runtimes reject them explicitly.
+to Foundation Models only in apps built with Swift 6.4 or later
+that run on macOS, iOS, or visionOS 27 or later.
+On earlier runtimes, and on tvOS and watchOS,
+they throw an error when a prompt has an attachment.
 The system bridge requires local file URLs; other provider adapters retain URL
 images in their existing transcript representation.
 
