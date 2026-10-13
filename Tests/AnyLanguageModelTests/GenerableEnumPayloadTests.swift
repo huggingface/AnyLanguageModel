@@ -76,6 +76,11 @@ struct GenerableEnumPayloadTests {
         #expect(try Step(GeneratedContent(json: #"{"type": "note", "value": "hi"}"#)) == .note("hi"))
     }
 
+    /// Foundation Models writes a `nil` value as `null`, and reads `null` as `nil`.
+    @Test func aNullOptionalValueIsNil() throws {
+        #expect(try Step(GeneratedContent(json: #"{"type": "note", "value": null}"#)) == .note(nil))
+    }
+
     @Test func anUnknownTypeIsAnError() {
         #expect(throws: DecodingError.self) {
             try Step(GeneratedContent(json: #"{"type": "jump"}"#))
