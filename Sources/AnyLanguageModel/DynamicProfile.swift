@@ -475,8 +475,36 @@ private func resolveDynamicProfile(
 actor ProfileLifecycle {
     private var activeProfile: ResolvedDynamicProfile?
     private var lastPromptID: String?
+    private var pendingPreparation: (id: Int, task: Task<Void, any Error>)?
+    private var nextPreparationID = 0
 
     func prepare(
+        _ profile: ResolvedDynamicProfile,
+        properties: SessionPropertyValues,
+        history: [Transcript.Entry]
+    ) async throws {
+        let previous = pendingPreparation?.task
+        nextPreparationID += 1
+        let id = nextPreparationID
+        let task = Task {
+            _ = try? await previous?.value
+            try await self.performPreparation(
+                profile,
+                properties: properties,
+                history: history
+            )
+        }
+        pendingPreparation = (id, task)
+        do {
+            try await task.value
+            if pendingPreparation?.id == id { pendingPreparation = nil }
+        } catch {
+            if pendingPreparation?.id == id { pendingPreparation = nil }
+            throw error
+        }
+    }
+
+    private func performPreparation(
         _ profile: ResolvedDynamicProfile,
         properties: SessionPropertyValues,
         history: [Transcript.Entry]

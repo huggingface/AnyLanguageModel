@@ -96,6 +96,43 @@ struct DynamicProfileTests {
         #expect(session.transcript.allSatisfy { if case .prompt = $0 { true } else { false } })
     }
 
+    @Test(arguments: [false, true])
+    func promptFailureUsesTheProducingRequestPolicy(streaming: Bool) async throws {
+        let state = PromptFailureProfileState()
+        let session = LanguageModelSession(
+            profile: PromptFailureProfile(state: state, model: LifecycleFixtureModel())
+        )
+
+        if streaming {
+            await #expect(throws: LifecycleFixtureError.self) {
+                _ = try await session.streamResponse(to: "Revert").collect()
+            }
+        } else {
+            await #expect(throws: LifecycleFixtureError.self) {
+                _ = try await session.respond(to: "Revert")
+            }
+        }
+        #expect(session.transcript.isEmpty)
+        #expect(session.transcriptErrorHandlingPolicy == nil)
+
+        state.useRevert.withLock { $0 = false }
+        if streaming {
+            await #expect(throws: LifecycleFixtureError.self) {
+                _ = try await session.streamResponse(to: "Keep").collect()
+            }
+        } else {
+            await #expect(throws: LifecycleFixtureError.self) {
+                _ = try await session.respond(to: "Keep")
+            }
+        }
+        #expect(session.transcript.count == 1)
+        guard case .prompt = session.transcript[0] else {
+            Issue.record("Expected the second request prompt to be retained")
+            return
+        }
+        #expect(session.transcriptErrorHandlingPolicy == nil)
+    }
+
     @Test func dynamicInstructionsAndToolsShareSessionProperties() async throws {
         let model = ProfileFixtureModel(id: "model", state: ProfileFixtureState())
         let session = LanguageModelSession(
@@ -197,22 +234,39 @@ struct DynamicProfileTests {
             segments: [.text(.init(content: "done"))]
         )
         let request = try await first.resolvedRequestContext(including: [], options: .init())
+        let unrelated = Transcript.Entry.prompt(
+            .init(id: "unrelated", segments: [.text(.init(content: "Other request"))])
+        )
+        first.properties.history = [unrelated]
+        let callEntry = Transcript.Entry.toolCalls(.init([call]))
+        let outputEntry = Transcript.Entry.toolOutput(output)
 
         try await first.profileWillExecuteToolCall(
             call,
             requestContext: request,
-            currentRoundEntries: [.toolCalls(.init([call]))]
+            currentRoundEntries: [callEntry]
         )
         try await first.profileDidProduceToolOutput(
             for: call,
             output: output,
             requestContext: request,
-            currentRoundEntries: [.toolCalls(.init([call])), .toolOutput(output)]
+            currentRoundEntries: [callEntry, outputEntry]
         )
+        let toolHistory = await first.withProfileToolExecution(
+            requestContext: request,
+            currentRoundEntries: [callEntry, outputEntry]
+        ) {
+            first.properties.history.map(\.id)
+        }
 
         #expect(first.properties.profileRevision == 1)
         #expect(second.properties.profileRevision == 0)
         #expect(state.callbackEvents.withLock { $0 } == ["call:call", "output:call"])
+        #expect(
+            state.callbackHistories.withLock { $0 }
+                == [[callEntry.id], [callEntry.id, outputEntry.id]]
+        )
+        #expect(toolHistory == [callEntry.id, outputEntry.id])
     }
 }
 
@@ -221,6 +275,7 @@ private struct FixtureProfile: LanguageModelSession.DynamicProfile, @unchecked S
     let first: ProfileFixtureModel
     let second: ProfileFixtureModel
     @SessionProperty(\.profileRevision) private var revision
+    @SessionProperty(\.history) private var history
 
     var body: some LanguageModelSession.DynamicProfile {
         if state.usesSecond {
@@ -257,6 +312,7 @@ private struct FixtureProfile: LanguageModelSession.DynamicProfile, @unchecked S
 
     private func recordCall(_ call: Transcript.ToolCall) async throws {
         state.callbackEvents.withLock { $0.append("call:\(call.id)") }
+        state.callbackHistories.withLock { $0.append(history.map(\.id)) }
     }
 
     private func recordOutput(
@@ -265,6 +321,7 @@ private struct FixtureProfile: LanguageModelSession.DynamicProfile, @unchecked S
     ) async throws {
         revision += 1
         state.callbackEvents.withLock { $0.append("output:\(output.id)") }
+        state.callbackHistories.withLock { $0.append(history.map(\.id)) }
     }
 }
 
@@ -356,6 +413,7 @@ private final class ProfileFixtureState: @unchecked Sendable {
     let requests = Locked<[Request]>([])
     let transformedHistory = Locked<[[String]]>([])
     let callbackEvents = Locked<[String]>([])
+    let callbackHistories = Locked<[[String]]>([])
 
     var usesSecond: Bool { selection.withLock { $0 } }
     func selectSecond() { selection.withLock { $0 = true } }
@@ -430,6 +488,28 @@ private struct ThrowingResponseProfile: LanguageModelSession.DynamicProfile {
         LanguageModelSession.Profile { Instructions("Throw after response") }
             .model(model)
             .onResponse { throw LifecycleFixtureError.rejected }
+    }
+}
+
+private final class PromptFailureProfileState: @unchecked Sendable {
+    let useRevert = Locked(true)
+}
+
+private struct PromptFailureProfile: LanguageModelSession.DynamicProfile, @unchecked Sendable {
+    let state: PromptFailureProfileState
+    let model: LifecycleFixtureModel
+
+    var body: some LanguageModelSession.DynamicProfile {
+        if state.useRevert.withLock({ $0 }) {
+            LanguageModelSession.Profile { Instructions("Revert prompt failures") }
+                .model(model)
+                .transcriptErrorHandlingPolicy(.revertTranscript)
+                .onPrompt { throw LifecycleFixtureError.rejected }
+        } else {
+            LanguageModelSession.Profile { Instructions("Keep prompt failures") }
+                .model(model)
+                .onPrompt { throw LifecycleFixtureError.rejected }
+        }
     }
 }
 
