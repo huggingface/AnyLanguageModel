@@ -462,7 +462,9 @@ public struct GenerationSchema: Equatable, Codable, CustomDebugStringConvertible
         }
 
         for (name, properties) in cases {
-            var props: [String: Node] = ["type": .string(StringNode(enumChoices: [name]))]
+            // Like Foundation Models, `type` is a constant.
+            // Providers whose schemas don't support `const` get a one-choice `enum`.
+            var props: [String: Node] = ["type": .string(StringNode(enumChoices: [name], isConstant: true))]
             var required: Set<String> = ["type"]
             for property in properties {
                 props[property.name] = property.node

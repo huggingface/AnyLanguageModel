@@ -146,7 +146,7 @@ struct GenerableEnumPayloadTests {
         let set = try caseSchema("Set")
         let properties = try #require(set["properties"] as? [String: [String: Any]])
         #expect(Set(properties.keys) == ["type", "field", "to"])
-        #expect(properties["type"]?["enum"] as? [String] == ["set"])
+        #expect(properties["type"]?["const"] as? String == "set")
         #expect(Set(set["required"] as? [String] ?? []) == ["type", "field", "to"])
         #expect(set["description"] as? String == "One thing a clause does.")
 
@@ -158,6 +158,23 @@ struct GenerableEnumPayloadTests {
 
         let reset = try caseSchema("Reset")
         #expect(Set((reset["properties"] as? [String: Any] ?? [:]).keys) == ["type"])
+    }
+
+    /// Like Foundation Models, a case's `type` is a constant,
+    /// which providers without `const` get as a one-choice `enum`.
+    @Test func typeIsAConstant() throws {
+        let inlined = try JSONValue(Step.generationSchema.inlinedJSONSchema())
+        let asEnum = try JSONValue(Step.generationSchema.inlinedJSONSchema(constantsAsEnums: true))
+        guard case .array(let cases)? = inlined.objectValue?["anyOf"],
+            case .array(let enumCases)? = asEnum.objectValue?["anyOf"]
+        else {
+            Issue.record("Expected a union of cases")
+            return
+        }
+        let type = cases.first?.objectValue?["properties"]?.objectValue?["type"]
+        #expect(type == ["type": "string", "const": "set"])
+        let enumType = enumCases.first?.objectValue?["properties"]?.objectValue?["type"]
+        #expect(enumType == ["type": "string", "enum": ["set"]])
     }
 
     /// The encoded definitions of a schema, and the definitions its root's choices refer to.
@@ -181,9 +198,9 @@ struct GenerableEnumPayloadTests {
         #expect(choices.first?.hasSuffix(".DiscriminatedFoo") == true)
         #expect(choices.last?.hasSuffix(".DiscriminatedFoo2") == true)
         let types = choices.map { name in
-            (defs[name]?["properties"] as? [String: [String: Any]])?["type"]?["enum"] as? [String]
+            (defs[name]?["properties"] as? [String: [String: Any]])?["type"]?["const"] as? String
         }
-        #expect(types == [["foo"], ["Foo"]])
+        #expect(types == ["foo", "Foo"])
         let values = choices.map { name in
             (defs[name]?["properties"] as? [String: [String: Any]])?["value"]?["type"] as? String
         }

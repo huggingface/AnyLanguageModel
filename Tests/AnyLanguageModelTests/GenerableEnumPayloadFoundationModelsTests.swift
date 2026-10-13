@@ -59,6 +59,47 @@ import Testing
             }
         }
 
+        /// The encoded definitions of each case in a schema, by the name in its `type`.
+        @available(macOS 26.0, iOS 26.0, watchOS 27.0, visionOS 26.0, *)
+        private func caseDefinitions(_ schema: FoundationModels.GenerationSchema) throws -> [String: NSDictionary] {
+            let encoder = JSONEncoder()
+            encoder.outputFormatting = .sortedKeys
+            let object = try JSONSerialization.jsonObject(with: encoder.encode(schema)) as? [String: Any]
+            let defs = try #require(object?["$defs"] as? [String: NSDictionary])
+            var cases: [String: NSDictionary] = [:]
+            for definition in defs.values {
+                guard let type = (definition["properties"] as? [String: NSDictionary])?["type"],
+                    let name = type["const"] as? String ?? (type["enum"] as? [String])?.first
+                else { continue }
+                cases[name] = definition
+            }
+            return cases
+        }
+
+        /// Converted for the system model, each case's schema encodes as Foundation Models' own does,
+        /// apart from the names of definitions in `$ref`s, the default descriptions,
+        /// and the order of properties, which the conversion doesn't keep.
+        @available(macOS 26.0, iOS 26.0, watchOS 27.0, visionOS 26.0, *)
+        @Test func caseSchemasMatchFoundationModels() throws {
+            let converted = try caseDefinitions(FoundationModels.GenerationSchema(Step.generationSchema))
+            let native = try caseDefinitions(Native.Step.generationSchema)
+
+            #expect(Set(converted.keys) == Set(native.keys))
+            #expect(Set(native.keys).isSuperset(of: ["set", "add", "pair", "note", "reset", "name", "number"]))
+            for (name, nativeCase) in native {
+                let convertedCase = try #require(converted[name])
+                #expect(
+                    Set(convertedCase["required"] as? [String] ?? []) == Set(nativeCase["required"] as? [String] ?? [])
+                )
+                let properties = try #require(convertedCase["properties"] as? [String: NSDictionary])
+                let nativeProperties = try #require(nativeCase["properties"] as? [String: NSDictionary])
+                #expect(Set(properties.keys) == Set(nativeProperties.keys))
+                for (key, nativeProperty) in nativeProperties where nativeProperty["$ref"] == nil {
+                    #expect(properties[key] == nativeProperty, "\(name).\(key)")
+                }
+            }
+        }
+
         @available(macOS 26.0, iOS 26.0, watchOS 27.0, visionOS 26.0, *)
         @Test func foundationModelsContentDecodes() throws {
             for (step, native) in steps {
