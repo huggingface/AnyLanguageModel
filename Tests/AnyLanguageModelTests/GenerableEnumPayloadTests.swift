@@ -18,6 +18,22 @@ private enum Step: Equatable {
     case reset
 }
 
+@Generable
+private enum Casing: Equatable {
+    case foo(Int)
+    case Foo(String)
+}
+
+@Generable
+private enum Shelf: Equatable {
+    @Generable
+    struct DiscriminatedItem: Equatable {
+        var title: String
+    }
+
+    case item(DiscriminatedItem)
+}
+
 /// Enums with associated values are generated the way Foundation Models generates them: each
 /// case an object whose `type` names it, with its values as properties. The expected values are
 /// what Foundation Models' own `@Generable` produces for the same enums.
@@ -92,5 +108,62 @@ struct GenerableEnumPayloadTests {
 
         let reset = try caseSchema("Reset")
         #expect(Set((reset["properties"] as? [String: Any] ?? [:]).keys) == ["type"])
+    }
+
+    /// The encoded definitions of a schema, and the definitions its root's choices refer to.
+    private func caseDefinitions(
+        _ schema: GenerationSchema
+    ) throws -> (defs: [String: [String: Any]], choices: [String]) {
+        let encoded = try JSONEncoder().encode(schema)
+        let object = try #require(JSONSerialization.jsonObject(with: encoded) as? [String: Any])
+        let defs = try #require(object["$defs"] as? [String: [String: Any]])
+        let rootName = try #require((object["$ref"] as? String)?.replacingOccurrences(of: "#/$defs/", with: ""))
+        let anyOf = try #require(defs[rootName]?["anyOf"] as? [[String: String]])
+        let choices = anyOf.compactMap { $0["$ref"]?.replacingOccurrences(of: "#/$defs/", with: "") }
+        return (defs, choices)
+    }
+
+    @Test func casesDifferingInCaseHaveTheirOwnSchemas() throws {
+        let (defs, choices) = try caseDefinitions(Casing.generationSchema)
+
+        #expect(choices.count == 2)
+        #expect(Set(choices).count == 2)
+        #expect(choices.first?.hasSuffix(".DiscriminatedFoo") == true)
+        #expect(choices.last?.hasSuffix(".DiscriminatedFoo2") == true)
+        let types = choices.map { name in
+            (defs[name]?["properties"] as? [String: [String: Any]])?["type"]?["enum"] as? [String]
+        }
+        #expect(types == [["foo"], ["Foo"]])
+        let values = choices.map { name in
+            (defs[name]?["properties"] as? [String: [String: Any]])?["value"]?["type"] as? String
+        }
+        #expect(values == ["integer", "string"])
+
+        // The names depend only on the declaration.
+        #expect(Casing.generationSchema == Casing.generationSchema)
+
+        let expected: [(Casing, String)] = [
+            (.foo(1), #"{"type":"foo","value":1}"#),
+            (.Foo("x"), #"{"type":"Foo","value":"x"}"#),
+        ]
+        for (casing, content) in expected {
+            #expect(casing.generatedContent.jsonString == content)
+            #expect(try Casing(GeneratedContent(json: content)) == casing)
+        }
+    }
+
+    @Test func aCaseDoesNotTakeTheNameOfAValueType() throws {
+        let (defs, choices) = try caseDefinitions(Shelf.generationSchema)
+        let itemName = String(reflecting: Shelf.DiscriminatedItem.self)
+
+        let caseName = try #require(choices.first)
+        #expect(caseName == "\(itemName)2")
+        let caseProperties = try #require(defs[caseName]?["properties"] as? [String: [String: Any]])
+        #expect(caseProperties["value"]?["$ref"] as? String == "#/$defs/\(itemName)")
+        let itemProperties = try #require(defs[itemName]?["properties"] as? [String: Any])
+        #expect(Set(itemProperties.keys) == ["title"])
+
+        let shelf = Shelf.item(.init(title: "Dune"))
+        #expect(try Shelf(GeneratedContent(json: shelf.generatedContent.jsonString)) == shelf)
     }
 }

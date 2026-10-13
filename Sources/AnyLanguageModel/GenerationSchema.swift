@@ -448,6 +448,19 @@ public struct GenerationSchema: Equatable, Codable, CustomDebugStringConvertible
         var members: [Node] = []
         var allDefs: [String: Node] = [:]
 
+        // Collect the values' types first,
+        // so that no case's definition takes the name of one of them.
+        for (_, properties) in cases {
+            for property in properties {
+                for (defName, defNode) in property.deps {
+                    if let existing = allDefs[defName], existing != defNode {
+                        fatalError("Duplicate type '\(defName)' with different structure")
+                    }
+                    allDefs[defName] = defNode
+                }
+            }
+        }
+
         for (name, properties) in cases {
             var props: [String: Node] = ["type": .string(StringNode(enumChoices: [name]))]
             var required: Set<String> = ["type"]
@@ -456,14 +469,18 @@ public struct GenerationSchema: Equatable, Codable, CustomDebugStringConvertible
                 if !property.isOptional {
                     required.insert(property.name)
                 }
-                for (defName, defNode) in property.deps {
-                    if let existing = allDefs[defName], existing != defNode {
-                        fatalError("Duplicate type '\(defName)' with different structure")
-                    }
-                    allDefs[defName] = defNode
-                }
             }
-            let caseName = "\(typeName).Discriminated\(name.prefix(1).uppercased() + name.dropFirst())"
+            // Name the case as Foundation Models does, after the enumeration.
+            // Cases whose names differ only in their first letter, like `foo` and `Foo`,
+            // or a value's type with the same name,
+            // get the first free numeric suffix, starting at 2.
+            let baseName = "\(typeName).Discriminated\(name.prefix(1).uppercased() + name.dropFirst())"
+            var caseName = baseName
+            var suffix = 2
+            while caseName == typeName || allDefs[caseName] != nil {
+                caseName = "\(baseName)\(suffix)"
+                suffix += 1
+            }
             allDefs[caseName] = .object(
                 ObjectNode(
                     description: description,
