@@ -30,7 +30,7 @@ let package = Package(
     ],
     dependencies: [
         .package(url: "https://github.com/huggingface/swift-transformers", from: "1.0.0"),
-        .package(url: "https://github.com/huggingface/swift-huggingface", from: "0.9.0"),
+        .package(url: "https://github.com/huggingface/swift-huggingface", from: "1.0.0"),
         .package(
             url: "https://github.com/mattt/EventSource",
             from: "1.3.0",

@@ -431,6 +431,10 @@ public struct GenerationSchema: Equatable, Codable, CustomDebugStringConvertible
         self.defs = [:]
     }
 
+    /// The property that names the case in the object of an enumeration case,
+    /// as in Foundation Models.
+    static let caseTypeProperty = "type"
+
     /// Creates a schema for an enumeration whose cases carry values, the way Foundation Models
     /// describes one: one object for each case, with a `type` property that names the case and a
     /// property for each of its values.
@@ -464,8 +468,9 @@ public struct GenerationSchema: Equatable, Codable, CustomDebugStringConvertible
         for (name, properties) in cases {
             // Like Foundation Models, `type` is a constant.
             // Providers whose schemas don't support `const` get a one-choice `enum`.
-            var props: [String: Node] = ["type": .string(StringNode(enumChoices: [name], isConstant: true))]
-            var required: Set<String> = ["type"]
+            let typeProperty = Self.caseTypeProperty
+            var props: [String: Node] = [typeProperty: .string(StringNode(enumChoices: [name], isConstant: true))]
+            var required: Set<String> = [typeProperty]
             for property in properties {
                 props[property.name] = property.node
                 if !property.isOptional {
@@ -488,7 +493,7 @@ public struct GenerationSchema: Equatable, Codable, CustomDebugStringConvertible
                     description: description,
                     properties: props,
                     required: required,
-                    propertyOrder: ["type"] + properties.map(\.name)
+                    propertyOrder: [typeProperty] + properties.map(\.name)
                 )
             )
             members.append(.ref(caseName))
