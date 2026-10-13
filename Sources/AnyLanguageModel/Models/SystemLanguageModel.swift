@@ -564,7 +564,7 @@
         var errorDescription: String? {
             switch self {
             case .attachmentsUnavailable:
-                "Prompt attachments require an OS 27 Foundation Models runtime."
+                "Prompt attachments require macOS 27, iOS 27, or visionOS 27."
             case .nonFileImageURL:
                 "Foundation Models prompt attachments require a local file URL."
             }
