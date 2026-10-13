@@ -259,6 +259,9 @@ public final class LanguageModelSession: @unchecked Sendable {
             context = context.sharingCallbackState(with: prepared.context)
         }
         if let profile = context.profile {
+            if let prepared, prepared.session === self {
+                prepared.context = context
+            }
             try await profileLifecycle.prepare(
                 profile,
                 properties: properties,
@@ -403,7 +406,7 @@ public final class LanguageModelSession: @unchecked Sendable {
         currentRoundEntries: [Transcript.Entry]
     ) async throws {
         guard let profile = requestContext.profile else { return }
-        let history = Array(transcript) + currentRoundEntries
+        let history = requestContext.canonicalTranscript + currentRoundEntries
         try await withSessionProperties(
             history: history,
             isHistoryWritable: true,
@@ -421,7 +424,7 @@ public final class LanguageModelSession: @unchecked Sendable {
         currentRoundEntries: [Transcript.Entry]
     ) async throws {
         guard let profile = requestContext.profile else { return }
-        let history = Array(transcript) + currentRoundEntries
+        let history = requestContext.canonicalTranscript + currentRoundEntries
         try await withSessionProperties(
             history: history,
             isHistoryWritable: true,
@@ -447,7 +450,7 @@ public final class LanguageModelSession: @unchecked Sendable {
             if requestContext.callbackState.wasDispatched(entry.id) {
                 continue
             }
-            let history = Array(transcript) + currentRoundEntries
+            let history = requestContext.canonicalTranscript + currentRoundEntries
             switch entry {
             case .reasoning(let reasoning):
                 try await withSessionProperties(
@@ -480,7 +483,7 @@ public final class LanguageModelSession: @unchecked Sendable {
         currentRoundEntries: [Transcript.Entry],
         operation: @Sendable () async throws -> Result
     ) async rethrows -> Result {
-        let history = Array(transcript) + currentRoundEntries
+        let history = requestContext.canonicalTranscript + currentRoundEntries
         return try await withSessionProperties(
             history: history,
             isHistoryWritable: false,
@@ -748,7 +751,10 @@ public final class LanguageModelSession: @unchecked Sendable {
         }
     }
 
-    nonisolated private func wrapRespond<T>(_ operation: (String) async throws -> T) async throws -> T {
+    nonisolated private func wrapRespond<T>(
+        profileTracker: PreparedProfileRequestTracker? = nil,
+        _ operation: (String) async throws -> T
+    ) async throws -> T {
         let promptID = UUID().uuidString
         beginResponding()
         do {
@@ -756,15 +762,17 @@ public final class LanguageModelSession: @unchecked Sendable {
             endResponding()
             return result
         } catch {
-            let failure = error as? ProfiledModelFailure
-            let policy =
-                failure?.prepared.context.transcriptErrorHandlingPolicy
-                ?? transcriptErrorHandlingPolicy
+            let policy: TranscriptErrorHandlingPolicy?
+            if let prepared = profileTracker?.prepared {
+                policy = prepared.context.transcriptErrorHandlingPolicy
+            } else {
+                policy = transcriptErrorHandlingPolicy
+            }
             if policy == .revertTranscript {
                 removePrompt(id: promptID)
             }
             endResponding()
-            throw failure?.underlyingError ?? error
+            throw error
         }
     }
 
@@ -884,10 +892,12 @@ public final class LanguageModelSession: @unchecked Sendable {
                                         }
                                     )
                                 }
-                                let policy =
-                                    profileTracker?.prepared?.context
-                                    .transcriptErrorHandlingPolicy
-                                    ?? state.transcriptErrorHandlingPolicy
+                                let policy: TranscriptErrorHandlingPolicy?
+                                if let prepared = profileTracker?.prepared {
+                                    policy = prepared.context.transcriptErrorHandlingPolicy
+                                } else {
+                                    policy = state.transcriptErrorHandlingPolicy
+                                }
                                 if policy == .preserveTranscript {
                                     state.transcript.append(contentsOf: lastSnapshot?.transcriptEntries ?? [])
                                 } else if policy == .revertTranscript {
@@ -1109,12 +1119,17 @@ public final class LanguageModelSession: @unchecked Sendable {
         includeSchemaInPrompt: Bool = true,
         options: GenerationOptions = GenerationOptions()
     ) async throws -> Response<Content> where Content: Generable {
-        try await respond(
+        let profileTracker = dynamicProfile == nil ? nil : PreparedProfileRequestTracker()
+        return try await respond(
             to: prompt,
             responseFormat: type == String.self ? nil : .init(type: type),
-            options: options
+            options: options,
+            profileTracker: profileTracker
         ) {
-            try await profiledResponse(options: options) { model, resolvedOptions, contextOptions in
+            try await profiledResponse(options: options, tracker: profileTracker) {
+                model,
+                resolvedOptions,
+                contextOptions in
                 try await model.respond(
                     within: self,
                     to: prompt,
@@ -1129,6 +1144,7 @@ public final class LanguageModelSession: @unchecked Sendable {
 
     nonisolated private func profiledResponse<Content>(
         options: GenerationOptions,
+        tracker: PreparedProfileRequestTracker?,
         generate: (
             any LanguageModel,
             GenerationOptions,
@@ -1141,29 +1157,34 @@ public final class LanguageModelSession: @unchecked Sendable {
                 prepared: nil
             )
         }
-        let context = try await resolvedRequestContext(including: [], options: options)
+        let context = resolveRequestContext(additionalEntries: [], options: options)
         let prepared = PreparedProfileRequest(
             session: self,
             context: context,
             callSiteOptions: options
         )
-        do {
-            let response = try await ProfileRequestBinding.$prepared.withValue(prepared) {
-                try await generate(context.model, context.options, context.contextOptions)
+        tracker?.prepared = prepared
+        let response = try await ProfileRequestBinding.$prepared.withValue(prepared) {
+            if let profile = context.profile {
+                try await profileLifecycle.prepare(
+                    profile,
+                    properties: properties,
+                    history: context.canonicalTranscript
+                )
             }
-            return ProfiledModelResponse(response: response, prepared: prepared)
-        } catch {
-            throw ProfiledModelFailure(underlyingError: error, prepared: prepared)
+            return try await generate(context.model, context.options, context.contextOptions)
         }
+        return ProfiledModelResponse(response: response, prepared: prepared)
     }
 
     nonisolated private func respond<Content: Generable>(
         to prompt: Prompt,
         responseFormat: Transcript.ResponseFormat?,
         options: GenerationOptions,
+        profileTracker: PreparedProfileRequestTracker?,
         generate: () async throws -> ProfiledModelResponse<Content>
     ) async throws -> Response<Content> {
-        try await wrapRespond { promptID in
+        try await wrapRespond(profileTracker: profileTracker) { promptID in
             // Add prompt to transcript
             let promptEntry = Transcript.Entry.prompt(
                 Transcript.Prompt(
@@ -1239,7 +1260,7 @@ public final class LanguageModelSession: @unchecked Sendable {
                     )
                 }
             }
-            throw ProfiledModelFailure(underlyingError: error, prepared: prepared)
+            throw error
         }
     }
 
@@ -1325,18 +1346,32 @@ public final class LanguageModelSession: @unchecked Sendable {
         let stream = AsyncThrowingStream<ResponseStream<Content>.Snapshot, any Error> { continuation in
             let task = Task {
                 do {
-                    let context = try await self.resolvedRequestContext(including: [], options: options)
+                    let context = self.resolveRequestContext(
+                        additionalEntries: [],
+                        options: options
+                    )
                     let prepared = PreparedProfileRequest(
                         session: self,
                         context: context,
                         callSiteOptions: options
                     )
                     tracker.prepared = prepared
-                    let upstream = ProfileRequestBinding.$prepared.withValue(prepared) {
-                        generate(context.model, context.options, context.contextOptions)
-                    }
-                    for try await snapshot in upstream {
-                        continuation.yield(snapshot)
+                    try await ProfileRequestBinding.$prepared.withValue(prepared) {
+                        if let profile = context.profile {
+                            try await self.profileLifecycle.prepare(
+                                profile,
+                                properties: self.properties,
+                                history: context.canonicalTranscript
+                            )
+                        }
+                        let upstream = generate(
+                            context.model,
+                            context.options,
+                            context.contextOptions
+                        )
+                        for try await snapshot in upstream {
+                            continuation.yield(snapshot)
+                        }
                     }
                     continuation.finish()
                 } catch {
@@ -1420,8 +1455,17 @@ extension LanguageModelSession {
         includeSchemaInPrompt: Bool = true,
         options: GenerationOptions = GenerationOptions()
     ) async throws -> Response<GeneratedContent> {
-        try await respond(to: prompt, responseFormat: .init(schema: schema), options: options) {
-            try await profiledResponse(options: options) { model, resolvedOptions, contextOptions in
+        let profileTracker = dynamicProfile == nil ? nil : PreparedProfileRequestTracker()
+        return try await respond(
+            to: prompt,
+            responseFormat: .init(schema: schema),
+            options: options,
+            profileTracker: profileTracker
+        ) {
+            try await profiledResponse(options: options, tracker: profileTracker) {
+                model,
+                resolvedOptions,
+                contextOptions in
                 try await model.respond(
                     within: self,
                     to: prompt,
@@ -1688,7 +1732,8 @@ extension LanguageModelSession {
         includeSchemaInPrompt: Bool = true,
         options: GenerationOptions = GenerationOptions()
     ) async throws -> Response<Content> where Content: Generable {
-        try await wrapRespond { promptID in
+        let profileTracker = dynamicProfile == nil ? nil : PreparedProfileRequestTracker()
+        return try await wrapRespond(profileTracker: profileTracker) { promptID in
             // Build segments from text and images
             var segments: [Transcript.Segment] = []
             if !prompt.isEmpty {
@@ -1712,7 +1757,7 @@ extension LanguageModelSession {
             // Extract text content for the Prompt parameter
             let textPrompt = Prompt(prompt)
 
-            let profiled = try await profiledResponse(options: options) {
+            let profiled = try await profiledResponse(options: options, tracker: profileTracker) {
                 model,
                 resolvedOptions,
                 contextOptions in
@@ -2266,11 +2311,6 @@ private enum ResponseStreamError: Error, LocalizedError {
 private struct ProfiledModelResponse<Content> where Content: Generable {
     let response: LanguageModelSession.Response<Content>
     let prepared: PreparedProfileRequest?
-}
-
-private struct ProfiledModelFailure: Error {
-    let underlyingError: any Error
-    let prepared: PreparedProfileRequest
 }
 
 fileprivate final class ProfileCallbackState: @unchecked Sendable {

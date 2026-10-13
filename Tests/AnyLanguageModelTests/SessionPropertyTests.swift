@@ -143,6 +143,24 @@ struct SessionPropertyTests {
         }
         #expect(session.transcript[1] == prompt)
     }
+
+    @Test func replacingHistoryDropsInstructionEntries() {
+        let session = LanguageModelSession(model: SessionPropertyFixtureModel())
+        let instructions = Transcript.Entry.instructions(
+            .init(
+                segments: [.text(.init(content: "Do not persist"))],
+                toolDefinitions: []
+            )
+        )
+        let prompt = Transcript.Entry.prompt(
+            .init(segments: [.text(.init(content: "Keep"))])
+        )
+
+        session.properties.history = [instructions, prompt]
+
+        #expect(session.properties.history == [prompt])
+        #expect(Array(session.transcript) == [prompt])
+    }
 }
 
 private struct SessionPropertyFixtureInstructions: DynamicInstructions {
