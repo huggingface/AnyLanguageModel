@@ -231,7 +231,7 @@ struct PromptAttachmentTests {
         @Test func promptBridgeErrorsHaveLocalizedDescriptions() {
             #expect(
                 AnyLanguageModel.PromptBridgeError.attachmentsUnavailable.errorDescription
-                    == "Prompt attachments require an OS 27 Foundation Models runtime."
+                    == "Prompt attachments require macOS 27, iOS 27, or visionOS 27."
             )
             #expect(
                 AnyLanguageModel.PromptBridgeError.nonFileImageURL.errorDescription
