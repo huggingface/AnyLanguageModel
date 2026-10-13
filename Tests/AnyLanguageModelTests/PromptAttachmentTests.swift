@@ -43,6 +43,21 @@ struct PromptAttachmentTests {
         }
     }
 
+    @Test func emptyBuildersKeepOneEmptyTextSegment() throws {
+        let built = AnyLanguageModel.Prompt {}
+        let array = AnyLanguageModel.Prompt([AnyLanguageModel.Prompt]())
+
+        for prompt in [built, array] {
+            let segments = try prompt.makeTranscriptSegments()
+            #expect(segments.count == 1)
+            guard case .text(let text) = segments[0] else {
+                Issue.record("Empty prompt did not retain its text segment")
+                continue
+            }
+            #expect(text.content.isEmpty)
+        }
+    }
+
     @Test func buildersAndRepresentablesPreserveOrderedImages() throws {
         let original = prompt()
         struct Representable: AnyLanguageModel.PromptRepresentable {
@@ -174,6 +189,42 @@ struct PromptAttachmentTests {
                     == CGImagePropertyOrientation.right.rawValue
             )
         }
+
+        #if canImport(FoundationModels)
+            @available(macOS 26, iOS 26, visionOS 26, *)
+            @Test func duplicateSuppressionDoesNotReencodeRecordedAttachments() throws {
+                let encoded = try AnyLanguageModel.Prompt {
+                    AnyLanguageModel.Attachment(try image(), orientation: .right)
+                }.makeTranscriptSegments()
+                guard case .image(let image) = try #require(encoded.first),
+                    case .data(let data, _) = image.source
+                else {
+                    Issue.record("Failed to encode the image fixture")
+                    return
+                }
+
+                let url = FileManager.default.temporaryDirectory
+                    .appending(path: UUID().uuidString)
+                    .appendingPathExtension("png")
+                try data.write(to: url)
+                let prompt = AnyLanguageModel.Prompt {
+                    AnyLanguageModel.Attachment(imageURL: url, orientation: .right)
+                }
+                let occurrenceID = UUID().uuidString
+                let segments = try prompt.makeTranscriptSegments(occurrenceID: occurrenceID)
+                try FileManager.default.removeItem(at: url)
+                let transcript = AnyLanguageModel.Transcript(entries: [
+                    .prompt(.init(id: occurrenceID, segments: segments))
+                ])
+
+                #expect(
+                    AnyLanguageModel.fmTranscriptDroppingDuplicatePrompt(
+                        transcript,
+                        prompt: prompt
+                    ).isEmpty
+                )
+            }
+        #endif
     #endif
 
     #if canImport(FoundationModels) && compiler(>=6.4) && !os(tvOS) && !os(watchOS)
