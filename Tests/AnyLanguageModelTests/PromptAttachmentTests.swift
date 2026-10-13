@@ -168,7 +168,7 @@ struct PromptAttachmentTests {
         }
 
         #if canImport(FoundationModels)
-            @available(macOS 26, iOS 26, visionOS 26, *)
+            @available(macOS 26.0, iOS 26.0, watchOS 27.0, tvOS 26.0, visionOS 26.0, *)
             @Test func duplicateSuppressionDoesNotReencodeRecordedAttachments() throws {
                 let encoded = try AnyLanguageModel.Prompt {
                     AnyLanguageModel.Attachment(try image(), orientation: .right)
