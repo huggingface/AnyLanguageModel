@@ -603,7 +603,7 @@ public struct GenerationSchema: Equatable, Codable, CustomDebugStringConvertible
         self.defs = allDefs
     }
 
-    private init(root: Node, defs: [String: Node]) {
+    init(root: Node, defs: [String: Node]) {
         self.root = root
         self.defs = defs
     }

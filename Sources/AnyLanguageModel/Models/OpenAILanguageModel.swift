@@ -492,7 +492,8 @@ public struct OpenAILanguageModel: LanguageModel {
         options: GenerationOptions,
         session: LanguageModelSession
     ) async throws -> LanguageModelSession.Response<Content> where Content: Generable {
-
+        // Structured outputs need an object root.
+        let responseSchema = ProviderResponseSchema(schema, generating: type, wrapping: .nonObjectRoots)
         var entries: [Transcript.Entry] = []
         var usage = ReportedUsage()
         var text = ""
@@ -513,7 +514,7 @@ public struct OpenAILanguageModel: LanguageModel {
                 messages: messages,
                 tools: tools,
                 generating: type,
-                schema: schema,
+                schema: responseSchema.schema,
                 options: options,
                 stream: false
             )
@@ -602,7 +603,7 @@ public struct OpenAILanguageModel: LanguageModel {
             )
         }
 
-        let generatedContent = try GeneratedContent(json: text)
+        let generatedContent = try responseSchema.content(json: text)
         let content = try type.init(generatedContent)
         return LanguageModelSession.Response(
             content: content,
@@ -618,6 +619,8 @@ public struct OpenAILanguageModel: LanguageModel {
         options: GenerationOptions,
         session: LanguageModelSession
     ) async throws -> LanguageModelSession.Response<Content> where Content: Generable {
+        // Structured outputs need an object root.
+        let responseSchema = ProviderResponseSchema(schema, generating: type, wrapping: .nonObjectRoots)
         var entries: [Transcript.Entry] = []
         var usage = ReportedUsage()
         var text = ""
@@ -641,7 +644,7 @@ public struct OpenAILanguageModel: LanguageModel {
                 messages: messages,
                 tools: tools,
                 generating: type,
-                schema: schema,
+                schema: responseSchema.schema,
                 options: options,
                 stream: false
             )
@@ -722,7 +725,7 @@ public struct OpenAILanguageModel: LanguageModel {
         }
 
         if let jsonString = extractJSONFromOutput(lastOutput) {
-            let generatedContent = try GeneratedContent(json: jsonString)
+            let generatedContent = try responseSchema.content(json: jsonString)
             let content = try type.init(generatedContent)
             return LanguageModelSession.Response(
                 content: content,
@@ -776,12 +779,14 @@ public struct OpenAILanguageModel: LanguageModel {
         includeSchemaInPrompt: Bool,
         options: GenerationOptions
     ) -> sending LanguageModelSession.ResponseStream<Content> where Content: Generable {
+        // Structured outputs need an object root.
+        let responseSchema = ProviderResponseSchema(schema, generating: type, wrapping: .nonObjectRoots)
         let stream = AsyncThrowingStream<LanguageModelSession.ResponseStream<Content>.Snapshot, any Error> {
             continuation in
             let task = Task {
                 do {
                     var inFlightMessages: [OpenAIMessage] = []
-                    var state = StreamingResponseState<Content>()
+                    var state = StreamingResponseState<Content>(wrapperProperty: responseSchema.wrapperProperty)
                     var toolRounds = ToolRoundLimit(provider: "OpenAI")
                     while true {
                         try Task.checkCancellation()
@@ -800,7 +805,7 @@ public struct OpenAILanguageModel: LanguageModel {
                                 messages: messages,
                                 tools: tools,
                                 generating: type,
-                                schema: schema,
+                                schema: responseSchema.schema,
                                 options: options,
                                 stream: true
                             )
@@ -811,7 +816,7 @@ public struct OpenAILanguageModel: LanguageModel {
                                 messages: messages,
                                 tools: tools,
                                 generating: type,
-                                schema: schema,
+                                schema: responseSchema.schema,
                                 options: options,
                                 stream: true,
                                 includeUsage: baseURL.host == Self.defaultBaseURL.host
