@@ -473,6 +473,21 @@ import Testing
             #expect(!response.content.steps.isEmpty)
         }
 
+        /// An enum with associated values can be the whole response,
+        /// with a union of its cases at the root of the schema.
+        @available(macOS 26.0, iOS 26.0, tvOS 26.0, visionOS 26.0, *)
+        @Test func guidedGenerationWithEnumPayloadRoot() async throws {
+            let session = LanguageModelSession(model: SystemLanguageModel.default)
+
+            let response = try await session.respond(
+                to: "Add 2 to the counter.",
+                generating: CounterStep.self
+            )
+
+            let type = try response.rawContent.value(String.self, forProperty: "type")
+            #expect(["add", "reset", "report"].contains(type))
+        }
+
         @available(macOS 26.0, iOS 26.0, tvOS 26.0, visionOS 26.0, *)
         @Test func guidedGenerationWithInstructions() async throws {
             let session = LanguageModelSession(
