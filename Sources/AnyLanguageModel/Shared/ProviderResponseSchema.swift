@@ -73,13 +73,7 @@ struct ProviderResponseSchema {
 extension GenerationSchema {
     /// The root, after following references.
     var resolvedRoot: Node? {
-        var node = root
-        var seen: Set<String> = []
-        while case .ref(let name) = node {
-            guard seen.insert(name).inserted, let definition = defs[name] else { return nil }
-            node = definition
-        }
-        return node
+        resolving(root)
     }
 
     /// Returns the schema with its root as the one required property of an object.

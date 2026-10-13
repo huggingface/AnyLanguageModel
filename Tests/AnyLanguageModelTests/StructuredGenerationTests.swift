@@ -860,6 +860,63 @@ struct StructuredGenerationTests {
         #expect(generator.generatedTokenCount == 2)
     }
 
+    // MARK: - Discriminated unions
+
+    /// A union like the schema of an enumeration with associated values:
+    /// case `a` has the property `x`, and case `b` has the property `y`.
+    private func discriminatedUnionSchema() -> GenerationSchema {
+        func caseNode(_ type: String, property: String) -> GenerationSchema.Node {
+            .object(
+                GenerationSchema.ObjectNode(
+                    description: nil,
+                    properties: [
+                        "type": .string(.init(enumChoices: [type], isConstant: true)),
+                        property: .string(.init(enumChoices: ["a"])),
+                    ],
+                    required: ["type", property]
+                )
+            )
+        }
+        return GenerationSchema(
+            root: .anyOf([.ref("A"), .ref("B")]),
+            defs: ["A": caseNode("a", property: "x"), "B": caseNode("b", property: "y")]
+        )
+    }
+
+    @Test(arguments: [("a", "x"), ("b", "y")])
+    func modelChoosesTheObjectOfADiscriminatedUnion(_ type: String, _ property: String) async throws {
+        var maps = objectTokenMaps()
+        let quote = 0
+        let comma = 1
+        let colon = 4
+        let aToken = 8
+        let typeToken = 16
+        let eosToken = 50
+        maps.tokenToText[typeToken] = "type"
+        maps.textToTokens["\"type\":"] = [quote, typeToken, quote, colon]
+        let typeValue = try #require(maps.textToTokens[type]?.first)
+        let propertyToken = try #require(maps.textToTokens[property]?.first)
+
+        // `{"type":` is forced; the model chooses the value of `type`, then the case's property.
+        let backend = MockTokenBackend(
+            tokenToText: maps.tokenToText,
+            textToTokens: maps.textToTokens,
+            eosToken: eosToken,
+            endTokens: [eosToken],
+            maximumTokens: 64,
+            samplingQueue: [
+                typeValue,
+                comma, quote, propertyToken, quote, colon,
+                aToken,
+            ]
+        )
+
+        var generator = try ConstrainedJSONGenerator(backend: backend, schema: discriminatedUnionSchema())
+        let result = try await generator.generate()
+        #expect(result == #"{"type":"\#(type)","\#(property)":"a"}"#)
+        #expect(generator.generatedTokenCount == backend.capture.tokens.count)
+    }
+
     // MARK: - Decimal / number token mask
 
     private func numberTokenMaps() -> (

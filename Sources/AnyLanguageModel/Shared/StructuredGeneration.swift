@@ -401,12 +401,77 @@ struct ConstrainedJSONGenerator<Backend: TokenBackend> {
             if variants.count == 1 {
                 return try await generateNode(variants[0])
             }
+            // The model chooses among objects that a constant property tells apart,
+            // like the cases of an enumeration with associated values.
+            if let union = discriminatedUnion(variants) {
+                return try await generateDiscriminatedUnion(union)
+            }
             // Choose the first variant to keep selection deterministic.
             return try await generateNode(variants[0])
         }
     }
 
+    /// Objects that a required, constant string property tells apart.
+    private struct DiscriminatedUnion {
+        /// The name of the constant property.
+        var property: String
+        /// The value of the constant property in each object, with the object.
+        var cases: [(value: String, object: GenerationSchema.ObjectNode)]
+    }
+
+    /// Returns the union of the variants if they're all objects
+    /// with a required property that has a different constant string value in each.
+    private func discriminatedUnion(_ variants: [GenerationSchema.Node]) -> DiscriminatedUnion? {
+        var objects: [GenerationSchema.ObjectNode] = []
+        for variant in variants {
+            guard case .object(let object)? = schema.resolving(variant) else { return nil }
+            objects.append(object)
+        }
+        guard let first = objects.first else { return nil }
+        for property in first.required.sorted() {
+            let values = objects.compactMap { object -> String? in
+                guard object.required.contains(property),
+                    case .string(let node)? = object.properties[property],
+                    node.pattern == nil,
+                    let choices = node.enumChoices, choices.count == 1
+                else { return nil }
+                return choices[0]
+            }
+            if values.count == objects.count, Set(values).count == values.count {
+                return DiscriminatedUnion(property: property, cases: Array(zip(values, objects)))
+            }
+        }
+        return nil
+    }
+
+    /// Generates one object of a discriminated union.
+    ///
+    /// The object starts with the constant property,
+    /// whose value the model chooses from the union's values,
+    /// and continues with the other properties of the object with that value.
+    private mutating func generateDiscriminatedUnion(_ union: DiscriminatedUnion) async throws -> String {
+        var output = try await emit("{")
+        output += try await emit("\"\(union.property)\":")
+        let value = try await generateString(GenerationSchema.StringNode(enumChoices: union.cases.map(\.value)))
+        output += value
+        guard let object = union.cases.first(where: { "\"\($0.value)\"" == value })?.object else {
+            throw ConstrainedGenerationError.tokenizationFailed
+        }
+        output += try await generateProperties(of: object, emitted: [union.property])
+        return output
+    }
+
     private mutating func generateObject(_ node: GenerationSchema.ObjectNode) async throws -> String {
+        let output = try await emit("{")
+        return output + (try await generateProperties(of: node, emitted: []))
+    }
+
+    /// Generates the properties of an object after its opening brace and the properties already emitted,
+    /// through its closing brace.
+    private mutating func generateProperties(
+        of node: GenerationSchema.ObjectNode,
+        emitted: Set<String>
+    ) async throws -> String {
         // Object *key set* is model-driven under the JSON grammar. The previous
         // implementation pre-filtered optional properties with a hash of the field
         // name XOR the token budget, so each optional was always-on or always-off
@@ -416,10 +481,10 @@ struct ConstrainedJSONGenerator<Backend: TokenBackend> {
         // `}` once every required property has been emitted. For schemas with no
         // required properties that makes `{}` reachable (schema-valid, and what the
         // model asked for) — a visible behaviour change for such schemas.
-        var remainingKeys = Set(node.properties.keys)
+        var remainingKeys = Set(node.properties.keys).subtracting(emitted)
         let required = node.required
-        var output = try await emit("{")
-        var emittedAnyProperty = false
+        var output = ""
+        var emittedAnyProperty = !emitted.isEmpty
 
         while !remainingKeys.isEmpty {
             let missingRequired = required.intersection(remainingKeys)

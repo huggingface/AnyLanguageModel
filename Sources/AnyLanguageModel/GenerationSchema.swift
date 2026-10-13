@@ -1155,7 +1155,8 @@ extension GenerationSchema {
         }
     }
 
-    private func resolving(_ node: Node, depth: Int) -> Node? {
+    /// Returns the node that a reference refers to, following any chain of references.
+    func resolving(_ node: Node, depth: Int = 0) -> Node? {
         guard depth < 64 else { return nil }
         guard case .ref(let name) = node else { return node }
         return defs[name].flatMap { resolving($0, depth: depth + 1) }
