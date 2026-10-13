@@ -1850,9 +1850,9 @@ private func convertToolToOpenAIFormat(_ tool: any Tool) -> OpenAITool {
 
     // Handle the case where the schema has a root reference
     if let resolvedSchema = tool.parameters.withResolvedRoot() {
-        rawParameters = try? JSONValue(resolvedSchema)
+        rawParameters = try? resolvedSchema.jsonValue(constantsAsEnums: true)
     } else {
-        rawParameters = try? JSONValue(tool.parameters)
+        rawParameters = try? tool.parameters.jsonValue(constantsAsEnums: true)
     }
 
     let fn = OpenAIFunction(
@@ -2065,7 +2065,8 @@ private extension GenerationSchema {
     /// 1. `additionalProperties: false` at the root
     /// 2. All properties (including optional ones) listed in `required`
     func toJSONValueForOpenAIStrictMode() throws -> JSONValue {
-        let jsonSchema = try inlinedJSONSchema(omitAdditionalProperties: false)
+        // OpenAI's structured outputs don't support `const`.
+        let jsonSchema = try inlinedJSONSchema(omitAdditionalProperties: false, constantsAsEnums: true)
         var jsonSchemaValue = try JSONValue(jsonSchema)
 
         if case .object(var schemaObj) = jsonSchemaValue {

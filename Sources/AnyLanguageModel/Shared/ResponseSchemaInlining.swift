@@ -9,19 +9,33 @@ extension GenerationSchema {
     /// would leave their `$ref`s dangling.
     /// Providers that send the schema over the wire use this instead.
     ///
-    /// - Parameter omitAdditionalProperties: Overrides the encoder's
-    ///   `additionalProperties` handling when set.
+    /// - Parameters:
+    ///   - omitAdditionalProperties: Overrides the encoder's
+    ///     `additionalProperties` handling when set.
+    ///   - constantsAsEnums: Whether to encode a constant string as a one-choice `enum`,
+    ///     for providers whose schemas don't support `const`.
     /// - Throws: An error if a reference is missing or recursive,
     ///   or if inlining exceeds the depth or node limit.
-    func inlinedJSONSchema(omitAdditionalProperties: Bool? = nil) throws -> JSONSchema {
+    func inlinedJSONSchema(omitAdditionalProperties: Bool? = nil, constantsAsEnums: Bool = false) throws -> JSONSchema {
         var remainingNodes = maxInlinedSchemaNodes
         let inlined = try inlineReferences(in: root, remainingNodes: &remainingNodes)
         let encoder = JSONEncoder()
         if let omitAdditionalProperties {
             encoder.userInfo[GenerationSchema.omitAdditionalPropertiesKey] = omitAdditionalProperties
         }
+        encoder.userInfo[GenerationSchema.constantsAsEnumsKey] = constantsAsEnums
         let data = try encoder.encode(inlined)
         return try JSONDecoder().decode(JSONSchema.self, from: data)
+    }
+
+    /// Encodes the schema, with its `$defs`, as a JSON value.
+    ///
+    /// - Parameter constantsAsEnums: Whether to encode a constant string as a one-choice `enum`,
+    ///   for providers whose schemas don't support `const`.
+    func jsonValue(constantsAsEnums: Bool) throws -> JSONValue {
+        let encoder = JSONEncoder()
+        encoder.userInfo[GenerationSchema.constantsAsEnumsKey] = constantsAsEnums
+        return try JSONDecoder().decode(JSONValue.self, from: encoder.encode(self))
     }
 
     enum InliningError: Error, Equatable, LocalizedError {

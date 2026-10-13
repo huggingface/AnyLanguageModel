@@ -1035,9 +1035,9 @@ private struct OpenResponsesTool: Sendable {
 private func convertToolToOpenResponsesFormat(_ tool: any Tool) -> OpenResponsesTool {
     let parameters: JSONValue?
     if let resolved = tool.parameters.withResolvedRoot() {
-        parameters = try? JSONValue(resolved)
+        parameters = try? resolved.jsonValue(constantsAsEnums: true)
     } else {
-        parameters = try? JSONValue(tool.parameters)
+        parameters = try? tool.parameters.jsonValue(constantsAsEnums: true)
     }
     return OpenResponsesTool(
         name: tool.name,
@@ -1290,7 +1290,8 @@ public enum OpenResponsesLanguageModelError: LocalizedError, Sendable {
 
 private extension GenerationSchema {
     func toJSONValueForOpenResponsesStrictMode() throws -> JSONValue {
-        let jsonSchema = try inlinedJSONSchema(omitAdditionalProperties: false)
+        // Open Responses providers follow OpenAI's structured outputs, which don't support `const`.
+        let jsonSchema = try inlinedJSONSchema(omitAdditionalProperties: false, constantsAsEnums: true)
         var value = try JSONValue(jsonSchema)
         if case .object(var obj) = value {
             obj["additionalProperties"] = .bool(false)
