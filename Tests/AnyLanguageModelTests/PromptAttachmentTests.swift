@@ -204,7 +204,30 @@ struct PromptAttachmentTests {
         #endif
     #endif
 
+    #if canImport(FoundationModels)
+        @Test func bridgeErrorsDescribeTheirCause() {
+            let unavailable = AnyLanguageModel.PromptBridgeError.attachmentsUnavailable
+            let nonFileURL = AnyLanguageModel.PromptBridgeError.nonFileImageURL
+            #expect(unavailable.localizedDescription.contains("Swift 6.4"))
+            #expect(unavailable.localizedDescription.contains("OS 27"))
+            #expect(nonFileURL.localizedDescription.contains("local files"))
+        }
+    #endif
+
     #if canImport(FoundationModels) && compiler(>=6.4) && !os(tvOS) && !os(watchOS)
+        @available(macOS 27, iOS 27, visionOS 27, *)
+        @Test func nativeBridgeDescribesRemoteImageURLs() throws {
+            let url = try #require(URL(string: "https://example.com/image.png"))
+            let input = AnyLanguageModel.Prompt {
+                AnyLanguageModel.Attachment(imageURL: url)
+            }
+            #expect {
+                _ = try input.toFoundationModels()
+            } throws: { error in
+                error.localizedDescription.contains("local files")
+            }
+        }
+
         @available(macOS 27, iOS 27, visionOS 27, *)
         @Test func nativeBridgeRetainsAttachment() async throws {
             let input = try AnyLanguageModel.Prompt {

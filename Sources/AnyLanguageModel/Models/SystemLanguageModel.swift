@@ -557,9 +557,20 @@
         }
     }
 
-    enum PromptBridgeError: Error {
+    enum PromptBridgeError: Error, LocalizedError {
         case attachmentsUnavailable
         case nonFileImageURL
+
+        var errorDescription: String? {
+            switch self {
+            case .attachmentsUnavailable:
+                return
+                    "Prompt attachments require an app built with Swift 6.4 or later that runs Foundation Models on OS 27 or later, and aren't available on tvOS or watchOS."
+            case .nonFileImageURL:
+                return
+                    "Foundation Models accepts image attachment URLs only for local files. Download the image to a file URL, or attach it as a CGImage."
+            }
+        }
     }
 
     /// A type-erased wrapper that bridges any `Tool` to `FoundationModels.Tool`.
