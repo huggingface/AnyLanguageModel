@@ -197,19 +197,8 @@
             let fmPrompt = prompt.toFoundationModels()
             let fmOptions = options.toFoundationModels()
 
-            let fmSession = FoundationModels.LanguageModelSession(
-                model: systemModel,
-                tools: session.tools.toFoundationModels(),
-                transcript: fmTranscriptDroppingDuplicatePrompt(session.transcript, prompt: prompt).toFoundationModels(
-                    instructions: session.instructions,
-                    toolDefinitions: session.tools
-                        .filter(\.includesSchemaInInstructions)
-                        .map { Transcript.ToolDefinition(tool: $0) }
-                )
-            )
-
             return try await fmRespond(
-                makeSession: { fmSession },
+                makeSession: { try self.makeSession(for: session, prompt: prompt) },
                 fmPrompt: fmPrompt,
                 fmOptions: fmOptions,
                 type: type,
@@ -263,19 +252,8 @@
             let fmPrompt = prompt.toFoundationModels()
             let fmOptions = options.toFoundationModels()
 
-            let fmSession = FoundationModels.LanguageModelSession(
-                model: systemModel,
-                tools: session.tools.toFoundationModels(),
-                transcript: fmTranscriptDroppingDuplicatePrompt(session.transcript, prompt: prompt).toFoundationModels(
-                    instructions: session.instructions,
-                    toolDefinitions: session.tools
-                        .filter(\.includesSchemaInInstructions)
-                        .map { Transcript.ToolDefinition(tool: $0) }
-                )
-            )
-
             return fmStreamResponse(
-                makeSession: { fmSession },
+                makeSession: { try self.makeSession(for: session, prompt: prompt) },
                 fmPrompt: fmPrompt,
                 fmOptions: fmOptions,
                 type: type,
@@ -290,13 +268,14 @@
             issues: [LanguageModelFeedback.Issue],
             desiredOutput: Transcript.Entry?
         ) -> Data {
+            let requestContext = session.resolvedRequestContext()
             // Attach the feedback to the session's conversation, including its latest response.
             let fmSession = FoundationModels.LanguageModelSession(
                 model: systemModel,
-                tools: session.tools.toFoundationModels(),
-                transcript: session.transcript.toFoundationModels(
-                    instructions: session.instructions,
-                    toolDefinitions: session.tools
+                tools: requestContext.tools.toFoundationModels(),
+                transcript: requestContext.transcript.toFoundationModels(
+                    instructions: requestContext.instructions,
+                    toolDefinitions: requestContext.tools
                         .filter(\.includesSchemaInInstructions)
                         .map { Transcript.ToolDefinition(tool: $0) }
                 )
@@ -310,6 +289,41 @@
                 sentiment: fmSentiment,
                 issues: fmIssues,
                 desiredOutput: fmDesiredOutput
+            )
+        }
+
+        private func makeSession(
+            for session: LanguageModelSession,
+            prompt: Prompt
+        ) throws -> FoundationModels.LanguageModelSession {
+            #if compiler(>=6.4) && !os(tvOS)
+                if #available(macOS 27.0, iOS 27.0, visionOS 27.0, watchOS 27.0, *) {
+                    return makeFoundationModelsSession(
+                        model: systemModel,
+                        session: session,
+                        prompt: prompt
+                    )
+                }
+            #endif
+
+            // Before OS 27, Foundation Models can't resolve instructions and tools
+            // again for the request that continues after tool calls.
+            guard !session.usesDynamicInstructions else {
+                throw SystemLanguageModel.Error.dynamicInstructionsUnavailable
+            }
+            let requestContext = session.resolvedRequestContext()
+            return FoundationModels.LanguageModelSession(
+                model: systemModel,
+                tools: requestContext.tools.toFoundationModels(),
+                transcript: fmTranscriptDroppingDuplicatePrompt(
+                    requestContext.transcript,
+                    prompt: prompt
+                ).toFoundationModels(
+                    instructions: requestContext.instructions,
+                    toolDefinitions: requestContext.tools
+                        .filter(\.includesSchemaInInstructions)
+                        .map { Transcript.ToolDefinition(tool: $0) }
+                )
             )
         }
 
@@ -331,6 +345,88 @@
         }
         return Transcript(entries: transcript.dropLast())
     }
+
+    @available(macOS 26.0, iOS 26.0, tvOS 26.0, visionOS 26.0, *)
+    @available(watchOS, unavailable)
+    extension SystemLanguageModel {
+        /// An error from the system language model.
+        ///
+        /// - Note: This API is exclusive to AnyLanguageModel
+        ///   and using it means your code is no longer drop-in compatible
+        ///   with the Foundation Models framework.
+        ///   Foundation Models 27 has a `SystemLanguageModel.Error` type with other cases.
+        public enum Error: LocalizedError, Sendable, Equatable {
+            /// The session uses dynamic instructions,
+            /// which the system language model supports only in apps built with Swift 6.4 or later
+            /// that run on OS 27 or later, and not on tvOS.
+            case dynamicInstructionsUnavailable
+
+            public var errorDescription: String? {
+                switch self {
+                case .dynamicInstructionsUnavailable:
+                    "Dynamic instructions require an app built with Swift 6.4 or later that runs Foundation Models on OS 27 or later, and aren't available on tvOS."
+                }
+            }
+        }
+    }
+
+    #if compiler(>=6.4) && !os(tvOS)
+        /// Dynamic instructions that resolve an AnyLanguageModel session
+        /// each time Foundation Models evaluates them.
+        @available(macOS 27.0, iOS 27.0, visionOS 27.0, watchOS 27.0, *)
+        struct FoundationModelsDynamicInstructionsAdapter: FoundationModels.DynamicInstructions {
+            let session: LanguageModelSession
+
+            var body: some FoundationModels.DynamicInstructions {
+                let requestContext = session.resolvedRequestContext()
+                if let instructions = requestContext.instructions {
+                    instructions.toFoundationModels()
+                }
+                requestContext.tools.toFoundationModels()
+            }
+        }
+
+        @available(macOS 27.0, iOS 27.0, visionOS 27.0, watchOS 27.0, *)
+        func makeFoundationModelsSession<Model: FoundationModels.LanguageModel>(
+            model: Model,
+            session: LanguageModelSession,
+            prompt: Prompt
+        ) -> FoundationModels.LanguageModelSession {
+            if session.usesDynamicInstructions {
+                // Foundation Models evaluates the dynamic instructions itself,
+                // so the history leaves out the instructions entry.
+                let history = fmTranscriptDroppingDuplicatePrompt(
+                    Transcript(
+                        entries: session.transcript.filter { entry in
+                            if case .instructions = entry { return false }
+                            return true
+                        }
+                    ),
+                    prompt: prompt
+                ).toFoundationModels(instructions: nil, toolDefinitions: [])
+                return FoundationModels.LanguageModelSession(
+                    model: model,
+                    dynamicInstructions: FoundationModelsDynamicInstructionsAdapter(session: session),
+                    history: history
+                )
+            }
+
+            let requestContext = session.resolvedRequestContext()
+            return FoundationModels.LanguageModelSession(
+                model: model,
+                tools: requestContext.tools.toFoundationModels(),
+                transcript: fmTranscriptDroppingDuplicatePrompt(
+                    requestContext.transcript,
+                    prompt: prompt
+                ).toFoundationModels(
+                    instructions: requestContext.instructions,
+                    toolDefinitions: requestContext.tools
+                        .filter(\.includesSchemaInInstructions)
+                        .map { Transcript.ToolDefinition(tool: $0) }
+                )
+            )
+        }
+    #endif
 
     @available(macOS 26.0, iOS 26.0, watchOS 27.0, tvOS 26.0, visionOS 26.0, *)
     extension Prompt {
@@ -722,6 +818,9 @@
                     )
                     fmEntries.append(.prompt(fmPrompt))
 
+                case .reasoning:
+                    // Keep display history in the transcript without sending unsupported replay state.
+                    continue
                 case .response(let response):
                     let fmSegments = response.segments.toFoundationModels()
                     let fmResponse = FoundationModels.Transcript.Response(

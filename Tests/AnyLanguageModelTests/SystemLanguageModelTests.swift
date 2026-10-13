@@ -92,6 +92,50 @@ import Testing
         #expect(schema.defs[nestedTypeName] != nil)
     }
 
+    private final class SwitchState: @unchecked Sendable {
+        var useWeather = false
+    }
+
+    private struct SwitchedInstructions: DynamicInstructions {
+        let state: SwitchState
+
+        var body: some DynamicInstructions {
+            if state.useWeather {
+                Instructions("Answer weather questions with the getWeather tool.")
+                WeatherTool()
+            } else {
+                Instructions("Reply with exactly one word: apple.")
+            }
+        }
+    }
+
+    private struct BriefInstructions: DynamicInstructions {
+        var body: some DynamicInstructions {
+            Instructions("Be brief.")
+        }
+    }
+
+    /// Before OS 27, and on tvOS, the system model rejects dynamic instructions
+    /// before it uses the model, so this runs even where the model is unavailable.
+    @available(macOS 26.0, iOS 26.0, tvOS 26.0, visionOS 26.0, *)
+    @Test func dynamicInstructionsAreUnavailableWithoutNativeSupport() async throws {
+        var hasNativeSupport = false
+        #if compiler(>=6.4) && !os(tvOS)
+            if #available(macOS 27.0, iOS 27.0, visionOS 27.0, *) {
+                hasNativeSupport = true
+            }
+        #endif
+        guard !hasNativeSupport else { return }
+
+        let session = LanguageModelSession(model: SystemLanguageModel(), dynamicInstructions: BriefInstructions())
+        await #expect(throws: SystemLanguageModel.Error.dynamicInstructionsUnavailable) {
+            try await session.respond(to: "Hello")
+        }
+        await #expect(throws: SystemLanguageModel.Error.dynamicInstructionsUnavailable) {
+            for try await _ in session.streamResponse(to: "Hello") {}
+        }
+    }
+
     @Suite(
         "SystemLanguageModel",
         .enabled(if: isSystemLanguageModelAvailable)
@@ -198,6 +242,32 @@ import Testing
             #expect(!snapshots.isEmpty)
             #expect(!snapshots.last!.rawContent.jsonString.isEmpty)
         }
+
+        #if compiler(>=6.4) && !os(tvOS)
+            @available(macOS 26.0, iOS 26.0, tvOS 26.0, visionOS 26.0, *)
+            @Test func dynamicInstructionsChangeBetweenRequests() async throws {
+                guard #available(macOS 27.0, iOS 27.0, visionOS 27.0, *) else { return }
+                let state = SwitchState()
+                let session = LanguageModelSession(
+                    model: SystemLanguageModel(),
+                    dynamicInstructions: SwitchedInstructions(state: state)
+                )
+                let options = GenerationOptions(sampling: .greedy)
+
+                let first = try await session.respond(to: "What should you reply?", options: options)
+                #expect(first.content.localizedCaseInsensitiveContains("apple"))
+
+                state.useWeather = true
+                let second = try await session.respond(to: "How's the weather in San Francisco?", options: options)
+                #expect(second.content.contains("72°F"))
+
+                #expect(
+                    !session.transcript.contains {
+                        if case .instructions = $0 { true } else { false }
+                    }
+                )
+            }
+        #endif
 
         @available(macOS 26.0, iOS 26.0, tvOS 26.0, visionOS 26.0, *)
         @Test func withTools() async throws {

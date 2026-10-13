@@ -210,6 +210,11 @@ public struct GenerableMacro: MemberMacro, ExtensionMacro {
                             continue
                         }
 
+                        if isStringChoiceGuide(guideExpression) {
+                            constraints.stringGuides.append(guideExpression.trimmedDescription)
+                            continue
+                        }
+
                         if let functionCall = guideExpression.as(FunctionCallExprSyntax.self) {
                             applyConstraints(from: functionCall, into: &constraints)
                         } else if let memberAccess = guideExpression.as(MemberAccessExprSyntax.self),
@@ -275,6 +280,16 @@ public struct GenerableMacro: MemberMacro, ExtensionMacro {
         default:
             break
         }
+    }
+
+    /// Whether `expression` is a `.constant(_:)` or `.anyOf(_:)` string guide,
+    /// which is passed through to the generated schema as written.
+    private static func isStringChoiceGuide(_ expression: ExprSyntax) -> Bool {
+        guard let functionCall = expression.as(FunctionCallExprSyntax.self),
+            let memberAccess = functionCall.calledExpression.as(MemberAccessExprSyntax.self)
+        else { return false }
+        let name = memberAccess.declName.baseName.text
+        return name == "constant" || name == "anyOf"
     }
 
     private static func parsePatternFromExpression(_ expression: ExprSyntax) -> String? {
@@ -393,6 +408,10 @@ public struct GenerableMacro: MemberMacro, ExtensionMacro {
             }
 
             return guides.isEmpty ? "[]" : "[\(guides.joined(separator: ", "))]"
+        }
+
+        if baseType == "String", !property.guide.constraints.stringGuides.isEmpty {
+            return "[\(property.guide.constraints.stringGuides.joined(separator: ", "))]"
         }
 
         return "[]"
@@ -1511,6 +1530,7 @@ private struct Constraints {
     var minimum: Double?
     var maximum: Double?
     var pattern: String?
+    var stringGuides: [String] = []
 }
 
 private struct PropertyInfo {
