@@ -98,6 +98,7 @@ public final class SessionPropertyValues: @unchecked Sendable {
         return SessionHistoryBinding(
             entries,
             isWritable: isWritable,
+            protectedEntryIDs: protectedEntryIDs,
             persist: persist
         )
     }
@@ -130,21 +131,29 @@ enum SessionPropertyBinding {
 final class SessionHistoryBinding: @unchecked Sendable {
     private let storage: Locked<Transcript.HistoryView>
     let isWritable: Bool
+    private let protectedEntryIDs: Set<String>
     private let persistValue: (@Sendable (Transcript.HistoryView) -> Void)?
 
     init(
         _ entries: Transcript.HistoryView,
         isWritable: Bool,
+        protectedEntryIDs: Set<String> = [],
         persist: (@Sendable (Transcript.HistoryView) -> Void)? = nil
     ) {
         storage = Locked(entries)
         self.isWritable = isWritable
+        self.protectedEntryIDs = protectedEntryIDs
         self.persistValue = persist
     }
 
     var entries: Transcript.HistoryView {
         get { storage.withLock { $0 } }
-        set { storage.withLock { $0 = newValue } }
+        set {
+            storage.withLock { current in
+                let protected = current.filter { protectedEntryIDs.contains($0.id) }
+                current = newValue.filter { !protectedEntryIDs.contains($0.id) } + protected
+            }
+        }
     }
 
     func persist(_ entries: Transcript.HistoryView) {

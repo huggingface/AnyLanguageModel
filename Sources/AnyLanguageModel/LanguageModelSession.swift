@@ -375,7 +375,10 @@ public final class LanguageModelSession: @unchecked Sendable {
             tools: resolved.tools,
             model: resolved.model ?? model,
             options: resolvedOptions,
-            contextOptions: .init(reasoningLevel: resolved.reasoningLevel),
+            contextOptions: .init(
+                includeSchemaInPrompt: resolved.includeSchemaInPrompt,
+                reasoningLevel: resolved.reasoningLevel
+            ),
             transcriptErrorHandlingPolicy: resolved.hasTranscriptErrorHandlingPolicy
                 ? resolved.transcriptErrorHandlingPolicy
                 : sessionErrorPolicy,

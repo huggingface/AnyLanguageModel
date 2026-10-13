@@ -29,6 +29,7 @@ struct DynamicProfileTests {
         #expect(requests.map(\.temperature) == [0.2, 0.8])
         #expect(requests.map(\.maximumResponseTokens) == [64, 128])
         #expect(requests.map(\.reasoningLevel) == [.light, .deep])
+        #expect(requests.map(\.includeSchemaInPrompt) == [false, true])
         #expect(session.transcript.count == 4)
         #expect(!session.transcript.contains { if case .instructions = $0 { true } else { false } })
     }
@@ -54,6 +55,7 @@ struct DynamicProfileTests {
         #expect(request.maximumResponseTokens == 17)
         #expect(request.toolCallingMode == .required)
         #expect(request.reasoningLevel == .light)
+        #expect(request.includeSchemaInPrompt == false)
     }
 
     @Test func lifecycleCallbacksAccumulateInOrderForResponseAndStream() async throws {
@@ -319,6 +321,41 @@ struct DynamicProfileTests {
         #expect(session.transcript == durableBefore)
     }
 
+    @Test func modelHandoffIsSkippedForTheInitialRequest() async throws {
+        let session = LanguageModelSession(
+            profile: LifecycleFixtureProfile(
+                state: LifecycleFixtureState(),
+                model: LifecycleFixtureModel()
+            )
+        )
+        let context = try await session.resolvedRequestContext(including: [], options: .init())
+        let response: LanguageModelSession.Response<String>? = try await session.profileContinuationResponse(
+            ifSelectedModelDiffersFrom: UUID(),
+            requestContext: context,
+            prompt: Prompt("Initial"),
+            generating: String.self,
+            schema: String.generationSchema,
+            includeSchemaInPrompt: true,
+            prefixEntries: [],
+            prefixUsage: .zero,
+            prefixText: ""
+        )
+        let stream: LanguageModelSession.ResponseStream<String>? = session.profileContinuationStream(
+            ifSelectedModelDiffersFrom: UUID(),
+            requestContext: context,
+            prompt: Prompt("Initial"),
+            generating: String.self,
+            schema: String.generationSchema,
+            includeSchemaInPrompt: true,
+            prefixEntries: [],
+            prefixUsage: .zero,
+            prefixText: ""
+        )
+
+        #expect(response == nil)
+        #expect(stream == nil)
+    }
+
     @Test func profileErrorPolicyDoesNotLeakIntoTheNextProfile() async throws {
         let state = LifecycleFixtureState()
         let session = LanguageModelSession(
@@ -358,6 +395,7 @@ private struct FixtureProfile: LanguageModelSession.DynamicProfile, @unchecked S
             .temperature(0.8)
             .maximumResponseTokens(128)
             .reasoningLevel(.deep)
+            .includeSchemaInPrompt(true)
             .historyTransform(recordingTransform)
             .onToolCall(perform: recordCall)
             .onToolOutput(perform: recordOutput)
@@ -370,6 +408,7 @@ private struct FixtureProfile: LanguageModelSession.DynamicProfile, @unchecked S
             .temperature(0.2)
             .maximumResponseTokens(64)
             .reasoningLevel(.light)
+            .includeSchemaInPrompt(false)
             .historyTransform(recordingTransform)
             .onToolCall(perform: recordCall)
             .onToolOutput(perform: recordOutput)
@@ -427,7 +466,8 @@ private struct ProfileFixtureModel: LanguageModel {
                     temperature: context.options.temperature,
                     maximumResponseTokens: context.options.maximumResponseTokens,
                     toolCallingMode: context.options.toolCallingMode,
-                    reasoningLevel: context.contextOptions.reasoningLevel
+                    reasoningLevel: context.contextOptions.reasoningLevel,
+                    includeSchemaInPrompt: includeSchemaInPrompt
                 )
             )
         }
@@ -478,6 +518,7 @@ private final class ProfileFixtureState: @unchecked Sendable {
         let maximumResponseTokens: Int?
         let toolCallingMode: GenerationOptions.ToolCallingMode?
         let reasoningLevel: ContextOptions.ReasoningLevel?
+        let includeSchemaInPrompt: Bool
     }
 
     private let selection = Locked(false)
@@ -567,7 +608,11 @@ private struct HistoryWritingProfile: LanguageModelSession.DynamicProfile {
     @SessionProperty(\.history) private var history
 
     var body: some LanguageModelSession.DynamicProfile {
-        history = history
+        history = history.filter { entry in
+            if case .toolCalls = entry { return false }
+            if case .toolOutput = entry { return false }
+            return true
+        }
         return LanguageModelSession.Profile { Instructions("History") }
             .model(model)
     }
