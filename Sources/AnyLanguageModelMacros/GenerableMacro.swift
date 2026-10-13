@@ -1159,21 +1159,17 @@ public struct GenerableMacro: MemberMacro, ExtensionMacro {
                 let payload = enumCase.payload
                 let bindings = payload.indices.map { "let value\($0)" }.joined(separator: ", ")
                 let pattern = payload.isEmpty ? ".\(enumCase.name)" : ".\(enumCase.name)(\(bindings))"
-                // An optional value that's nil is left out, as for a structure's properties.
+                // Like Foundation Models, write an optional value that's nil as null,
+                // whatever the spelling of its type.
                 let assignments = payload.enumerated().map { index, value in
-                    let assignment = """
-                        properties["\(value.property)"] = value\(index).generatedContent
-                                    keys.append("\(value.property)")
-                        """
-                    return value.isOptional
-                        ? "if let value\(index) {\n                \(assignment)\n            }" : assignment
+                    "properties[\"\(value.property)\"] = value\(index).generatedContent"
                 }.joined(separator: "\n            ")
+                let keys = (["type"] + payload.map(\.property)).map { "\"\($0)\"" }.joined(separator: ", ")
                 return """
                     case \(pattern):
-                        var properties: [String: GeneratedContent] = ["type": GeneratedContent("\(enumCase.name)")]
-                        var keys = ["type"]
+                        \(payload.isEmpty ? "let" : "var") properties: [String: GeneratedContent] = ["type": GeneratedContent("\(enumCase.name)")]
                         \(assignments)
-                        return GeneratedContent(kind: .structure(properties: properties, orderedKeys: keys))
+                        return GeneratedContent(kind: .structure(properties: properties, orderedKeys: [\(keys)]))
                     """
             }.joined(separator: "\n            ")
 
@@ -1294,11 +1290,14 @@ private struct EnumCaseInfo {
 
     /// Each value with the property it's generated as: its label, or `value`, `value1` and so on
     /// for an unlabeled one, as Foundation Models names them.
-    var payload: [(label: String?, property: String, type: String, isOptional: Bool)] {
+    ///
+    /// The generated code doesn't depend on whether a value's type is optional:
+    /// overload resolution makes an optional value's property optional in the schema,
+    /// and reads a missing or `null` property as `nil`.
+    /// That covers a spelling the macro can't resolve, like a type alias.
+    var payload: [(label: String?, property: String, type: String)] {
         associatedValues.enumerated().map { index, value in
-            let type = value.type
-            let isOptional = type.hasSuffix("?") || type.hasPrefix("Optional<")
-            return (value.label, value.label ?? (index == 0 ? "value" : "value\(index)"), type, isOptional)
+            (value.label, value.label ?? (index == 0 ? "value" : "value\(index)"), value.type)
         }
     }
 }

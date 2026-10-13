@@ -3,19 +3,33 @@ import Testing
 
 @testable import AnyLanguageModel
 
+// `GenerableEnumPayloadFoundationModelsTests` compares these enums
+// with the same enums in Foundation Models.
+
 @Generable
-private enum Operand: Equatable {
+enum Operand: Equatable {
     case name(String)
     case number(Double)
 }
 
 @Generable(description: "One thing a clause does.")
-private enum Step: Equatable {
+enum Step: Equatable {
     case set(field: String, to: Operand)
     case add(Operand, to: String)
     case pair(Int, Int)
     case note(String?)
     case reset
+}
+
+typealias MaybeText = String?
+
+/// Optional values, with each spelling of an optional type.
+@Generable
+enum Annotation: Equatable {
+    case note(String?)
+    case alias(MaybeText)
+    case generic(Optional<Int>)
+    case qualified(Swift.Optional<String>)
 }
 
 @Generable
@@ -70,8 +84,7 @@ struct GenerableEnumPayloadTests {
         #expect(keys == ["type", "field", "to"])
     }
 
-    @Test func aMissingOptionalValueIsLeftOut() throws {
-        #expect(try json(Step.note(nil).generatedContent.jsonString) == json(#"{"type": "note"}"#))
+    @Test func aMissingOptionalValueIsNil() throws {
         #expect(try Step(GeneratedContent(json: #"{"type": "note"}"#)) == .note(nil))
         #expect(try Step(GeneratedContent(json: #"{"type": "note", "value": "hi"}"#)) == .note("hi"))
     }
@@ -79,6 +92,38 @@ struct GenerableEnumPayloadTests {
     /// Foundation Models writes a `nil` value as `null`, and reads `null` as `nil`.
     @Test func aNullOptionalValueIsNil() throws {
         #expect(try Step(GeneratedContent(json: #"{"type": "note", "value": null}"#)) == .note(nil))
+    }
+
+    /// The macro can't see through a type alias,
+    /// so nothing it generates depends on how an optional type is spelled.
+    @Test func optionalValuesDoNotDependOnSpelling() throws {
+        let expected: [(Annotation, String)] = [
+            (.note(nil), #"{"type":"note","value":null}"#),
+            (.alias(nil), #"{"type":"alias","value":null}"#),
+            (.generic(nil), #"{"type":"generic","value":null}"#),
+            (.qualified(nil), #"{"type":"qualified","value":null}"#),
+            (.note("a"), #"{"type":"note","value":"a"}"#),
+            (.alias("b"), #"{"type":"alias","value":"b"}"#),
+            (.generic(2), #"{"type":"generic","value":2}"#),
+            (.qualified("c"), #"{"type":"qualified","value":"c"}"#),
+        ]
+        for (annotation, content) in expected {
+            #expect(annotation.generatedContent.jsonString == content)
+            #expect(try Annotation(GeneratedContent(json: content)) == annotation)
+        }
+
+        let missing: [(String, Annotation)] = [
+            ("note", .note(nil)), ("alias", .alias(nil)), ("generic", .generic(nil)), ("qualified", .qualified(nil)),
+        ]
+        for (type, annotation) in missing {
+            #expect(try Annotation(GeneratedContent(json: #"{"type":"\#(type)"}"#)) == annotation)
+        }
+
+        let (defs, choices) = try caseDefinitions(Annotation.generationSchema)
+        #expect(choices.count == 4)
+        for name in choices {
+            #expect(defs[name]?["required"] as? [String] == ["type"])
+        }
     }
 
     @Test func anUnknownTypeIsAnError() {
