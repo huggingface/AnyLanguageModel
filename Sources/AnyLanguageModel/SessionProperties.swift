@@ -47,6 +47,10 @@ public final class SessionPropertyValues: @unchecked Sendable {
     public var history: Transcript.HistoryView {
         get { SessionPropertyBinding.history?.entries ?? historyGetter() }
         set {
+            let newValue = newValue.filter { entry in
+                if case .instructions = entry { return false }
+                return true
+            }
             if let history = SessionPropertyBinding.history {
                 precondition(
                     history.isWritable,
