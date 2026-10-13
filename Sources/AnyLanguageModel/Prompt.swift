@@ -53,18 +53,38 @@ public struct Prompt: Sendable {
         self.components = components
     }
 
-    func makeTranscriptSegments() throws -> [Transcript.Segment] {
-        try components.map { component in
+    func makeTranscriptSegments(occurrenceID: String = UUID().uuidString) throws -> [Transcript.Segment] {
+        try components.enumerated().map { index, component in
+            let id = Self.transcriptSegmentID(occurrenceID: occurrenceID, index: index)
             switch component {
             case .text(let text):
-                return .text(.init(content: text.content))
+                return .text(.init(id: id, content: text.content))
             case .image(_, let content):
-                return .image(try content.makeSegment(id: UUID().uuidString))
+                return .image(try content.makeSegment(id: id))
             }
         }
     }
 
+    func matchesTranscriptOccurrence(
+        _ segments: [Transcript.Segment],
+        occurrenceID: String
+    ) -> Bool {
+        guard components.count == segments.count else { return false }
+        return segments.indices.allSatisfy { index in
+            segments[index].id
+                == Self.transcriptSegmentID(
+                    occurrenceID: occurrenceID,
+                    index: index
+                )
+        }
+    }
+
+    private static func transcriptSegmentID(occurrenceID: String, index: Int) -> String {
+        "\(occurrenceID).\(index)"
+    }
+
     static func joining(_ prompts: [Prompt], trim: Bool = false) -> Prompt {
+        guard !prompts.isEmpty else { return Prompt(content: "") }
         var components: [Component] = []
         for prompt in prompts {
             for component in prompt.components {
