@@ -26,6 +26,7 @@ extension LanguageModelSession {
         prefixUsage: Usage,
         prefixText: String
     ) async throws -> Response<Content>? {
+        guard !prefixEntries.isEmpty else { return nil }
         if let selected = requestContext.model as? any ProfileRequestIdentifiedLanguageModel,
             selected.profileRequestIdentity == currentModelIdentity
         {
@@ -86,6 +87,7 @@ extension LanguageModelSession {
         prefixUsage: Usage,
         prefixText: String
     ) -> ResponseStream<Content>? {
+        guard !prefixEntries.isEmpty else { return nil }
         if let selected = requestContext.model as? any ProfileRequestIdentifiedLanguageModel,
             selected.profileRequestIdentity == currentModelIdentity
         {

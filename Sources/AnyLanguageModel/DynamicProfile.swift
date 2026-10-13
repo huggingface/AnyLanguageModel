@@ -195,6 +195,15 @@ extension LanguageModelSession.DynamicProfile {
         BuiltinModifiedDynamicProfile(content: self, modifier: .reasoningLevel(reasoningLevel))
     }
 
+    public func includeSchemaInPrompt(
+        _ includeSchemaInPrompt: Bool?
+    ) -> some LanguageModelSession.DynamicProfile {
+        BuiltinModifiedDynamicProfile(
+            content: self,
+            modifier: .includeSchemaInPrompt(includeSchemaInPrompt)
+        )
+    }
+
     public func toolCallingMode(
         _ toolCallingMode: GenerationOptions.ToolCallingMode?
     ) -> some LanguageModelSession.DynamicProfile {
@@ -328,6 +337,8 @@ struct ResolvedDynamicProfile: @unchecked Sendable {
     var hasMaximumResponseTokens = false
     var reasoningLevel: ContextOptions.ReasoningLevel?
     var hasReasoningLevel = false
+    var includeSchemaInPrompt: Bool?
+    var hasIncludeSchemaInPrompt = false
     var toolCallingMode: GenerationOptions.ToolCallingMode?
     var hasToolCallingMode = false
     var transcriptErrorHandlingPolicy: TranscriptErrorHandlingPolicy?
@@ -411,6 +422,7 @@ private enum BuiltinDynamicProfileModifier: @unchecked Sendable {
     case samplingMode(GenerationOptions.SamplingMode?)
     case maximumResponseTokens(Int?)
     case reasoningLevel(ContextOptions.ReasoningLevel?)
+    case includeSchemaInPrompt(Bool?)
     case toolCallingMode(GenerationOptions.ToolCallingMode?)
     case historyTransform(([Transcript.Entry]) -> [Transcript.Entry])
     case transcriptErrorHandlingPolicy(TranscriptErrorHandlingPolicy?)
@@ -445,6 +457,11 @@ private enum BuiltinDynamicProfileModifier: @unchecked Sendable {
             if !resolved.hasReasoningLevel {
                 resolved.reasoningLevel = value
                 resolved.hasReasoningLevel = true
+            }
+        case .includeSchemaInPrompt(let value):
+            if !resolved.hasIncludeSchemaInPrompt {
+                resolved.includeSchemaInPrompt = value
+                resolved.hasIncludeSchemaInPrompt = true
             }
         case .toolCallingMode(let value):
             if !resolved.hasToolCallingMode {
