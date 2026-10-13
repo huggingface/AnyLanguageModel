@@ -18,18 +18,28 @@ struct AnyOfGenerationTests {
     private let one = 6
     private let eos = 50
 
-    /// - Parameter decodedText: Overrides the text a token decodes to, as for a piece with a
-    ///   leading space that still tokenizes from the bare text.
+    /// Single tokens for property starts, to reach a low budget in few tokens.
+    private let xKey = 20
+    private let yKey = 21
+    private let commaXKey = 22
+    private let commaYKey = 23
+
+    /// - Parameters:
+    ///   - decodedText: Overrides the text a token decodes to, as for a piece with a
+    ///     leading space that still tokenizes from the bare text.
+    ///   - singleTokenKeys: Tokenizes each property start as one token.
     private func generate(
         _ schema: GenerationSchema,
         sampling queue: [Int],
-        decodedText: [Int: String] = [:]
+        decodedText: [Int: String] = [:],
+        singleTokenKeys: Bool = false,
+        maximumTokens: Int = 64
     ) async throws -> String {
-        let tokenToText: [Int: String] = [
+        var tokenToText: [Int: String] = [
             quote: "\"", comma: ",", rightBrace: "}", 3: "]", colon: ":",
             a: "a", b: "b", x: "x", y: "y", leftBrace: "{", null: "null", one: "1", eos: "<eos>",
         ].merging(decodedText) { $1 }
-        let textToTokens: [String: [Int]] = [
+        var textToTokens: [String: [Int]] = [
             "\"": [quote], ",": [comma], "}": [rightBrace], ":": [colon], "{": [leftBrace],
             "a": [a], "b": [b], "x": [x], "y": [y], "1": [one], "null": [null],
             "\"x\":": [quote, x, quote, colon],
@@ -37,12 +47,19 @@ struct AnyOfGenerationTests {
             ",\"x\":": [comma, quote, x, quote, colon],
             ",\"y\":": [comma, quote, y, quote, colon],
         ]
+        if singleTokenKeys {
+            let keys = [xKey: "\"x\":", yKey: "\"y\":", commaXKey: ",\"x\":", commaYKey: ",\"y\":"]
+            for (token, text) in keys {
+                tokenToText[token] = text
+                textToTokens[text] = [token]
+            }
+        }
         let backend = MockTokenBackend(
             tokenToText: tokenToText,
             textToTokens: textToTokens,
             eosToken: eos,
             endTokens: [eos],
-            maximumTokens: 64,
+            maximumTokens: maximumTokens,
             samplingQueue: queue
         )
         var generator = try ConstrainedJSONGenerator(backend: backend, schema: schema)
@@ -168,6 +185,52 @@ struct AnyOfGenerationTests {
         )
         let queue = [quote, x, quote, colon, quote, y, quote, colon, a, comma, quote, y, quote, colon, a]
         #expect(try await generate(schema, sampling: queue) == #"{"x":{"y":"a"},"y":"a"}"#)
+    }
+
+    @Test func nestedObjectClosedByTheModelKeepsOnlyTheVariantsItCompletes() async throws {
+        // The nested object closes after `x`, which completes the first value but not the
+        // second, which requires `y`. Only the first variant matches, so `y` isn't offered.
+        let schema = GenerationSchema.primitive(
+            String.self,
+            node: .anyOf([
+                object(["x": object(["x": letter(["a"])])]),
+                object(["x": object(["x": letter(["a"]), "y": letter(["a"])]), "y": letter(["a"])]),
+            ])
+        )
+        let queue = [
+            quote, x, quote, colon, quote, x, quote, colon, a, rightBrace,
+            comma, quote, y, quote, colon, a,
+        ]
+        #expect(try await generate(schema, sampling: queue) == #"{"x":{"x":"a"}}"#)
+    }
+
+    @Test func nestedObjectClosedForBudgetKeepsOnlyTheVariantsItCompletes() async throws {
+        // The budget runs low after the nested `x`, so the nested object closes. That
+        // completes the first value but not the second, which requires `y`, so the outer
+        // `y` must match the first variant's "a"; scripting the second variant's "b" must
+        // be refused.
+        let schema = GenerationSchema.primitive(
+            String.self,
+            node: .anyOf([
+                object(["x": object(["x": letter(["a"])]), "y": letter(["a"])]),
+                object(["x": object(["x": letter(["a"]), "y": letter(["a"])]), "y": letter(["b"])]),
+            ])
+        )
+        let output = try await generate(
+            schema,
+            sampling: [xKey, xKey, a, commaYKey, a],
+            singleTokenKeys: true,
+            maximumTokens: 14
+        )
+        #expect(output == #"{"x":{"x":"a"},"y":"a"}"#)
+        await #expect(throws: ConstrainedGenerationError.self) {
+            try await generate(
+                schema,
+                sampling: [xKey, xKey, a, commaYKey, b],
+                singleTokenKeys: true,
+                maximumTokens: 14
+            )
+        }
     }
 
     @Test func sharedKeysWhoseReferencesDifferOnlyInDescriptionKeepBothVariants() async throws {

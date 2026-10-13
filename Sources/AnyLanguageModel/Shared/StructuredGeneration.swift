@@ -528,9 +528,11 @@ struct ConstrainedJSONGenerator<Backend: TokenBackend> {
             if remainingKeys.isEmpty { break }
             let missingRequired = liveVariants.reduce(into: Set<String>()) { $0.formUnion($1.required) }
                 .intersection(remainingKeys)
-            let canClose = liveVariants.contains { variant in
-                variant.required.allSatisfy { emittedKeys.contains($0) || variant.properties[$0] == nil }
+            let closable = live.filter { index in
+                let variant = variants[index]
+                return variant.required.allSatisfy { emittedKeys.contains($0) || variant.properties[$0] == nil }
             }
+            let canClose = !closable.isEmpty
             let emittedAnyProperty = !emittedKeys.isEmpty
             let budgetAllowsMoreOptionals = hasBudgetForOptionalStructure()
 
@@ -540,7 +542,9 @@ struct ConstrainedJSONGenerator<Backend: TokenBackend> {
                 keysToOffer = remainingKeys.sorted()
             } else if canClose {
                 // Genuine last resort: stop offering optionals when the budget is nearly
-                // exhausted. Required properties are already present, so close cleanly.
+                // exhausted. Required properties are already present, so close cleanly,
+                // keeping only the variants the object completes.
+                live = closable
                 break
             } else {
                 // Still missing required keys — only those may be emitted under pressure.
@@ -562,9 +566,9 @@ struct ConstrainedJSONGenerator<Backend: TokenBackend> {
             let choice = try await generateChoice(candidates)
             output += choice
 
-            // Model elected to close; the keys left out are optional for a live variant.
+            // Model elected to close; the keys left out are optional for a closable variant.
             if choice == "}" {
-                return (output, live)
+                return (output, closable)
             }
 
             guard let key = propertyKey(fromPropertyStart: choice) else {
