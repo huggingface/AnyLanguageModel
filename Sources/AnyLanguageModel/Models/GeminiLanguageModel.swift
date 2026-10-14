@@ -219,6 +219,8 @@ public struct GeminiLanguageModel: LanguageModel, ProfileRequestIdentifiedLangua
         includeSchemaInPrompt: Bool,
         options: GenerationOptions
     ) async throws -> LanguageModelSession.Response<Content> where Content: Generable {
+        // Gemini's response schemas can be objects, primitives, or arrays, but not unions.
+        let responseSchema = ProviderResponseSchema(schema, generating: type, wrapping: .unionRoots)
         let url =
             baseURL
             .appendingPathComponent(apiVersion)
@@ -263,7 +265,7 @@ public struct GeminiLanguageModel: LanguageModel, ProfileRequestIdentifiedLangua
                 contents: requestContext.transcript.toGeminiContent(),
                 tools: geminiTools,
                 generating: type,
-                schema: schema,
+                schema: responseSchema.schema,
                 options: requestContext.options,
                 thinking: effectiveThinking,
                 jsonMode: effectiveJsonMode
@@ -347,7 +349,7 @@ public struct GeminiLanguageModel: LanguageModel, ProfileRequestIdentifiedLangua
                     )
                 }
 
-                let generatedContent = try GeneratedContent(json: text)
+                let generatedContent = try responseSchema.content(json: text)
                 let content = try type.init(generatedContent)
                 return LanguageModelSession.Response(
                     content: content,
@@ -402,7 +404,8 @@ public struct GeminiLanguageModel: LanguageModel, ProfileRequestIdentifiedLangua
         includeSchemaInPrompt: Bool,
         options: GenerationOptions
     ) -> sending LanguageModelSession.ResponseStream<Content> where Content: Generable {
-        // Extract effective configuration from custom options or fall back to model defaults
+        // Gemini's response schemas can be objects, primitives, or arrays, but not unions.
+        let responseSchema = ProviderResponseSchema(schema, generating: type, wrapping: .unionRoots)
         var streamURL =
             baseURL
             .appendingPathComponent(apiVersion)
@@ -415,7 +418,7 @@ public struct GeminiLanguageModel: LanguageModel, ProfileRequestIdentifiedLangua
             let task = Task { @Sendable in
                 do {
                     let headers = buildHeaders()
-                    var state = StreamingResponseState<Content>()
+                    var state = StreamingResponseState<Content>(wrapperProperty: responseSchema.wrapperProperty)
                     var toolRounds = ToolRoundLimit(provider: "Gemini")
                     while true {
                         try Task.checkCancellation()
@@ -450,7 +453,7 @@ public struct GeminiLanguageModel: LanguageModel, ProfileRequestIdentifiedLangua
                             contents: requestContext.transcript.toGeminiContent(),
                             tools: geminiTools,
                             generating: type,
-                            schema: schema,
+                            schema: responseSchema.schema,
                             options: requestContext.options,
                             thinking: effectiveThinking,
                             jsonMode: effectiveJsonMode

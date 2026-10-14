@@ -219,6 +219,16 @@ struct GeneratedContentJSONTests {
         #expect(GeneratedContent(value, id: id).id == id)
     }
 
+    /// Like Foundation Models, reading an optional property returns `nil` for `null`.
+    @Test func optionalPropertyReadsNullAsNil() throws {
+        let content = try GeneratedContent(json: #"{"none": null, "some": "x"}"#)
+        #expect(try content.value(String?.self, forProperty: "none") == nil)
+        #expect(try content.value(GeneratedContent?.self, forProperty: "none") == nil)
+        #expect(try content.value(String?.self, forProperty: "missing") == nil)
+        #expect(try content.value(String?.self, forProperty: "some") == "x")
+        #expect(try content.value(GeneratedContent.self, forProperty: "none").kind == .null)
+    }
+
     @Test func jsonValueRoundTrips() throws {
         let value: JSONValue = [
             "title": "Dune",
