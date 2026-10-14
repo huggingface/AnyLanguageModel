@@ -860,6 +860,72 @@ struct StructuredGenerationTests {
         #expect(generator.generatedTokenCount == 2)
     }
 
+    // MARK: - Discriminated unions
+
+    /// A union like the schema of an enumeration with associated values:
+    /// case `a` has the property `x`, and case `b` has the property `y`.
+    private func discriminatedUnionSchema() -> GenerationSchema {
+        func caseNode(_ type: String, property: String) -> GenerationSchema.Node {
+            .object(
+                GenerationSchema.ObjectNode(
+                    description: nil,
+                    properties: [
+                        "type": .string(.init(enumChoices: [type], isConstant: true)),
+                        property: .string(.init(enumChoices: ["a"])),
+                    ],
+                    required: ["type", property]
+                )
+            )
+        }
+        return GenerationSchema(
+            root: .anyOf([.ref("A"), .ref("B")]),
+            defs: ["A": caseNode("a", property: "x"), "B": caseNode("b", property: "y")]
+        )
+    }
+
+    /// Generates the union of `discriminatedUnionSchema()`, sampling the tokens in `queue`.
+    private func generateDiscriminatedUnion(
+        sampling queue: (_ token: (String) -> Int) -> [Int]
+    ) async throws -> (result: String, generatedTokens: Int, decodedTokens: Int) {
+        var maps = objectTokenMaps()
+        let typeToken = 16
+        maps.tokenToText[typeToken] = "type"
+        maps.textToTokens["\"type\":"] = [0, typeToken, 0, 4]
+        maps.textToTokens[",\"type\":"] = [1, 0, typeToken, 0, 4]
+        let tokens = maps.textToTokens
+        let backend = MockTokenBackend(
+            tokenToText: maps.tokenToText,
+            textToTokens: maps.textToTokens,
+            eosToken: 50,
+            endTokens: [50],
+            maximumTokens: 64,
+            samplingQueue: queue { tokens[$0]![0] }
+        )
+        var generator = try ConstrainedJSONGenerator(backend: backend, schema: discriminatedUnionSchema())
+        let result = try await generator.generate()
+        return (result, generator.generatedTokenCount, backend.capture.tokens.count)
+    }
+
+    @Test(arguments: [("a", "x"), ("b", "y")])
+    func modelChoosesTheObjectOfADiscriminatedUnion(_ type: String, _ property: String) async throws {
+        // `{"type":` is forced; the model chooses the value of `type`, then the case's property.
+        let (result, generated, decoded) = try await generateDiscriminatedUnion { token in
+            [token(type), token(","), token("\""), token(property), token("\""), token(":"), token("a")]
+        }
+        #expect(result == #"{"type":"\#(type)","\#(property)":"a"}"#)
+        #expect(generated == decoded)
+    }
+
+    /// Unlike other unions, whose keys come in the order the model writes them,
+    /// the object of an enumeration case starts with its `type`.
+    @Test func caseTypeComesBeforeTheOtherKeys() async throws {
+        await #expect(throws: ConstrainedGenerationError.self) {
+            try await generateDiscriminatedUnion { token in
+                [token("\""), token("y"), token("\""), token(":"), token("a")]
+            }
+        }
+    }
+
     // MARK: - Decimal / number token mask
 
     private func numberTokenMaps() -> (

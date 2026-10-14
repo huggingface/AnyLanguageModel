@@ -349,6 +349,9 @@ public struct GeneratedContent: Sendable, Equatable, Generable, CustomDebugStrin
     }
 
     /// Reads an optional, concrete generable type from named property.
+    ///
+    /// Like Foundation Models, this returns `nil`
+    /// for a property that's missing or `null`.
     public func value<Value>(
         _ type: Value?.Type = Value?.self,
         forProperty property: String
@@ -357,6 +360,9 @@ public struct GeneratedContent: Sendable, Equatable, Generable, CustomDebugStrin
             return nil
         }
         guard let value = properties[property] else {
+            return nil
+        }
+        if case .null = value.kind {
             return nil
         }
         return try Value(value)

@@ -223,6 +223,8 @@ public struct GeminiLanguageModel: LanguageModel {
         let effectiveThinking = customOptions?.thinking ?? .disabled
         let effectiveServerTools = customOptions?.serverTools ?? []
         let effectiveJsonMode = customOptions?.jsonMode
+        // Gemini's response schemas can be objects, primitives, or arrays, but not unions.
+        let responseSchema = ProviderResponseSchema(schema, generating: type, wrapping: .unionRoots)
 
         let url =
             baseURL
@@ -255,7 +257,7 @@ public struct GeminiLanguageModel: LanguageModel {
                 contents: requestTranscript.toGeminiContent(),
                 tools: geminiTools,
                 generating: type,
-                schema: schema,
+                schema: responseSchema.schema,
                 options: options,
                 thinking: effectiveThinking,
                 jsonMode: effectiveJsonMode
@@ -340,7 +342,7 @@ public struct GeminiLanguageModel: LanguageModel {
                     )
                 }
 
-                let generatedContent = try GeneratedContent(json: text)
+                let generatedContent = try responseSchema.content(json: text)
                 let content = try type.init(generatedContent)
                 return LanguageModelSession.Response(
                     content: content,
@@ -400,6 +402,8 @@ public struct GeminiLanguageModel: LanguageModel {
         let effectiveThinking = customOptions?.thinking ?? .disabled
         let effectiveServerTools = customOptions?.serverTools ?? []
         let effectiveJsonMode = customOptions?.jsonMode
+        // Gemini's response schemas can be objects, primitives, or arrays, but not unions.
+        let responseSchema = ProviderResponseSchema(schema, generating: type, wrapping: .unionRoots)
 
         var streamURL =
             baseURL
@@ -414,7 +418,7 @@ public struct GeminiLanguageModel: LanguageModel {
                 do {
                     let headers = buildHeaders()
                     var inFlightEntries: [Transcript.Entry] = []
-                    var state = StreamingResponseState<Content>()
+                    var state = StreamingResponseState<Content>(wrapperProperty: responseSchema.wrapperProperty)
                     var toolRounds = ToolRoundLimit(provider: "Gemini")
                     while true {
                         try Task.checkCancellation()
@@ -431,7 +435,7 @@ public struct GeminiLanguageModel: LanguageModel {
                             contents: requestTranscript.toGeminiContent(),
                             tools: geminiTools,
                             generating: type,
-                            schema: schema,
+                            schema: responseSchema.schema,
                             options: options,
                             thinking: effectiveThinking,
                             jsonMode: effectiveJsonMode

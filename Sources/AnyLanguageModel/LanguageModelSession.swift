@@ -871,7 +871,7 @@ extension LanguageModelSession {
 
 extension LanguageModelSession {
     /// Generates content that conforms to the supplied schema.
-    /// Provider restrictions still apply; OpenAI strict mode requires an object root.
+    /// Provider restrictions on schemas still apply.
     @discardableResult
     nonisolated public func respond(
         to prompt: Prompt,
@@ -891,7 +891,7 @@ extension LanguageModelSession {
     }
 
     /// Generates content that conforms to the supplied schema.
-    /// Provider restrictions still apply; OpenAI strict mode requires an object root.
+    /// Provider restrictions on schemas still apply.
     @discardableResult
     nonisolated public func respond(
         to prompt: String,
@@ -908,7 +908,7 @@ extension LanguageModelSession {
     }
 
     /// Generates content that conforms to the supplied schema.
-    /// Provider restrictions still apply; OpenAI strict mode requires an object root.
+    /// Provider restrictions on schemas still apply.
     @discardableResult
     nonisolated public func respond(
         schema: GenerationSchema,
@@ -925,7 +925,7 @@ extension LanguageModelSession {
     }
 
     /// Streams content that conforms to the supplied schema.
-    /// Provider restrictions still apply; OpenAI strict mode requires an object root.
+    /// Provider restrictions on schemas still apply.
     nonisolated public func streamResponse(
         to prompt: Prompt,
         schema: GenerationSchema,
@@ -964,7 +964,7 @@ extension LanguageModelSession {
     }
 
     /// Streams content that conforms to the supplied schema.
-    /// Provider restrictions still apply; OpenAI strict mode requires an object root.
+    /// Provider restrictions on schemas still apply.
     nonisolated public func streamResponse(
         to prompt: String,
         schema: GenerationSchema,
@@ -980,7 +980,7 @@ extension LanguageModelSession {
     }
 
     /// Streams content that conforms to the supplied schema.
-    /// Provider restrictions still apply; OpenAI strict mode requires an object root.
+    /// Provider restrictions on schemas still apply.
     nonisolated public func streamResponse(
         schema: GenerationSchema,
         includeSchemaInPrompt: Bool = true,
