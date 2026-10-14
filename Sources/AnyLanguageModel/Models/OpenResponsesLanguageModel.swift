@@ -489,12 +489,14 @@ public struct OpenResponsesLanguageModel: LanguageModel, ProfileRequestIdentifie
         options: GenerationOptions
     ) -> sending LanguageModelSession.ResponseStream<Content> where Content: Generable {
         let url = baseURL.appendingPathComponent("responses")
+        // Open Responses follows OpenAI's structured outputs, which need an object root.
+        let responseSchema = ProviderResponseSchema(schema, generating: type, wrapping: .nonObjectRoots)
         let stream = AsyncThrowingStream<LanguageModelSession.ResponseStream<Content>.Snapshot, any Error> {
             continuation in
             let task = Task {
                 do {
                     var inFlightMessages: [OpenResponsesMessage] = []
-                    var state = StreamingResponseState<Content>()
+                    var state = StreamingResponseState<Content>(wrapperProperty: responseSchema.wrapperProperty)
                     var toolRounds = ToolRoundLimit(provider: "Open Responses")
                     while true {
                         try Task.checkCancellation()
@@ -530,7 +532,7 @@ public struct OpenResponsesLanguageModel: LanguageModel, ProfileRequestIdentifie
                             messages: messages,
                             tools: tools,
                             generating: type,
-                            schema: schema,
+                            schema: responseSchema.schema,
                             options: requestContext.options,
                             stream: true
                         )
@@ -621,6 +623,8 @@ public struct OpenResponsesLanguageModel: LanguageModel, ProfileRequestIdentifie
         options: GenerationOptions,
         session: LanguageModelSession
     ) async throws -> LanguageModelSession.Response<Content> where Content: Generable {
+        // Open Responses follows OpenAI's structured outputs, which need an object root.
+        let responseSchema = ProviderResponseSchema(schema, generating: type, wrapping: .nonObjectRoots)
         var entries: [Transcript.Entry] = []
         var usage = ReportedUsage()
         var text = ""
@@ -662,7 +666,7 @@ public struct OpenResponsesLanguageModel: LanguageModel, ProfileRequestIdentifie
                 messages: messages,
                 tools: tools,
                 generating: type,
-                schema: schema,
+                schema: responseSchema.schema,
                 options: requestContext.options,
                 stream: false
             )
@@ -738,7 +742,7 @@ public struct OpenResponsesLanguageModel: LanguageModel, ProfileRequestIdentifie
             )
         }
         if let jsonString = extractJSONFromOutput(lastOutput) {
-            let generatedContent = try GeneratedContent(json: jsonString)
+            let generatedContent = try responseSchema.content(json: jsonString)
             let content = try type.init(generatedContent)
             return LanguageModelSession.Response(
                 content: content,

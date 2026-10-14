@@ -194,7 +194,7 @@
             includeSchemaInPrompt: Bool,
             options: GenerationOptions
         ) async throws -> LanguageModelSession.Response<Content> where Content: Generable {
-            let fmPrompt = prompt.toFoundationModels()
+            let fmPrompt = try prompt.toFoundationModels()
             let fmOptions = options.toFoundationModels()
 
             return try await fmRespond(
@@ -249,7 +249,12 @@
             includeSchemaInPrompt: Bool,
             options: GenerationOptions
         ) -> sending LanguageModelSession.ResponseStream<Content> where Content: Generable {
-            let fmPrompt = prompt.toFoundationModels()
+            let fmPrompt: FoundationModels.Prompt
+            do {
+                fmPrompt = try prompt.toFoundationModels()
+            } catch {
+                return .init(stream: AsyncThrowingStream { $0.finish(throwing: error) })
+            }
             let fmOptions = options.toFoundationModels()
 
             return fmStreamResponse(
@@ -336,11 +341,12 @@
         guard let lastEntry = transcript.last, case .prompt(let lastPrompt) = lastEntry else {
             return transcript
         }
-        let lastText = lastPrompt.segments.compactMap { segment -> String? in
-            if case .text(let textSegment) = segment { return textSegment.content }
-            return nil
-        }.joined()
-        guard lastText == prompt.description else {
+        guard
+            prompt.matchesTranscriptOccurrence(
+                lastPrompt.segments,
+                occurrenceID: lastPrompt.id
+            )
+        else {
             return transcript
         }
         return Transcript(entries: transcript.dropLast())
@@ -430,8 +436,42 @@
 
     @available(macOS 26.0, iOS 26.0, watchOS 27.0, tvOS 26.0, visionOS 26.0, *)
     extension Prompt {
-        func toFoundationModels() -> FoundationModels.Prompt {
-            FoundationModels.Prompt(self.description)
+        func toFoundationModels() throws -> FoundationModels.Prompt {
+            let prompts: [FoundationModels.Prompt] = try components.map { component in
+                switch component {
+                case .text(let text):
+                    return FoundationModels.Prompt(text.content)
+                case .image(_, let image):
+                    #if compiler(>=6.4) && !os(tvOS) && !os(watchOS)
+                        if #available(macOS 27, iOS 27, visionOS 27, *) {
+                            switch image.source {
+                            case .url(let url, let orientation):
+                                guard url.isFileURL else {
+                                    throw PromptBridgeError.nonFileImageURL
+                                }
+                                return FoundationModels.Prompt(
+                                    FoundationModels.Attachment(
+                                        imageURL: url,
+                                        orientation: orientation.flatMap(
+                                            CGImagePropertyOrientation.init(rawValue:)
+                                        )
+                                    )
+                                )
+                            case .image(let value, let orientation):
+                                return FoundationModels.Prompt(
+                                    FoundationModels.Attachment(value, orientation: orientation)
+                                )
+                            }
+                        }
+                    #endif
+                    throw PromptBridgeError.attachmentsUnavailable
+                }
+            }
+            return FoundationModels.Prompt {
+                for prompt in prompts {
+                    prompt
+                }
+            }
         }
     }
 
@@ -529,6 +569,22 @@
     extension Array where Element == (any Tool) {
         func toFoundationModels() -> [any FoundationModels.Tool] {
             map { AnyToolWrapper($0) }
+        }
+    }
+
+    enum PromptBridgeError: Error, LocalizedError {
+        case attachmentsUnavailable
+        case nonFileImageURL
+
+        var errorDescription: String? {
+            switch self {
+            case .attachmentsUnavailable:
+                return
+                    "Prompt attachments require an app built with Swift 6.4 or later that runs Foundation Models on OS 27 or later, and aren't available on tvOS or watchOS."
+            case .nonFileImageURL:
+                return
+                    "Foundation Models accepts image attachment URLs only for local files. Download the image to a file URL, or attach it as a CGImage."
+            }
         }
     }
 
@@ -663,7 +719,7 @@
 
         case .integer(_, _, _, _, _, _, minimum: let minimum, maximum: let maximum, _, _, _):
             if let enumValues = jsonSchema.enum {
-                let enumsSchema = enumValues.compactMap { convertConstToSchema($0) }
+                let enumsSchema = enumValues.compactMap { convertConstToSchema(JSONValue($0)) }
                 return .init(name: name ?? "", anyOf: enumsSchema)
             }
 
@@ -681,7 +737,7 @@
 
         case .number(_, _, _, _, _, _, minimum: let minimum, maximum: let maximum, _, _, _):
             if let enumValues = jsonSchema.enum {
-                let enumsSchema = enumValues.compactMap { convertConstToSchema($0) }
+                let enumsSchema = enumValues.compactMap { convertConstToSchema(JSONValue($0)) }
                 return .init(name: name ?? "", anyOf: enumsSchema)
             }
 
@@ -939,7 +995,15 @@
                     else {
                         return nil
                     }
-                    self.init(cgImage)
+                    let properties =
+                        CGImageSourceCopyPropertiesAtIndex(
+                            imageSource,
+                            0,
+                            nil
+                        ) as? [CFString: Any]
+                    let orientation = (properties?[kCGImagePropertyOrientation] as? NSNumber)
+                        .flatMap { CGImagePropertyOrientation(rawValue: $0.uint32Value) }
+                    self.init(cgImage, orientation: orientation)
                 }
             }
         }

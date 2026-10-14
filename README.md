@@ -97,7 +97,7 @@ Add this package to your `Package.swift`:
 
 ```swift
 dependencies: [
-    .package(url: "https://github.com/huggingface/AnyLanguageModel", from: "0.16.0")
+    .package(url: "https://github.com/huggingface/AnyLanguageModel", from: "1.0.0")
 ]
 ```
 
@@ -125,7 +125,7 @@ To enable specific traits, specify them in your package's dependencies:
 dependencies: [
     .package(
         url: "https://github.com/huggingface/AnyLanguageModel.git",
-        from: "0.16.0",
+        from: "1.0.0",
         traits: ["CoreML", "MLX"] // Enable CoreML and MLX support
     )
 ]
@@ -142,7 +142,7 @@ dependencies: [
 > dependencies: [
 >     .package(
 >         url: "https://github.com/huggingface/AnyLanguageModel.git",
->         from: "0.16.0",
+>         from: "1.0.0",
 >         traits: ["CoreML", "MLX", "Llama"]
 >     ),
 >     .package(url: "https://github.com/huggingface/swift-transformers", from: "1.0.0"), // CoreML
@@ -381,6 +381,34 @@ pass the model's multimodal projector with `mmprojPath:`.
 > [!NOTE]
 > Image inputs are an AnyLanguageModel extension.
 > See [Differences from Foundation Models](#differences-from-foundation-models).
+
+### Prompt attachments
+
+Image attachments use the Foundation Models 27 prompt construction syntax:
+
+```swift
+let prompt = Prompt {
+    "Describe this image"
+    Attachment(imageURL: fileURL)
+}
+```
+
+On Apple platforms, `Attachment(CGImage, orientation:)` retains typed image
+content and orientation. Prompt builders preserve the order of text and images,
+and the OS 26 compatibility transcript continues to store images using its
+existing `Transcript.Segment.image` Codable representation.
+
+`SystemLanguageModel` and `FoundationLanguageModel` bridge prompt attachments
+to Foundation Models only in apps built with Swift 6.4 or later
+that run on macOS, iOS, or visionOS 27 or later.
+On earlier runtimes, and on tvOS and watchOS,
+they throw an error when a prompt has an attachment.
+The system bridge requires local file URLs; other provider adapters retain URL
+images in their existing transcript representation.
+
+This first compatibility surface covers prompt `CGImage` and `imageURL`
+attachments. Tool outputs, instruction attachments, labels, `CIImage`, pixel
+buffers, and newer data attachments remain outside this change.
 
 ### Tool Calling
 
@@ -633,8 +661,8 @@ say which API they follow.
   described in that provider's section under [Providers](#providers).
 - `respond(to:images:)`, `Transcript.ImageSegment`, and `Transcript.Segment.image`:
   [image inputs](#image-inputs).
-  Foundation Models 27 adds prompt attachments,
-  and AnyLanguageModel 2.0 will change to match them.
+  Foundation Models 27-style [prompt attachments](#prompt-attachments) are also
+  available for ordered text and image prompt construction.
 - `ToolExecutionDelegate`, `ToolExecutionDecision`, and `toolExecutionDelegate`:
   [observing and controlling tool calls](#tool-calling).
 - `transcriptErrorHandlingPolicy` and `waitForResponseCompletion()`:
@@ -672,7 +700,7 @@ say which API they follow.
 ### Behavior differences
 
 - A session adds the prompt to its transcript before the model responds,
-  as a single text segment.
+  preserving its text and image segment order.
 - A structured response is recorded in the transcript as JSON text,
   not as a structured segment.
 - A session created from a transcript restores `instructions`
@@ -772,7 +800,7 @@ Enable the trait in Package.swift:
 ```swift
 .package(
     url: "https://github.com/huggingface/AnyLanguageModel.git",
-    from: "0.16.0",
+    from: "1.0.0",
     traits: ["CoreML"]
 )
 ```
@@ -869,7 +897,7 @@ Enable the trait in Package.swift:
 ```swift
 .package(
     url: "https://github.com/huggingface/AnyLanguageModel.git",
-    from: "0.16.0",
+    from: "1.0.0",
     traits: ["MLX"]
 )
 ```
@@ -893,7 +921,7 @@ Enable the trait in Package.swift:
 ```swift
 .package(
     url: "https://github.com/huggingface/AnyLanguageModel.git",
-    from: "0.16.0",
+    from: "1.0.0",
     traits: ["Llama"]
 )
 ```
