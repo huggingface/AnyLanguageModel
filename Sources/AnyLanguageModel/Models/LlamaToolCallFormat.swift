@@ -308,7 +308,9 @@ extension LlamaToolCallFormat {
                 parts.append("properties:{" + gemmaProperties(properties) + "}")
             }
             if let required = parameters["required"]?.arrayValue, !required.isEmpty {
-                let items = required.map { gemmaQuote($0.stringValue ?? $0.description) }.joined(separator: ",")
+                let items = required.map { gemmaQuote($0.stringValue ?? llamaJSONString($0) ?? "") }.joined(
+                    separator: ","
+                )
                 parts.append("required:[\(items)]")
             }
             if let type = parameters["type"]?.stringValue {
@@ -339,7 +341,9 @@ extension LlamaToolCallFormat {
             if type == "OBJECT", let nested = value["properties"]?.objectValue {
                 fields.append("properties:{" + gemmaProperties(nested) + "}")
                 if let required = value["required"]?.arrayValue, !required.isEmpty {
-                    let names = required.map { gemmaQuote($0.stringValue ?? $0.description) }.joined(separator: ",")
+                    let names = required.map { gemmaQuote($0.stringValue ?? llamaJSONString($0) ?? "") }.joined(
+                        separator: ","
+                    )
                     fields.append("required:[\(names)]")
                 }
             }

@@ -557,16 +557,18 @@
         }
     }
 
-    enum PromptBridgeError: LocalizedError, Sendable, Equatable {
+    enum PromptBridgeError: Error, LocalizedError {
         case attachmentsUnavailable
         case nonFileImageURL
 
         var errorDescription: String? {
             switch self {
             case .attachmentsUnavailable:
-                "Prompt attachments require macOS 27, iOS 27, or visionOS 27."
+                return
+                    "Prompt attachments require an app built with Swift 6.4 or later that runs Foundation Models on OS 27 or later, and aren't available on tvOS or watchOS."
             case .nonFileImageURL:
-                "Foundation Models prompt attachments require a local file URL."
+                return
+                    "Foundation Models accepts image attachment URLs only for local files. Download the image to a file URL, or attach it as a CGImage."
             }
         }
     }
@@ -702,7 +704,7 @@
 
         case .integer(_, _, _, _, _, _, minimum: let minimum, maximum: let maximum, _, _, _):
             if let enumValues = jsonSchema.enum {
-                let enumsSchema = enumValues.compactMap { convertConstToSchema($0) }
+                let enumsSchema = enumValues.compactMap { convertConstToSchema(JSONValue($0)) }
                 return .init(name: name ?? "", anyOf: enumsSchema)
             }
 
@@ -720,7 +722,7 @@
 
         case .number(_, _, _, _, _, _, minimum: let minimum, maximum: let maximum, _, _, _):
             if let enumValues = jsonSchema.enum {
-                let enumsSchema = enumValues.compactMap { convertConstToSchema($0) }
+                let enumsSchema = enumValues.compactMap { convertConstToSchema(JSONValue($0)) }
                 return .init(name: name ?? "", anyOf: enumsSchema)
             }
 

@@ -97,7 +97,7 @@ Add this package to your `Package.swift`:
 
 ```swift
 dependencies: [
-    .package(url: "https://github.com/huggingface/AnyLanguageModel", from: "0.16.0")
+    .package(url: "https://github.com/huggingface/AnyLanguageModel", from: "1.0.0")
 ]
 ```
 
@@ -125,7 +125,7 @@ To enable specific traits, specify them in your package's dependencies:
 dependencies: [
     .package(
         url: "https://github.com/huggingface/AnyLanguageModel.git",
-        from: "0.16.0",
+        from: "1.0.0",
         traits: ["CoreML", "MLX"] // Enable CoreML and MLX support
     )
 ]
@@ -142,7 +142,7 @@ dependencies: [
 > dependencies: [
 >     .package(
 >         url: "https://github.com/huggingface/AnyLanguageModel.git",
->         from: "0.16.0",
+>         from: "1.0.0",
 >         traits: ["CoreML", "MLX", "Llama"]
 >     ),
 >     .package(url: "https://github.com/huggingface/swift-transformers", from: "1.0.0"), // CoreML
@@ -399,7 +399,10 @@ and the OS 26 compatibility transcript continues to store images using its
 existing `Transcript.Segment.image` Codable representation.
 
 `SystemLanguageModel` and `FoundationLanguageModel` bridge prompt attachments
-to Foundation Models on OS 27. Earlier system runtimes reject them explicitly.
+to Foundation Models only in apps built with Swift 6.4 or later
+that run on macOS, iOS, or visionOS 27 or later.
+On earlier runtimes, and on tvOS and watchOS,
+they throw an error when a prompt has an attachment.
 The system bridge requires local file URLs; other provider adapters retain URL
 images in their existing transcript representation.
 
@@ -771,7 +774,7 @@ Enable the trait in Package.swift:
 ```swift
 .package(
     url: "https://github.com/huggingface/AnyLanguageModel.git",
-    from: "0.16.0",
+    from: "1.0.0",
     traits: ["CoreML"]
 )
 ```
@@ -868,7 +871,7 @@ Enable the trait in Package.swift:
 ```swift
 .package(
     url: "https://github.com/huggingface/AnyLanguageModel.git",
-    from: "0.16.0",
+    from: "1.0.0",
     traits: ["MLX"]
 )
 ```
@@ -892,7 +895,7 @@ Enable the trait in Package.swift:
 ```swift
 .package(
     url: "https://github.com/huggingface/AnyLanguageModel.git",
-    from: "0.16.0",
+    from: "1.0.0",
     traits: ["Llama"]
 )
 ```

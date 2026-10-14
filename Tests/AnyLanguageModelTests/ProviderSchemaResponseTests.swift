@@ -250,6 +250,122 @@ import Testing
         }
     }
 
+    extension ProviderSchemaResponseTests {
+        /// The text of the response that the session's transcript records last.
+        private func lastResponseText(in session: LanguageModelSession) -> String? {
+            guard case .response(let response)? = session.transcript.last,
+                case .text(let text)? = response.segments.first
+            else { return nil }
+            return text.content
+        }
+
+        /// The JSON value in a string, which compares without regard to the order of keys.
+        private func jsonValue(_ text: String?) throws -> JSONValue? {
+            try text.map { try JSONDecoder().decode(JSONValue.self, from: Data($0.utf8)) }
+        }
+
+        /// An enumeration whose cases have associated values has a union at the root of its schema.
+        /// OpenAI and Open Responses need an object root, and Gemini's response schemas have no unions,
+        /// so they get the union as the `response` property of an object,
+        /// and the content they return is unwrapped.
+        /// Anthropic and Ollama get the union itself.
+        @Test(arguments: Provider.allCases, [false, true])
+        func unionRootReachesRequest(_ provider: Provider, _ streaming: Bool) async throws {
+            SchemaURLProtocol.reset()
+            defer { SchemaURLProtocol.reset() }
+            let wraps = provider != .anthropic && provider != .ollama
+            let operand = #"{"type":"number","value":1}"#
+            let text = wraps ? #"{"response":\#(operand)}"# : operand
+            SchemaURLProtocol.enqueue(
+                json: try streaming ? provider.stream(text: text) : json(provider.response(text: text))
+            )
+            let session = provider.session()
+            let response =
+                try await streaming
+                ? session.streamResponse(to: "One", generating: Operand.self, includeSchemaInPrompt: false).collect()
+                : session.respond(to: "One", generating: Operand.self, includeSchemaInPrompt: false)
+            #expect(response.content == .number(1))
+            #expect(try jsonValue(response.rawContent.jsonString) == jsonValue(operand))
+            #expect(try jsonValue(lastResponseText(in: session)) == jsonValue(operand))
+
+            let data = try #require(SchemaURLProtocol.recordedBodies.first)
+            let body = try #require(JSONSerialization.jsonObject(with: data) as? [String: Any])
+            let sent = try provider.requestSchema(body)
+            #expect(sent["$defs"] == nil)
+            var union = sent
+            if wraps {
+                #expect((sent["type"] as? String)?.lowercased() == "object")
+                #expect(sent["required"] as? [String] == ["response"])
+                let properties = try #require(sent["properties"] as? [String: [String: Any]])
+                #expect(Set(properties.keys) == ["response"])
+                union = try #require(properties["response"])
+                if provider != .gemini {
+                    #expect(sent["additionalProperties"] as? Bool == false)
+                }
+            }
+            let cases = try #require(union["anyOf"] as? [[String: Any]])
+            let types = cases.map { ($0["properties"] as? [String: [String: Any]])?["type"] }
+            #expect(types.count == 2)
+            for type in types {
+                #expect(type?["const"] != nil || type?["enum"] != nil)
+            }
+        }
+
+        /// OpenAI and Open Responses need an object root, so an array is wrapped too.
+        /// Gemini, Anthropic, and Ollama accept an array at the root.
+        @Test(arguments: Provider.allCases, [false, true])
+        func arrayRootIsWrappedOnlyForObjectRootProviders(_ provider: Provider, _ streaming: Bool) async throws {
+            SchemaURLProtocol.reset()
+            defer { SchemaURLProtocol.reset() }
+            let wraps = provider == .chat || provider == .responses || provider == .openResponses
+            let array = #"["a","b"]"#
+            let text = wraps ? #"{"response":\#(array)}"# : array
+            SchemaURLProtocol.enqueue(
+                json: try streaming ? provider.stream(text: text) : json(provider.response(text: text))
+            )
+            let session = provider.session()
+            let response =
+                try await streaming
+                ? session.streamResponse(to: "Two", generating: [String].self, includeSchemaInPrompt: false).collect()
+                : session.respond(to: "Two", generating: [String].self, includeSchemaInPrompt: false)
+            #expect(response.content == ["a", "b"])
+            #expect(try jsonValue(lastResponseText(in: session)) == jsonValue(array))
+
+            let data = try #require(SchemaURLProtocol.recordedBodies.first)
+            let body = try #require(JSONSerialization.jsonObject(with: data) as? [String: Any])
+            let sent = try provider.requestSchema(body)
+            if wraps {
+                #expect(sent["type"] as? String == "object")
+                let properties = try #require(sent["properties"] as? [String: [String: Any]])
+                #expect(properties["response"]?["type"] as? String == "array")
+            } else {
+                #expect((sent["type"] as? String)?.lowercased() == "array")
+            }
+        }
+
+        /// A provider that doesn't apply the response schema can return content without the wrapper,
+        /// and an object with properties besides the wrapper property isn't unwrapped.
+        @Test(arguments: [false, true])
+        func unwrappedResponseIsUsedAsSent(_ streaming: Bool) async throws {
+            SchemaURLProtocol.reset()
+            defer { SchemaURLProtocol.reset() }
+            let provider = Provider.chat
+            let operand = #"{"type":"number","value":1}"#
+            SchemaURLProtocol.enqueue(
+                json: try streaming ? provider.stream(text: operand) : json(provider.response(text: operand))
+            )
+            let session = provider.session()
+            let response =
+                try await streaming
+                ? session.streamResponse(to: "One", generating: Operand.self).collect()
+                : session.respond(to: "One", generating: Operand.self)
+            #expect(response.content == .number(1))
+
+            let extra = try GeneratedContent(json: #"{"response":{"type":"number","value":1},"note":"extra"}"#)
+            #expect(ProviderResponseSchema.unwrapping(extra, fromProperty: "response") == extra)
+        }
+    }
+
     private func json(_ value: [String: Any]) throws -> String {
         String(decoding: try JSONSerialization.data(withJSONObject: value), as: UTF8.self)
     }

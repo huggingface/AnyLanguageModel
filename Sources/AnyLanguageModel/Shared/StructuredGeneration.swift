@@ -244,6 +244,18 @@ struct ConstrainedJSONGenerator<Backend: TokenBackend> {
     }
 
     private mutating func generateChoice(_ candidates: [String]) async throws -> String {
+        try await generateIndexedChoice(candidates).text
+    }
+
+    /// Generates one of `candidates`.
+    ///
+    /// - Returns: The text the sampled tokens decode to, and the position in `candidates` of
+    ///   the choice they spell, or `nil` when the budget runs out before one is complete.
+    ///   The text can differ from the choice when a token's text differs from the text it
+    ///   was tokenized from, like a piece with a leading space; the position doesn't.
+    private mutating func generateIndexedChoice(
+        _ candidates: [String]
+    ) async throws -> (text: String, index: Int?) {
         guard !candidates.isEmpty else {
             throw ConstrainedGenerationError.tokenizationFailed
         }
@@ -263,20 +275,20 @@ struct ConstrainedJSONGenerator<Backend: TokenBackend> {
             if !chosen.isEmpty {
                 _ = try await emit(chosen)
             }
-            return chosen
+            return (chosen, candidates.firstIndex(of: chosen))
         }
 
-        var prefixes = tokenized
+        var prefixes = Array(tokenized.indices)
         var emitted = ""
         var position = 0
 
         while backend.remainingTokens > 0 {
-            if prefixes.contains(where: { $0.count == position }) { break }
+            if prefixes.contains(where: { tokenized[$0].count == position }) { break }
 
             let allowed = Set(
-                prefixes.compactMap { tokens -> Int? in
-                    guard position < tokens.count else { return nil }
-                    return tokens[position]
+                prefixes.compactMap { index -> Int? in
+                    guard position < tokenized[index].count else { return nil }
+                    return tokenized[index][position]
                 }
             )
 
@@ -289,12 +301,12 @@ struct ConstrainedJSONGenerator<Backend: TokenBackend> {
             emittedText += text
             try await backend.decode(token)
 
-            prefixes = prefixes.filter { $0.count > position && $0[position] == token }
+            prefixes = prefixes.filter { tokenized[$0].count > position && tokenized[$0][position] == token }
             position += 1
             if prefixes.isEmpty { break }
         }
 
-        return emitted
+        return (emitted, prefixes.first { tokenized[$0].count == position })
     }
 
     private func maxNumberTokens(for node: GenerationSchema.NumberNode) -> Int {
@@ -398,32 +410,140 @@ struct ConstrainedJSONGenerator<Backend: TokenBackend> {
             guard !variants.isEmpty else {
                 throw ConstrainedGenerationError.emptyAnyOf
             }
-            if variants.count == 1 {
-                return try await generateNode(variants[0])
-            }
-            // Choose the first variant to keep selection deterministic.
-            return try await generateNode(variants[0])
+            return try await generateAnyOf(variants)
         }
     }
 
+    /// Lets the model choose a variant of an `anyOf`.
+    ///
+    /// Samples once, without decoding, among the tokens that can start each variant and
+    /// continues with the variants that can start with the sample, as
+    /// ``sampleWhetherToCloseEmptyArray(items:)`` does for an array's first item.
+    /// Object variants all start with `{`, so the keys the model emits tell them apart.
+    /// Other variants that start alike, like two strings, fall back to the first of them.
+    private mutating func generateAnyOf(_ variants: [GenerationSchema.Node]) async throws -> String {
+        let candidates = try flattenedVariants(variants)
+        guard let first = candidates.first else {
+            throw ConstrainedGenerationError.emptyAnyOf
+        }
+        guard candidates.count > 1 else {
+            return try await generateNode(first)
+        }
+
+        let matching = try await variantsStartingWithSample(candidates).map { candidates[$0] }
+        let objects = matching.compactMap { variant -> GenerationSchema.ObjectNode? in
+            if case .object(let object) = variant { return object }
+            return nil
+        }
+        if objects.count > 1, objects.count == matching.count {
+            return try await generateObject(oneOf: objects).output
+        }
+        // Known limitation: variants that start alike but aren't all objects (two strings,
+        // integer and number, two arrays) can't be told apart by their first token, so the
+        // first of them is generated.
+        return try await generateNode(matching[0])
+    }
+
+    /// Resolves references and flattens nested unions, keeping declaration order.
+    ///
+    /// Each definition is expanded at most once: a later reference to it, including one
+    /// from inside itself, would only repeat variants already in the list. That keeps the
+    /// result linear in the number of definitions, where expanding every reference would
+    /// double the list at each union that refers to the same definition twice.
+    private func flattenedVariants(_ variants: [GenerationSchema.Node]) throws -> [GenerationSchema.Node] {
+        var expanded = Set<String>()
+        return try flattenedVariants(variants, expanded: &expanded)
+    }
+
+    private func flattenedVariants(
+        _ variants: [GenerationSchema.Node],
+        expanded: inout Set<String>
+    ) throws -> [GenerationSchema.Node] {
+        var flattened: [GenerationSchema.Node] = []
+        for variant in variants {
+            switch variant {
+            case .ref(let typeName):
+                guard let referenced = schema.defs[typeName] else {
+                    throw ConstrainedGenerationError.missingReference(typeName)
+                }
+                guard expanded.insert(typeName).inserted else { continue }
+                flattened += try flattenedVariants([referenced], expanded: &expanded)
+            case .anyOf(let nested):
+                flattened += try flattenedVariants(nested, expanded: &expanded)
+            default:
+                flattened.append(variant)
+            }
+        }
+        return flattened
+    }
+
+    /// Samples among the tokens that can start each variant, without decoding the sample,
+    /// and returns the positions of the variants that can start with it. Returns every
+    /// position without sampling when the variants all start alike.
+    private mutating func variantsStartingWithSample(
+        _ variants: [GenerationSchema.Node]
+    ) async throws -> [Int] {
+        let starts = try variants.map { try itemStartTokens(for: $0) }
+        guard starts.dropFirst().contains(where: { $0 != starts[0] }) else {
+            return Array(variants.indices)
+        }
+        let allowed = starts.reduce(into: Set<Int>()) { $0.formUnion($1) }
+        guard !allowed.isEmpty else { return Array(variants.indices) }
+        let token = try await backend.sample(from: allowed)
+        let matching = starts.indices.filter { starts[$0].contains(token) }
+        return matching.isEmpty ? Array(variants.indices) : matching
+    }
+
     private mutating func generateObject(_ node: GenerationSchema.ObjectNode) async throws -> String {
+        try await generateObject(oneOf: [node]).output
+    }
+
+    /// Generates an object matching one of `variants`.
+    ///
+    /// With several variants, the mask offers the keys of every variant still in play, and
+    /// each emitted key keeps only the variants that declare it.
+    /// When the variants are the cases of an enumeration with associated values,
+    /// the object starts with the case's `type`, whose value chooses the case.
+    ///
+    /// - Returns: The object, and the positions in `variants` of the variants it still matches.
+    private mutating func generateObject(
+        oneOf variants: [GenerationSchema.ObjectNode]
+    ) async throws -> (output: String, live: [Int]) {
         // Object *key set* is model-driven under the JSON grammar. The previous
         // implementation pre-filtered optional properties with a hash of the field
         // name XOR the token budget, so each optional was always-on or always-off
         // for a given budget — decided before the model was consulted.
         //
-        // After each property the mask permits any not-yet-emitted key, and permits
-        // `}` once every required property has been emitted. For schemas with no
-        // required properties that makes `{}` reachable (schema-valid, and what the
-        // model asked for) — a visible behaviour change for such schemas.
-        var remainingKeys = Set(node.properties.keys)
-        let required = node.required
+        // After each property the mask permits any not-yet-emitted key of a live
+        // variant, and permits `}` once some live variant has all of its required
+        // properties. For schemas with no required properties that makes `{}`
+        // reachable (schema-valid, and what the model asked for) — a visible
+        // behaviour change for such schemas.
+        var live = Array(variants.indices)
+        var emittedKeys = Set<String>()
         var output = try await emit("{")
-        var emittedAnyProperty = false
 
-        while !remainingKeys.isEmpty {
-            let missingRequired = required.intersection(remainingKeys)
-            let canClose = missingRequired.isEmpty
+        // Like Foundation Models, the object of an enumeration case starts with its `type`,
+        // whose value chooses the case. Other unions follow the keys the model writes.
+        if variants.count > 1, let key = try caseTypeKey(of: variants) {
+            output += try await emit("\"\(key)\":")
+            emittedKeys.insert(key)
+            output += try await generateValue(forKey: key, of: variants, narrowing: &live)
+        }
+
+        while true {
+            let liveVariants = live.map { variants[$0] }
+            let remainingKeys = liveVariants.reduce(into: Set<String>()) { $0.formUnion($1.properties.keys) }
+                .subtracting(emittedKeys)
+            if remainingKeys.isEmpty { break }
+            let missingRequired = liveVariants.reduce(into: Set<String>()) { $0.formUnion($1.required) }
+                .intersection(remainingKeys)
+            let closable = live.filter { index in
+                let variant = variants[index]
+                return variant.required.allSatisfy { emittedKeys.contains($0) || variant.properties[$0] == nil }
+            }
+            let canClose = !closable.isEmpty
+            let emittedAnyProperty = !emittedKeys.isEmpty
             let budgetAllowsMoreOptionals = hasBudgetForOptionalStructure()
 
             let keysToOffer: [String]
@@ -432,7 +552,9 @@ struct ConstrainedJSONGenerator<Backend: TokenBackend> {
                 keysToOffer = remainingKeys.sorted()
             } else if canClose {
                 // Genuine last resort: stop offering optionals when the budget is nearly
-                // exhausted. Required properties are already present, so close cleanly.
+                // exhausted. Required properties are already present, so close cleanly,
+                // keeping only the variants the object completes.
+                live = closable
                 break
             } else {
                 // Still missing required keys — only those may be emitted under pressure.
@@ -443,8 +565,8 @@ struct ConstrainedJSONGenerator<Backend: TokenBackend> {
                 let prefix = emittedAnyProperty ? "," : ""
                 return "\(prefix)\"\(key)\":"
             }
-            // Closing is legal once every required property has been emitted. The model
-            // may leave remaining optionals out; that is schema-valid JSON.
+            // Closing is legal once some live variant has all of its required properties.
+            // The model may leave remaining optionals out; that is schema-valid JSON.
             if canClose {
                 candidates.append("}")
             }
@@ -454,23 +576,195 @@ struct ConstrainedJSONGenerator<Backend: TokenBackend> {
             let choice = try await generateChoice(candidates)
             output += choice
 
-            // Model elected to close; remaining keys are optional and intentionally omitted.
+            // Model elected to close; the keys left out are optional for a closable variant.
             if choice == "}" {
-                return output
+                return (output, closable)
             }
 
-            guard let key = propertyKey(fromPropertyStart: choice),
-                let valueNode = node.properties[key]
-            else {
+            guard let key = propertyKey(fromPropertyStart: choice) else {
                 throw ConstrainedGenerationError.tokenizationFailed
             }
-            remainingKeys.remove(key)
-            output += try await generateNode(valueNode)
-            emittedAnyProperty = true
+            live = live.filter { variants[$0].properties[key] != nil }
+            guard !live.isEmpty else {
+                throw ConstrainedGenerationError.tokenizationFailed
+            }
+            emittedKeys.insert(key)
+            output += try await generateValue(forKey: key, of: variants, narrowing: &live)
         }
 
         output += try await emit("}")
-        return output
+        return (output, live)
+    }
+
+    /// Generates the value of `key`, keeping in `live` only the variants whose schema for
+    /// it the value matches.
+    ///
+    /// Variants that agree on the key's schema all stay. Variants that name themselves with
+    /// a string choice, like the `type` of an enum case, are told apart by the choice.
+    /// Variants whose values are all objects are told apart by the keys of the nested
+    /// object. Otherwise the value's first token chooses, and the first matching variant stays.
+    private mutating func generateValue(
+        forKey key: String,
+        of variants: [GenerationSchema.ObjectNode],
+        narrowing live: inout [Int]
+    ) async throws -> String {
+        let nodes = live.compactMap { variants[$0].properties[key] }
+        guard let first = nodes.first, nodes.count == live.count else {
+            throw ConstrainedGenerationError.tokenizationFailed
+        }
+        // Descriptions don't change what gets generated, so variants whose schemas for
+        // this key differ only in their descriptions all stay live.
+        let comparable = nodes.map { withoutDescriptions($0) }
+        if comparable.allSatisfy({ $0 == comparable[0] }) {
+            return try await generateNode(first)
+        }
+
+        let choices = try nodes.map { try stringChoices(of: $0) }
+        if choices.allSatisfy({ $0 != nil }) {
+            var all: [String] = []
+            for choice in choices.compactMap({ $0 }).joined() where !all.contains(choice) {
+                all.append(choice)
+            }
+            var output = try await emit("\"")
+            let (value, index) = try await generateIndexedChoice(all)
+            output += value
+            output += try await emit("\"")
+            // Narrow by the choice the sampled tokens spell, not by the text they decode to:
+            // the two differ when a token's text differs from the text it was tokenized
+            // from, like a piece with a leading space. Without a choice, the budget ran out
+            // and the live variants stay as they were.
+            if let index {
+                live = zip(live, choices).filter { $0.1?.contains(all[index]) == true }.map(\.0)
+            }
+            return output
+        }
+
+        let starting = try await variantsStartingWithSample(nodes)
+        if let objects = try distinctObjects(in: starting.map { nodes[$0] }) {
+            // Every value is an object and they all start with `{`, so the nested keys
+            // choose: the variants stay whose nested object the generated one still matches.
+            let (output, survivors) = try await generateObject(oneOf: objects.map(\.object))
+            let kept = Set(survivors.flatMap { objects[$0].owners })
+            live = kept.sorted().map { live[starting[$0]] }
+            return output
+        }
+
+        // Same limitation as in `generateAnyOf(_:)`: among values that start alike, the first
+        // variant's schema is used.
+        let chosen = nodes[starting[0]]
+        let chosenShape = comparable[starting[0]]
+        live = zip(live, comparable).filter { $0.1 == chosenShape }.map(\.0)
+        return try await generateNode(chosen)
+    }
+
+    /// The distinct objects that `nodes` resolve to, each with the positions in `nodes` that
+    /// can be it, or `nil` when a node can be something other than an object.
+    private func distinctObjects(
+        in nodes: [GenerationSchema.Node]
+    ) throws -> [(object: GenerationSchema.ObjectNode, owners: [Int])]? {
+        var objects: [(object: GenerationSchema.ObjectNode, shape: GenerationSchema.Node, owners: [Int])] = []
+        for (position, node) in nodes.enumerated() {
+            let flattened = try flattenedVariants([node])
+            guard !flattened.isEmpty else { return nil }
+            for variant in flattened {
+                guard case .object(let object) = variant else { return nil }
+                let shape = withoutDescriptions(variant)
+                if let index = objects.firstIndex(where: { $0.shape == shape }) {
+                    if !objects[index].owners.contains(position) {
+                        objects[index].owners.append(position)
+                    }
+                } else {
+                    objects.append((object, shape, [position]))
+                }
+            }
+        }
+        return objects.map { ($0.object, $0.owners) }
+    }
+
+    /// How many references one ``withoutDescriptions(_:)`` call resolves before it leaves the
+    /// rest as references.
+    private static var comparableReferenceBudget: Int { 256 }
+
+    /// `node` without any descriptions, so nodes that generate the same values compare equal.
+    ///
+    /// References are resolved, except one already being resolved further up, which stays a
+    /// reference so a recursive definition can't expand forever. Resolution also stops after
+    /// ``comparableReferenceBudget`` references: a definition that refers to another one twice,
+    /// at each level, would otherwise expand exponentially. A reference left unresolved only
+    /// compares equal to the same reference, so two schemas then differ sooner, never later.
+    private func withoutDescriptions(_ node: GenerationSchema.Node) -> GenerationSchema.Node {
+        var budget = Self.comparableReferenceBudget
+        return withoutDescriptions(node, resolving: [], budget: &budget)
+    }
+
+    private func withoutDescriptions(
+        _ node: GenerationSchema.Node,
+        resolving: Set<String>,
+        budget: inout Int
+    ) -> GenerationSchema.Node {
+        switch node {
+        case .object(var object):
+            object.description = nil
+            for key in object.properties.keys.sorted() {
+                object.properties[key] = withoutDescriptions(
+                    object.properties[key]!,
+                    resolving: resolving,
+                    budget: &budget
+                )
+            }
+            return .object(object)
+        case .array(var array):
+            array.description = nil
+            array.items = withoutDescriptions(array.items, resolving: resolving, budget: &budget)
+            return .array(array)
+        case .string(var string):
+            string.description = nil
+            return .string(string)
+        case .number(var number):
+            number.description = nil
+            return .number(number)
+        case .anyOf(let variants):
+            var stripped: [GenerationSchema.Node] = []
+            for variant in variants {
+                stripped.append(withoutDescriptions(variant, resolving: resolving, budget: &budget))
+            }
+            return .anyOf(stripped)
+        case .ref(let typeName):
+            guard budget > 0, !resolving.contains(typeName), let referenced = schema.defs[typeName] else {
+                return node
+            }
+            budget -= 1
+            return withoutDescriptions(referenced, resolving: resolving.union([typeName]), budget: &budget)
+        case .boolean, .null:
+            return node
+        }
+    }
+
+    /// The key that names the case, if every variant is the object of a different case
+    /// of an enumeration with associated values.
+    ///
+    /// That's a required `type` with a different single string choice in each variant,
+    /// as `GenerationSchema(type:description:cases:)` writes it.
+    private func caseTypeKey(of variants: [GenerationSchema.ObjectNode]) throws -> String? {
+        let key = GenerationSchema.caseTypeProperty
+        var names = Set<String>()
+        for variant in variants {
+            guard variant.required.contains(key),
+                let node = variant.properties[key],
+                let choices = try stringChoices(of: node), choices.count == 1,
+                names.insert(choices[0]).inserted
+            else { return nil }
+        }
+        return key
+    }
+
+    /// The choices of a string enum without a pattern, through references.
+    private func stringChoices(of node: GenerationSchema.Node) throws -> [String]? {
+        let flattened = try flattenedVariants([node])
+        guard flattened.count == 1, case .string(let string) = flattened[0], string.pattern == nil,
+            let choices = string.enumChoices, !choices.isEmpty
+        else { return nil }
+        return choices
     }
 
     private mutating func generateArray(_ node: GenerationSchema.ArrayNode) async throws -> String {

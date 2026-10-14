@@ -6,6 +6,13 @@ struct StreamingResponseState<Content: Generable> {
     var usage = ReportedUsage()
     private var completedUsage = LanguageModelSession.Usage.zero
 
+    /// The property that holds the response, if the provider's response schema wraps it.
+    let wrapperProperty: String?
+
+    init(wrapperProperty: String? = nil) {
+        self.wrapperProperty = wrapperProperty
+    }
+
     /// The text of completed rounds, for string content.
     ///
     /// Like the MLX and llama.cpp providers,
@@ -27,7 +34,11 @@ struct StreamingResponseState<Content: Generable> {
 
     func snapshot(providerMetadata: [String: String]? = nil) -> LanguageModelSession.ResponseStream<Content>.Snapshot? {
         guard
-            var snapshot = LanguageModelSession.ResponseStream<Content>.Snapshot(text: responseText, usage: totalUsage)
+            var snapshot = LanguageModelSession.ResponseStream<Content>.Snapshot(
+                text: responseText,
+                usage: totalUsage,
+                wrapperProperty: wrapperProperty
+            )
         else { return nil }
         snapshot.transcriptEntries = ArraySlice(entries)
         snapshot.providerMetadata = providerMetadata
