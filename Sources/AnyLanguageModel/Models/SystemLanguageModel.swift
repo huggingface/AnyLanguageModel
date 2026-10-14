@@ -762,11 +762,16 @@
         }
     }
 
+    /// The Foundation Models schema of `node`, named `name`, or by `path`, where it sits in its
+    /// schema, when it's written in place: Foundation Models refers to every object and choice by
+    /// its name, and one with no name refers to nothing.
     @available(macOS 26.0, iOS 26.0, watchOS 27.0, tvOS 26.0, visionOS 26.0, *)
     func convertToDynamicSchema(
         _ node: AnyLanguageModel.GenerationSchema.Node,
-        name: String? = nil
+        name: String? = nil,
+        path: String = ""
     ) -> FoundationModels.DynamicGenerationSchema {
+        func at(_ step: String) -> String { path.isEmpty ? step : "\(path).\(step)" }
         switch node {
         case .object(let object):
             // Declaration order, then any properties the order doesn't name, sorted.
@@ -777,11 +782,11 @@
                 return .init(
                     name: key,
                     description: property.description,
-                    schema: convertToDynamicSchema(property),
+                    schema: convertToDynamicSchema(property, path: at(key)),
                     isOptional: !object.required.contains(key)
                 )
             }
-            return .init(name: name ?? "", description: object.description, properties: properties)
+            return .init(name: name ?? path, description: object.description, properties: properties)
 
         case .string(let string):
             if let values = string.enumChoices, !values.isEmpty, let name, !string.isConstant {
@@ -821,13 +826,18 @@
                 if !nonNull.isEmpty { choices = nonNull }
             }
             if choices.count == 1 {
-                return convertToDynamicSchema(choices[0], name: name)
+                return convertToDynamicSchema(choices[0], name: name, path: path)
             }
-            return .init(name: name ?? "", anyOf: choices.map { convertToDynamicSchema($0) })
+            return .init(
+                name: name ?? path,
+                anyOf: choices.enumerated().map { index, choice in
+                    convertToDynamicSchema(choice, path: at(String(index)))
+                }
+            )
 
         case .array(let array):
             return .init(
-                arrayOf: convertToDynamicSchema(array.items),
+                arrayOf: convertToDynamicSchema(array.items, path: path),
                 minimumElements: array.minItems,
                 maximumElements: array.maxItems
             )
