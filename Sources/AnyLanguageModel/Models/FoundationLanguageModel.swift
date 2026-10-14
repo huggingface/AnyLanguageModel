@@ -159,7 +159,7 @@
         ) async throws -> LanguageModelSession.Response<Content> where Content: Generable {
             return try await fmRespond(
                 makeSession: { try await self.makeSession(for: session, prompt: prompt) },
-                fmPrompt: prompt.toFoundationModels(),
+                fmPrompt: try prompt.toFoundationModels(),
                 fmOptions: options.toFoundationModels(),
                 type: type,
                 schema: schema,
@@ -209,9 +209,15 @@
             includeSchemaInPrompt: Bool,
             options: GenerationOptions
         ) -> sending LanguageModelSession.ResponseStream<Content> where Content: Generable {
+            let fmPrompt: FoundationModels.Prompt
+            do {
+                fmPrompt = try prompt.toFoundationModels()
+            } catch {
+                return .init(stream: AsyncThrowingStream { $0.finish(throwing: error) })
+            }
             return fmStreamResponse(
                 makeSession: { try await self.makeSession(for: session, prompt: prompt) },
-                fmPrompt: prompt.toFoundationModels(),
+                fmPrompt: fmPrompt,
                 fmOptions: options.toFoundationModels(),
                 type: type,
                 schema: schema,

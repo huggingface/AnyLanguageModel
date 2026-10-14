@@ -117,7 +117,10 @@ struct ResponsesUsage: Decodable, Sendable {
 extension LanguageModelSession.ResponseStream.Snapshot {
     /// Builds a snapshot from accumulated text,
     /// including metadata-only updates.
-    init?(text: String, usage: LanguageModelSession.Usage) {
+    ///
+    /// - Parameter wrapperProperty: The property that holds the response,
+    ///   if the provider's response schema wraps it.
+    init?(text: String, usage: LanguageModelSession.Usage, wrapperProperty: String? = nil) {
         if Content.self == String.self {
             self.init(
                 content: (text as! Content).asPartiallyGenerated(),
@@ -125,7 +128,10 @@ extension LanguageModelSession.ResponseStream.Snapshot {
                 usage: usage
             )
         } else {
-            let raw = (try? GeneratedContent(json: text)) ?? GeneratedContent(text)
+            let raw = ProviderResponseSchema.unwrapping(
+                (try? GeneratedContent(json: text)) ?? GeneratedContent(text),
+                fromProperty: wrapperProperty
+            )
             guard let content = try? Content(raw) else { return nil }
             self.init(content: content.asPartiallyGenerated(), rawContent: raw, usage: usage)
         }
