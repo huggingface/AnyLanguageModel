@@ -99,6 +99,43 @@ struct DynamicProfileTests {
         let _: any Observable = session.properties
     }
 
+    @Test func concurrentSnapshotsDispatchEachCallbackOnce() async throws {
+        let probe = ConcurrentCallbackProbe()
+        let model = LifecycleFixtureModel()
+        let session = LanguageModelSession(
+            profile: LanguageModelSession.Profile { Instructions("Concurrent callback") }
+                .model(model)
+                .onResponse { _ in await probe.recordInvocation() }
+        )
+        let context = try await session.resolvedRequestContext(including: [], options: .init())
+        let entry = Transcript.Entry.response(
+            .init(assetIDs: [], segments: [.text(.init(content: "response"))])
+        )
+
+        let first = Task {
+            try await session.profileDidProduceEntries(
+                [entry],
+                requestContext: context,
+                currentRoundEntries: [entry]
+            )
+        }
+        await probe.waitUntilFirstInvocation()
+        let second = Task {
+            try await session.profileDidProduceEntries(
+                [entry],
+                requestContext: context,
+                currentRoundEntries: [entry]
+            )
+        }
+
+        try await second.value
+        let invocationCount = await probe.invocationCount
+        await probe.releaseFirstInvocation()
+        try await first.value
+
+        #expect(invocationCount == 1)
+    }
+
     @Test(arguments: [false, true])
     func callbackErrorsPropagateWithoutCommittingAResponse(streaming: Bool) async throws {
         let model = LifecycleFixtureModel()
@@ -288,6 +325,44 @@ struct DynamicProfileTests {
             state.callbackHistories.withLock { $0 }
                 == [[callEntry.id], [callEntry.id, outputEntry.id]]
         )
+        #expect(toolHistory == [callEntry.id, outputEntry.id])
+    }
+
+    @Test func callbackHistoryDoesNotDuplicateCanonicalEntries() async throws {
+        let state = ProfileFixtureState()
+        let model = ProfileFixtureModel(id: "model-a", state: state)
+        let call = Transcript.ToolCall(
+            id: "call",
+            toolName: "fixture",
+            arguments: GeneratedContent(properties: [:])
+        )
+        let output = Transcript.ToolOutput(
+            id: call.id,
+            toolName: call.toolName,
+            segments: [.text(.init(content: "done"))]
+        )
+        let callEntry = Transcript.Entry.toolCalls(.init([call]))
+        let outputEntry = Transcript.Entry.toolOutput(output)
+        let session = LanguageModelSession(
+            profile: FixtureProfile(state: state, first: model, second: model),
+            history: [callEntry]
+        )
+        let request = try await session.resolvedRequestContext(including: [], options: .init())
+
+        try await session.profileDidProduceToolOutput(
+            for: call,
+            output: output,
+            requestContext: request,
+            currentRoundEntries: [callEntry, outputEntry]
+        )
+        let toolHistory = await session.withProfileToolExecution(
+            requestContext: request,
+            currentRoundEntries: [callEntry, outputEntry]
+        ) {
+            session.properties.history.map(\.id)
+        }
+
+        #expect(state.callbackHistories.withLock { $0 } == [[callEntry.id, outputEntry.id]])
         #expect(toolHistory == [callEntry.id, outputEntry.id])
     }
 
@@ -554,6 +629,30 @@ private struct PropertyFixtureTool: Tool, @unchecked Sendable {
 
 private enum LifecycleFixtureError: Error {
     case rejected
+}
+
+private actor ConcurrentCallbackProbe {
+    private(set) var invocationCount = 0
+    private var firstInvocationWaiter: CheckedContinuation<Void, Never>?
+    private var firstInvocationRelease: CheckedContinuation<Void, Never>?
+
+    func recordInvocation() async {
+        invocationCount += 1
+        guard invocationCount == 1 else { return }
+        firstInvocationWaiter?.resume()
+        firstInvocationWaiter = nil
+        await withCheckedContinuation { firstInvocationRelease = $0 }
+    }
+
+    func waitUntilFirstInvocation() async {
+        guard invocationCount == 0 else { return }
+        await withCheckedContinuation { firstInvocationWaiter = $0 }
+    }
+
+    func releaseFirstInvocation() {
+        firstInvocationRelease?.resume()
+        firstInvocationRelease = nil
+    }
 }
 
 private final class LifecycleFixtureState: @unchecked Sendable {

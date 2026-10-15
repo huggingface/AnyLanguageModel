@@ -508,7 +508,7 @@ public struct OpenAILanguageModel: LanguageModel, ProfileRequestIdentifiedLangua
         var earlierText = ""
         var inFlightMessages: [OpenAIMessage] = []
 
-        var toolRounds = ToolRoundLimit(provider: "OpenAI")
+        let toolRounds = session.toolRoundLimit(for: "OpenAI")
         // Loop until no more tool calls
         while true {
             let requestContext = try await session.resolvedRequestContext(
@@ -661,7 +661,7 @@ public struct OpenAILanguageModel: LanguageModel, ProfileRequestIdentifiedLangua
 
         let url = baseURL.appendingPathComponent("responses")
 
-        var toolRounds = ToolRoundLimit(provider: "OpenAI")
+        let toolRounds = session.toolRoundLimit(for: "OpenAI")
         // Loop until no more tool calls
         while true {
             let requestContext = try await session.resolvedRequestContext(
@@ -838,7 +838,7 @@ public struct OpenAILanguageModel: LanguageModel, ProfileRequestIdentifiedLangua
                 do {
                     var inFlightMessages: [OpenAIMessage] = []
                     var state = StreamingResponseState<Content>(wrapperProperty: responseSchema.wrapperProperty)
-                    var toolRounds = ToolRoundLimit(provider: "OpenAI")
+                    let toolRounds = session.toolRoundLimit(for: "OpenAI")
                     while true {
                         try Task.checkCancellation()
                         let requestContext = try await session.resolvedRequestContext(

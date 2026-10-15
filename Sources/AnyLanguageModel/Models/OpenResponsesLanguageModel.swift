@@ -497,7 +497,7 @@ public struct OpenResponsesLanguageModel: LanguageModel, ProfileRequestIdentifie
                 do {
                     var inFlightMessages: [OpenResponsesMessage] = []
                     var state = StreamingResponseState<Content>(wrapperProperty: responseSchema.wrapperProperty)
-                    var toolRounds = ToolRoundLimit(provider: "Open Responses")
+                    let toolRounds = session.toolRoundLimit(for: "Open Responses")
                     while true {
                         try Task.checkCancellation()
                         let requestContext = try await session.resolvedRequestContext(
@@ -634,7 +634,7 @@ public struct OpenResponsesLanguageModel: LanguageModel, ProfileRequestIdentifie
         var inFlightMessages: [OpenResponsesMessage] = []
         let url = baseURL.appendingPathComponent("responses")
 
-        var toolRounds = ToolRoundLimit(provider: "Open Responses")
+        let toolRounds = session.toolRoundLimit(for: "Open Responses")
         while true {
             let requestContext = try await session.resolvedRequestContext(
                 including: entries,

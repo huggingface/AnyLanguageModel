@@ -451,7 +451,7 @@ public struct AnthropicLanguageModel: LanguageModel, ProfileRequestIdentifiedLan
         var usage = LanguageModelSession.Usage.zero
         var earlierText = ""
         var inFlightMessages: [AnthropicMessage] = []
-        var toolRounds = ToolRoundLimit(provider: "Anthropic")
+        let toolRounds = session.toolRoundLimit(for: "Anthropic")
 
         while true {
             let requestContext = try await session.resolvedRequestContext(
@@ -631,7 +631,7 @@ public struct AnthropicLanguageModel: LanguageModel, ProfileRequestIdentifiedLan
                         type == String.self ? nil : try convertSchemaToAnthropicFormat(schema)
                     var inFlightMessages: [AnthropicMessage] = []
                     var state = StreamingResponseState<Content>()
-                    var toolRounds = ToolRoundLimit(provider: "Anthropic")
+                    let toolRounds = session.toolRoundLimit(for: "Anthropic")
                     while true {
                         try Task.checkCancellation()
                         let requestContext = try await session.resolvedRequestContext(

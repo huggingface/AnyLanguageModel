@@ -233,7 +233,7 @@ public struct GeminiLanguageModel: LanguageModel, ProfileRequestIdentifiedLangua
         // The text of earlier tool rounds, which string responses include.
         var earlierText = ""
 
-        var toolRounds = ToolRoundLimit(provider: "Gemini")
+        let toolRounds = session.toolRoundLimit(for: "Gemini")
         // Multi-turn conversation loop for tool calling
         while true {
             let requestContext = try await session.resolvedRequestContext(
@@ -419,7 +419,7 @@ public struct GeminiLanguageModel: LanguageModel, ProfileRequestIdentifiedLangua
                 do {
                     let headers = buildHeaders()
                     var state = StreamingResponseState<Content>(wrapperProperty: responseSchema.wrapperProperty)
-                    var toolRounds = ToolRoundLimit(provider: "Gemini")
+                    let toolRounds = session.toolRoundLimit(for: "Gemini")
                     while true {
                         try Task.checkCancellation()
                         let requestContext = try await session.resolvedRequestContext(
