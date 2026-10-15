@@ -45,13 +45,18 @@ public final class SessionPropertyValues: @unchecked Sendable {
 
     /// The session history without an instructions entry.
     public var history: Transcript.HistoryView {
-        get { SessionPropertyBinding.history ?? historyGetter() }
+        get {
+            _accessSessionProperty(keyPath: \.history)
+            return SessionPropertyBinding.history ?? historyGetter()
+        }
         set {
-            precondition(
-                SessionPropertyBinding.history == nil,
-                "Session history is read-only while dynamic instructions are active"
-            )
-            historySetter(newValue)
+            _withSessionPropertyMutation(keyPath: \.history) {
+                precondition(
+                    SessionPropertyBinding.history == nil,
+                    "Session history is read-only while dynamic instructions are active"
+                )
+                historySetter(newValue)
+            }
         }
     }
 

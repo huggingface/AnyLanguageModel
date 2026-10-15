@@ -405,10 +405,18 @@ public final class LanguageModelSession: @unchecked Sendable {
         }
     }
 
+    nonisolated private func withTranscriptMutation<Result>(
+        _ mutation: () throws -> Result
+    ) rethrows -> Result {
+        try properties._withSessionPropertyMutation(keyPath: \.history) {
+            try withMutation(keyPath: \.transcript, mutation)
+        }
+    }
+
     // The prompt is the only entry committed before a request succeeds. Checkpoints and
     // the final response commit atomically at completion, so rollback owns only this ID.
     nonisolated private func removePrompt(id: String) {
-        withMutation(keyPath: \.transcript) {
+        withTranscriptMutation {
             state.withLock { state in
                 state.transcript = Transcript(entries: state.transcript.filter { $0.id != id })
             }
@@ -517,7 +525,7 @@ public final class LanguageModelSession: @unchecked Sendable {
                                 providerMetadata: lastSnapshot.providerMetadata
                             )
                         )
-                        session.withMutation(keyPath: \.transcript) {
+                        session.withTranscriptMutation {
                             session.state.withLock {
                                 $0.transcript.append(contentsOf: lastSnapshot.transcriptEntries)
                                 $0.transcript.append(responseEntry)
@@ -526,7 +534,7 @@ public final class LanguageModelSession: @unchecked Sendable {
                         session.endResponding()
                         continuation.finish()
                     } catch {
-                        session.withMutation(keyPath: \.transcript) {
+                        session.withTranscriptMutation {
                             session.state.withLock { state in
                                 if state.transcriptErrorHandlingPolicy == .preserveTranscript {
                                     state.transcript.append(contentsOf: lastSnapshot?.transcriptEntries ?? [])
@@ -780,7 +788,7 @@ public final class LanguageModelSession: @unchecked Sendable {
                     responseFormat: responseFormat
                 )
             )
-            withMutation(keyPath: \.transcript) {
+            withTranscriptMutation {
                 state.withLock { $0.transcript.append(promptEntry) }
             }
 
@@ -805,7 +813,7 @@ public final class LanguageModelSession: @unchecked Sendable {
             )
 
             // Add tool entries and response to transcript
-            withMutation(keyPath: \.transcript) {
+            withTranscriptMutation {
                 state.withLock { lockedState in
                     lockedState.transcript.append(contentsOf: response.transcriptEntries)
                     lockedState.transcript.append(responseEntry)
@@ -830,7 +838,7 @@ public final class LanguageModelSession: @unchecked Sendable {
                 responseFormat: type == String.self ? nil : .init(type: type)
             )
         )
-        withMutation(keyPath: \.transcript) {
+        withTranscriptMutation {
             state.withLock { $0.transcript.append(promptEntry) }
         }
 
@@ -978,7 +986,7 @@ extension LanguageModelSession {
                 responseFormat: .init(schema: schema)
             )
         )
-        withMutation(keyPath: \.transcript) {
+        withTranscriptMutation {
             state.withLock { $0.transcript.append(promptEntry) }
         }
 
@@ -1177,7 +1185,7 @@ extension LanguageModelSession {
                     responseFormat: type == String.self ? nil : .init(type: type)
                 )
             )
-            withMutation(keyPath: \.transcript) {
+            withTranscriptMutation {
                 state.withLock { $0.transcript.append(promptEntry) }
             }
 
@@ -1214,7 +1222,7 @@ extension LanguageModelSession {
             )
 
             // Add tool entries and response to transcript
-            withMutation(keyPath: \.transcript) {
+            withTranscriptMutation {
                 state.withLock { lockedState in
                     lockedState.transcript.append(contentsOf: response.transcriptEntries)
                     lockedState.transcript.append(responseEntry)
@@ -1309,7 +1317,7 @@ extension LanguageModelSession {
                 responseFormat: type == String.self ? nil : .init(type: type)
             )
         )
-        withMutation(keyPath: \.transcript) {
+        withTranscriptMutation {
             state.withLock { $0.transcript.append(promptEntry) }
         }
 
