@@ -254,7 +254,7 @@ public struct GeminiLanguageModel: LanguageModel {
                 requestTranscript.append(entry)
             }
             let params = try createGenerateContentParams(
-                contents: requestTranscript.toGeminiContent(),
+                contents: try requestTranscript.toGeminiContent(),
                 tools: geminiTools,
                 generating: type,
                 schema: responseSchema.schema,
@@ -432,7 +432,7 @@ public struct GeminiLanguageModel: LanguageModel {
                             requestTranscript.append(entry)
                         }
                         let params = try createGenerateContentParams(
-                            contents: requestTranscript.toGeminiContent(),
+                            contents: try requestTranscript.toGeminiContent(),
                             tools: geminiTools,
                             generating: type,
                             schema: responseSchema.schema,
@@ -800,7 +800,7 @@ private func toGeminiFunctionResponse(
                     )
                 )
             case .url(let url):
-                parts.append(.fileData(GeminiFileData(fileURI: url.absoluteString)))
+                parts.append(.inlineData(try geminiFunctionResponseData(from: url)))
             }
         }
     }
@@ -816,10 +816,41 @@ private func toGeminiFunctionResponse(
     )
 }
 
+private enum GeminiFunctionResponseAttachmentError: LocalizedError {
+    case unsupportedURL(URL)
+    case unsupportedImageType(URL)
+
+    var errorDescription: String? {
+        switch self {
+        case .unsupportedURL(let url):
+            "Gemini Tool output attachments require a local file URL; cannot inline \(url.absoluteString)."
+        case .unsupportedImageType(let url):
+            "Gemini Tool output attachments support PNG, JPEG, and WebP files; cannot determine a supported MIME type for \(url.lastPathComponent)."
+        }
+    }
+}
+
+private func geminiFunctionResponseData(from url: URL) throws -> GeminiInlineData {
+    guard url.isFileURL else {
+        throw GeminiFunctionResponseAttachmentError.unsupportedURL(url)
+    }
+
+    let mimeType = switch url.pathExtension.lowercased() {
+    case "png": "image/png"
+    case "jpg", "jpeg": "image/jpeg"
+    case "webp": "image/webp"
+    default: throw GeminiFunctionResponseAttachmentError.unsupportedImageType(url)
+    }
+    return try GeminiInlineData(
+        mimeType: mimeType,
+        data: Data(contentsOf: url).base64EncodedString()
+    )
+}
+
 // MARK: - Supporting Types
 
 extension Transcript {
-    fileprivate func toGeminiContent() -> [GeminiContent] {
+    fileprivate func toGeminiContent() throws -> [GeminiContent] {
         var messages = [GeminiContent]()
         for item in self {
             switch item {
@@ -869,13 +900,7 @@ extension Transcript {
                 )
             case .toolOutput(let toolOutput):
                 // Add function response as a user message (Gemini API expects function responses from user role)
-                let functionResponse =
-                    (try? toGeminiFunctionResponse(toolOutput))
-                    ?? GeminiFunctionResponse(
-                        name: toolOutput.toolName,
-                        response: [:],
-                        parts: nil
-                    )
+                let functionResponse = try toGeminiFunctionResponse(toolOutput)
                 messages.append(
                     .init(
                         role: .user,

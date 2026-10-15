@@ -179,6 +179,68 @@ import Testing
             #expect(Data(base64Encoded: try #require(inlineData["data"] as? String)) != nil)
         }
 
+        @Test("inlines URL-backed images in function responses")
+        func inlinesURLBackedToolOutput() async throws {
+            StubURLProtocol.reset()
+            StubURLProtocol.enqueue(
+                json:
+                    #"{"candidates":[{"content":{"role":"model","parts":[{"functionCall":{"name":"image","args":{"request":"read"}}}]},"finishReason":"STOP"}]}"#
+            )
+            StubURLProtocol.enqueue(json: textResponse("OK"))
+
+            let imageData = Data([0x89, 0x50, 0x4E, 0x47])
+            let url = FileManager.default.temporaryDirectory
+                .appending(path: UUID().uuidString)
+                .appendingPathExtension("png")
+            try imageData.write(to: url)
+            defer { try? FileManager.default.removeItem(at: url) }
+
+            let output = Prompt { Attachment(imageURL: url) }
+            let session = LanguageModelSession(
+                model: makeModel(),
+                tools: [ImageOutputTool(output: output)]
+            )
+            _ = try await session.respond(to: "read image")
+
+            let body = try #require(StubURLProtocol.recordedBodies.last)
+            let json = try #require(
+                try JSONSerialization.jsonObject(with: body) as? [String: Any]
+            )
+            let contents = try #require(json["contents"] as? [[String: Any]])
+            let outputParts = try #require(contents.last?["parts"] as? [[String: Any]])
+            let functionResponse = try #require(
+                outputParts.first?["functionResponse"] as? [String: Any]
+            )
+            let mediaParts = try #require(functionResponse["parts"] as? [[String: Any]])
+            let inlineData = try #require(mediaParts.first?["inlineData"] as? [String: Any])
+            #expect(inlineData["mime_type"] as? String == "image/png")
+            #expect(Data(base64Encoded: try #require(inlineData["data"] as? String)) == imageData)
+            #expect(mediaParts.first?["fileData"] == nil)
+        }
+
+        @Test("rejects remote URL-backed images with an actionable error")
+        func rejectsRemoteURLBackedToolOutput() async throws {
+            StubURLProtocol.reset()
+            StubURLProtocol.enqueue(
+                json:
+                    #"{"candidates":[{"content":{"role":"model","parts":[{"functionCall":{"name":"image","args":{"request":"read"}}}]},"finishReason":"STOP"}]}"#
+            )
+
+            let url = try #require(URL(string: "https://example.com/image.png"))
+            let output = Prompt { Attachment(imageURL: url) }
+            let session = LanguageModelSession(
+                model: makeModel(),
+                tools: [ImageOutputTool(output: output)]
+            )
+
+            do {
+                _ = try await session.respond(to: "read image")
+                Issue.record("Expected a remote Tool output attachment to be rejected")
+            } catch {
+                #expect(error.localizedDescription.contains("local file URL"))
+            }
+        }
+
         @Test("does not replay the conversation history on later turns")
         func doesNotReplayHistoryOnLaterTurns() async throws {
             StubURLProtocol.reset()
