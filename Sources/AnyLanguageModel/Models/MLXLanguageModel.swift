@@ -1128,7 +1128,7 @@ import Foundation
             var usage = LanguageModelSession.Usage.zero
             var allTextChunks: [String] = []
             var allEntries: [Transcript.Entry] = []
-            var toolRounds = ToolRoundLimit(provider: "MLX")
+            var toolRounds = ToolRoundLimit(provider: "MLX", options: options)
 
             // Loop until no more tool calls
             while true {
@@ -1354,7 +1354,7 @@ import Foundation
                         var usage = LanguageModelSession.Usage.zero
                         var accumulatedText = ""
                         var accumulatedEntries: [Transcript.Entry] = []
-                        var toolRounds = ToolRoundLimit(provider: "MLX")
+                        var toolRounds = ToolRoundLimit(provider: "MLX", options: options)
 
                         // Yields a snapshot carrying the cumulative text and tool entries so far.
                         func yieldSnapshot() {

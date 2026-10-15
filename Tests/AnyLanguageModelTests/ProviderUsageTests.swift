@@ -814,7 +814,7 @@ import Testing
         @Test(arguments: Provider.allCases)
         func streamedToolRoundsStopAtLimit(_ provider: Provider) async throws {
             UsageURLProtocol.reset()
-            let limit = ToolRoundLimit.maximumRounds
+            let limit = GenerationOptions().maximumToolRounds
             for round in 0 ... limit {
                 UsageURLProtocol.enqueue(json: try provider.toolStream(city: "City \(round)", callID: "call_\(round)"))
             }
@@ -827,6 +827,23 @@ import Testing
             #expect(tool.cities.withLock { $0.count } == limit)
             #expect(UsageURLProtocol.recordedBodies.count == limit + 1)
             #expect(!session.isResponding)
+        }
+
+        @Test(arguments: Provider.allCases)
+        func streamedToolRoundsGoOnToTheirMaximum(_ provider: Provider) async throws {
+            UsageURLProtocol.reset()
+            let rounds = 10
+            for round in 0 ..< rounds {
+                UsageURLProtocol.enqueue(json: try provider.toolStream(city: "City \(round)", callID: "call_\(round)"))
+            }
+            UsageURLProtocol.enqueue(json: try provider.stream())
+            let tool = RecordingWeatherTool()
+            let session = provider.makeSession(tools: [tool])
+            var options = GenerationOptions()
+            options.maximumToolRounds = rounds
+            _ = try await session.streamResponse(to: "Weather?", options: options).collect()
+            #expect(tool.cities.withLock { $0.count } == rounds)
+            #expect(UsageURLProtocol.recordedBodies.count == rounds + 1)
         }
 
         /// Calling the same tool with the same arguments again can be what's asked,

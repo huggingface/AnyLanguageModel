@@ -121,6 +121,13 @@ public struct GenerationOptions: Sendable, Equatable {
     /// an error will be thrown.
     public var maximumResponseTokens: Int?
 
+    /// The most rounds of tool calls one response may take: a round past it fails the response.
+    ///
+    /// - Note: This API is exclusive to AnyLanguageModel
+    ///   and using it means your code is no longer drop-in compatible
+    ///   with the Foundation Models framework.
+    public var maximumToolRounds: Int = 8
+
     /// Storage for model-specific custom options.
     private var customOptionsStorage: CustomOptionsStorage = .init()
 

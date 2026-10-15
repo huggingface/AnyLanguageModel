@@ -1,36 +1,36 @@
 import Foundation
 
-/// Bounds the tool rounds in one response.
+/// Bounds the tool rounds in one response, as its options say.
 ///
 /// A model that keeps calling tools would otherwise run tools
 /// and send requests until the caller cancels.
-/// A response allows at most ``maximumRounds`` rounds of tool calls.
+/// A response allows at most ``GenerationOptions/maximumToolRounds`` rounds of tool calls, 8 by default.
 /// A round that repeats the previous one runs like any other:
 /// calling the same tool with the same arguments again can be what's asked,
 /// and the limit is what ends a loop.
 struct ToolRoundLimit {
-    /// The maximum number of tool rounds in one response.
-    static let maximumRounds = 8
-
     /// The provider name used in error messages.
     let provider: String
+    /// The most rounds the response may take.
+    let maximumRounds: Int
 
-    private var rounds = 0
+    private var taken = 0
 
-    init(provider: String) {
+    init(provider: String, options: GenerationOptions) {
         self.provider = provider
+        self.maximumRounds = options.maximumToolRounds
     }
 
     /// Records a round of tool calls before any of them runs.
     ///
-    /// - Throws: A decoding failure when the round exceeds ``maximumRounds``.
+    /// - Throws: A decoding failure when the round is past the most rounds the options allow.
     mutating func record() throws {
-        rounds += 1
-        if rounds > Self.maximumRounds {
+        taken += 1
+        if taken > maximumRounds {
             throw LanguageModelSession.GenerationError.decodingFailure(
                 .init(
                     debugDescription:
-                        "Exceeded maximum tool iterations (\(Self.maximumRounds)) while processing \(provider) tool calls."
+                        "Exceeded maximum tool iterations (\(maximumRounds)) while processing \(provider) tool calls."
                 )
             )
         }

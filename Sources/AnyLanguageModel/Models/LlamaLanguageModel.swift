@@ -859,7 +859,7 @@ import Foundation
             if type == String.self {
                 let maxTokens = runtimeOptions.maximumResponseTokens ?? 100
                 let outputFormat = currentToolCallFormat()
-                let maxToolIterations = 8
+                let maxToolIterations = options.maximumToolRounds
                 var toolIteration = 0
                 var allEntries: [Transcript.Entry] = []
                 var text = ""
@@ -1098,7 +1098,7 @@ import Foundation
                             let runtimeOptions = resolvedOptions(from: options)
                             let maxTokens = runtimeOptions.maximumResponseTokens ?? 100
                             let outputFormat = self.currentToolCallFormat()
-                            let maxToolIterations = 8
+                            let maxToolIterations = options.maximumToolRounds
                             var toolIteration = 0
                             var accumulatedEntries: [Transcript.Entry] = []
                             var emittedBase = ""
