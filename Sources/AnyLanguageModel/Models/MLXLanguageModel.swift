@@ -802,24 +802,6 @@ import Foundation
             )
         }
 
-        private static func maxToolIterationsExceededError(limit: Int) -> LanguageModelSession.GenerationError {
-            .decodingFailure(
-                .init(
-                    debugDescription:
-                        "Exceeded maximum tool iterations (\(limit)) while processing MLX tool calls."
-                )
-            )
-        }
-
-        private static func repeatedToolCallLoopError() -> LanguageModelSession.GenerationError {
-            .decodingFailure(
-                .init(
-                    debugDescription:
-                        "Detected repeated MLX tool-call signature and aborted to avoid an infinite tool loop."
-                )
-            )
-        }
-
         private static func acquireGenerationSlot(for session: LanguageModelSession) -> Bool {
             sessionGenerationGate.acquire(session: session)
         }
@@ -1146,9 +1128,7 @@ import Foundation
             var usage = LanguageModelSession.Usage.zero
             var allTextChunks: [String] = []
             var allEntries: [Transcript.Entry] = []
-            let maxToolIterations = 8
-            var toolIteration = 0
-            var previousToolCallSignature: String?
+            var toolRounds = ToolRoundLimit(provider: "MLX")
 
             // Loop until no more tool calls
             while true {
@@ -1220,23 +1200,7 @@ import Foundation
 
                 // If there are tool calls, execute them and continue
                 if !collectedToolCalls.isEmpty {
-                    toolIteration += 1
-                    if toolIteration > maxToolIterations {
-                        let unresolvedCalls = try makeTranscriptToolCalls(from: collectedToolCalls)
-                        allEntries.append(Transcript.Entry.toolCalls(Transcript.ToolCalls(unresolvedCalls)))
-                        throw Self.maxToolIterationsExceededError(limit: maxToolIterations)
-                    }
-
-                    let signature =
-                        collectedToolCalls
-                        .map { "\($0.function.name):\($0.function.arguments)" }
-                        .joined(separator: "|")
-                    if signature == previousToolCallSignature {
-                        let unresolvedCalls = try makeTranscriptToolCalls(from: collectedToolCalls)
-                        allEntries.append(Transcript.Entry.toolCalls(Transcript.ToolCalls(unresolvedCalls)))
-                        throw Self.repeatedToolCallLoopError()
-                    }
-                    previousToolCallSignature = signature
+                    try toolRounds.record(collectedToolCalls.map(\.roundCall))
 
                     let resolution = try await resolveToolCalls(
                         collectedToolCalls,
@@ -1398,9 +1362,7 @@ import Foundation
                         var usage = LanguageModelSession.Usage.zero
                         var accumulatedText = ""
                         var accumulatedEntries: [Transcript.Entry] = []
-                        let maxToolIterations = 8
-                        var toolIteration = 0
-                        var previousToolCallSignature: String?
+                        var toolRounds = ToolRoundLimit(provider: "MLX")
 
                         // Yields a snapshot carrying the cumulative text and tool entries so far.
                         func yieldSnapshot() {
@@ -1488,19 +1450,7 @@ import Foundation
 
                             guard !collectedToolCalls.isEmpty else { break }
 
-                            toolIteration += 1
-                            if toolIteration > maxToolIterations {
-                                throw Self.maxToolIterationsExceededError(limit: maxToolIterations)
-                            }
-
-                            let signature =
-                                collectedToolCalls
-                                .map { "\($0.function.name):\($0.function.arguments)" }
-                                .joined(separator: "|")
-                            if signature == previousToolCallSignature {
-                                throw Self.repeatedToolCallLoopError()
-                            }
-                            previousToolCallSignature = signature
+                            try toolRounds.record(collectedToolCalls.map(\.roundCall))
 
                             let resolution = try await resolveToolCalls(
                                 collectedToolCalls,
@@ -2368,6 +2318,13 @@ import Foundation
             case .array(let arr): return arr.map { $0.toSendable() }
             case .object(let obj): return obj.mapValues { $0.toSendable() }
             }
+        }
+    }
+
+    extension MLXLMCommon.ToolCall {
+        var roundCall: ToolRoundLimit.Call {
+            let arguments = try? JSONEncoder().encode(function.arguments)
+            return .init(name: function.name, jsonArguments: arguments.map { String(decoding: $0, as: UTF8.self) })
         }
     }
 #endif  // MLX

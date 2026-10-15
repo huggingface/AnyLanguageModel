@@ -1,11 +1,10 @@
 import Foundation
 
-/// Bounds the tool rounds in one response from a remote provider.
+/// Bounds the tool rounds in one response.
 ///
 /// A model that keeps calling tools would otherwise run tools
 /// and send requests until the caller cancels.
-/// Like the MLX and llama.cpp providers,
-/// a response allows at most ``maximumRounds`` rounds of tool calls
+/// A response allows at most ``maximumRounds`` rounds of tool calls
 /// and stops when a round repeats the previous round's calls exactly.
 struct ToolRoundLimit {
     /// A tool call, reduced to what identifies a repeated round.

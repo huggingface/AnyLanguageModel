@@ -6,6 +6,7 @@ import Testing
 #if MLX
     import class MLX.MLXArray
     import struct MLXLMCommon.LMInput
+    import struct MLXLMCommon.ToolCall
 
     private let shouldRunMLXTests = {
         // Enable when explicitly requested via environment variable
@@ -561,6 +562,41 @@ import Testing
             let session = LanguageModelSession(model: model)
             let response = try await session.respond(to: "Say hello after cache clear", options: boundedOptions)
             #expect(!response.content.isEmpty)
+        }
+    }
+
+    // These tests need no model or Metal library, so unlike the suite above they also run under
+    // `swift test --traits MLX`.
+    @Suite("MLXLanguageModel tool rounds")
+    struct MLXToolRoundTests {
+        // Each round decodes its calls into new dictionaries, which can list the same keys in a different order,
+        // and the parser gives every call a new ID.
+        @Test func repeatedToolRoundIsDetectedRegardlessOfArgumentOrder() throws {
+            func decode(_ pattern: String, id: String) throws -> MLXLMCommon.ToolCall {
+                let json = #"""
+                    {"id": "\#(id)", "function": {"name": "search",
+                     "arguments": {"pattern": "\#(pattern)", "file": "notes.md", "context": 0}}}
+                    """#
+                return try JSONDecoder().decode(MLXLMCommon.ToolCall.self, from: Data(json.utf8))
+            }
+            // Keep every decode alive, so each has its own hash seed, and repeat one that lists its keys differently.
+            let decodes = try (1 ... 20).map { try decode("report", id: "call_\($0)") }
+            let first = decodes[0]
+            let repeated = decodes.first { "\($0.function.arguments)" != "\(first.function.arguments)" } ?? decodes[1]
+            let changed = try decode("summary", id: "call_21")
+
+            var rounds = ToolRoundLimit(provider: "MLX")
+            try rounds.record([first.roundCall])
+            do {
+                try rounds.record([repeated.roundCall])
+                Issue.record("Expected the repeated round to stop the response.")
+            } catch LanguageModelSession.GenerationError.decodingFailure(let context) {
+                #expect(context.debugDescription.contains("repeated"))
+            }
+
+            var otherRounds = ToolRoundLimit(provider: "MLX")
+            try otherRounds.record([first.roundCall])
+            try otherRounds.record([changed.roundCall])
         }
     }
 #endif  // MLX
