@@ -1,17 +1,10 @@
-import EventSource
 import Foundation
-import JSONSchema
+import HTTPTypes
+import HTTPTypesFoundation
 
 #if canImport(FoundationNetworking)
     import FoundationNetworking
 #endif
-
-enum HTTP {
-    enum Method: String {
-        case get = "GET"
-        case post = "POST"
-    }
-}
 
 #if canImport(FoundationNetworking)
     /// Serializes Linux URLSession operations to mitigate a FoundationNetworking race.
@@ -102,219 +95,33 @@ enum HTTP {
     }
 #endif
 
-extension URLSession {
-    func fetch<T: Decodable>(
-        _ method: HTTP.Method,
-        url: URL,
-        headers: [String: String] = [:],
-        body: Data? = nil,
-        dateDecodingStrategy: JSONDecoder.DateDecodingStrategy = .deferredToDate
-    ) async throws -> T {
-        var request = URLRequest(url: url)
-        request.httpMethod = method.rawValue
-        request.addValue("application/json", forHTTPHeaderField: "Accept")
-
-        for (key, value) in headers {
-            request.addValue(value, forHTTPHeaderField: key)
-        }
-
-        if let body {
-            request.httpBody = body
-            request.addValue("application/json", forHTTPHeaderField: "Content-Type")
-        }
+/// A URL session sends a model's requests with its own configuration, reading each response's
+/// body as it arrives.
+extension URLSession: HTTPTransport {
+    public func perform<Return>(
+        request: HTTPRequest,
+        body: Data?,
+        timeout: Duration,
+        responseHandler: (HTTPResponse, HTTPResponseBody) async throws -> Return
+    ) async throws -> Return {
+        guard var urlRequest = URLRequest(httpRequest: request) else { throw HTTPTransportError.invalidRequest }
+        urlRequest.httpBody = body
+        // With URLSession, it's how long to wait for each part of the response.
+        let (seconds, attoseconds) = timeout.components
+        urlRequest.timeoutInterval = TimeInterval(seconds) + TimeInterval(attoseconds) / 1e18
 
         #if canImport(FoundationNetworking)
-            var lockedData: Data?
-            var lockedResponse: URLResponse?
+            var started: (bytes: AsyncThrowingStream<UInt8, Error>, response: URLResponse)?
             try await withLinuxRequestLock {
-                let (data, response) = try await data(for: request)
-                lockedData = data
-                lockedResponse = response
+                started = try await self.linuxBytes(for: urlRequest)
             }
-            guard let data = lockedData, let response = lockedResponse else {
-                throw URLSessionError.invalidResponse
-            }
+            guard let started, let response = (started.response as? HTTPURLResponse)?.httpResponse else { throw HTTPTransportError.invalidResponse }
+            return try await responseHandler(response, HTTPResponseBody(started.bytes))
         #else
-            let (data, response) = try await data(for: request)
+            let (bytes, urlResponse) = try await self.bytes(for: urlRequest)
+            guard let response = (urlResponse as? HTTPURLResponse)?.httpResponse else { throw HTTPTransportError.invalidResponse }
+            return try await responseHandler(response, HTTPResponseBody(bytes))
         #endif
-
-        guard let httpResponse = response as? HTTPURLResponse else {
-            throw URLSessionError.invalidResponse
-        }
-
-        let decoder = JSONDecoder()
-        decoder.dateDecodingStrategy = dateDecodingStrategy
-
-        guard (200 ..< 300).contains(httpResponse.statusCode) else {
-            if let errorString = String(data: data, encoding: .utf8) {
-                throw URLSessionError.httpError(statusCode: httpResponse.statusCode, detail: errorString)
-            }
-            throw URLSessionError.httpError(statusCode: httpResponse.statusCode, detail: "Invalid response")
-        }
-
-        do {
-            return try decoder.decode(T.self, from: data)
-        } catch {
-            throw URLSessionError.decodingError(detail: error.localizedDescription)
-        }
-    }
-
-    func fetchStream<T: Decodable & Sendable>(
-        _ method: HTTP.Method,
-        url: URL,
-        headers: [String: String] = [:],
-        body: Data? = nil,
-        dateDecodingStrategy: JSONDecoder.DateDecodingStrategy = .deferredToDate
-    ) -> AsyncThrowingStream<T, any Error> {
-        AsyncThrowingStream { continuation in
-            let task = Task { @Sendable in
-                let decoder = JSONDecoder()
-                decoder.dateDecodingStrategy = dateDecodingStrategy
-
-                do {
-                    var request = URLRequest(url: url)
-                    request.httpMethod = method.rawValue
-                    request.addValue("application/json", forHTTPHeaderField: "Accept")
-
-                    for (key, value) in headers {
-                        request.addValue(value, forHTTPHeaderField: key)
-                    }
-
-                    if let body {
-                        request.httpBody = body
-                        request.addValue("application/json", forHTTPHeaderField: "Content-Type")
-                    }
-
-                    #if canImport(FoundationNetworking)
-                        var lockedAsyncBytes: AsyncThrowingStream<UInt8, Error>?
-                        var lockedResponse: URLResponse?
-                        try await withLinuxRequestLock {
-                            let (bytes, response) = try await self.linuxBytes(for: request)
-                            lockedAsyncBytes = bytes
-                            lockedResponse = response
-                        }
-                        guard let asyncBytes = lockedAsyncBytes, let response = lockedResponse else {
-                            throw URLSessionError.invalidResponse
-                        }
-                        try await self.validateStreamingResponse(response, asyncBytes: asyncBytes)
-                        try await decodeAndYieldJSONLines(asyncBytes, using: decoder, to: continuation)
-                    #else
-                        let (asyncBytes, response) = try await self.bytes(for: request)
-                        try await validateStreamingResponse(response, asyncBytes: asyncBytes)
-                        try await decodeAndYieldJSONLines(asyncBytes, using: decoder, to: continuation)
-                    #endif
-                    continuation.finish()
-                } catch {
-                    continuation.finish(throwing: error)
-                }
-            }
-
-            continuation.onTermination = { _ in
-                task.cancel()
-            }
-        }
-    }
-
-    func fetchEventStream<T: Decodable & Sendable>(
-        _ method: HTTP.Method,
-        url: URL,
-        headers: [String: String] = [:],
-        body: Data? = nil
-    ) -> AsyncThrowingStream<T, any Error> {
-        AsyncThrowingStream { continuation in
-            let task = Task { @Sendable in
-                do {
-                    var request = URLRequest(url: url)
-                    request.httpMethod = method.rawValue
-                    request.addValue("text/event-stream", forHTTPHeaderField: "Accept")
-
-                    for (key, value) in headers {
-                        request.addValue(value, forHTTPHeaderField: key)
-                    }
-
-                    if let body {
-                        request.httpBody = body
-                        request.addValue("application/json", forHTTPHeaderField: "Content-Type")
-                    }
-
-                    #if canImport(FoundationNetworking)
-                        var lockedAsyncBytes: AsyncThrowingStream<UInt8, Error>?
-                        var lockedResponse: URLResponse?
-                        try await withLinuxRequestLock {
-                            let (bytes, response) = try await self.linuxBytes(for: request)
-                            lockedAsyncBytes = bytes
-                            lockedResponse = response
-                        }
-                        guard let asyncBytes = lockedAsyncBytes, let response = lockedResponse else {
-                            throw URLSessionError.invalidResponse
-                        }
-                        try await self.validateStreamingResponse(response, asyncBytes: asyncBytes)
-                        try await decodeAndYieldEventStream(asyncBytes, to: continuation)
-                    #else
-                        let (asyncBytes, response) = try await self.bytes(for: request)
-                        try await validateStreamingResponse(response, asyncBytes: asyncBytes)
-                        try await decodeAndYieldEventStream(asyncBytes, to: continuation)
-                    #endif
-                    continuation.finish()
-                } catch {
-                    continuation.finish(throwing: error)
-                }
-            }
-
-            continuation.onTermination = { _ in
-                task.cancel()
-            }
-        }
-    }
-
-    private func validateStreamingResponse<Bytes>(
-        _ response: URLResponse,
-        asyncBytes: Bytes
-    ) async throws where Bytes: AsyncSequence, Bytes.Element == UInt8 {
-        guard let httpResponse = response as? HTTPURLResponse else {
-            throw URLSessionError.invalidResponse
-        }
-
-        guard (200 ..< 300).contains(httpResponse.statusCode) else {
-            var errorData = Data()
-            for try await byte in asyncBytes {
-                errorData.append(byte)
-            }
-            if let errorString = String(data: errorData, encoding: .utf8) {
-                throw URLSessionError.httpError(statusCode: httpResponse.statusCode, detail: errorString)
-            }
-            throw URLSessionError.httpError(statusCode: httpResponse.statusCode, detail: "Invalid response")
-        }
-    }
-
-    /// Decodes each line as it arrives, the way the AsyncHTTPClient transport does.
-    private func decodeAndYieldJSONLines<T: Decodable & Sendable, Bytes>(
-        _ asyncBytes: Bytes,
-        using decoder: JSONDecoder,
-        to continuation: AsyncThrowingStream<T, any Error>.Continuation
-    ) async throws where Bytes: AsyncSequence, Bytes.Element == UInt8 {
-        var lines = JSONLines()
-        for try await byte in asyncBytes {
-            guard let line = lines.append(byte) else { continue }
-            try Task.checkCancellation()
-            continuation.yield(try decoder.decode(T.self, from: Data(line)))
-        }
-        if let line = lines.finish() {
-            continuation.yield(try decoder.decode(T.self, from: Data(line)))
-        }
-    }
-
-    private func decodeAndYieldEventStream<T: Decodable & Sendable, Bytes>(
-        _ asyncBytes: Bytes,
-        to continuation: AsyncThrowingStream<T, any Error>.Continuation
-    ) async throws where Bytes: AsyncSequence, Bytes.Element == UInt8 {
-        let decoder = JSONDecoder()
-        for try await event in asyncBytes.events {
-            guard let data = event.data.data(using: .utf8) else { continue }
-            if let decoded = try? decoder.decode(T.self, from: data) {
-                continuation.yield(decoded)
-            }
-        }
     }
 }
 
@@ -447,7 +254,7 @@ extension URLSession {
                 } else if let response = task.response {
                     continuation.resume(returning: response)
                 } else {
-                    continuation.resume(throwing: URLSessionError.invalidResponse)
+                    continuation.resume(throwing: HTTPTransportError.invalidResponse)
                 }
             }
 
@@ -462,20 +269,3 @@ extension URLSession {
         }
     }
 #endif
-
-enum URLSessionError: Error, CustomStringConvertible {
-    case invalidResponse
-    case httpError(statusCode: Int, detail: String)
-    case decodingError(detail: String)
-
-    var description: String {
-        switch self {
-        case .invalidResponse:
-            return "Invalid response"
-        case .httpError(let statusCode, let detail):
-            return "HTTP error (Status \(statusCode)): \(detail)"
-        case .decodingError(let detail):
-            return "Decoding error: \(detail)"
-        }
-    }
-}

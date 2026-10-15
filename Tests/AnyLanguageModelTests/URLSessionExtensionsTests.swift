@@ -1,4 +1,6 @@
 import Foundation
+import HTTPTypes
+import HTTPTypesFoundation
 import Testing
 
 #if canImport(FoundationNetworking)
@@ -10,17 +12,17 @@ import Testing
 @Suite("URLSession Extensions")
 struct URLSessionExtensionsTests {
     @Test func invalidResponseDescriptionMatchesExpectedText() {
-        let error = URLSessionError.invalidResponse
+        let error = HTTPTransportError.invalidResponse
         #expect(error.description == "Invalid response")
     }
 
     @Test func httpErrorDescriptionIncludesStatusCodeAndDetail() {
-        let error = URLSessionError.httpError(statusCode: 429, detail: "rate limit")
+        let error = HTTPTransportError.httpError(status: .tooManyRequests, detail: "rate limit")
         #expect(error.description == "HTTP error (Status 429): rate limit")
     }
 
     @Test func decodingErrorDescriptionIncludesDetail() {
-        let error = URLSessionError.decodingError(detail: "keyNotFound")
+        let error = HTTPTransportError.decodingError(detail: "keyNotFound")
         #expect(error.description == "Decoding error: keyNotFound")
     }
 }
@@ -154,8 +156,8 @@ struct URLSessionExtensionsTests {
                 let streaming = Task {
                     let stream: AsyncThrowingStream<Line, any Error> =
                         eventStream
-                        ? session.fetchEventStream(HTTP.Method.post, url: url)
-                        : session.fetchStream(HTTP.Method.post, url: url)
+                        ? session.fetchEventStream(HTTPRequest(method: .post, url: url))
+                        : session.fetchStream(HTTPRequest(method: .post, url: url))
                     for try await _ in stream {}
                 }
 
@@ -249,8 +251,7 @@ struct URLSessionExtensionsTests {
             let session = ChunkedURLProtocol.makeSession()
             var received: [Line] = []
             let stream: AsyncThrowingStream<Line, any Error> = session.fetchStream(
-                .post,
-                url: URL(string: "https://example.com")!
+                HTTPRequest(method: .post, url: URL(string: "https://example.com")!)
             )
             for try await line in stream {
                 received.append(line)
