@@ -6,6 +6,14 @@ import Testing
 
 extension SessionPropertyValues {
     @SessionPropertyEntry var revision = 0
+    @SessionPropertyEntry var optionalSelection: String? = nil
+    @SessionPropertyEntry var items: [Int] = []
+    @SessionPropertyEntry var mode: SessionPropertyMode = .first
+}
+
+enum SessionPropertyMode {
+    case first
+    case second
 }
 
 @Suite("Session properties")
@@ -105,6 +113,35 @@ struct SessionPropertyTests {
         session.properties.revision = 1
 
         #expect(changed.withLock { $0 })
+    }
+
+    @Test func generatedPropertiesPreserveExplicitTypeContext() {
+        let session = LanguageModelSession(model: SessionPropertyFixtureModel())
+
+        #expect(session.properties.optionalSelection == nil)
+        #expect(session.properties.items.isEmpty)
+        #expect(session.properties.mode == .first)
+        session.properties.optionalSelection = "selected"
+        session.properties.items = [1, 2]
+        session.properties.mode = .second
+        #expect(session.properties.optionalSelection == "selected")
+        #expect(session.properties.items == [1, 2])
+        #expect(session.properties.mode == .second)
+    }
+
+    @Test func historyObservationTracksSessionTranscriptChanges() async throws {
+        let session = LanguageModelSession(model: CompletingSessionPropertyModel())
+        let changed = Locked(false)
+
+        withObservationTracking {
+            _ = session.properties.history
+        } onChange: {
+            changed.withLock { $0 = true }
+        }
+        _ = try await session.respond(to: "Observe history")
+
+        #expect(changed.withLock { $0 })
+        #expect(session.properties.history.count == 2)
     }
 
     @Test func propertiesAndHistoryAreIsolatedBetweenSessions() {
@@ -219,5 +256,30 @@ private struct SessionPropertyFixtureModel: LanguageModel {
         options: GenerationOptions
     ) -> sending LanguageModelSession.ResponseStream<Content> where Content: Generable {
         fatalError("SessionPropertyFixtureModel does not generate responses")
+    }
+}
+
+private struct CompletingSessionPropertyModel: LanguageModel {
+    typealias UnavailableReason = Never
+
+    func respond<Content>(
+        within session: LanguageModelSession,
+        to prompt: Prompt,
+        generating type: Content.Type,
+        includeSchemaInPrompt: Bool,
+        options: GenerationOptions
+    ) async throws -> LanguageModelSession.Response<Content> where Content: Generable {
+        let raw = GeneratedContent("Done")
+        return .init(content: try Content(raw), rawContent: raw, transcriptEntries: [])
+    }
+
+    func streamResponse<Content>(
+        within session: LanguageModelSession,
+        to prompt: Prompt,
+        generating type: Content.Type,
+        includeSchemaInPrompt: Bool,
+        options: GenerationOptions
+    ) -> sending LanguageModelSession.ResponseStream<Content> where Content: Generable {
+        fatalError("This fixture only supports non-streaming responses")
     }
 }
