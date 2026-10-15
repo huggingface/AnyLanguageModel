@@ -202,7 +202,7 @@ extension LanguageModelSession.DynamicProfile {
     }
 
     public func historyTransform(
-        _ transform: @escaping ([Transcript.Entry]) -> [Transcript.Entry]
+        _ transform: @Sendable @escaping ([Transcript.Entry]) -> [Transcript.Entry]
     ) -> some LanguageModelSession.DynamicProfile {
         BuiltinModifiedDynamicProfile(content: self, modifier: .historyTransform(transform))
     }
@@ -314,7 +314,7 @@ struct ResolvedDynamicProfile: @unchecked Sendable {
     var hasToolCallingMode = false
     var transcriptErrorHandlingPolicy: TranscriptErrorHandlingPolicy?
     var hasTranscriptErrorHandlingPolicy = false
-    var historyTransforms: [([Transcript.Entry]) -> [Transcript.Entry]] = []
+    var historyTransforms: [@Sendable ([Transcript.Entry]) -> [Transcript.Entry]] = []
     var onPrompt: [@Sendable (Transcript.Prompt) async throws -> Void] = []
     var onResponse: [@Sendable (Transcript.Response) async throws -> Void] = []
     var onReasoning: [@Sendable (Transcript.Reasoning) async throws -> Void] = []
@@ -394,7 +394,7 @@ private enum BuiltinDynamicProfileModifier: @unchecked Sendable {
     case maximumResponseTokens(Int?)
     case reasoningLevel(ContextOptions.ReasoningLevel?)
     case toolCallingMode(GenerationOptions.ToolCallingMode?)
-    case historyTransform(([Transcript.Entry]) -> [Transcript.Entry])
+    case historyTransform(@Sendable ([Transcript.Entry]) -> [Transcript.Entry])
     case transcriptErrorHandlingPolicy(TranscriptErrorHandlingPolicy?)
     case onPrompt(@Sendable (Transcript.Prompt) async throws -> Void)
     case onResponse(@Sendable (Transcript.Response) async throws -> Void)

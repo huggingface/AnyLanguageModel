@@ -77,6 +77,43 @@ struct DynamicProfileTests {
         )
     }
 
+    @Test func concurrentSnapshotsDispatchEachCallbackOnce() async throws {
+        let probe = ConcurrentCallbackProbe()
+        let model = LifecycleFixtureModel()
+        let session = LanguageModelSession(
+            profile: LanguageModelSession.Profile { Instructions("Concurrent callback") }
+                .model(model)
+                .onResponse { _ in await probe.recordInvocation() }
+        )
+        let context = try await session.resolvedRequestContext(including: [], options: .init())
+        let entry = Transcript.Entry.response(
+            .init(assetIDs: [], segments: [.text(.init(content: "response"))])
+        )
+
+        let first = Task {
+            try await session.profileDidProduceEntries(
+                [entry],
+                requestContext: context,
+                currentRoundEntries: [entry]
+            )
+        }
+        await probe.waitUntilFirstInvocation()
+        let second = Task {
+            try await session.profileDidProduceEntries(
+                [entry],
+                requestContext: context,
+                currentRoundEntries: [entry]
+            )
+        }
+
+        try await second.value
+        let invocationCount = await probe.invocationCount
+        await probe.releaseFirstInvocation()
+        try await first.value
+
+        #expect(invocationCount == 1)
+    }
+
     @Test(arguments: [false, true])
     func callbackErrorsPropagateWithoutCommittingAResponse(streaming: Bool) async throws {
         let model = LifecycleFixtureModel()
@@ -442,6 +479,30 @@ private struct PropertyFixtureTool: Tool, @unchecked Sendable {
 
 private enum LifecycleFixtureError: Error {
     case rejected
+}
+
+private actor ConcurrentCallbackProbe {
+    private(set) var invocationCount = 0
+    private var firstInvocationWaiter: CheckedContinuation<Void, Never>?
+    private var firstInvocationRelease: CheckedContinuation<Void, Never>?
+
+    func recordInvocation() async {
+        invocationCount += 1
+        guard invocationCount == 1 else { return }
+        firstInvocationWaiter?.resume()
+        firstInvocationWaiter = nil
+        await withCheckedContinuation { firstInvocationRelease = $0 }
+    }
+
+    func waitUntilFirstInvocation() async {
+        guard invocationCount == 0 else { return }
+        await withCheckedContinuation { firstInvocationWaiter = $0 }
+    }
+
+    func releaseFirstInvocation() {
+        firstInvocationRelease?.resume()
+        firstInvocationRelease = nil
+    }
 }
 
 private final class LifecycleFixtureState: @unchecked Sendable {

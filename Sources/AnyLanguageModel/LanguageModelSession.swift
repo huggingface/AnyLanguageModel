@@ -428,23 +428,32 @@ public final class LanguageModelSession: @unchecked Sendable {
     ) async throws {
         guard let profile = requestContext.profile else { return }
         for entry in entries {
-            if requestContext.callbackState.wasDispatched(entry.id) {
-                continue
-            }
-            let history = requestContext.canonicalTranscript + currentRoundEntries
             switch entry {
             case .reasoning(let reasoning):
-                try await withSessionProperties(history: history, isHistoryWritable: true) {
-                    for action in profile.onReasoning { try await action(reasoning) }
+                guard requestContext.callbackState.reserve(entry.id) else { continue }
+                do {
+                    let history = requestContext.canonicalTranscript + currentRoundEntries
+                    try await withSessionProperties(history: history, isHistoryWritable: true) {
+                        for action in profile.onReasoning { try await action(reasoning) }
+                    }
+                } catch {
+                    requestContext.callbackState.release(entry.id)
+                    throw error
                 }
             case .response(let response):
-                try await withSessionProperties(history: history, isHistoryWritable: true) {
-                    for action in profile.onResponse { try await action(response) }
+                guard requestContext.callbackState.reserve(entry.id) else { continue }
+                do {
+                    let history = requestContext.canonicalTranscript + currentRoundEntries
+                    try await withSessionProperties(history: history, isHistoryWritable: true) {
+                        for action in profile.onResponse { try await action(response) }
+                    }
+                } catch {
+                    requestContext.callbackState.release(entry.id)
+                    throw error
                 }
             default:
                 continue
             }
-            requestContext.callbackState.markDispatched(entry.id)
         }
     }
 
@@ -2304,12 +2313,12 @@ private struct ProfiledModelResponse<Content> where Content: Generable {
 fileprivate final class ProfileCallbackState: @unchecked Sendable {
     private let dispatchedEntryIDs = Locked<Set<String>>([])
 
-    func wasDispatched(_ id: String) -> Bool {
-        dispatchedEntryIDs.withLock { $0.contains(id) }
+    func reserve(_ id: String) -> Bool {
+        dispatchedEntryIDs.withLock { $0.insert(id).inserted }
     }
 
-    func markDispatched(_ id: String) {
-        dispatchedEntryIDs.withLock { _ = $0.insert(id) }
+    func release(_ id: String) {
+        dispatchedEntryIDs.withLock { _ = $0.remove(id) }
     }
 }
 
