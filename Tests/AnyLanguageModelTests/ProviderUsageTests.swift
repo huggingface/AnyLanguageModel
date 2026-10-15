@@ -541,6 +541,48 @@ import Testing
             #expect(selected.sawToolOutput)
         }
 
+        @Test(arguments: [false, true])
+        func providerModelHandoffsShareToolRoundLimit(_ streaming: Bool) async throws {
+            let provider = Provider.chat
+            UsageURLProtocol.reset()
+            let limit = ToolRoundLimit.maximumRounds
+            for round in 0 ... limit {
+                if streaming {
+                    UsageURLProtocol.enqueue(
+                        json: try provider.toolStream(
+                            city: "City \(round)",
+                            callID: "call_\(round)"
+                        )
+                    )
+                } else {
+                    let response = try Self.json(provider.response(text: "", tool: true))
+                        .replacingOccurrences(of: "Paris", with: "City \(round)")
+                        .replacingOccurrences(of: "call_1", with: "call_\(round)")
+                    UsageURLProtocol.enqueue(json: response)
+                }
+            }
+            let state = AlternatingProviderProfileState()
+            let session = LanguageModelSession(
+                profile: AlternatingProviderProfile(
+                    state: state,
+                    first: provider.makeModel(),
+                    second: provider.makeModel()
+                )
+            )
+
+            let description = await Self.decodingFailureDescription {
+                if streaming {
+                    _ = try await session.streamResponse(to: "Weather?").collect()
+                } else {
+                    _ = try await session.respond(to: "Weather?")
+                }
+            }
+
+            #expect(description?.contains("Exceeded maximum tool iterations (\(limit))") == true)
+            #expect(state.executions.withLock { $0.count } == limit)
+            #expect(UsageURLProtocol.recordedBodies.count == limit + 1)
+        }
+
         @Test(arguments: Provider.allCases, [false, true])
         func streamedToolsThenStructuredContent(_ provider: Provider, _ dynamicSchema: Bool) async throws {
             UsageURLProtocol.reset()
@@ -1036,6 +1078,47 @@ import Testing
                     values.append(entries.contains { if case .toolOutput = $0 { true } else { false } })
                 }
                 return entries
+            }
+        }
+
+        private final class AlternatingProviderProfileState: @unchecked Sendable {
+            let useSecond = Locked(false)
+            let executions = Locked<[String]>([])
+
+            func toggleModel() {
+                useSecond.withLock { $0.toggle() }
+            }
+        }
+
+        private struct AlternatingProviderProfile: LanguageModelSession.DynamicProfile, @unchecked Sendable {
+            let state: AlternatingProviderProfileState
+            let first: any LanguageModel
+            let second: any LanguageModel
+
+            var body: some LanguageModelSession.DynamicProfile {
+                if state.useSecond.withLock({ $0 }) {
+                    LanguageModelSession.Profile {
+                        AlternatingProviderProfileTool(state: state)
+                    }
+                    .model(second)
+                } else {
+                    LanguageModelSession.Profile {
+                        AlternatingProviderProfileTool(state: state)
+                    }
+                    .model(first)
+                }
+            }
+        }
+
+        private struct AlternatingProviderProfileTool: Tool {
+            let name = "getWeather"
+            let description = "Get weather and switch models"
+            let state: AlternatingProviderProfileState
+
+            func call(arguments: WeatherTool.Arguments) async throws -> String {
+                state.executions.withLock { $0.append(arguments.city) }
+                state.toggleModel()
+                return "Sunny"
             }
         }
 

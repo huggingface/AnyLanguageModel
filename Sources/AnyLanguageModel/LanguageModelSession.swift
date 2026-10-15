@@ -228,6 +228,15 @@ public final class LanguageModelSession: @unchecked Sendable {
         return resolveRequestContext(additionalEntries: [], options: .init())
     }
 
+    nonisolated func toolRoundLimit(for provider: String) -> ToolRoundLimit {
+        guard let prepared = ProfileRequestBinding.prepared,
+            prepared.session === self
+        else {
+            return ToolRoundLimit(provider: provider)
+        }
+        return prepared.toolRoundLimit(for: provider)
+    }
+
     /// Resolves the active profile for one actual model request.
     ///
     /// `additionalEntries` supplies canonical entries produced in the current Tool
@@ -409,11 +418,14 @@ public final class LanguageModelSession: @unchecked Sendable {
         currentRoundEntries: [Transcript.Entry]
     ) async throws {
         guard let profile = requestContext.profile else { return }
-        let history = requestContext.canonicalTranscript + currentRoundEntries
+        let history = profileHistory(
+            requestContext: requestContext,
+            currentRoundEntries: currentRoundEntries
+        )
         try await withSessionProperties(
-            history: history,
+            history: history.entries,
             isHistoryWritable: true,
-            protectedEntryIDs: Set(currentRoundEntries.map(\.id))
+            protectedEntryIDs: history.protectedEntryIDs
         ) {
             for action in profile.onToolCall { try await action(call) }
         }
@@ -427,11 +439,14 @@ public final class LanguageModelSession: @unchecked Sendable {
         currentRoundEntries: [Transcript.Entry]
     ) async throws {
         guard let profile = requestContext.profile else { return }
-        let history = requestContext.canonicalTranscript + currentRoundEntries
+        let history = profileHistory(
+            requestContext: requestContext,
+            currentRoundEntries: currentRoundEntries
+        )
         try await withSessionProperties(
-            history: history,
+            history: history.entries,
             isHistoryWritable: true,
-            protectedEntryIDs: Set(currentRoundEntries.map(\.id))
+            protectedEntryIDs: history.protectedEntryIDs
         ) {
             for action in profile.onToolOutput { try await action(call, output) }
         }
@@ -449,32 +464,43 @@ public final class LanguageModelSession: @unchecked Sendable {
         currentRoundEntries: [Transcript.Entry]
     ) async throws {
         guard let profile = requestContext.profile else { return }
+        let history = profileHistory(
+            requestContext: requestContext,
+            currentRoundEntries: currentRoundEntries
+        )
         for entry in entries {
-            if requestContext.callbackState.wasDispatched(entry.id) {
-                continue
-            }
-            let history = requestContext.canonicalTranscript + currentRoundEntries
             switch entry {
             case .reasoning(let reasoning):
-                try await withSessionProperties(
-                    history: history,
-                    isHistoryWritable: true,
-                    protectedEntryIDs: Set(currentRoundEntries.map(\.id))
-                ) {
-                    for action in profile.onReasoning { try await action(reasoning) }
+                guard requestContext.callbackState.reserve(entry.id) else { continue }
+                do {
+                    try await withSessionProperties(
+                        history: history.entries,
+                        isHistoryWritable: true,
+                        protectedEntryIDs: history.protectedEntryIDs
+                    ) {
+                        for action in profile.onReasoning { try await action(reasoning) }
+                    }
+                } catch {
+                    requestContext.callbackState.release(entry.id)
+                    throw error
                 }
             case .response(let response):
-                try await withSessionProperties(
-                    history: history,
-                    isHistoryWritable: true,
-                    protectedEntryIDs: Set(currentRoundEntries.map(\.id))
-                ) {
-                    for action in profile.onResponse { try await action(response) }
+                guard requestContext.callbackState.reserve(entry.id) else { continue }
+                do {
+                    try await withSessionProperties(
+                        history: history.entries,
+                        isHistoryWritable: true,
+                        protectedEntryIDs: history.protectedEntryIDs
+                    ) {
+                        for action in profile.onResponse { try await action(response) }
+                    }
+                } catch {
+                    requestContext.callbackState.release(entry.id)
+                    throw error
                 }
             default:
                 continue
             }
-            requestContext.callbackState.markDispatched(entry.id)
         }
     }
 
@@ -486,14 +512,29 @@ public final class LanguageModelSession: @unchecked Sendable {
         currentRoundEntries: [Transcript.Entry],
         operation: @Sendable () async throws -> Result
     ) async rethrows -> Result {
-        let history = requestContext.canonicalTranscript + currentRoundEntries
+        let history = profileHistory(
+            requestContext: requestContext,
+            currentRoundEntries: currentRoundEntries
+        )
         return try await withSessionProperties(
-            history: history,
+            history: history.entries,
             isHistoryWritable: false,
-            protectedEntryIDs: Set(currentRoundEntries.map(\.id))
+            protectedEntryIDs: history.protectedEntryIDs
         ) {
             try await operation()
         }
+    }
+
+    nonisolated private func profileHistory(
+        requestContext: RequestContext,
+        currentRoundEntries: [Transcript.Entry]
+    ) -> (entries: [Transcript.Entry], protectedEntryIDs: Set<String>) {
+        var entryIDs = Set(requestContext.canonicalTranscript.map(\.id))
+        let additionalEntries = currentRoundEntries.filter { entryIDs.insert($0.id).inserted }
+        return (
+            requestContext.canonicalTranscript + additionalEntries,
+            Set(additionalEntries.map(\.id))
+        )
     }
 
     nonisolated private func withSessionProperties<Result: Sendable>(
@@ -744,10 +785,18 @@ public final class LanguageModelSession: @unchecked Sendable {
         }
     }
 
+    nonisolated private func withTranscriptMutation<Result>(
+        _ mutation: () throws -> Result
+    ) rethrows -> Result {
+        try properties._withSessionPropertyMutation(keyPath: \.history) {
+            try withMutation(keyPath: \.transcript, mutation)
+        }
+    }
+
     // The prompt is the only entry committed before a request succeeds. Checkpoints and
     // the final response commit atomically at completion, so rollback owns only this ID.
     nonisolated private func removePrompt(id: String) {
-        withMutation(keyPath: \.transcript) {
+        withTranscriptMutation {
             state.withLock { state in
                 state.transcript = Transcript(entries: state.transcript.filter { $0.id != id })
             }
@@ -867,7 +916,7 @@ public final class LanguageModelSession: @unchecked Sendable {
                                 providerMetadata: lastSnapshot.providerMetadata
                             )
                         )
-                        session.withMutation(keyPath: \.transcript) {
+                        session.withTranscriptMutation {
                             session.state.withLock {
                                 $0.transcript.append(contentsOf: lastSnapshot.transcriptEntries)
                                 $0.transcript.append(responseEntry)
@@ -886,7 +935,7 @@ public final class LanguageModelSession: @unchecked Sendable {
                         session.endResponding()
                         continuation.finish()
                     } catch {
-                        session.withMutation(keyPath: \.transcript) {
+                        session.withTranscriptMutation {
                             session.state.withLock { state in
                                 if !committedEntryIDs.isEmpty {
                                     state.transcript = Transcript(
@@ -1197,7 +1246,7 @@ public final class LanguageModelSession: @unchecked Sendable {
                     responseFormat: responseFormat
                 )
             )
-            withMutation(keyPath: \.transcript) {
+            withTranscriptMutation {
                 state.withLock { $0.transcript.append(promptEntry) }
             }
 
@@ -1240,7 +1289,7 @@ public final class LanguageModelSession: @unchecked Sendable {
         entry responseEntry: Transcript.Entry,
         prepared: PreparedProfileRequest?
     ) async throws where Content: Generable {
-        withMutation(keyPath: \.transcript) {
+        withTranscriptMutation {
             state.withLock { lockedState in
                 lockedState.transcript.append(contentsOf: response.transcriptEntries)
                 lockedState.transcript.append(responseEntry)
@@ -1256,7 +1305,7 @@ public final class LanguageModelSession: @unchecked Sendable {
             )
         } catch {
             let ids = Set(response.transcriptEntries.map(\.id) + [responseEntry.id])
-            withMutation(keyPath: \.transcript) {
+            withTranscriptMutation {
                 state.withLock { lockedState in
                     lockedState.transcript = Transcript(
                         entries: lockedState.transcript.filter { !ids.contains($0.id) }
@@ -1289,7 +1338,7 @@ public final class LanguageModelSession: @unchecked Sendable {
                 responseFormat: type == String.self ? nil : .init(type: type)
             )
         )
-        withMutation(keyPath: \.transcript) {
+        withTranscriptMutation {
             state.withLock { $0.transcript.append(promptEntry) }
         }
 
@@ -1546,7 +1595,7 @@ extension LanguageModelSession {
                 responseFormat: .init(schema: schema)
             )
         )
-        withMutation(keyPath: \.transcript) {
+        withTranscriptMutation {
             state.withLock { $0.transcript.append(promptEntry) }
         }
 
@@ -1769,7 +1818,7 @@ extension LanguageModelSession {
                     responseFormat: type == String.self ? nil : .init(type: type)
                 )
             )
-            withMutation(keyPath: \.transcript) {
+            withTranscriptMutation {
                 state.withLock { $0.transcript.append(promptEntry) }
             }
 
@@ -1906,7 +1955,7 @@ extension LanguageModelSession {
                 responseFormat: type == String.self ? nil : .init(type: type)
             )
         )
-        withMutation(keyPath: \.transcript) {
+        withTranscriptMutation {
             state.withLock { $0.transcript.append(promptEntry) }
         }
 
@@ -2335,12 +2384,12 @@ private struct ProfiledModelResponse<Content> where Content: Generable {
 fileprivate final class ProfileCallbackState: @unchecked Sendable {
     private let dispatchedEntryIDs = Locked<Set<String>>([])
 
-    func wasDispatched(_ id: String) -> Bool {
-        dispatchedEntryIDs.withLock { $0.contains(id) }
+    func reserve(_ id: String) -> Bool {
+        dispatchedEntryIDs.withLock { $0.insert(id).inserted }
     }
 
-    func markDispatched(_ id: String) {
-        dispatchedEntryIDs.withLock { _ = $0.insert(id) }
+    func release(_ id: String) {
+        dispatchedEntryIDs.withLock { _ = $0.remove(id) }
     }
 }
 
@@ -2348,6 +2397,7 @@ private final class PreparedProfileRequest: @unchecked Sendable {
     let session: LanguageModelSession
     let callSiteOptions: GenerationOptions
     private let state: Locked<State>
+    private let toolRoundLimitStorage = Locked<ToolRoundLimit?>(nil)
 
     init(
         session: LanguageModelSession,
@@ -2362,6 +2412,15 @@ private final class PreparedProfileRequest: @unchecked Sendable {
     var context: LanguageModelSession.RequestContext {
         get { state.withLock { $0.context } }
         set { state.withLock { $0.context = newValue } }
+    }
+
+    func toolRoundLimit(for provider: String) -> ToolRoundLimit {
+        toolRoundLimitStorage.withLock { limit in
+            if let limit { return limit }
+            let created = ToolRoundLimit(provider: provider)
+            limit = created
+            return created
+        }
     }
 
     private struct State: Sendable {

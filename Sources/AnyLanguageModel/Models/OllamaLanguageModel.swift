@@ -133,7 +133,7 @@ public struct OllamaLanguageModel: LanguageModel, ProfileRequestIdentifiedLangua
         var usage = LanguageModelSession.Usage.zero
         var earlierText = ""
         var inFlightMessages: [OllamaMessage] = []
-        var toolRounds = ToolRoundLimit(provider: "Ollama")
+        let toolRounds = session.toolRoundLimit(for: "Ollama")
 
         while true {
             let requestContext = try await session.resolvedRequestContext(
@@ -290,7 +290,7 @@ public struct OllamaLanguageModel: LanguageModel, ProfileRequestIdentifiedLangua
                     let format = type == String.self ? nil : try JSONValue(convertSchemaToOllamaFormat(schema))
                     var inFlightMessages: [OllamaMessage] = []
                     var state = StreamingResponseState<Content>()
-                    var toolRounds = ToolRoundLimit(provider: "Ollama")
+                    let toolRounds = session.toolRoundLimit(for: "Ollama")
                     while true {
                         try Task.checkCancellation()
                         let requestContext = try await session.resolvedRequestContext(

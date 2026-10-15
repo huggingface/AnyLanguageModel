@@ -41,13 +41,23 @@ public struct SessionPropertyEntryMacro: AccessorMacro, PeerMacro {
             let initializer = binding.initializer?.value
         else { return [] }
 
-        return [
-            """
-            private struct __Key_\(raw: name): SessionPropertyKey {
-                static let defaultValue = \(initializer)
-            }
-            """
-        ]
+        let defaultValue: DeclSyntax
+        if let typeAnnotation = binding.typeAnnotation {
+            defaultValue =
+                """
+                private struct __Key_\(raw: name): SessionPropertyKey {
+                    static let defaultValue \(typeAnnotation) = \(initializer)
+                }
+                """
+        } else {
+            defaultValue =
+                """
+                private struct __Key_\(raw: name): SessionPropertyKey {
+                    static let defaultValue = \(initializer)
+                }
+                """
+        }
+        return [defaultValue]
     }
 
     private static func propertyName(in declaration: some DeclSyntaxProtocol) -> String? {

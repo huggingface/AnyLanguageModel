@@ -45,22 +45,27 @@ public final class SessionPropertyValues: @unchecked Sendable {
 
     /// The canonical session history after dynamic instructions.
     public var history: Transcript.HistoryView {
-        get { SessionPropertyBinding.history?.entries ?? historyGetter() }
+        get {
+            _accessSessionProperty(keyPath: \.history)
+            return SessionPropertyBinding.history?.entries ?? historyGetter()
+        }
         set {
-            let newValue = newValue.filter { entry in
-                if case .instructions = entry { return false }
-                return true
+            _withSessionPropertyMutation(keyPath: \.history) {
+                let newValue = newValue.filter { entry in
+                    if case .instructions = entry { return false }
+                    return true
+                }
+                if let history = SessionPropertyBinding.history {
+                    precondition(
+                        history.isWritable,
+                        "Session history is read-only while dynamic instructions or a Tool is active"
+                    )
+                    history.entries = newValue
+                    history.persist(newValue)
+                } else {
+                    historySetter(newValue)
+                }
             }
-            if let history = SessionPropertyBinding.history {
-                precondition(
-                    history.isWritable,
-                    "Session history is read-only while dynamic instructions or a Tool is active"
-                )
-                history.entries = newValue
-                history.persist(newValue)
-                return
-            }
-            historySetter(newValue)
         }
     }
 

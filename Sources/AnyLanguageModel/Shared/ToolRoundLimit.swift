@@ -7,7 +7,7 @@ import Foundation
 /// Like the MLX and llama.cpp providers,
 /// a response allows at most ``maximumRounds`` rounds of tool calls
 /// and stops when a round repeats the previous round's calls exactly.
-struct ToolRoundLimit {
+final class ToolRoundLimit: @unchecked Sendable {
     /// A tool call, reduced to what identifies a repeated round.
     struct Call: Equatable {
         var name: String
@@ -39,8 +39,7 @@ struct ToolRoundLimit {
     /// The provider name used in error messages.
     let provider: String
 
-    private var rounds = 0
-    private var previousCalls: [Call]?
+    private let state = Locked(State())
 
     init(provider: String) {
         self.provider = provider
@@ -51,24 +50,31 @@ struct ToolRoundLimit {
     /// - Throws: A decoding failure
     ///   when the round exceeds ``maximumRounds``
     ///   or repeats the previous round's calls.
-    mutating func record(_ calls: [Call]) throws {
-        rounds += 1
-        if rounds > Self.maximumRounds {
-            throw LanguageModelSession.GenerationError.decodingFailure(
-                .init(
-                    debugDescription:
-                        "Exceeded maximum tool iterations (\(Self.maximumRounds)) while processing \(provider) tool calls."
+    func record(_ calls: [Call]) throws {
+        try state.withLock { state in
+            state.rounds += 1
+            if state.rounds > Self.maximumRounds {
+                throw LanguageModelSession.GenerationError.decodingFailure(
+                    .init(
+                        debugDescription:
+                            "Exceeded maximum tool iterations (\(Self.maximumRounds)) while processing \(provider) tool calls."
+                    )
                 )
-            )
-        }
-        if calls == previousCalls {
-            throw LanguageModelSession.GenerationError.decodingFailure(
-                .init(
-                    debugDescription:
-                        "Detected repeated \(provider) tool-call signature and aborted to avoid an infinite tool loop."
+            }
+            if calls == state.previousCalls {
+                throw LanguageModelSession.GenerationError.decodingFailure(
+                    .init(
+                        debugDescription:
+                            "Detected repeated \(provider) tool-call signature and aborted to avoid an infinite tool loop."
+                    )
                 )
-            )
+            }
+            state.previousCalls = calls
         }
-        previousCalls = calls
+    }
+
+    private struct State {
+        var rounds = 0
+        var previousCalls: [Call]?
     }
 }
