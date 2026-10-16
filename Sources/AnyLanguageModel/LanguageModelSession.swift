@@ -333,6 +333,10 @@ public final class LanguageModelSession: @unchecked Sendable {
         let state = Locked(State(finalTranscript))
         self.state = state
         let setHistory: @Sendable (Transcript.HistoryView) -> Void = { history in
+            let history = history.filter { entry in
+                if case .instructions = entry { return false }
+                return true
+            }
             state.withLock { locked in
                 let instructions = locked.transcript.prefix {
                     if case .instructions = $0 { return true }

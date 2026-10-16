@@ -180,6 +180,51 @@ struct SessionPropertyTests {
         }
         #expect(session.transcript[1] == prompt)
     }
+
+    @Test func boundHistoryOnlyAppliesToItsOwningSession() {
+        let earlier = Transcript.Entry.prompt(.init(segments: [.text(.init(content: "Earlier"))]))
+        let replacement = Transcript.Entry.prompt(.init(segments: [.text(.init(content: "Replacement"))]))
+        let other = LanguageModelSession(model: SessionPropertyFixtureModel())
+        other.properties.history = [earlier]
+        let session = LanguageModelSession(
+            model: SessionPropertyFixtureModel(),
+            dynamicInstructions: ForeignSessionHistoryInstructions(other: other, replacement: replacement)
+        )
+
+        let context = session.resolvedRequestContext()
+
+        #expect(context.instructions?.description == "Other history count 1")
+        #expect(session.properties.history.isEmpty)
+        #expect(other.properties.history == [replacement])
+    }
+
+    @Test func replacingHistoryRejectsForeignInstructions() {
+        let other = LanguageModelSession(model: SessionPropertyFixtureModel(), instructions: "Foreign")
+        let prompt = Transcript.Entry.prompt(.init(segments: [.text(.init(content: "Earlier"))]))
+        other.properties.history = [prompt]
+        let session = LanguageModelSession(
+            model: SessionPropertyFixtureModel(),
+            dynamicInstructions: SessionPropertyHistoryInstructions()
+        )
+
+        session.properties.history = Array(other.transcript)
+        let context = session.resolvedRequestContext()
+
+        #expect(session.transcript == Transcript(entries: [prompt]))
+        #expect(context.instructions?.description == "History count 1")
+        #expect(context.transcript.count == 2)
+    }
+}
+
+private struct ForeignSessionHistoryInstructions: DynamicInstructions {
+    let other: LanguageModelSession
+    let replacement: Transcript.Entry
+
+    var body: some DynamicInstructions {
+        let count = other.properties.history.count
+        other.properties.history = [replacement]
+        return Instructions("Other history count \(count)")
+    }
 }
 
 private struct SessionPropertyFixtureInstructions: DynamicInstructions {
