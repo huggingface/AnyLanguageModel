@@ -116,7 +116,12 @@ final class SessionHistoryBinding: @unchecked Sendable {
     let isWritable: Bool
 
     init(_ entries: Transcript.HistoryView, isWritable: Bool) {
-        storage = Locked(entries)
+        storage = Locked(
+            entries.filter { entry in
+                if case .instructions = entry { return false }
+                return true
+            }
+        )
         self.isWritable = isWritable
     }
 

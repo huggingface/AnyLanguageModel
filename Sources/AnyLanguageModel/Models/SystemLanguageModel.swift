@@ -398,12 +398,13 @@
             session: LanguageModelSession,
             prompt: Prompt
         ) -> FoundationModels.LanguageModelSession {
+            let requestContext = session.resolvedRequestContext()
             if session.usesDynamicInstructions {
                 // Foundation Models evaluates the dynamic instructions itself,
                 // so the history leaves out the instructions entry.
                 let history = fmTranscriptDroppingDuplicatePrompt(
                     Transcript(
-                        entries: session.transcript.filter { entry in
+                        entries: requestContext.transcript.filter { entry in
                             if case .instructions = entry { return false }
                             return true
                         }
@@ -417,7 +418,6 @@
                 )
             }
 
-            let requestContext = session.resolvedRequestContext()
             return FoundationModels.LanguageModelSession(
                 model: model,
                 tools: requestContext.tools.toFoundationModels(),

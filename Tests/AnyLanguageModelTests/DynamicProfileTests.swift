@@ -1,5 +1,10 @@
 import Foundation
+import Observation
 import Testing
+
+#if canImport(FoundationModels) && compiler(>=6.4) && !os(tvOS) && !os(watchOS)
+    import class FoundationModels.SystemLanguageModel
+#endif
 
 @_spi(Compatibility) @testable import AnyLanguageModel
 
@@ -113,6 +118,153 @@ struct DynamicProfileTests {
 
         #expect(invocationCount == 1)
     }
+
+    @Test(arguments: [false, true])
+    func completionCallbacksSeeAndPreserveCommittedHistory(streaming: Bool) async throws {
+        let histories = Locked<[[Transcript.Entry]]>([])
+        let session = LanguageModelSession(
+            profile: LanguageModelSession.Profile { Instructions("Completion history") }
+                .model(LifecycleFixtureModel())
+                .onResponse { _ in
+                    let properties = try #require(SessionPropertyBinding.values)
+                    let history = properties.history
+                    histories.withLock { $0.append(history) }
+                    properties.history = history
+                }
+        )
+
+        if streaming {
+            _ = try await session.streamResponse(to: "Complete").collect()
+        } else {
+            _ = try await session.respond(to: "Complete")
+        }
+
+        let history = try #require(histories.withLock { $0.first })
+        #expect(history == Array(session.transcript))
+        #expect(history.contains { if case .response = $0 { true } else { false } })
+        #expect(history.contains { if case .reasoning = $0 { true } else { false } })
+    }
+
+    @Test(arguments: [false, true])
+    func historyObserversSeeCompletionAndCallbackRollback(streaming: Bool) async throws {
+        let completionObserved = Locked(false)
+        let rollbackObserved = Locked(false)
+        let session = LanguageModelSession(
+            profile: LanguageModelSession.Profile { Instructions("Observe completion") }
+                .model(LifecycleFixtureModel())
+                .onPrompt { _ in
+                    let properties = try #require(SessionPropertyBinding.values)
+                    withObservationTracking {
+                        _ = properties.history
+                    } onChange: {
+                        completionObserved.withLock { $0 = true }
+                    }
+                }
+                .onResponse { _ in
+                    let properties = try #require(SessionPropertyBinding.values)
+                    withObservationTracking {
+                        _ = properties.history
+                    } onChange: {
+                        rollbackObserved.withLock { $0 = true }
+                    }
+                    throw LifecycleFixtureError.rejected
+                }
+        )
+
+        await #expect(throws: LifecycleFixtureError.self) {
+            if streaming {
+                _ = try await session.streamResponse(to: "Roll back").collect()
+            } else {
+                _ = try await session.respond(to: "Roll back")
+            }
+        }
+
+        #expect(completionObserved.withLock { $0 })
+        #expect(rollbackObserved.withLock { $0 })
+        #expect(session.transcript.count == 1)
+    }
+
+    @Test func nestedInstructionsReceiveReadOnlyHistory() {
+        let writability = Locked<[Bool]>([])
+        let session = LanguageModelSession(profile: HistoryBindingProfile(writability: writability))
+
+        _ = session.resolvedRequestContext()
+
+        #expect(writability.withLock { $0 } == [true, false])
+    }
+
+    @Test func toolHistoryExcludesStaticInstructions() async {
+        let session = LanguageModelSession(model: LifecycleFixtureModel(), instructions: "Static")
+        let context = session.resolvedRequestContext()
+        let history = await session.withProfileToolExecution(requestContext: context, currentRoundEntries: []) {
+            session.properties.history
+        }
+
+        #expect(history.isEmpty)
+        #expect(session.transcript.count == 1)
+    }
+
+    @Test(arguments: [false, true])
+    func promptCallbackUsesTheActualRequestAfterHistoryMutation(streaming: Bool) async throws {
+        let prompts = Locked<[String]>([])
+        let session = LanguageModelSession(profile: PromptRemovingProfile(prompts: prompts))
+
+        if streaming {
+            _ = try await session.streamResponse(to: "Actual request").collect()
+        } else {
+            _ = try await session.respond(to: "Actual request")
+        }
+
+        #expect(prompts.withLock { $0 } == ["Actual request"])
+    }
+
+    @Test func concurrentStreamsKeepTheirOwnPromptCallbacks() async throws {
+        let prompts = Locked<[String]>([])
+        let session = LanguageModelSession(
+            profile: LanguageModelSession.Profile { Instructions("Concurrent prompts") }
+                .model(LifecycleFixtureModel())
+                .onPrompt { (prompt: Transcript.Prompt) in
+                    let text = prompt.segments.compactMap { segment in
+                        if case .text(let text) = segment { return text.content }
+                        return nil
+                    }.joined()
+                    prompts.withLock { $0.append(text) }
+                }
+        )
+        let first = session.streamResponse(to: "First")
+        let second = session.streamResponse(to: "Second")
+        async let firstResponse = first.collect()
+        async let secondResponse = second.collect()
+        _ = try await (firstResponse, secondResponse)
+
+        #expect(prompts.withLock { $0.sorted() } == ["First", "Second"])
+    }
+
+    #if canImport(FoundationModels) && compiler(>=6.4) && !os(tvOS) && !os(watchOS)
+        @Test func nativeSessionUsesProjectedHistory() throws {
+            guard #available(macOS 27.0, iOS 27.0, visionOS 27.0, *) else { return }
+            let earlier = Transcript.Entry.prompt(.init(segments: [.text(.init(content: "Earlier"))]))
+            let prompt = Prompt("Current")
+            let current = Transcript.Entry.prompt(
+                .init(id: "current", segments: try prompt.makeTranscriptSegments(occurrenceID: "current"))
+            )
+            let session = LanguageModelSession(
+                profile: LanguageModelSession.Profile { Instructions("Projected") }
+                    .model(LifecycleFixtureModel())
+                    .historyTransform { $0.filter { $0.id != earlier.id } },
+                history: [earlier, current]
+            )
+
+            let native = makeFoundationModelsSession(
+                model: FoundationModels.SystemLanguageModel.default,
+                session: session,
+                prompt: prompt
+            )
+
+            #expect(!native.transcript.contains { if case .prompt = $0 { true } else { false } })
+            #expect(Array(session.transcript) == [earlier, current])
+        }
+    #endif
 
     @Test(arguments: [false, true])
     func callbackErrorsPropagateWithoutCommittingAResponse(streaming: Bool) async throws {
@@ -479,6 +631,43 @@ private struct PropertyFixtureTool: Tool, @unchecked Sendable {
 
 private enum LifecycleFixtureError: Error {
     case rejected
+}
+
+private struct HistoryBindingProfile: LanguageModelSession.DynamicProfile, @unchecked Sendable {
+    let writability: Locked<[Bool]>
+
+    var body: some LanguageModelSession.DynamicProfile {
+        writability.withLock { $0.append(SessionPropertyBinding.history?.isWritable ?? false) }
+        return LanguageModelSession.Profile { HistoryBindingInstructions(writability: writability) }
+            .model(LifecycleFixtureModel())
+    }
+}
+
+private struct HistoryBindingInstructions: DynamicInstructions, @unchecked Sendable {
+    let writability: Locked<[Bool]>
+
+    var body: some DynamicInstructions {
+        writability.withLock { $0.append(SessionPropertyBinding.history?.isWritable ?? true) }
+        return Instructions("Read-only instructions")
+    }
+}
+
+private struct PromptRemovingProfile: LanguageModelSession.DynamicProfile, @unchecked Sendable {
+    let prompts: Locked<[String]>
+    @SessionProperty(\.history) private var history
+
+    var body: some LanguageModelSession.DynamicProfile {
+        history = []
+        return LanguageModelSession.Profile { Instructions("Removed prompt") }
+            .model(LifecycleFixtureModel())
+            .onPrompt { (prompt: Transcript.Prompt) in
+                let text = prompt.segments.compactMap { segment in
+                    if case .text(let text) = segment { return text.content }
+                    return nil
+                }.joined()
+                prompts.withLock { $0.append(text) }
+            }
+    }
 }
 
 private actor ConcurrentCallbackProbe {
