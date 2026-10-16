@@ -835,12 +835,13 @@ private func geminiFunctionResponseData(from url: URL) throws -> GeminiInlineDat
         throw GeminiFunctionResponseAttachmentError.unsupportedURL(url)
     }
 
-    let mimeType = switch url.pathExtension.lowercased() {
-    case "png": "image/png"
-    case "jpg", "jpeg": "image/jpeg"
-    case "webp": "image/webp"
-    default: throw GeminiFunctionResponseAttachmentError.unsupportedImageType(url)
-    }
+    let mimeType =
+        switch url.pathExtension.lowercased() {
+        case "png": "image/png"
+        case "jpg", "jpeg": "image/jpeg"
+        case "webp": "image/webp"
+        default: throw GeminiFunctionResponseAttachmentError.unsupportedImageType(url)
+        }
     return try GeminiInlineData(
         mimeType: mimeType,
         data: Data(contentsOf: url).base64EncodedString()
