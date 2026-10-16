@@ -811,6 +811,18 @@ import Testing
             }
         }
 
+        /// Ollama is asked not to cut a prompt longer than its context, so such a request fails
+        /// instead of being answered without its beginning.
+        @Test
+        func ollamaIsAskedNotToTruncate() async throws {
+            UsageURLProtocol.reset()
+            UsageURLProtocol.enqueue(json: try Provider.ollama.stream())
+            _ = try await Provider.ollama.makeSession().streamResponse(to: "Hi").collect()
+            let body = try #require(UsageURLProtocol.recordedBodies.first)
+            let request = try JSONSerialization.jsonObject(with: body) as? [String: Any]
+            #expect(request?["truncate"] as? Bool == false)
+        }
+
         @Test(arguments: Provider.allCases)
         func streamedToolRoundsStopAtLimit(_ provider: Provider) async throws {
             UsageURLProtocol.reset()

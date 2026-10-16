@@ -510,14 +510,19 @@ func convertOptions(_ options: GenerationOptions) -> [String: JSONValue]? {
 
 /// Custom option keys that Ollama's `/api/chat` endpoint reads from the top level
 /// of the request body rather than from `options`.
-private let topLevelChatParameterKeys: Set<String> = ["think", "keep_alive"]
+private let topLevelChatParameterKeys: Set<String> = ["think", "keep_alive", "truncate"]
 
+/// The top-level chat parameters a request sends. Ollama cuts a prompt longer than the context
+/// it was given unless told not to, and the model then answers without its beginning, with
+/// nothing to say so: every request tells it not to, so such a request fails instead.
+/// A custom `truncate` option still decides.
 func extractTopLevelChatParameters(_ options: GenerationOptions) -> [String: JSONValue]? {
-    guard let customOptions: [String: JSONValue] = options[custom: OllamaLanguageModel.self] else {
-        return nil
+    var parameters: [String: JSONValue] = ["truncate": .bool(false)]
+    let customOptions: [String: JSONValue] = options[custom: OllamaLanguageModel.self] ?? [:]
+    for (key, value) in customOptions where topLevelChatParameterKeys.contains(key) {
+        parameters[key] = value
     }
-    let parameters = customOptions.filter { topLevelChatParameterKeys.contains($0.key) }
-    return parameters.isEmpty ? nil : parameters
+    return parameters
 }
 
 private func convertToolToOllamaFormat(_ tool: any Tool) throws -> [String: JSONValue] {
