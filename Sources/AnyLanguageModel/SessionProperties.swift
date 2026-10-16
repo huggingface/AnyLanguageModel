@@ -47,7 +47,10 @@ public final class SessionPropertyValues: @unchecked Sendable {
     public var history: Transcript.HistoryView {
         get {
             _accessSessionProperty(keyPath: \.history)
-            return SessionPropertyBinding.history?.entries ?? historyGetter()
+            if SessionPropertyBinding.values === self, let history = SessionPropertyBinding.history {
+                return history.entries
+            }
+            return historyGetter()
         }
         set {
             _withSessionPropertyMutation(keyPath: \.history) {
@@ -55,7 +58,7 @@ public final class SessionPropertyValues: @unchecked Sendable {
                     if case .instructions = entry { return false }
                     return true
                 }
-                if let history = SessionPropertyBinding.history {
+                if SessionPropertyBinding.values === self, let history = SessionPropertyBinding.history {
                     precondition(
                         history.isWritable,
                         "Session history is read-only while dynamic instructions or a Tool is active"
