@@ -355,7 +355,12 @@ struct ResolvedDynamicProfile: @unchecked Sendable {
 
 extension LanguageModelSession.Profile: PrimitiveDynamicProfile {
     fileprivate func resolve() -> ResolvedDynamicProfile {
-        let dynamic = dynamicInstructions.resolveForRequest()
+        let history = SessionPropertyBinding.history.map {
+            SessionHistoryBinding($0.entries, isWritable: false)
+        }
+        let dynamic = SessionPropertyBinding.$history.withValue(history) {
+            dynamicInstructions.resolveForRequest()
+        }
         return ResolvedDynamicProfile(
             identity: identity,
             model: nil,
@@ -509,7 +514,6 @@ private func resolveDynamicProfile(
 
 actor ProfileLifecycle {
     private var activeProfile: ResolvedDynamicProfile?
-    private var lastPromptID: String?
     private var pendingPreparation: (id: Int, task: Task<Void, any Error>)?
     private var nextPreparationID = 0
 
@@ -517,6 +521,8 @@ actor ProfileLifecycle {
         _ profile: ResolvedDynamicProfile,
         properties: SessionPropertyValues,
         history: [Transcript.Entry],
+        prompt: Transcript.Prompt?,
+        callbackState: ProfileCallbackState,
         protectedEntryIDs: Set<String> = []
     ) async throws {
         let previous = pendingPreparation?.task
@@ -528,6 +534,8 @@ actor ProfileLifecycle {
                 profile,
                 properties: properties,
                 history: history,
+                prompt: prompt,
+                callbackState: callbackState,
                 protectedEntryIDs: protectedEntryIDs
             )
         }
@@ -545,6 +553,8 @@ actor ProfileLifecycle {
         _ profile: ResolvedDynamicProfile,
         properties: SessionPropertyValues,
         history: [Transcript.Entry],
+        prompt: Transcript.Prompt?,
+        callbackState: ProfileCallbackState,
         protectedEntryIDs: Set<String>
     ) async throws {
         if activeProfile?.identity != profile.identity {
@@ -569,22 +579,19 @@ actor ProfileLifecycle {
             activeProfile = profile
         }
 
-        guard
-            let prompt = history.reversed().compactMap({ entry -> Transcript.Prompt? in
-                if case .prompt(let prompt) = entry { return prompt }
-                return nil
-            }).first,
-            prompt.id != lastPromptID
-        else { return }
-
-        try await withBindings(
-            properties: properties,
-            history: history,
-            protectedEntryIDs: protectedEntryIDs
-        ) {
-            for action in profile.onPrompt { try await action(prompt) }
+        guard let prompt, callbackState.reserve(prompt.id) else { return }
+        do {
+            try await withBindings(
+                properties: properties,
+                history: history,
+                protectedEntryIDs: protectedEntryIDs
+            ) {
+                for action in profile.onPrompt { try await action(prompt) }
+            }
+        } catch {
+            callbackState.release(prompt.id)
+            throw error
         }
-        lastPromptID = prompt.id
     }
 
     private func withBindings<Result: Sendable>(

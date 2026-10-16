@@ -43,6 +43,19 @@ struct RequestOptionsTests {
         #expect(options.sampling == .random(probabilityThreshold: 0.8, seed: 9))
     }
 
+    @Test func samplingModeInitializerDoesNotRequireAToolPolicy() {
+        let options = GenerationOptions(samplingMode: .greedy)
+        #expect(options.sampling == .greedy)
+        #expect(options.toolCallingMode == nil)
+        #expect(GenerationOptions(samplingMode: nil) == GenerationOptions())
+        #expect(
+            GenerationOptions(samplingMode: .greedy, temperature: 0.4, maximumResponseTokens: 16)
+                == GenerationOptions(sampling: .greedy, temperature: 0.4, maximumResponseTokens: 16)
+        )
+        #expect(GenerationOptions(temperature: 0.4).temperature == 0.4)
+        #expect(GenerationOptions(toolCallingMode: .required).toolCallingMode == .required)
+    }
+
     @Test func transcriptRoundTripsToolCallingMode() throws {
         let options = GenerationOptions(
             samplingMode: .greedy,

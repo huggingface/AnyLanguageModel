@@ -584,6 +584,111 @@ import Testing
         }
 
         @Test(arguments: Provider.allCases, [false, true])
+        func modelHandoffsPreserveEarlierToolResultsAndHistoryWrites(
+            _ provider: Provider,
+            _ streaming: Bool
+        ) async throws {
+            UsageURLProtocol.reset()
+            for round in 0 ..< 2 {
+                let response =
+                    try streaming
+                    ? provider.toolStream(city: "City \(round)", callID: "call_\(round)")
+                    : Self.json(provider.response(text: "", tool: true))
+                        .replacingOccurrences(of: "Paris", with: "City \(round)")
+                        .replacingOccurrences(of: "call_1", with: "call_\(round)")
+                UsageURLProtocol.enqueue(json: response)
+            }
+            UsageURLProtocol.enqueue(
+                json: try streaming ? provider.stream() : Self.json(provider.response())
+            )
+            let state = AlternatingProviderProfileState(writesHistory: true)
+            let session = LanguageModelSession(
+                profile: AlternatingProviderProfile(
+                    state: state,
+                    first: provider.makeModel(),
+                    second: provider.makeModel()
+                )
+            )
+
+            if streaming {
+                _ = try await session.streamResponse(to: "Weather?").collect()
+            } else {
+                _ = try await session.respond(to: "Weather?")
+            }
+
+            #expect(state.executions.withLock { $0 } == ["City 0", "City 1"])
+            #expect(state.outputHistoryCounts.withLock { $0 } == [1, 2])
+            #expect(state.promptIDs.withLock { $0.count } == 1)
+            #expect(session.transcript.count == 6)
+            #expect(Set(session.transcript.map(\.id)).count == session.transcript.count)
+            let lastRequest = try #require(UsageURLProtocol.recordedBodies.last)
+            let text = String(decoding: lastRequest, as: UTF8.self)
+            #expect(text.contains("Sunny for City 0"))
+            #expect(text.contains("Sunny for City 1"))
+        }
+
+        @Test(arguments: [false, true])
+        func failedHandoffDoesNotPersistPendingHistory(_ streaming: Bool) async throws {
+            let provider = Provider.chat
+            UsageURLProtocol.reset()
+            for round in 0 ..< 2 {
+                UsageURLProtocol.enqueue(
+                    json: try streaming
+                        ? provider.toolStream(city: "City \(round)", callID: "call_\(round)")
+                        : Self.json(provider.response(text: "", tool: true))
+                            .replacingOccurrences(of: "Paris", with: "City \(round)")
+                            .replacingOccurrences(of: "call_1", with: "call_\(round)")
+                )
+            }
+            let state = AlternatingProviderProfileState(writesHistory: true, failsAfterSecondOutput: true)
+            let session = LanguageModelSession(
+                profile: AlternatingProviderProfile(
+                    state: state,
+                    first: provider.makeModel(),
+                    second: provider.makeModel()
+                )
+            )
+
+            await #expect(throws: ProfileHistoryError.self) {
+                if streaming {
+                    _ = try await session.streamResponse(to: "Weather?").collect()
+                } else {
+                    _ = try await session.respond(to: "Weather?")
+                }
+            }
+
+            #expect(state.outputHistoryCounts.withLock { $0 } == [1, 2])
+            #expect(session.transcript.count == 1)
+            #expect(session.transcript.allSatisfy { if case .prompt = $0 { true } else { false } })
+        }
+
+        @Test(arguments: Provider.allCases, [false, true])
+        func ordinaryWrapperKeepsTheProviderToolLoop(_ provider: Provider, _ streaming: Bool) async throws {
+            UsageURLProtocol.reset()
+            UsageURLProtocol.enqueue(
+                json: try streaming ? provider.toolStream() : Self.json(provider.response(text: "", tool: true))
+            )
+            UsageURLProtocol.enqueue(
+                json: try streaming ? provider.stream() : Self.json(provider.response())
+            )
+            let invocations = Locked(0)
+            let session = LanguageModelSession(
+                model: ProviderWrapper(model: provider.makeModel(), invocations: invocations),
+                tools: [WeatherTool()]
+            )
+
+            let response =
+                try await streaming
+                ? session.streamResponse(to: "Weather?").collect()
+                : session.respond(to: "Weather?")
+
+            #expect(response.content == "Hello")
+            #expect(invocations.withLock { $0 } == 1)
+            #expect(UsageURLProtocol.recordedBodies.count == 2)
+            #expect(session.transcript.count == 4)
+        }
+
+        @Test(arguments: Provider.allCases, [false, true])
         func streamedToolsThenStructuredContent(_ provider: Provider, _ dynamicSchema: Bool) async throws {
             UsageURLProtocol.reset()
             UsageURLProtocol.enqueue(json: try provider.toolStream())
@@ -1084,6 +1189,15 @@ import Testing
         private final class AlternatingProviderProfileState: @unchecked Sendable {
             let useSecond = Locked(false)
             let executions = Locked<[String]>([])
+            let outputHistoryCounts = Locked<[Int]>([])
+            let promptIDs = Locked<[String]>([])
+            let writesHistory: Bool
+            let failsAfterSecondOutput: Bool
+
+            init(writesHistory: Bool = false, failsAfterSecondOutput: Bool = false) {
+                self.writesHistory = writesHistory
+                self.failsAfterSecondOutput = failsAfterSecondOutput
+            }
 
             func toggleModel() {
                 useSecond.withLock { $0.toggle() }
@@ -1097,16 +1211,34 @@ import Testing
 
             var body: some LanguageModelSession.DynamicProfile {
                 if state.useSecond.withLock({ $0 }) {
-                    LanguageModelSession.Profile {
-                        AlternatingProviderProfileTool(state: state)
-                    }
-                    .model(second)
+                    profile(model: second)
                 } else {
-                    LanguageModelSession.Profile {
-                        AlternatingProviderProfileTool(state: state)
-                    }
-                    .model(first)
+                    profile(model: first)
                 }
+            }
+
+            private func profile(model: any LanguageModel) -> some LanguageModelSession.DynamicProfile {
+                LanguageModelSession.Profile { AlternatingProviderProfileTool(state: state) }
+                    .model(model)
+                    .onPrompt { (prompt: Transcript.Prompt) in
+                        state.promptIDs.withLock { $0.append(prompt.id) }
+                    }
+                    .onToolOutput { _, _ in
+                        guard state.writesHistory else { return }
+                        let properties = try #require(SessionPropertyBinding.values)
+                        let history = properties.history
+                        let outputs = history.filter { if case .toolOutput = $0 { true } else { false } }
+                        state.outputHistoryCounts.withLock { $0.append(outputs.count) }
+                        properties.history = history
+                        if state.failsAfterSecondOutput && outputs.count == 2 {
+                            throw ProfileHistoryError.rejected
+                        }
+                    }
+                    .onResponse { _ in
+                        guard state.writesHistory else { return }
+                        let properties = try #require(SessionPropertyBinding.values)
+                        properties.history = properties.history
+                    }
             }
         }
 
@@ -1118,7 +1250,51 @@ import Testing
             func call(arguments: WeatherTool.Arguments) async throws -> String {
                 state.executions.withLock { $0.append(arguments.city) }
                 state.toggleModel()
-                return "Sunny"
+                return "Sunny for \(arguments.city)"
+            }
+        }
+
+        private enum ProfileHistoryError: Error {
+            case rejected
+        }
+
+        private struct ProviderWrapper: LanguageModel {
+            typealias UnavailableReason = Never
+            let model: any LanguageModel
+            let invocations: Locked<Int>
+
+            func respond<Content>(
+                within session: LanguageModelSession,
+                to prompt: Prompt,
+                generating type: Content.Type,
+                includeSchemaInPrompt: Bool,
+                options: GenerationOptions
+            ) async throws -> LanguageModelSession.Response<Content> where Content: Generable {
+                invocations.withLock { $0 += 1 }
+                return try await model.respond(
+                    within: session,
+                    to: prompt,
+                    generating: type,
+                    includeSchemaInPrompt: includeSchemaInPrompt,
+                    options: options
+                )
+            }
+
+            func streamResponse<Content>(
+                within session: LanguageModelSession,
+                to prompt: Prompt,
+                generating type: Content.Type,
+                includeSchemaInPrompt: Bool,
+                options: GenerationOptions
+            ) -> sending LanguageModelSession.ResponseStream<Content> where Content: Generable {
+                invocations.withLock { $0 += 1 }
+                return model.streamResponse(
+                    within: session,
+                    to: prompt,
+                    generating: type,
+                    includeSchemaInPrompt: includeSchemaInPrompt,
+                    options: options
+                )
             }
         }
 
