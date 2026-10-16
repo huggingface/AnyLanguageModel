@@ -199,6 +199,18 @@ public struct GenerationOptions: Sendable, Equatable {
         self.toolCallingMode = nil
     }
 
+    public init(
+        samplingMode: SamplingMode?,
+        temperature: Double? = nil,
+        maximumResponseTokens: Int? = nil
+    ) {
+        self.init(
+            sampling: samplingMode,
+            temperature: temperature,
+            maximumResponseTokens: maximumResponseTokens
+        )
+    }
+
     /// Creates Foundation Models 27-style generation options.
     public init(
         samplingMode: SamplingMode? = nil,
