@@ -4,20 +4,32 @@ import HTTPTypes
 import HTTPTypesFoundation
 
 /// Why a request to a model's provider failed.
-enum HTTPTransportError: Error, CustomStringConvertible {
+/// Why a request to a model's provider failed in sending it or in its answer.
+///
+/// A caller can read an error response's status, headers and body,
+/// for example to wait as its `Retry-After` header says.
+///
+/// - Note: This API is exclusive to AnyLanguageModel
+///   and using it means your code is no longer drop-in compatible
+///   with the Foundation Models framework.
+public enum HTTPTransportError: Error, CustomStringConvertible {
+    /// The request couldn't be sent as given.
     case invalidRequest
+    /// The answer wasn't an HTTP response.
     case invalidResponse
-    case httpError(status: HTTPResponse.Status, detail: String)
+    /// The provider answered with an error: its response, headers included, and its body.
+    case httpError(response: HTTPResponse, body: String)
+    /// A successful answer couldn't be read as what was expected.
     case decodingError(detail: String)
 
-    var description: String {
+    public var description: String {
         switch self {
         case .invalidRequest:
             return "Invalid request"
         case .invalidResponse:
             return "Invalid response"
-        case .httpError(let status, let detail):
-            return "HTTP error (Status \(status.code)): \(detail)"
+        case .httpError(let response, let body):
+            return "HTTP error (Status \(response.status.code)): \(body)"
         case .decodingError(let detail):
             return "Decoding error: \(detail)"
         }
@@ -123,7 +135,7 @@ extension HTTPTransport {
     private static func validate(_ response: HTTPResponse, _ body: HTTPResponseBody) async throws {
         guard response.status.kind == .successful else {
             let detail = String(data: try await body.collect(), encoding: .utf8) ?? "Invalid response"
-            throw HTTPTransportError.httpError(status: response.status, detail: detail)
+            throw HTTPTransportError.httpError(response: response, body: detail)
         }
     }
 }

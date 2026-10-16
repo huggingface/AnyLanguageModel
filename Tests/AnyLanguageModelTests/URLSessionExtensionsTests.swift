@@ -17,7 +17,7 @@ struct URLSessionExtensionsTests {
     }
 
     @Test func httpErrorDescriptionIncludesStatusCodeAndDetail() {
-        let error = HTTPTransportError.httpError(status: .tooManyRequests, detail: "rate limit")
+        let error = HTTPTransportError.httpError(response: HTTPResponse(status: .tooManyRequests), body: "rate limit")
         #expect(error.description == "HTTP error (Status 429): rate limit")
     }
 
