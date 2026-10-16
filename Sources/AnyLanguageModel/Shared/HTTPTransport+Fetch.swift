@@ -3,7 +3,6 @@ import Foundation
 import HTTPTypes
 import HTTPTypesFoundation
 
-/// Why a request to a model's provider failed.
 /// Why a request to a model's provider failed in sending it or in its answer.
 ///
 /// A caller can read an error response's status, headers and body,
