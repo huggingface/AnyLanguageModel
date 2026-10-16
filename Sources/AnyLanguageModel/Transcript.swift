@@ -833,3 +833,37 @@ extension Transcript.ToolCalls: RandomAccessCollection {
         calls.endIndex
     }
 }
+
+extension Transcript.Reasoning {
+    /// The provider whose model reasoned it: only that provider's model can go on from it, so it's
+    /// given back only to that provider.
+    ///
+    /// - Note: This API is exclusive to AnyLanguageModel
+    ///   and using it means your code is no longer drop-in compatible
+    ///   with the Foundation Models framework.
+    public enum Origin: String, Sendable, Equatable, CaseIterable {
+        case anthropic
+        case ollama
+    }
+
+    /// Its origin, as its metadata holds it: `nil` for reasoning no provider here produced.
+    public var origin: Origin? {
+        get {
+            guard case .string(let name)? = metadata[Self.originKey]?.kind else { return nil }
+            return Origin(rawValue: name)
+        }
+        set { metadata[Self.originKey] = newValue.map { GeneratedContent($0.rawValue) } }
+    }
+
+    /// Reasoning that `origin`'s model produced.
+    public init(
+        id: String = UUID().uuidString, origin: Origin, metadata: [String: GeneratedContent] = [:], segments: [Transcript.Segment],
+        signature: Data? = nil
+    ) {
+        self.init(id: id, metadata: metadata, segments: segments, signature: signature)
+        self.origin = origin
+    }
+
+    /// Where its origin is kept, in metadata a transcript encodes as it is.
+    static let originKey = "provider"
+}

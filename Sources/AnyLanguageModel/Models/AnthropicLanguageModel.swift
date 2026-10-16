@@ -1037,7 +1037,7 @@ extension Transcript {
                     )
                 )
             case .reasoning(let reasoning):
-                guard reasoning.metadata["provider"] == GeneratedContent("anthropic") else {
+                guard reasoning.origin == .anthropic else {
                     // Foreign reasoning remains display history, not Anthropic replay state.
                     continue
                 }
@@ -1172,7 +1172,8 @@ private struct AnthropicRedactedThinking: Codable, Sendable {
     func transcriptReasoning(id: String = UUID().uuidString) -> Transcript.Reasoning {
         .init(
             id: id,
-            metadata: ["provider": GeneratedContent("anthropic"), "isRedacted": GeneratedContent(true)],
+            origin: .anthropic,
+            metadata: ["isRedacted": GeneratedContent(true)],
             segments: [],
             signature: Data(data.utf8)
         )
@@ -1234,7 +1235,7 @@ private extension AnthropicThinking {
     func transcriptReasoning(id: String = UUID().uuidString) -> Transcript.Reasoning {
         .init(
             id: id,
-            metadata: ["provider": GeneratedContent("anthropic")],
+            origin: .anthropic,
             segments: [.text(.init(id: id + ":text", content: thinking))],
             signature: signature.isEmpty ? nil : Data(signature.utf8)
         )
