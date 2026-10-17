@@ -797,9 +797,14 @@
             return .init(type: String.self, guides: guides)
 
         case .number(let number) where number.integerOnly:
+            // The whole numbers within the bounds; a bound no `Int` can hold sets no guide.
             var guides: [FoundationModels.GenerationGuide<Int>] = []
-            if let minimum = number.minimum { guides.append(.minimum(Int(minimum))) }
-            if let maximum = number.maximum { guides.append(.maximum(Int(maximum))) }
+            if let minimum = number.minimum.flatMap({ Int(exactly: $0.rounded(.up)) }) {
+                guides.append(.minimum(minimum))
+            }
+            if let maximum = number.maximum.flatMap({ Int(exactly: $0.rounded(.down)) }) {
+                guides.append(.maximum(maximum))
+            }
             return .init(type: Int.self, guides: guides)
 
         case .number(let number):
@@ -833,6 +838,11 @@
             )
 
         case .ref(let typeName):
+            // A named definition that is only a reference, such as a one-choice `anyOf`, keeps its
+            // name, or the references to it are undefined.
+            if let name {
+                return .init(name: name, anyOf: [.init(referenceTo: typeName)])
+            }
             return .init(referenceTo: typeName)
 
         case .null:
