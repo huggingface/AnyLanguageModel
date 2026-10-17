@@ -38,7 +38,12 @@ extension LanguageModelSession {
         fileprivate let resolveValue: () -> ResolvedDynamicProfile
 
         public init(_ dynamicProfile: any DynamicProfile) {
-            resolveValue = { resolveDynamicProfile(dynamicProfile) }
+            let identity = String(reflecting: type(of: dynamicProfile))
+            resolveValue = {
+                var resolved = resolveDynamicProfile(dynamicProfile)
+                resolved.identity = identity + "/" + resolved.identity
+                return resolved
+            }
         }
 
         public init(erasing dynamicProfile: some DynamicProfile) {
@@ -557,20 +562,19 @@ actor ProfileLifecycle {
         callbackState: ProfileCallbackState,
         protectedEntryIDs: Set<String>
     ) async throws {
+        let history = properties.historyBinding(history, isWritable: true, protecting: protectedEntryIDs)
         if activeProfile?.identity != profile.identity {
             if let previous = activeProfile {
                 await withBindings(
                     properties: properties,
-                    history: history,
-                    protectedEntryIDs: protectedEntryIDs
+                    history: history
                 ) {
                     for action in previous.onDeactivate { await action() }
                 }
             }
             await withBindings(
                 properties: properties,
-                history: history,
-                protectedEntryIDs: protectedEntryIDs
+                history: history
             ) {
                 for action in profile.onActivate { await action() }
             }
@@ -583,8 +587,7 @@ actor ProfileLifecycle {
         do {
             try await withBindings(
                 properties: properties,
-                history: history,
-                protectedEntryIDs: protectedEntryIDs
+                history: history
             ) {
                 for action in profile.onPrompt { try await action(prompt) }
             }
@@ -596,15 +599,9 @@ actor ProfileLifecycle {
 
     private func withBindings<Result: Sendable>(
         properties: SessionPropertyValues,
-        history: [Transcript.Entry],
-        protectedEntryIDs: Set<String>,
+        history: SessionHistoryBinding,
         operation: @Sendable () async throws -> Result
     ) async rethrows -> Result {
-        let history = properties.historyBinding(
-            history,
-            isWritable: true,
-            protecting: protectedEntryIDs
-        )
         return try await SessionPropertyBinding.$values.withValue(properties) {
             try await SessionPropertyBinding.$history.withValue(history) {
                 try await operation()
