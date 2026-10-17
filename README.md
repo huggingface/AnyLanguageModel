@@ -384,19 +384,22 @@ pass the model's multimodal projector with `mmprojPath:`.
 
 ### Prompt attachments
 
-Image attachments use the Foundation Models 27 prompt construction syntax:
+Image attachments use the Foundation Models 27 prompt construction syntax,
+including ordinary Tool outputs:
 
 ```swift
-let prompt = Prompt {
-    "Describe this image"
-    Attachment(imageURL: fileURL)
+func call(arguments: Arguments) async throws -> Prompt {
+    Prompt {
+        "Image read from the selected file"
+        Attachment(imageURL: fileURL)
+    }
 }
 ```
 
 On Apple platforms, `Attachment(CGImage, orientation:)` retains typed image
-content and orientation. Prompt builders preserve the order of text and images,
-and the OS 26 compatibility transcript continues to store images using its
-existing `Transcript.Segment.image` Codable representation.
+content and orientation. Prompts, builders, and Tool outputs preserve the order
+of text and images, and the OS 26 compatibility transcript continues to store
+images using its existing `Transcript.Segment.image` Codable representation.
 
 `SystemLanguageModel` and `FoundationLanguageModel` bridge prompt attachments
 to Foundation Models only in apps built with Swift 6.4 or later
@@ -406,9 +409,14 @@ they throw an error when a prompt has an attachment.
 The system bridge requires local file URLs; other provider adapters retain URL
 images in their existing transcript representation.
 
-This first compatibility surface covers prompt `CGImage` and `imageURL`
-attachments. Tool outputs, instruction attachments, labels, `CIImage`, pixel
-buffers, and newer data attachments remain outside this change.
+Ordinary Tool outputs read local image files once when the output is created,
+and retain the image bytes and MIME type in the compatibility transcript.
+Continuations and saved transcript replay therefore do not depend on the original
+file remaining at its URL. Remote image URLs are retained without downloading.
+
+This compatibility surface covers `CGImage` and `imageURL` attachments in
+prompts and ordinary Tool outputs. Instruction attachments, labels, `CIImage`,
+pixel buffers, and newer data attachments remain outside this change.
 
 ### Tool Calling
 
@@ -514,6 +522,28 @@ but never become part of the session's transcript.
 > that run on OS 27 or later, and not on tvOS.
 > Otherwise, it throws `SystemLanguageModel.Error.dynamicInstructionsUnavailable`
 > for a session with dynamic instructions.
+
+### Foundation Models 27 request options
+
+`ContextOptions` mirrors Foundation Models 27's schema-in-prompt and reasoning-level
+settings for compatibility-layer request construction. `GenerationOptions` also
+provides the OS 27 `samplingMode` spelling and `ToolCallingMode` values:
+
+```swift
+let context = ContextOptions(
+    includeSchemaInPrompt: true,
+    reasoningLevel: .moderate
+)
+let options = GenerationOptions(
+    samplingMode: .greedy,
+    toolCallingMode: .required
+)
+```
+
+The older `sampling` property and initializer remain source-compatible.
+Tool-calling mode is preserved in Codable transcripts and forwarded by the
+Foundation Models bridge on OS 27. Other model providers can read the same
+option from their request's `GenerationOptions`.
 
 ### Reasoning in the transcript
 
@@ -641,6 +671,10 @@ say which API they follow.
   [image inputs](#image-inputs).
   Foundation Models 27-style [prompt attachments](#prompt-attachments) are also
   available for ordered text and image prompt construction.
+- `Tool.makeOutputSegments(from:)`, exposed only through the `Compatibility` SPI:
+  an integration extension for back-deployment provider adapters to lower normal
+  Tool outputs into the compatibility transcript. It is not an Apple Tool API;
+  OS 27 canonical executors use Foundation Models' own Tool execution instead.
 - `ToolExecutionDelegate`, `ToolExecutionDecision`, and `toolExecutionDelegate`:
   [observing and controlling tool calls](#tool-calling).
 - `transcriptErrorHandlingPolicy` and `waitForResponseCompletion()`:
@@ -654,6 +688,11 @@ say which API they follow.
 - `DynamicInstructions`, its builder, and `LanguageModelSession.init(model:dynamicInstructions:history:)`:
   [dynamic instructions](#dynamic-instructions),
   which follow the Foundation Models 27 API.
+- `ContextOptions`, `GenerationOptions.samplingMode`, and
+  `GenerationOptions.ToolCallingMode`:
+  [request options](#foundation-models-27-request-options), which follow the
+  Foundation Models 27 API while remaining available on the package's existing
+  deployment targets.
 - `Transcript.Entry.reasoning` and `Transcript.Reasoning`:
   [reasoning in the transcript](#reasoning-in-the-transcript),
   which follows the Foundation Models 27 API.

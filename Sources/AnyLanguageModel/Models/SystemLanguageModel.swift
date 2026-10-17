@@ -498,6 +498,21 @@
             }
 
             #if compiler(>=6.4) && !os(tvOS)
+                if #available(macOS 27, iOS 27, visionOS 27, watchOS 27, *) {
+                    let toolCallingMode: FoundationModels.GenerationOptions.ToolCallingMode? =
+                        switch self.toolCallingMode?.kind {
+                        case .allowed: .allowed
+                        case .required: .required
+                        case .disallowed: .disallowed
+                        case nil: nil
+                        }
+                    return FoundationModels.GenerationOptions(
+                        samplingMode: sampling,
+                        temperature: temperature,
+                        maximumResponseTokens: maximumResponseTokens,
+                        toolCallingMode: toolCallingMode
+                    )
+                }
                 return FoundationModels.GenerationOptions(
                     samplingMode: sampling,
                     temperature: temperature,
@@ -577,7 +592,7 @@
     @available(macOS 26.0, iOS 26.0, watchOS 27.0, tvOS 26.0, visionOS 26.0, *)
     private struct AnyToolWrapper: FoundationModels.Tool {
         typealias Arguments = FoundationModels.GeneratedContent
-        typealias Output = String
+        typealias Output = FoundationModels.Prompt
 
         let name: String
         let description: String
@@ -596,7 +611,7 @@
 
         func call(arguments: FoundationModels.GeneratedContent) async throws -> Output {
             let output = try await wrappedTool.callFunction(arguments: arguments)
-            return output.promptRepresentation.description
+            return try output.promptRepresentation.toFoundationModels()
         }
     }
 
