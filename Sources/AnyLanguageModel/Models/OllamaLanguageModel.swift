@@ -687,7 +687,12 @@ private extension Transcript {
                 )
             }
             let (text, images) = convertSegmentsToOllama(segments)
-            return .init(role: role, content: text, thinking: role == .assistant ? thinking : nil, images: images.isEmpty ? nil : images)
+            return .init(
+                role: role,
+                content: text,
+                thinking: role == .assistant ? thinking : nil,
+                images: images.isEmpty ? nil : images
+            )
         }
     }
 }

@@ -857,7 +857,10 @@ extension Transcript.Reasoning {
 
     /// Reasoning that `origin`'s model produced.
     public init(
-        id: String = UUID().uuidString, origin: Origin, metadata: [String: GeneratedContent] = [:], segments: [Transcript.Segment],
+        id: String = UUID().uuidString,
+        origin: Origin,
+        metadata: [String: GeneratedContent] = [:],
+        segments: [Transcript.Segment],
         signature: Data? = nil
     ) {
         self.init(id: id, metadata: metadata, segments: segments, signature: signature)

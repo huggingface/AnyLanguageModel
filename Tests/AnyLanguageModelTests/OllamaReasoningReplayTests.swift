@@ -27,7 +27,9 @@ struct OllamaReasoningReplayTests {
         #expect(response.content == "It's sunny.")
 
         let second = try #require(transport.bodies.count == 2 ? transport.bodies[1] : nil)
-        let messages = try #require((try JSONSerialization.jsonObject(with: second) as? [String: Any])?["messages"] as? [[String: Any]])
+        let messages = try #require(
+            (try JSONSerialization.jsonObject(with: second) as? [String: Any])?["messages"] as? [[String: Any]]
+        )
         let asked = try #require(messages.first { $0["tool_calls"] != nil })
         #expect(asked["thinking"] as? String == "I should check the weather.")
         #expect(session.transcript.contains { if case .reasoning = $0 { true } else { false } })
@@ -35,9 +37,11 @@ struct OllamaReasoningReplayTests {
 
     @Test("reasoning in the transcript goes back with the assistant message it came before")
     func transcriptReasoningGoesBack() async throws {
-        let transport = ScriptedTransport(replies: [[
-            #"{"model":"m","created_at":"2026-10-16T10:00:00.000Z","message":{"role":"assistant","content":"Fine."},"done":true}"#
-        ]])
+        let transport = ScriptedTransport(replies: [
+            [
+                #"{"model":"m","created_at":"2026-10-16T10:00:00.000Z","message":{"role":"assistant","content":"Fine."},"done":true}"#
+            ]
+        ])
         let model = OllamaLanguageModel(baseURL: URL(string: "http://localhost:11434")!, model: "m", session: transport)
         let transcript = Transcript(entries: [
             .prompt(.init(segments: [.text(.init(content: "Hi"))])),
@@ -47,7 +51,9 @@ struct OllamaReasoningReplayTests {
         let session = LanguageModelSession(model: model, transcript: transcript)
         _ = try await session.respond(to: "How are you?")
         let body = try #require(transport.bodies.first)
-        let messages = try #require((try JSONSerialization.jsonObject(with: body) as? [String: Any])?["messages"] as? [[String: Any]])
+        let messages = try #require(
+            (try JSONSerialization.jsonObject(with: body) as? [String: Any])?["messages"] as? [[String: Any]]
+        )
         let answered = try #require(messages.first { $0["role"] as? String == "assistant" })
         #expect(answered["thinking"] as? String == "Greet back.")
         #expect(!messages.contains { $0["role"] as? String == "user" && $0["thinking"] != nil })
@@ -66,7 +72,9 @@ private final class ScriptedTransport: HTTPTransport {
     var bodies: [Data] { state.withLock { $0.bodies } }
 
     func perform<Return>(
-        request: HTTPRequest, body: Data?, timeout: Duration,
+        request: HTTPRequest,
+        body: Data?,
+        timeout: Duration,
         responseHandler: (HTTPResponse, HTTPResponseBody) async throws -> Return
     ) async throws -> Return {
         let lines: [String] = state.withLock { state in
