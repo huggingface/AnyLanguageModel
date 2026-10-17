@@ -31,13 +31,34 @@ import Testing
         @available(macOS 26.0, iOS 26.0, watchOS 27.0, tvOS 26.0, visionOS 26.0, *)
         static func schema() throws -> FoundationModels.GenerationSchema {
             FoundationModels.GenerationSchema(
-                try JSONDecoder().decode(AnyLanguageModel.GenerationSchema.self, from: Data(page.utf8)))
+                try JSONDecoder().decode(AnyLanguageModel.GenerationSchema.self, from: Data(page.utf8))
+            )
         }
 
         @available(macOS 26.0, iOS 26.0, watchOS 27.0, tvOS 26.0, visionOS 26.0, *)
         @Test func everyObjectAndChoiceIsNamed() throws {
             let json = String(decoding: try JSONEncoder().encode(try Self.schema()), as: UTF8.self)
             #expect(!json.contains(##""$ref":"#""##))
+        }
+
+        /// An inline object at the root and one in a definition, under the same property name,
+        /// stay two schemas, each with its own properties.
+        @available(macOS 26.0, iOS 26.0, watchOS 27.0, tvOS 26.0, visionOS 26.0, *)
+        @Test func sameInlineNameInRootAndDefinitionStaysApart() throws {
+            let json = #"""
+                {"type":"object","properties":{
+                  "x":{"type":"object","properties":{"fromRoot":{"type":"string"}},"required":["fromRoot"]},
+                  "a":{"$ref":"#/$defs/A"}},"required":["x","a"],
+                 "$defs":{"A":{"type":"object","properties":{
+                  "x":{"type":"object","properties":{"fromA":{"type":"string"}},"required":["fromA"]}},
+                  "required":["x"]}}}
+                """#
+            let schema = FoundationModels.GenerationSchema(
+                try JSONDecoder().decode(AnyLanguageModel.GenerationSchema.self, from: Data(json.utf8))
+            )
+            let encoded = String(decoding: try JSONEncoder().encode(schema), as: UTF8.self)
+            #expect(encoded.contains("fromRoot"))
+            #expect(encoded.contains("fromA"))
         }
 
         @available(macOS 26.0, iOS 26.0, watchOS 27.0, tvOS 26.0, visionOS 26.0, *)

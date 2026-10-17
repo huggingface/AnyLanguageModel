@@ -607,7 +607,9 @@
 
             // Convert straight from the schema's nodes, which keep each object's properties in
             // declaration order: the order the model generates them in.
-            let rootDynamicSchema = convertToDynamicSchema(resolvedSchema.root)
+            // The root's inline objects and choices are named from a name no definition has.
+            let rootName = sequence(first: "Root") { "\($0)_" }.first { resolvedSchema.defs[$0] == nil }!
+            let rootDynamicSchema = convertToDynamicSchema(resolvedSchema.root, path: rootName)
             let dependencies = resolvedSchema.defs.sorted { $0.key < $1.key }.map { name, node in
                 convertToDynamicSchema(node, name: name)
             }
@@ -771,7 +773,10 @@
         name: String? = nil,
         path: String = ""
     ) -> FoundationModels.DynamicGenerationSchema {
-        func at(_ step: String) -> String { path.isEmpty ? step : "\(path).\(step)" }
+        // A definition's inline objects and choices are named from the definition's name, so the
+        // same property in two definitions, or in a definition and the root, names two schemas.
+        let base = path.isEmpty ? (name ?? "") : path
+        func at(_ step: String) -> String { base.isEmpty ? step : "\(base).\(step)" }
         switch node {
         case .object(let object):
             // Declaration order, then any properties the order doesn't name, sorted.
