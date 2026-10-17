@@ -267,7 +267,10 @@ public struct GeminiLanguageModel: LanguageModel {
 
             let body = try JSONEncoder().encode(params)
 
-            let response: GeminiGenerateContentResponse = try await httpSession.fetch(HTTPRequest(method: .post, url: url, headerFields: headers), body: body)
+            let response: GeminiGenerateContentResponse = try await httpSession.fetch(
+                HTTPRequest(method: .post, url: url, headerFields: headers),
+                body: body
+            )
 
             usage.add(response.usageMetadata?.reportedUsage)
 
@@ -439,7 +442,10 @@ public struct GeminiLanguageModel: LanguageModel {
                         )
                         let body = try JSONEncoder().encode(params)
                         let stream: AsyncThrowingStream<GeminiGenerateContentResponse, any Error> =
-                            httpSession.fetchEventStream(HTTPRequest(method: .post, url: url, headerFields: headers), body: body)
+                            httpSession.fetchEventStream(
+                                HTTPRequest(method: .post, url: url, headerFields: headers),
+                                body: body
+                            )
                         var parts: [GeminiPart] = []
                         var functionCalls: [GeminiFunctionCall] = []
                         for try await chunk in stream {

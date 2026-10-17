@@ -148,8 +148,11 @@ public struct OllamaLanguageModel: LanguageModel {
 
         let url = baseURL.appendingPathComponent("api/chat")
         let body = try encodeChatParams(params)
-        let chatResponse: ChatResponse = try await httpSession.fetch(HTTPRequest(method: .post, url: url), body: body,
-            dateDecodingStrategy: .iso8601WithFractionalSeconds)
+        let chatResponse: ChatResponse = try await httpSession.fetch(
+            HTTPRequest(method: .post, url: url),
+            body: body,
+            dateDecodingStrategy: .iso8601WithFractionalSeconds
+        )
 
         var entries: [Transcript.Entry] = []
         let usage = chatResponse.reportedUsage?.value ?? .zero
@@ -271,8 +274,11 @@ public struct OllamaLanguageModel: LanguageModel {
                             parameters: extractTopLevelChatParameters(options)
                         )
                         let body = try encodeChatParams(params)
-                        let chunks: AsyncThrowingStream<ChatResponse, any Error> = httpSession.fetchStream(HTTPRequest(method: .post, url: url), body: body,
-                            dateDecodingStrategy: .iso8601WithFractionalSeconds)
+                        let chunks: AsyncThrowingStream<ChatResponse, any Error> = httpSession.fetchStream(
+                            HTTPRequest(method: .post, url: url),
+                            body: body,
+                            dateDecodingStrategy: .iso8601WithFractionalSeconds
+                        )
                         var toolCalls: [OllamaToolCall] = []
                         for try await chunk in chunks {
                             state.usage.merge(chunk.reportedUsage)

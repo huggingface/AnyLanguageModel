@@ -466,7 +466,10 @@ public struct AnthropicLanguageModel: LanguageModel {
 
         let body = try JSONEncoder().encode(params)
 
-        let message: AnthropicMessageResponse = try await httpSession.fetch(HTTPRequest(method: .post, url: url, headerFields: headers), body: body)
+        let message: AnthropicMessageResponse = try await httpSession.fetch(
+            HTTPRequest(method: .post, url: url, headerFields: headers),
+            body: body
+        )
 
         var entries: [Transcript.Entry] = message.content.compactMap { block in
             switch block {
@@ -609,7 +612,10 @@ public struct AnthropicLanguageModel: LanguageModel {
                         params["stream"] = .bool(true)
                         let body = try JSONEncoder().encode(params)
                         let events: AsyncThrowingStream<AnthropicStreamEvent, any Error> =
-                            httpSession.fetchEventStream(HTTPRequest(method: .post, url: url, headerFields: headers), body: body)
+                            httpSession.fetchEventStream(
+                                HTTPRequest(method: .post, url: url, headerFields: headers),
+                                body: body
+                            )
                         var blocks: [Int: AnthropicStreamBlock] = [:]
                         var lastSnapshot: LanguageModelSession.ResponseStream<Content>.Snapshot?
 

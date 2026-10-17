@@ -26,14 +26,20 @@
             }
 
             let (seconds, attoseconds) = timeout.components
-            let received = try await execute(sent, timeout: .nanoseconds(seconds * 1_000_000_000 + attoseconds / 1_000_000_000))
+            let received = try await execute(
+                sent,
+                timeout: .nanoseconds(seconds * 1_000_000_000 + attoseconds / 1_000_000_000)
+            )
             var fields = HTTPFields()
             for (name, value) in received.headers {
                 guard let name = HTTPField.Name(name) else { continue }
                 fields.append(HTTPField(name: name, value: value))
             }
             let response = HTTPResponse(
-                status: HTTPResponse.Status(code: Int(received.status.code), reasonPhrase: received.status.reasonPhrase),
+                status: HTTPResponse.Status(
+                    code: Int(received.status.code),
+                    reasonPhrase: received.status.reasonPhrase
+                ),
                 headerFields: fields
             )
             return try await responseHandler(response, HTTPResponseBody(Bytes(received.body)))

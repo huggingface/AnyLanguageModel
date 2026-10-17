@@ -515,7 +515,14 @@ public struct OpenResponsesLanguageModel: LanguageModel {
                         )
                         let body = try JSONEncoder().encode(params)
                         let events: AsyncThrowingStream<OpenResponsesStreamEvent, any Error> =
-                            httpSession.fetchEventStream(HTTPRequest(method: .post, url: url, headerFields: [.authorization: "Bearer \(tokenProvider())"]), body: body)
+                            httpSession.fetchEventStream(
+                                HTTPRequest(
+                                    method: .post,
+                                    url: url,
+                                    headerFields: [.authorization: "Bearer \(tokenProvider())"]
+                                ),
+                                body: body
+                            )
                         var toolCalls: [OpenResponsesToolCall] = []
                         responseEvents: for try await event in events {
                             switch event {
@@ -620,7 +627,10 @@ public struct OpenResponsesLanguageModel: LanguageModel {
                 stream: false
             )
             let body = try JSONEncoder().encode(params)
-            let resp: OpenResponsesAPI.Response = try await httpSession.fetch(HTTPRequest(method: .post, url: url, headerFields: [.authorization: "Bearer \(tokenProvider())"]), body: body)
+            let resp: OpenResponsesAPI.Response = try await httpSession.fetch(
+                HTTPRequest(method: .post, url: url, headerFields: [.authorization: "Bearer \(tokenProvider())"]),
+                body: body
+            )
 
             usage.add(resp.usage?.reportedUsage)
 

@@ -126,7 +126,9 @@ extension HTTPTransport {
     private static func request(_ request: HTTPRequest, accepting accept: String, body: Data?) -> HTTPRequest {
         var request = request
         if request.headerFields[.accept] == nil { request.headerFields[.accept] = accept }
-        if body != nil, request.headerFields[.contentType] == nil { request.headerFields[.contentType] = "application/json" }
+        if body != nil, request.headerFields[.contentType] == nil {
+            request.headerFields[.contentType] = "application/json"
+        }
         return request
     }
 

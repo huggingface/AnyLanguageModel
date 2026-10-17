@@ -523,7 +523,10 @@ public struct OpenAILanguageModel: LanguageModel {
 
             let url = baseURL.appendingPathComponent("chat/completions")
             let body = try JSONEncoder().encode(params)
-            let resp: ChatCompletions.Response = try await httpSession.fetch(HTTPRequest(method: .post, url: url, headerFields: [.authorization: "Bearer \(tokenProvider())"]), body: body)
+            let resp: ChatCompletions.Response = try await httpSession.fetch(
+                HTTPRequest(method: .post, url: url, headerFields: [.authorization: "Bearer \(tokenProvider())"]),
+                body: body
+            )
 
             usage.add(resp.usage?.reportedUsage)
 
@@ -646,7 +649,10 @@ public struct OpenAILanguageModel: LanguageModel {
 
             let encoder = JSONEncoder()
             let body = try encoder.encode(params)
-            let resp: Responses.Response = try await httpSession.fetch(HTTPRequest(method: .post, url: url, headerFields: [.authorization: "Bearer \(tokenProvider())"]), body: body)
+            let resp: Responses.Response = try await httpSession.fetch(
+                HTTPRequest(method: .post, url: url, headerFields: [.authorization: "Bearer \(tokenProvider())"]),
+                body: body
+            )
 
             usage.add(resp.usage?.reportedUsage)
 
@@ -818,7 +824,10 @@ public struct OpenAILanguageModel: LanguageModel {
                         switch apiVariant {
                         case .responses:
                             let events: AsyncThrowingStream<OpenAIResponsesServerEvent, any Error> =
-                                httpSession.fetchEventStream(HTTPRequest(method: .post, url: url, headerFields: headers), body: body)
+                                httpSession.fetchEventStream(
+                                    HTTPRequest(method: .post, url: url, headerFields: headers),
+                                    body: body
+                                )
                             responseEvents: for try await event in events {
                                 switch event {
                                 case .outputTextDelta(let delta):
@@ -849,7 +858,10 @@ public struct OpenAILanguageModel: LanguageModel {
                             }
                         case .chatCompletions:
                             let events: AsyncThrowingStream<OpenAIChatCompletionsChunk, any Error> =
-                                httpSession.fetchEventStream(HTTPRequest(method: .post, url: url, headerFields: headers), body: body)
+                                httpSession.fetchEventStream(
+                                    HTTPRequest(method: .post, url: url, headerFields: headers),
+                                    body: body
+                                )
                             var calls: [Int: OpenAIStreamedToolCall] = [:]
                             for try await chunk in events {
                                 state.usage.merge(chunk.usage?.reportedUsage)
