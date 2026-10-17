@@ -28,6 +28,9 @@ struct ReportedUsage: Sendable {
 
     var metadata: [String: GeneratedContent]
 
+    /// The input of the latest request added with ``add(_:)`` that reported one.
+    private(set) var latestInput: Input?
+
     init(input: Input = .init(), output: Output = .init(), metadata: [String: GeneratedContent] = [:]) {
         self.input = input
         self.output = output
@@ -68,6 +71,16 @@ struct ReportedUsage: Sendable {
         output.totalTokenCount = sum(output.totalTokenCount, other.output.totalTokenCount)
         output.reasoningTokenCount = sum(output.reasoningTokenCount, other.output.reasoningTokenCount)
         metadata.merge(other.metadata) { _, latest in latest }
+        if other.input.totalTokenCount != nil || other.input.cachedTokenCount != nil {
+            latestInput = other.input
+        }
+    }
+
+    /// The latest request's input: how much of the context the response takes now.
+    /// For a single request, it's the input in ``value``.
+    var context: LanguageModelSession.Usage.Input {
+        let input = latestInput ?? self.input
+        return .init(totalTokenCount: input.totalTokenCount ?? 0, cachedTokenCount: input.cachedTokenCount ?? 0)
     }
 
     /// Applies cumulative streaming updates;

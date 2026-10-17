@@ -295,6 +295,22 @@ struct ExplicitNilTests {
         #expect(snapshot.content.generatedContent == snapshot.rawContent)
     }
 
+    @Test func finalStreamedSnapshotKeepsTheContext() async throws {
+        let context = LanguageModelSession.Usage.Input(totalTokenCount: 40, cachedTokenCount: 10)
+        let model = RawPartialStreamingModel(
+            json: #"{"name": "Alice"}"#,
+            usage: .init(
+                input: .init(totalTokenCount: 100, cachedTokenCount: 10),
+                output: .init(totalTokenCount: 20, reasoningTokenCount: 0)
+            ),
+            context: context
+        )
+        let response = try await LanguageModelSession(model: model)
+            .streamResponse(to: "Who?", generating: ExplicitNilContact.self)
+            .collect()
+        #expect(response.context == context)
+    }
+
     @Test func sessionRecordsNullForOmittedOptionalProperties() async throws {
         let model = MockLanguageModel { _, _ in #"{"name": "Alice"}"# }
 
@@ -322,6 +338,8 @@ private struct RawPartialStreamingModel: LanguageModel {
     typealias UnavailableReason = Never
 
     let json: String
+    var usage = LanguageModelSession.Usage.zero
+    var context: LanguageModelSession.Usage.Input? = nil
 
     func respond<Content>(
         within session: LanguageModelSession,
@@ -340,13 +358,18 @@ private struct RawPartialStreamingModel: LanguageModel {
         includeSchemaInPrompt: Bool,
         options: GenerationOptions
     ) -> sending LanguageModelSession.ResponseStream<Content> where Content: Generable {
-        let json = json
+        let (json, usage, context) = (json, usage, context)
         let stream = AsyncThrowingStream<LanguageModelSession.ResponseStream<Content>.Snapshot, any Error> {
             continuation in
             do {
                 let rawContent = try GeneratedContent(json: json)
                 continuation.yield(
-                    .init(content: try Content.PartiallyGenerated(rawContent), rawContent: rawContent)
+                    .init(
+                        content: try Content.PartiallyGenerated(rawContent),
+                        rawContent: rawContent,
+                        usage: usage,
+                        context: context ?? usage.input
+                    )
                 )
                 continuation.finish()
             } catch {

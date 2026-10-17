@@ -658,7 +658,8 @@ public struct OpenResponsesLanguageModel: LanguageModel {
                         content: empty.content,
                         rawContent: empty.rawContent,
                         transcriptEntries: ArraySlice(entries),
-                        usage: usage.value
+                        usage: usage.value,
+                        context: usage.context
                     )
                 case .invocations(let invocations):
                     if !invocations.isEmpty {
@@ -689,7 +690,8 @@ public struct OpenResponsesLanguageModel: LanguageModel {
                 content: text as! Content,
                 rawContent: GeneratedContent(text),
                 transcriptEntries: ArraySlice(entries),
-                usage: usage.value
+                usage: usage.value,
+                context: usage.context
             )
         }
         if let jsonString = extractJSONFromOutput(lastOutput) {
@@ -699,7 +701,8 @@ public struct OpenResponsesLanguageModel: LanguageModel {
                 content: content,
                 rawContent: generatedContent,
                 transcriptEntries: ArraySlice(entries),
-                usage: usage.value
+                usage: usage.value,
+                context: usage.context
             )
         }
         throw OpenResponsesLanguageModelError.noResponseGenerated

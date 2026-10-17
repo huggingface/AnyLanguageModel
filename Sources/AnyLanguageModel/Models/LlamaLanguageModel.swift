@@ -874,6 +874,8 @@ import Foundation
                 var allEntries: [Transcript.Entry] = []
                 var text = ""
                 var usage = LanguageModelSession.Usage.zero
+                /// The input of the latest round: how much of the context the response takes now.
+                var latestInput = LanguageModelSession.Usage.zero.input
                 var pendingEntries: [Transcript.Entry] = []
 
                 generationLoop: while true {
@@ -931,6 +933,7 @@ import Foundation
                     }
 
                     usage.add(roundUsage)
+                    latestInput = roundUsage.input
 
                     guard let format = toolContext?.format else {
                         text = outputFormat.streamingVisibleText(
@@ -979,7 +982,8 @@ import Foundation
                             content: "" as! Content,
                             rawContent: GeneratedContent(""),
                             transcriptEntries: ArraySlice(allEntries),
-                            usage: usage
+                            usage: usage,
+                            context: latestInput
                         )
                     case .invocations(let invocations):
                         guard !invocations.isEmpty else {
@@ -1002,7 +1006,8 @@ import Foundation
                     content: text as! Content,
                     rawContent: GeneratedContent(text),
                     transcriptEntries: ArraySlice(allEntries),
-                    usage: usage
+                    usage: usage,
+                    context: latestInput
                 )
             } else {
                 let requestContext = session.resolvedRequestContext()
@@ -1124,6 +1129,8 @@ import Foundation
                             var accumulatedEntries: [Transcript.Entry] = []
                             var emittedBase = ""
                             var usage = LanguageModelSession.Usage.zero
+                            /// The input of the latest round: how much of the context the response takes now.
+                            var latestInput = LanguageModelSession.Usage.zero.input
                             var lastYieldedText: String?
                             var pendingEntries: [Transcript.Entry] = []
                             let imageMarker =
@@ -1135,7 +1142,8 @@ import Foundation
                                     content: (text as! Content).asPartiallyGenerated(),
                                     rawContent: GeneratedContent(text),
                                     transcriptEntries: ArraySlice(accumulatedEntries),
-                                    usage: usage
+                                    usage: usage,
+                                    context: latestInput
                                 )
                                 continuation.yield(snapshot)
                             }
@@ -1204,6 +1212,7 @@ import Foundation
                                 }
 
                                 usage.add(roundUsage)
+                                latestInput = roundUsage.input
                                 // Publish counts before tool execution, which may stop or fail.
                                 yieldSnapshot(lastYieldedText ?? emittedBase)
 
