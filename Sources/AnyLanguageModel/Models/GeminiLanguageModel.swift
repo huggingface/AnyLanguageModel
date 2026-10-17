@@ -290,7 +290,7 @@ public struct GeminiLanguageModel: LanguageModel {
 
             if !functionCalls.isEmpty {
                 // Resolve function calls
-                try toolRounds.record(functionCalls.map(\.roundCall))
+                try toolRounds.record()
                 let resolution = try await resolveFunctionCalls(
                     functionCalls,
                     tools: requestContext.tools,
@@ -472,7 +472,7 @@ public struct GeminiLanguageModel: LanguageModel {
                         guard !functionCalls.isEmpty else { break }
                         try Task.checkCancellation()
                         let metadata = try textPartMetadata(parts, includeUnsignedText: true)
-                        try toolRounds.record(functionCalls.map(\.roundCall))
+                        try toolRounds.record()
                         switch try await resolveFunctionCalls(
                             functionCalls,
                             tools: requestContext.tools,
@@ -1237,11 +1237,5 @@ enum GeminiError: Error, CustomStringConvertible {
         case .noCandidate:
             return "No candidate in response"
         }
-    }
-}
-
-extension GeminiFunctionCall {
-    var roundCall: ToolRoundLimit.Call {
-        .init(name: name, arguments: args)
     }
 }

@@ -695,7 +695,7 @@ public struct AnthropicLanguageModel: LanguageModel {
                         }
                         guard !toolUses.isEmpty else { break }
                         try Task.checkCancellation()
-                        try toolRounds.record(toolUses.map(\.roundCall))
+                        try toolRounds.record()
                         switch try await resolveToolUses(
                             toolUses,
                             tools: requestContext.tools,
@@ -1605,11 +1605,5 @@ private struct AnthropicUsage: Codable, Sendable {
             output: .init(totalTokenCount: outputTokens),
             metadata: metadata
         ).normalized
-    }
-}
-
-extension AnthropicToolUse {
-    var roundCall: ToolRoundLimit.Call {
-        .init(name: name, arguments: input)
     }
 }
