@@ -35,8 +35,8 @@ import Testing
                 }
             }
 
-            func makeSession(tools: [any Tool] = []) -> LanguageModelSession {
-                LanguageModelSession(model: makeModel(), tools: tools)
+            func makeSession(tools: [any Tool] = [], transcript: Transcript = .init()) -> LanguageModelSession {
+                LanguageModelSession(model: makeModel(), tools: tools, transcript: transcript)
             }
 
             var counts: [String: Any] {
@@ -482,6 +482,89 @@ import Testing
             expected.add(provider.expected)
             #expect(session.usage == expected)
             #expect(UsageURLProtocol.recordedBodies.count == 2)
+        }
+
+        @Test(arguments: [Provider.anthropic, .gemini], [false, true])
+        func localToolImagesSurviveDeletionAndTranscriptRestoration(_ provider: Provider, _ streaming: Bool)
+            async throws
+        {
+            UsageURLProtocol.reset()
+            UsageURLProtocol.enqueue(
+                json: try streaming ? provider.toolStream() : Self.json(provider.response(text: "", tool: true))
+            )
+            if streaming || provider == .gemini {
+                UsageURLProtocol.enqueue(json: try streaming ? provider.stream() : Self.json(provider.response()))
+            }
+            UsageURLProtocol.enqueue(json: try Self.json(provider.response()))
+            let url = FileManager.default.temporaryDirectory
+                .appendingPathComponent(UUID().uuidString)
+                .appendingPathExtension("png")
+            try testImageData.write(to: url)
+            defer { try? FileManager.default.removeItem(at: url) }
+            let session = provider.makeSession(tools: [LocalImageWeatherTool(url: url)])
+            session.toolExecutionDelegate = DeleteImageAfterToolOutput(url: url)
+
+            if streaming {
+                _ = try await session.streamResponse(to: "Weather?").collect()
+            } else {
+                _ = try await session.respond(to: "Weather?")
+            }
+            #expect(!FileManager.default.fileExists(atPath: url.path))
+            let archived = try JSONEncoder().encode(session.transcript)
+            let restored = provider.makeSession(transcript: try JSONDecoder().decode(Transcript.self, from: archived))
+            _ = try await restored.respond(to: "Review the image")
+
+            #expect(UsageURLProtocol.recordedBodies.count == (streaming || provider == .gemini ? 3 : 2))
+            for body in UsageURLProtocol.recordedBodies.dropFirst() {
+                let request = try JSONDecoder().decode([String: JSONValue].self, from: body)
+                if provider == .gemini {
+                    let contents = try #require(request["contents"]?.arrayValue)
+                    let results = contents.flatMap { $0.objectValue?["parts"]?.arrayValue ?? [] }
+                        .compactMap { $0.objectValue?["functionResponse"]?.objectValue }
+                    let parts = try #require(results.first?["parts"]?.arrayValue)
+                    let inlineData = try #require(parts.first?.objectValue?["inlineData"]?.objectValue)
+                    #expect(inlineData["mime_type"] == .string("image/png"))
+                    #expect(inlineData["data"] == .string(testImageData.base64EncodedString()))
+                    continue
+                }
+                let messages = try #require(request["messages"]?.arrayValue)
+                let results = messages.flatMap { $0.objectValue?["content"]?.arrayValue ?? [] }
+                    .filter { $0.objectValue?["type"] == .string("tool_result") }
+                let content = try #require(results.first?.objectValue?["content"]?.arrayValue)
+                let image = try #require(content.first { $0.objectValue?["type"] == .string("image") })
+                let source = try #require(image.objectValue?["source"]?.objectValue)
+                #expect(source["type"] == .string("base64"))
+                #expect(source["media_type"] == .string("image/png"))
+                #expect(source["data"] == .string(testImageData.base64EncodedString()))
+                #expect(source["url"] == nil)
+            }
+        }
+
+        private struct DeleteImageAfterToolOutput: ToolExecutionDelegate {
+            let url: URL
+
+            func didExecuteToolCall(
+                _ toolCall: Transcript.ToolCall,
+                output: Transcript.ToolOutput,
+                in session: LanguageModelSession
+            ) async {
+                guard case .image(let image)? = output.segments.first else {
+                    Issue.record("Missing image in Tool output")
+                    return
+                }
+                #expect(image.source == .data(testImageData, mimeType: "image/png"))
+                do { try FileManager.default.removeItem(at: url) } catch { Issue.record(error) }
+            }
+        }
+
+        private struct LocalImageWeatherTool: Tool {
+            let name = "getWeather"
+            let description = "Get weather as an image"
+            let url: URL
+
+            func call(arguments: WeatherTool.Arguments) async throws -> Prompt {
+                Prompt { Attachment(imageURL: url) }
+            }
         }
 
         @Test(arguments: Provider.allCases)
