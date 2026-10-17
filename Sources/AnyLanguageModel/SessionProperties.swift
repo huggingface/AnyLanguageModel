@@ -6,7 +6,50 @@ extension Transcript {
     ///
     /// - Note: This API is exclusive to AnyLanguageModel on OS 26. It mirrors
     ///   Foundation Models 27's `Transcript.HistoryView` role with value semantics.
-    public typealias HistoryView = [Entry]
+    public struct HistoryView: RandomAccessCollection, MutableCollection, RangeReplaceableCollection,
+        ExpressibleByArrayLiteral, Sendable
+    {
+        public typealias Element = Entry
+        public typealias SubSequence = HistoryView
+        public typealias Indices = Range<Index>
+        private var entries: ArraySlice<Entry>
+
+        public struct Index: Comparable, Hashable, Strideable, Sendable {
+            fileprivate let offset: Int
+
+            public static func < (lhs: Self, rhs: Self) -> Bool { lhs.offset < rhs.offset }
+            public func distance(to other: Self) -> Int { other.offset - offset }
+            public func advanced(by n: Int) -> Self { Self(offset: offset + n) }
+        }
+
+        public init() { entries = [] }
+        public init<S: Sequence>(_ elements: S) where S.Element == Entry { entries = Array(elements)[...] }
+        public init(arrayLiteral elements: Entry...) { entries = elements[...] }
+        private init(entries: ArraySlice<Entry>) { self.entries = entries }
+
+        public var startIndex: Index { Index(offset: entries.startIndex) }
+        public var endIndex: Index { Index(offset: entries.endIndex) }
+        public var indices: Indices { startIndex ..< endIndex }
+        public func index(after i: Index) -> Index { i.advanced(by: 1) }
+        public func index(before i: Index) -> Index { i.advanced(by: -1) }
+        public func index(_ i: Index, offsetBy distance: Int) -> Index { i.advanced(by: distance) }
+        public func distance(from start: Index, to end: Index) -> Int { start.distance(to: end) }
+
+        public subscript(position: Index) -> Entry {
+            get { entries[position.offset] }
+            set { entries[position.offset] = newValue }
+        }
+
+        public subscript(bounds: Range<Index>) -> HistoryView {
+            get { HistoryView(entries: entries[bounds.lowerBound.offset ..< bounds.upperBound.offset]) }
+            set { replaceSubrange(bounds, with: newValue) }
+        }
+
+        public mutating func replaceSubrange<C: Collection>(_ subrange: Range<Index>, with newElements: C)
+        where C.Element == Entry {
+            entries.replaceSubrange(subrange.lowerBound.offset ..< subrange.upperBound.offset, with: newElements)
+        }
+    }
 }
 
 /// A type-keyed session property.
@@ -24,7 +67,7 @@ public protocol SessionPropertyKey: SendableMetatype {
 public macro SessionPropertyEntry() =
     #externalMacro(module: "AnyLanguageModelMacros", type: "SessionPropertyEntryMacro")
 
-/// Session-scoped storage available while dynamic instructions are evaluated.
+/// Session-scoped storage shared by dynamic instructions and Tools.
 ///
 /// - Note: This API is exclusive to AnyLanguageModel on OS 26 and mirrors
 ///   Foundation Models 27.
@@ -56,7 +99,7 @@ public final class SessionPropertyValues: @unchecked Sendable {
             _withSessionPropertyMutation(keyPath: \.history) {
                 precondition(
                     SessionPropertyBinding.values !== self || SessionPropertyBinding.history == nil,
-                    "Session history is read-only while dynamic instructions are active"
+                    "Session history is read-only while dynamic instructions or a Tool is active"
                 )
                 historySetter(newValue)
             }
@@ -121,7 +164,7 @@ extension LanguageModelSession {
             get {
                 guard let values = SessionPropertyBinding.values else {
                     preconditionFailure(
-                        "SessionProperty can only be accessed while dynamic instructions are active"
+                        "SessionProperty can only be accessed while dynamic instructions or a Tool is active"
                     )
                 }
                 return values[keyPath: keyPath]
@@ -129,7 +172,7 @@ extension LanguageModelSession {
             nonmutating set {
                 guard let values = SessionPropertyBinding.values else {
                     preconditionFailure(
-                        "SessionProperty can only be accessed while dynamic instructions are active"
+                        "SessionProperty can only be accessed while dynamic instructions or a Tool is active"
                     )
                 }
                 values[keyPath: keyPath] = newValue
@@ -142,4 +185,32 @@ extension LanguageModelSession.SessionProperty: @unchecked Sendable where Value:
 
 extension DynamicInstructions {
     public typealias SessionProperty = LanguageModelSession.SessionProperty
+}
+
+extension Tool {
+    func bindingSessionProperties(_ properties: SessionPropertyValues, history: Transcript.HistoryView) -> any Tool {
+        SessionPropertyTool(wrapped: self, properties: properties, history: history)
+    }
+}
+
+private struct SessionPropertyTool<Wrapped: Tool>: Tool {
+    let wrapped: Wrapped
+    let properties: SessionPropertyValues
+    let history: Transcript.HistoryView
+
+    var name: String { wrapped.name }
+    var description: String { wrapped.description }
+    var parameters: GenerationSchema { wrapped.parameters }
+    var includesSchemaInInstructions: Bool { wrapped.includesSchemaInInstructions }
+
+    func call(arguments: Wrapped.Arguments) async throws -> Wrapped.Output {
+        let history =
+            SessionPropertyBinding.values === properties
+            ? SessionPropertyBinding.history ?? history : history
+        return try await SessionPropertyBinding.$values.withValue(properties) {
+            try await SessionPropertyBinding.$history.withValue(history) {
+                try await wrapped.call(arguments: arguments)
+            }
+        }
+    }
 }

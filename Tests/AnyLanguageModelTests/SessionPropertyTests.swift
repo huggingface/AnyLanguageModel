@@ -2,7 +2,7 @@ import Foundation
 import Observation
 import Testing
 
-@testable import AnyLanguageModel
+@_spi(Compatibility) @testable import AnyLanguageModel
 
 extension SessionPropertyValues {
     @SessionPropertyEntry var revision = 0
@@ -18,6 +18,42 @@ enum SessionPropertyMode {
 
 @Suite("Session properties")
 struct SessionPropertyTests {
+    @Test(arguments: [false, true])
+    func contextToolsCarryPropertiesIntoDetachedExecution(dynamic: Bool) async throws {
+        let session =
+            dynamic
+            ? LanguageModelSession(
+                model: SessionPropertyFixtureModel(),
+                dynamicInstructions: PropertyToolInstructions()
+            )
+            : LanguageModelSession(
+                model: SessionPropertyFixtureModel(),
+                tools: [PropertyBoundTool()],
+                instructions: "Static"
+            )
+        let earlier = Transcript.Entry.prompt(.init(segments: [.text(.init(content: "Earlier"))]))
+        session.properties.history = [earlier]
+        session.properties.revision = 7
+        let context = session.resolvedRequestContext()
+        let tool = try #require(context.tools.first)
+        let output = try await Task.detached {
+            #expect(SessionPropertyBinding.values == nil)
+            return try await tool.makeOutputSegments(from: GeneratedContent("read"))
+        }.value
+
+        switch try #require(output.first) {
+        case .text(let text):
+            #expect(text.content == "revision:7 history:1")
+        case .structure(let structured):
+            #expect(try String(structured.content) == "revision:7 history:1")
+        case .image:
+            Issue.record("Unexpected image output")
+        }
+        #expect(session.properties.revision == 8)
+        #expect(Array(session.properties.history) == [earlier])
+        #expect(SessionPropertyBinding.values == nil)
+    }
+
     @Test func propertyDefaultsCanReadAnotherProperty() {
         let session = LanguageModelSession(model: SessionPropertyFixtureModel())
         SessionPropertyBinding.$values.withValue(session.properties) {
@@ -55,7 +91,7 @@ struct SessionPropertyTests {
         resumeContinuation.yield()
 
         #expect(try await request.value == "Done")
-        #expect(session.properties.history == [replacement])
+        #expect(Array(session.properties.history) == [replacement])
         #expect(session.transcript.count == 2)
         #expect(!session.isResponding)
     }
@@ -72,7 +108,7 @@ struct SessionPropertyTests {
         resumeContinuation.yield()
 
         await #expect(throws: PausedHistoryError.self) { try await request.value }
-        #expect(session.properties.history == [replacement])
+        #expect(Array(session.properties.history) == [replacement])
         #expect(!session.isResponding)
     }
 
@@ -105,7 +141,7 @@ struct SessionPropertyTests {
 
         #expect(context.instructions?.description == "History count 1")
         #expect(context.transcript.count == 2)
-        #expect(session.properties.history == [prompt])
+        #expect(Array(session.properties.history) == [prompt])
     }
 
     @Test func requestUsesOneHistorySnapshotDuringDynamicResolution() async {
@@ -139,7 +175,7 @@ struct SessionPropertyTests {
                 return true
             } == [initial]
         )
-        #expect(session.properties.history == [replacement])
+        #expect(Array(session.properties.history) == [replacement])
     }
 
     @Test func replacingHistoryNotifiesTranscriptObservers() {
@@ -230,7 +266,7 @@ struct SessionPropertyTests {
 
         session.properties.history = [prompt]
 
-        #expect(session.properties.history == [prompt])
+        #expect(Array(session.properties.history) == [prompt])
         #expect(session.transcript.count == 2)
         guard case .instructions = session.transcript[0] else {
             Issue.record("Expected the static instructions entry to remain first")
@@ -253,7 +289,7 @@ struct SessionPropertyTests {
 
         #expect(context.instructions?.description == "Other history count 1")
         #expect(session.properties.history.isEmpty)
-        #expect(other.properties.history == [replacement])
+        #expect(Array(other.properties.history) == [replacement])
     }
 
     @Test func replacingHistoryRejectsForeignInstructions() {
@@ -265,12 +301,34 @@ struct SessionPropertyTests {
             dynamicInstructions: SessionPropertyHistoryInstructions()
         )
 
-        session.properties.history = Array(other.transcript)
+        session.properties.history = .init(other.transcript)
         let context = session.resolvedRequestContext()
 
         #expect(session.transcript == Transcript(entries: [prompt]))
         #expect(context.instructions?.description == "History count 1")
         #expect(context.transcript.count == 2)
+    }
+}
+
+private struct PropertyToolInstructions: DynamicInstructions {
+    var body: some DynamicInstructions {
+        Instructions("Property Tool")
+        PropertyBoundTool()
+    }
+}
+
+private struct PropertyBoundTool: Tool {
+    @LanguageModelSession.SessionProperty(\.revision) private var revision
+    @LanguageModelSession.SessionProperty(\.history) private var history
+
+    let name = "property"
+    let description = "Read and update session properties"
+    var parameters: GenerationSchema { String.generationSchema }
+
+    func call(arguments: String) async throws -> String {
+        let result = "revision:\(revision) history:\(history.count)"
+        revision += 1
+        return result
     }
 }
 

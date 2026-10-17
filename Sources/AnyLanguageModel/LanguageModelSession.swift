@@ -141,6 +141,7 @@ public final class LanguageModelSession: @unchecked Sendable {
     ///   with the Foundation Models framework.
     ///   It's public so that language models outside this module
     ///   can read the inputs for each request.
+    @_spi(Compatibility)
     public struct RequestContext: Sendable {
         /// The transcript to send with the request.
         public let transcript: Transcript
@@ -160,22 +161,36 @@ public final class LanguageModelSession: @unchecked Sendable {
 
     /// Returns the transcript, instructions, and tools for the next model request.
     ///
-    /// Calling this method doesn't change the session.
+    /// Dynamic instructions may read and update custom session properties while
+    /// being resolved. Their history snapshot is read-only and instructions are
+    /// not committed to the canonical transcript.
     ///
     /// - Note: This API is exclusive to AnyLanguageModel
     ///   and using it means your code is no longer drop-in compatible
     ///   with the Foundation Models framework.
     ///   It's public so that language models outside this module
     ///   can read the inputs for each request.
+    @_spi(Compatibility)
     nonisolated public func resolvedRequestContext() -> RequestContext {
         guard let dynamicInstructions else {
-            return RequestContext(transcript: transcript, instructions: instructions, tools: tools)
+            let transcript = transcript
+            let history = Transcript.HistoryView(
+                transcript.filter {
+                    if case .instructions = $0 { return false }
+                    return true
+                }
+            )
+            return RequestContext(
+                transcript: transcript,
+                instructions: instructions,
+                tools: tools.map { $0.bindingSessionProperties(properties, history: history) }
+            )
         }
 
         // Evaluate the body for this request.
         // The resolved instructions go into the request's transcript,
         // never into the session's.
-        let canonicalHistory = Array(transcript)
+        let canonicalHistory = Transcript.HistoryView(transcript)
         let resolved = dynamicInstructionsLock.withLock {
             SessionPropertyBinding.$values.withValue(properties) {
                 SessionPropertyBinding.$history.withValue(canonicalHistory) {
@@ -183,7 +198,7 @@ public final class LanguageModelSession: @unchecked Sendable {
                 }
             }
         }
-        var requestTranscript = Transcript(entries: canonicalHistory)
+        var requestTranscript = Transcript(entries: Array(canonicalHistory))
         if let instructions = resolved.instructions {
             let instructionsEntry = Transcript.Entry.instructions(
                 Transcript.Instructions(
@@ -195,7 +210,11 @@ public final class LanguageModelSession: @unchecked Sendable {
             )
             requestTranscript = Transcript(entries: [instructionsEntry] + requestTranscript)
         }
-        return RequestContext(transcript: requestTranscript, instructions: resolved.instructions, tools: resolved.tools)
+        return RequestContext(
+            transcript: requestTranscript,
+            instructions: resolved.instructions,
+            tools: resolved.tools.map { $0.bindingSessionProperties(properties, history: canonicalHistory) }
+        )
     }
 
     /// Creates a session with a model, tools,
@@ -349,10 +368,12 @@ public final class LanguageModelSession: @unchecked Sendable {
         self.properties = SessionPropertyValues(
             historyGetter: {
                 state.withLock { locked in
-                    locked.transcript.filter { entry in
-                        if case .instructions = entry { return false }
-                        return true
-                    }
+                    Transcript.HistoryView(
+                        locked.transcript.filter { entry in
+                            if case .instructions = entry { return false }
+                            return true
+                        }
+                    )
                 }
             },
             historySetter: { history in
