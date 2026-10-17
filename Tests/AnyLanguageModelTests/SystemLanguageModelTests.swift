@@ -1,5 +1,11 @@
 import Foundation
 import Testing
+
+#if canImport(ImageIO)
+    import CoreGraphics
+    import ImageIO
+#endif
+
 @testable import AnyLanguageModel
 
 #if canImport(FoundationModels) && !os(watchOS)
@@ -21,6 +27,17 @@ import Testing
     private struct Greeting {
         @Guide(description: "A greeting message")
         var message: String
+    }
+
+    /// Takes no empty value: its sky has to be one of its cases.
+    @Generable
+    private struct Forecast {
+        var sky: Sky
+
+        @Generable
+        enum Sky {
+            case sunny, cloudy
+        }
     }
 
     @Generable
@@ -218,6 +235,128 @@ import Testing
         #expect(stoppedToolCall(in: wrapped)?.id == "call")
         #expect(stoppedToolCall(in: CancellationError()) == nil)
     }
+
+    /// A stop before any content, for a content type that takes no empty value, throws
+    /// `typeMismatch`, as other models do, whether streaming or not. No model is involved.
+    @available(macOS 26.0, iOS 26.0, tvOS 26.0, visionOS 26.0, *)
+    @Test(arguments: [false, true])
+    func stopWithoutEmptyContentThrowsTypeMismatch(streaming: Bool) async throws {
+        let weatherTool = spy(on: WeatherTool())
+        let session = LanguageModelSession(model: SystemLanguageModel.default, tools: [weatherTool])
+        session.toolExecutionDelegate = StoppingDelegate()
+        let makeSession: @Sendable () async throws -> FoundationModels.LanguageModelSession = {
+            _ = try await callTool(weatherTool, with: GeneratedContent(properties: ["city": "Paris"]), in: session)
+            throw CancellationError()  // The call must stop before reaching here.
+        }
+        let error = await #expect(throws: GeneratedContentError.self) {
+            if streaming {
+                let stream = fmStreamResponse(
+                    makeSession: makeSession,
+                    fmPrompt: .init(""),
+                    fmOptions: .init(),
+                    type: Forecast.self,
+                    schema: Forecast.generationSchema,
+                    includeSchemaInPrompt: false
+                )
+                for try await _ in stream {}
+            } else {
+                _ = try await fmRespond(
+                    makeSession: makeSession,
+                    fmPrompt: .init(""),
+                    fmOptions: .init(),
+                    type: Forecast.self,
+                    schema: Forecast.generationSchema,
+                    includeSchemaInPrompt: false
+                )
+            }
+        }
+        guard case .typeMismatch? = error else {
+            Issue.record("Expected typeMismatch, got \(String(describing: error))")
+            return
+        }
+    }
+
+    /// Parallel calls keep the order they started in, not the order they finish in.
+    @available(macOS 26.0, iOS 26.0, tvOS 26.0, visionOS 26.0, *)
+    @Test func callsKeepTheOrderTheyStartedIn() async {
+        let record = ToolCallRecord()
+        let arguments = GeneratedContent(properties: [:])
+        let first = Transcript.ToolCall(id: "first", toolName: "getWeather", arguments: arguments)
+        let second = Transcript.ToolCall(id: "second", toolName: "getWeather", arguments: arguments)
+        await record.start(first)
+        await record.start(second)
+        for call in [second, first] {
+            await record.ran(
+                call,
+                output: Transcript.ToolOutput(id: call.id, toolName: call.toolName, segments: [.text(.init(content: "Sunny"))])
+            )
+        }
+        let order = await record.entries.compactMap { entry -> String? in
+            if case .toolOutput(let output) = entry { return output.id }
+            return nil
+        }
+        #expect(order == ["first", "second"])
+    }
+
+    /// An image the delegate provides that Foundation Models can't take fails the call,
+    /// rather than reaching the model as nothing while the transcript shows it given.
+    @available(macOS 26.0, iOS 26.0, tvOS 26.0, visionOS 26.0, *)
+    @Test(arguments: [
+        Transcript.ImageSegment(url: URL(string: "https://example.com/forecast.png")!),
+        Transcript.ImageSegment(data: Data("not an image".utf8), mimeType: "image/png"),
+    ])
+    func providedImageFoundationModelsCannotTakeFailsTheCall(image: Transcript.ImageSegment) async throws {
+        let weatherTool = spy(on: WeatherTool())
+        let session = LanguageModelSession(model: SystemLanguageModel.default, tools: [weatherTool])
+        session.toolExecutionDelegate = ScriptedDelegate([.provideOutput([.image(image)])])
+        let record = ToolCallRecord()
+        await ToolCallRecord.$current.withValue(record) {
+            await #expect(throws: PromptBridgeError.self) {
+                _ = try await callTool(weatherTool, with: GeneratedContent(properties: ["city": "Paris"]), in: session)
+            }
+        }
+        #expect(await record.entries.isEmpty)
+    }
+
+    #if compiler(>=6.4)
+        /// An image the delegate provides goes to Foundation Models as an attachment.
+        @available(macOS 27.0, iOS 27.0, visionOS 27.0, *)
+        @Test func providedImageIsAttached() async throws {
+            let weatherTool = spy(on: WeatherTool())
+            let session = LanguageModelSession(model: SystemLanguageModel.default, tools: [weatherTool])
+            let image = Transcript.ImageSegment(data: try onePixelPNG(), mimeType: "image/png")
+            session.toolExecutionDelegate = ScriptedDelegate([.provideOutput([.image(image)])])
+            let record = ToolCallRecord()
+            try await ToolCallRecord.$current.withValue(record) {
+                _ = try await callTool(weatherTool, with: GeneratedContent(properties: ["city": "Paris"]), in: session)
+            }
+            let outputs = await record.entries.compactMap { entry -> Transcript.ToolOutput? in
+                if case .toolOutput(let output) = entry { return output }
+                return nil
+            }
+            #expect(outputs.map(\.segments) == [[.image(image)]])
+        }
+
+        private func onePixelPNG() throws -> Data {
+            let context = try #require(
+                CGContext(
+                    data: nil,
+                    width: 1,
+                    height: 1,
+                    bitsPerComponent: 8,
+                    bytesPerRow: 4,
+                    space: CGColorSpaceCreateDeviceRGB(),
+                    bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+                )
+            )
+            let image = try #require(context.makeImage())
+            let data = NSMutableData()
+            let destination = try #require(CGImageDestinationCreateWithData(data, "public.png" as CFString, 1, nil))
+            CGImageDestinationAddImage(destination, image, nil)
+            try #require(CGImageDestinationFinalize(destination))
+            return data as Data
+        }
+    #endif
 
     @Test("GenerationSchema merges duplicate defs for the same type")
     func generationSchemaMergesDuplicateDefsForSameType() {

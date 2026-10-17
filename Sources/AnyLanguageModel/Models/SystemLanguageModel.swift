@@ -476,6 +476,39 @@
     }
 
     @available(macOS 26.0, iOS 26.0, watchOS 27.0, tvOS 26.0, visionOS 26.0, *)
+    extension Array where Element == Transcript.Segment {
+        /// The segments as a tool's output for Foundation Models: text and structures as text,
+        /// and images as attachments, as a prompt's images are.
+        ///
+        /// - Throws: ``PromptBridgeError`` for an image Foundation Models can't take,
+        ///   rather than leaving it out.
+        func toFoundationModelsToolOutput() throws -> FoundationModels.Prompt {
+            let prompts: [FoundationModels.Prompt] = try map { segment in
+                switch segment {
+                case .text(let text):
+                    return FoundationModels.Prompt(text.content)
+                case .structure(let structure):
+                    return FoundationModels.Prompt(structure.content.jsonString)
+                case .image(let image):
+                    #if compiler(>=6.4) && !os(tvOS) && !os(watchOS)
+                        if #available(macOS 27, iOS 27, visionOS 27, *) {
+                            return FoundationModels.Prompt(
+                                try FoundationModels.Attachment<FoundationModels.ImageAttachmentContent>(image)
+                            )
+                        }
+                    #endif
+                    throw PromptBridgeError.attachmentsUnavailable
+                }
+            }
+            return FoundationModels.Prompt {
+                for prompt in prompts {
+                    prompt
+                }
+            }
+        }
+    }
+
+    @available(macOS 26.0, iOS 26.0, watchOS 27.0, tvOS 26.0, visionOS 26.0, *)
     extension Instructions {
         func toFoundationModels() -> FoundationModels.Instructions {
             FoundationModels.Instructions(self.description)
@@ -563,6 +596,7 @@
     enum PromptBridgeError: Error, LocalizedError {
         case attachmentsUnavailable
         case nonFileImageURL
+        case unreadableImage
 
         var errorDescription: String? {
             switch self {
@@ -572,6 +606,8 @@
             case .nonFileImageURL:
                 return
                     "Foundation Models accepts image attachment URLs only for local files. Download the image to a file URL, or attach it as a CGImage."
+            case .unreadableImage:
+                return "The image's data couldn't be read as an image."
             }
         }
     }
@@ -588,9 +624,11 @@
     /// Foundation Models wraps errors that tools throw in its own `ToolCallError`.
     func stoppedToolCall(in error: any Error) -> Transcript.ToolCall? {
         if let stopped = error as? ToolCallStopped { return stopped.call }
-        if let toolError = error as? FoundationModels.LanguageModelSession.ToolCallError {
-            return stoppedToolCall(in: toolError.underlyingError)
-        }
+        #if !os(watchOS)
+            if let toolError = error as? FoundationModels.LanguageModelSession.ToolCallError {
+                return stoppedToolCall(in: toolError.underlyingError)
+            }
+        #endif
         if let toolError = error as? LanguageModelSession.ToolCallError {
             return stoppedToolCall(in: toolError.underlyingError)
         }
@@ -599,7 +637,10 @@
 
     @available(macOS 26.0, iOS 26.0, watchOS 27.0, tvOS 26.0, visionOS 26.0, *)
     /// The emptiest content of `type`, for a response that stopped at tool calls before any content.
-    func stoppedContent<Content: Generable>(of type: Content.Type) -> (content: Content, raw: GeneratedContent)? {
+    ///
+    /// - Throws: ``GeneratedContentError/typeMismatch`` when `type` takes no empty value,
+    ///   as other models do when they stop at tool calls.
+    func stoppedContent<Content: Generable>(of type: Content.Type) throws -> (content: Content, raw: GeneratedContent) {
         let candidates: [GeneratedContent.Kind] = [
             .string(""), .structure(properties: [:], orderedKeys: []), .array([]), .null, .number(0), .bool(false),
         ]
@@ -607,14 +648,14 @@
             let raw = GeneratedContent(kind: kind)
             if let content = try? Content(raw) { return (content, raw) }
         }
-        return nil
+        throw GeneratedContentError.typeMismatch
     }
 
     /// A type-erased wrapper that bridges any `Tool` to `FoundationModels.Tool`.
     @available(macOS 26.0, iOS 26.0, watchOS 27.0, tvOS 26.0, visionOS 26.0, *)
     private struct AnyToolWrapper: FoundationModels.Tool {
         typealias Arguments = FoundationModels.GeneratedContent
-        typealias Output = String
+        typealias Output = FoundationModels.Prompt
 
         let name: String
         let description: String
@@ -638,17 +679,39 @@
         }
     }
 
-    /// The tool calls Foundation Models ran during one request, each with its output, in order.
+    /// The tool calls Foundation Models ran during one request, each with its output.
     /// Foundation Models runs tools inside the request, so this is where the response's
     /// transcript entries for them come from, with the IDs the delegate saw.
+    /// Foundation Models runs parallel calls at the same time, so each call takes its place
+    /// when it starts: the entries keep the order the model made the calls in,
+    /// not the order they finish in.
     @available(macOS 26.0, iOS 26.0, watchOS 27.0, tvOS 26.0, visionOS 26.0, *)
     actor ToolCallRecord {
         @TaskLocal static var current: ToolCallRecord?
 
-        private(set) var entries: [Transcript.Entry] = []
+        /// A call that started, with its output once it ran.
+        private struct Started {
+            let call: Transcript.ToolCall
+            var output: Transcript.ToolOutput?
+        }
+
+        private var started: [Started] = []
+
+        /// The calls that ran, each followed by its output, in the order they started.
+        var entries: [Transcript.Entry] {
+            started.flatMap { started -> [Transcript.Entry] in
+                guard let output = started.output else { return [] }
+                return [.toolCalls(Transcript.ToolCalls([started.call])), .toolOutput(output)]
+            }
+        }
+
+        func start(_ call: Transcript.ToolCall) {
+            started.append(Started(call: call, output: nil))
+        }
 
         func ran(_ call: Transcript.ToolCall, output: Transcript.ToolOutput) {
-            entries += [.toolCalls(Transcript.ToolCalls([call])), .toolOutput(output)]
+            guard let index = started.firstIndex(where: { $0.call.id == call.id }) else { return }
+            started[index].output = output
         }
     }
 
@@ -658,37 +721,35 @@
     /// output the delegate provides, is recorded for the request's transcript.
     @available(macOS 26.0, iOS 26.0, watchOS 27.0, tvOS 26.0, visionOS 26.0, *)
     func callTool(_ tool: any Tool, with arguments: GeneratedContent, in session: LanguageModelSession?) async throws
-        -> String
+        -> FoundationModels.Prompt
     {
         let call = Transcript.ToolCall(id: UUID().uuidString, toolName: tool.name, arguments: arguments)
+        await ToolCallRecord.current?.start(call)
         func output(_ segments: [Transcript.Segment]) -> Transcript.ToolOutput {
             Transcript.ToolOutput(id: call.id, toolName: tool.name, segments: segments)
         }
         guard let session, let delegate = session.toolExecutionDelegate else {
             let text = try await tool.callFunction(content: arguments).promptRepresentation.description
             await ToolCallRecord.current?.ran(call, output: output([.text(.init(content: text))]))
-            return text
+            return FoundationModels.Prompt(text)
         }
         await delegate.didGenerateToolCalls([call], in: session)
         switch await delegate.toolCallDecision(for: call, in: session) {
         case .stop:
             throw ToolCallStopped(call: call)
         case .provideOutput(let segments):
+            // Made before the delegate hears the output was given: an image Foundation Models
+            // can't take fails the call here rather than reaching the model as nothing.
+            let prompt = try segments.toFoundationModelsToolOutput()
             await delegate.didExecuteToolCall(call, output: output(segments), in: session)
             await ToolCallRecord.current?.ran(call, output: output(segments))
-            return segments.map { segment in
-                switch segment {
-                case .text(let text): text.content
-                case .structure(let structure): structure.content.jsonString
-                default: ""
-                }
-            }.joined(separator: "\n")
+            return prompt
         case .execute:
             do {
                 let text = try await tool.callFunction(content: arguments).promptRepresentation.description
                 await delegate.didExecuteToolCall(call, output: output([.text(.init(content: text))]), in: session)
                 await ToolCallRecord.current?.ran(call, output: output([.text(.init(content: text))]))
-                return text
+                return FoundationModels.Prompt(text)
             } catch {
                 await delegate.didFailToolCall(call, error: error, in: session)
                 throw error
@@ -1067,22 +1128,48 @@
                     guard url.isFileURL else { return nil }
                     self.init(imageURL: url)
                 case .data(let data, _):
-                    guard
-                        let imageSource = CGImageSourceCreateWithData(data as CFData, nil),
-                        let cgImage = CGImageSourceCreateImageAtIndex(imageSource, 0, nil)
-                    else {
-                        return nil
-                    }
-                    let properties =
-                        CGImageSourceCopyPropertiesAtIndex(
-                            imageSource,
-                            0,
-                            nil
-                        ) as? [CFString: Any]
-                    let orientation = (properties?[kCGImagePropertyOrientation] as? NSNumber)
-                        .flatMap { CGImagePropertyOrientation(rawValue: $0.uint32Value) }
-                    self.init(cgImage, orientation: orientation)
+                    guard let decoded = DecodedImage(data) else { return nil }
+                    self.init(decoded.image, orientation: decoded.orientation)
                 }
+            }
+        }
+
+        #if !os(watchOS)
+            @available(macOS 27.0, iOS 27.0, visionOS 27.0, *)
+            extension FoundationModels.Attachment where Content == FoundationModels.ImageAttachmentContent {
+                /// The image as an attachment, for a tool's output.
+                ///
+                /// - Throws: ``PromptBridgeError/nonFileImageURL`` for an image on the web,
+                ///   and ``PromptBridgeError/unreadableImage`` for data that isn't an image.
+                fileprivate init(_ imageSegment: Transcript.ImageSegment) throws {
+                    switch imageSegment.source {
+                    case .url(let url):
+                        guard url.isFileURL else { throw PromptBridgeError.nonFileImageURL }
+                        self.init(imageURL: url, orientation: nil)
+                    case .data(let data, _):
+                        guard let decoded = DecodedImage(data) else { throw PromptBridgeError.unreadableImage }
+                        self.init(decoded.image, orientation: decoded.orientation)
+                    }
+                }
+            }
+        #endif
+
+        /// An image read from its data, with the orientation its data gives.
+        private struct DecodedImage {
+            let image: CGImage
+            let orientation: CGImagePropertyOrientation?
+
+            init?(_ data: Data) {
+                guard
+                    let imageSource = CGImageSourceCreateWithData(data as CFData, nil),
+                    let image = CGImageSourceCreateImageAtIndex(imageSource, 0, nil)
+                else {
+                    return nil
+                }
+                let properties = CGImageSourceCopyPropertiesAtIndex(imageSource, 0, nil) as? [CFString: Any]
+                self.image = image
+                self.orientation = (properties?[kCGImagePropertyOrientation] as? NSNumber)
+                    .flatMap { CGImagePropertyOrientation(rawValue: $0.uint32Value) }
             }
         }
     #endif
@@ -1133,7 +1220,8 @@
         } catch {
             // The delegate stopped at a tool call: the response ends there, with the calls that ran
             // before it and then the call.
-            guard let call = stoppedToolCall(in: error), let stopped = stoppedContent(of: type) else { throw error }
+            guard let call = stoppedToolCall(in: error) else { throw error }
+            let stopped = try stoppedContent(of: type)
             return LanguageModelSession.Response(
                 content: stopped.content,
                 rawContent: stopped.raw,
@@ -1257,14 +1345,20 @@
                         if var last {
                             last.transcriptEntries += entries
                             continuation.yield(last)
-                        } else if let stopped = stoppedContent(of: type) {
-                            continuation.yield(
-                                .init(
-                                    content: stopped.content.asPartiallyGenerated(),
-                                    rawContent: stopped.raw,
-                                    transcriptEntries: ArraySlice(entries)
+                        } else {
+                            do {
+                                let stopped = try stoppedContent(of: type)
+                                continuation.yield(
+                                    .init(
+                                        content: stopped.content.asPartiallyGenerated(),
+                                        rawContent: stopped.raw,
+                                        transcriptEntries: ArraySlice(entries)
+                                    )
                                 )
-                            )
+                            } catch {
+                                continuation.finish(throwing: error)
+                                return
+                            }
                         }
                         continuation.finish()
                     }
