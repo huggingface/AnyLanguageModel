@@ -691,15 +691,6 @@ import Foundation
             )
         }
 
-        private static func repeatedToolCallLoopError() -> LanguageModelSession.GenerationError {
-            .decodingFailure(
-                .init(
-                    debugDescription:
-                        "Detected repeated Llama tool-call signature and aborted to avoid an infinite tool loop."
-                )
-            )
-        }
-
         private func currentToolCallFormat() -> LlamaToolCallFormat {
             guard let model = self.model else { return .hermesJSON }
             let template = llama_model_chat_template(model, nil).map { String(cString: $0) }
@@ -870,7 +861,6 @@ import Foundation
                 let outputFormat = currentToolCallFormat()
                 let maxToolIterations = 8
                 var toolIteration = 0
-                var previousToolCallSignature: String?
                 var allEntries: [Transcript.Entry] = []
                 var text = ""
                 var usage = LanguageModelSession.Usage.zero
@@ -954,16 +944,6 @@ import Foundation
                         allEntries.append(.toolCalls(Transcript.ToolCalls(unresolved)))
                         throw Self.maxToolIterationsExceededError(limit: maxToolIterations)
                     }
-                    let signature =
-                        parsedCalls
-                        .map { "\($0.name):\($0.argumentsJSON)" }
-                        .joined(separator: "|")
-                    if signature == previousToolCallSignature {
-                        let unresolved = try makeTranscriptToolCalls(from: parsedCalls)
-                        allEntries.append(.toolCalls(Transcript.ToolCalls(unresolved)))
-                        throw Self.repeatedToolCallLoopError()
-                    }
-                    previousToolCallSignature = signature
 
                     let resolution = try await resolveToolCalls(
                         parsedCalls,
@@ -1120,7 +1100,6 @@ import Foundation
                             let outputFormat = self.currentToolCallFormat()
                             let maxToolIterations = 8
                             var toolIteration = 0
-                            var previousToolCallSignature: String?
                             var accumulatedEntries: [Transcript.Entry] = []
                             var emittedBase = ""
                             var usage = LanguageModelSession.Usage.zero
@@ -1233,16 +1212,6 @@ import Foundation
                                     accumulatedEntries.append(.toolCalls(Transcript.ToolCalls(unresolved)))
                                     throw Self.maxToolIterationsExceededError(limit: maxToolIterations)
                                 }
-                                let signature =
-                                    parsedCalls
-                                    .map { "\($0.name):\($0.argumentsJSON)" }
-                                    .joined(separator: "|")
-                                if signature == previousToolCallSignature {
-                                    let unresolved = try self.makeTranscriptToolCalls(from: parsedCalls)
-                                    accumulatedEntries.append(.toolCalls(Transcript.ToolCalls(unresolved)))
-                                    throw Self.repeatedToolCallLoopError()
-                                }
-                                previousToolCallSignature = signature
 
                                 let resolution = try await self.resolveToolCalls(
                                     parsedCalls,

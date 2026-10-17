@@ -746,9 +746,14 @@
                 ?? FoundationModels.DynamicGenerationSchema(type: String.self)
             return .init(arrayOf: itemsSchema, minimumElements: minItems, maximumElements: maxItems)
 
-        case .reference(let name):
+        case .reference(let reference):
             let prefix = "#/$defs/"
-            let typeName = name.hasPrefix(prefix) ? String(name.dropFirst(prefix.count)) : name
+            let typeName = reference.hasPrefix(prefix) ? String(reference.dropFirst(prefix.count)) : reference
+            // A named definition that is only a reference, such as a one-choice `anyOf`, keeps its
+            // name, or the references to it are undefined.
+            if let name {
+                return .init(name: name, anyOf: [.init(referenceTo: typeName)])
+            }
             return .init(referenceTo: typeName)
 
         case .null:
