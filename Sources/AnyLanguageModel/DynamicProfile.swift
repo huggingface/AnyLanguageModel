@@ -61,7 +61,7 @@ extension LanguageModelSession {
 
     public struct ConditionalDynamicProfile<TrueContent, FalseContent>: DynamicProfile
     where TrueContent: DynamicProfile, FalseContent: DynamicProfile {
-        public enum Branch {
+        enum Branch {
             case trueContent(TrueContent)
             case falseContent(FalseContent)
         }
@@ -69,7 +69,7 @@ extension LanguageModelSession {
         public typealias Body = Never
         fileprivate let branch: Branch
 
-        public init(_ branch: Branch) {
+        init(_ branch: Branch) {
             self.branch = branch
         }
 
@@ -200,6 +200,16 @@ extension LanguageModelSession.DynamicProfile {
         BuiltinModifiedDynamicProfile(content: self, modifier: .reasoningLevel(reasoningLevel))
     }
 
+    @_spi(Compatibility)
+    public func includeSchemaInPrompt(
+        _ includeSchemaInPrompt: Bool?
+    ) -> some LanguageModelSession.DynamicProfile {
+        BuiltinModifiedDynamicProfile(
+            content: self,
+            modifier: .includeSchemaInPrompt(includeSchemaInPrompt)
+        )
+    }
+
     public func toolCallingMode(
         _ toolCallingMode: GenerationOptions.ToolCallingMode?
     ) -> some LanguageModelSession.DynamicProfile {
@@ -219,75 +229,93 @@ extension LanguageModelSession.DynamicProfile {
     }
 
     public func onPrompt(
-        perform action: @Sendable @escaping (Transcript.Prompt) async throws -> Void
+        @_inheritActorContext perform action:
+            nonisolated(nonsending) sending @escaping (
+                Transcript.Prompt
+            ) async throws -> Void
     ) -> some LanguageModelSession.DynamicProfile {
         BuiltinModifiedDynamicProfile(content: self, modifier: .onPrompt(action))
     }
 
     public func onPrompt(
-        perform action: @Sendable @escaping () async throws -> Void
+        @_inheritActorContext perform action: nonisolated(nonsending) sending @escaping () async throws -> Void
     ) -> some LanguageModelSession.DynamicProfile {
         onPrompt { _ in try await action() }
     }
 
     public func onResponse(
-        perform action: @Sendable @escaping (Transcript.Response) async throws -> Void
+        @_inheritActorContext perform action:
+            nonisolated(nonsending) sending @escaping (
+                Transcript.Response
+            ) async throws -> Void
     ) -> some LanguageModelSession.DynamicProfile {
         BuiltinModifiedDynamicProfile(content: self, modifier: .onResponse(action))
     }
 
     public func onResponse(
-        perform action: @Sendable @escaping () async throws -> Void
+        @_inheritActorContext perform action: nonisolated(nonsending) sending @escaping () async throws -> Void
     ) -> some LanguageModelSession.DynamicProfile {
         onResponse { _ in try await action() }
     }
 
     public func onReasoning(
-        perform action: @Sendable @escaping (Transcript.Reasoning) async throws -> Void
+        @_inheritActorContext perform action:
+            nonisolated(nonsending) sending @escaping (
+                Transcript.Reasoning
+            ) async throws -> Void
     ) -> some LanguageModelSession.DynamicProfile {
         BuiltinModifiedDynamicProfile(content: self, modifier: .onReasoning(action))
     }
 
     public func onReasoning(
-        perform action: @Sendable @escaping () async throws -> Void
+        @_inheritActorContext perform action: nonisolated(nonsending) sending @escaping () async throws -> Void
     ) -> some LanguageModelSession.DynamicProfile {
         onReasoning { _ in try await action() }
     }
 
     public func onToolCall(
-        perform action: @Sendable @escaping (Transcript.ToolCall) async throws -> Void
+        @_inheritActorContext perform action:
+            nonisolated(nonsending) sending @escaping (
+                Transcript.ToolCall
+            ) async throws -> Void
     ) -> some LanguageModelSession.DynamicProfile {
         BuiltinModifiedDynamicProfile(content: self, modifier: .onToolCall(action))
     }
 
     public func onToolCall(
-        perform action: @Sendable @escaping () async throws -> Void
+        @_inheritActorContext perform action: nonisolated(nonsending) sending @escaping () async throws -> Void
     ) -> some LanguageModelSession.DynamicProfile {
         onToolCall { _ in try await action() }
     }
 
     public func onToolOutput(
-        perform action: @Sendable @escaping (Transcript.ToolCall, Transcript.ToolOutput) async throws -> Void
+        @_inheritActorContext perform action:
+            nonisolated(nonsending) sending @escaping (
+                Transcript.ToolCall,
+                Transcript.ToolOutput
+            ) async throws -> Void
     ) -> some LanguageModelSession.DynamicProfile {
         BuiltinModifiedDynamicProfile(content: self, modifier: .onToolOutput(action))
     }
 
     public func onToolOutput(
-        perform action: @Sendable @escaping () async throws -> Void
+        @_inheritActorContext perform action: nonisolated(nonsending) sending @escaping () async throws -> Void
     ) -> some LanguageModelSession.DynamicProfile {
         onToolOutput { _, _ in try await action() }
     }
 
     public func onActivate(
-        perform action: @Sendable @escaping () async -> Void
+        @_inheritActorContext perform action: sending @escaping @isolated(any) () async -> Void
     ) -> some LanguageModelSession.DynamicProfile {
-        BuiltinModifiedDynamicProfile(content: self, modifier: .onActivate(action))
+        let wrapped: () async -> Void = { await action() }
+        return BuiltinModifiedDynamicProfile(content: self, modifier: .onActivate(wrapped))
     }
 
     public func onDeactivate(
-        perform action: @Sendable @escaping () async -> Void
+        @_inheritActorContext perform action: sending @escaping @isolated(any) () async -> Void
     ) -> some LanguageModelSession.DynamicProfile {
-        BuiltinModifiedDynamicProfile(content: self, modifier: .onDeactivate(action))
+        let wrapped: () async -> Void = { await action() }
+        return BuiltinModifiedDynamicProfile(content: self, modifier: .onDeactivate(wrapped))
     }
 }
 
@@ -315,28 +343,25 @@ struct ResolvedDynamicProfile: @unchecked Sendable {
     var hasMaximumResponseTokens = false
     var reasoningLevel: ContextOptions.ReasoningLevel?
     var hasReasoningLevel = false
+    var includeSchemaInPrompt: Bool?
+    var hasIncludeSchemaInPrompt = false
     var toolCallingMode: GenerationOptions.ToolCallingMode?
     var hasToolCallingMode = false
     var transcriptErrorHandlingPolicy: TranscriptErrorHandlingPolicy?
     var hasTranscriptErrorHandlingPolicy = false
     var historyTransforms: [@Sendable ([Transcript.Entry]) -> [Transcript.Entry]] = []
-    var onPrompt: [@Sendable (Transcript.Prompt) async throws -> Void] = []
-    var onResponse: [@Sendable (Transcript.Response) async throws -> Void] = []
-    var onReasoning: [@Sendable (Transcript.Reasoning) async throws -> Void] = []
-    var onToolCall: [@Sendable (Transcript.ToolCall) async throws -> Void] = []
-    var onToolOutput: [@Sendable (Transcript.ToolCall, Transcript.ToolOutput) async throws -> Void] = []
-    var onActivate: [@Sendable () async -> Void] = []
-    var onDeactivate: [@Sendable () async -> Void] = []
+    var onPrompt: [(Transcript.Prompt) async throws -> Void] = []
+    var onResponse: [(Transcript.Response) async throws -> Void] = []
+    var onReasoning: [(Transcript.Reasoning) async throws -> Void] = []
+    var onToolCall: [(Transcript.ToolCall) async throws -> Void] = []
+    var onToolOutput: [(Transcript.ToolCall, Transcript.ToolOutput) async throws -> Void] = []
+    var onActivate: [() async -> Void] = []
+    var onDeactivate: [() async -> Void] = []
 }
 
 extension LanguageModelSession.Profile: PrimitiveDynamicProfile {
     fileprivate func resolve() -> ResolvedDynamicProfile {
-        let history = SessionPropertyBinding.history.map {
-            SessionHistoryBinding($0.entries, isWritable: false)
-        }
-        let dynamic = SessionPropertyBinding.$history.withValue(history) {
-            dynamicInstructions.resolveForRequest()
-        }
+        let dynamic = dynamicInstructions.resolveForRequest()
         return ResolvedDynamicProfile(
             identity: identity,
             model: nil,
@@ -403,16 +428,17 @@ private enum BuiltinDynamicProfileModifier: @unchecked Sendable {
     case samplingMode(GenerationOptions.SamplingMode?)
     case maximumResponseTokens(Int?)
     case reasoningLevel(ContextOptions.ReasoningLevel?)
+    case includeSchemaInPrompt(Bool?)
     case toolCallingMode(GenerationOptions.ToolCallingMode?)
     case historyTransform(@Sendable ([Transcript.Entry]) -> [Transcript.Entry])
     case transcriptErrorHandlingPolicy(TranscriptErrorHandlingPolicy?)
-    case onPrompt(@Sendable (Transcript.Prompt) async throws -> Void)
-    case onResponse(@Sendable (Transcript.Response) async throws -> Void)
-    case onReasoning(@Sendable (Transcript.Reasoning) async throws -> Void)
-    case onToolCall(@Sendable (Transcript.ToolCall) async throws -> Void)
-    case onToolOutput(@Sendable (Transcript.ToolCall, Transcript.ToolOutput) async throws -> Void)
-    case onActivate(@Sendable () async -> Void)
-    case onDeactivate(@Sendable () async -> Void)
+    case onPrompt((Transcript.Prompt) async throws -> Void)
+    case onResponse((Transcript.Response) async throws -> Void)
+    case onReasoning((Transcript.Reasoning) async throws -> Void)
+    case onToolCall((Transcript.ToolCall) async throws -> Void)
+    case onToolOutput((Transcript.ToolCall, Transcript.ToolOutput) async throws -> Void)
+    case onActivate(() async -> Void)
+    case onDeactivate(() async -> Void)
 
     func apply(to resolved: inout ResolvedDynamicProfile) {
         switch self {
@@ -437,6 +463,11 @@ private enum BuiltinDynamicProfileModifier: @unchecked Sendable {
             if !resolved.hasReasoningLevel {
                 resolved.reasoningLevel = value
                 resolved.hasReasoningLevel = true
+            }
+        case .includeSchemaInPrompt(let value):
+            if !resolved.hasIncludeSchemaInPrompt {
+                resolved.includeSchemaInPrompt = value
+                resolved.hasIncludeSchemaInPrompt = true
             }
         case .toolCallingMode(let value):
             if !resolved.hasToolCallingMode {
@@ -480,117 +511,4 @@ private func resolveDynamicProfile(
     }
 
     return resolve(dynamicProfile)
-}
-
-actor ProfileLifecycle {
-    private var activeProfile: ResolvedDynamicProfile?
-    private var pendingPreparation: (id: Int, task: Task<Void, any Error>)?
-    private var nextPreparationID = 0
-
-    func prepare(
-        _ profile: ResolvedDynamicProfile,
-        properties: SessionPropertyValues,
-        history: [Transcript.Entry],
-        prompt: Transcript.Prompt?,
-        callbackState: ProfileCallbackState
-    ) async throws {
-        let previous = pendingPreparation?.task
-        nextPreparationID += 1
-        let id = nextPreparationID
-        let task = Task {
-            _ = try? await previous?.value
-            try await self.performPreparation(
-                profile,
-                properties: properties,
-                history: history,
-                prompt: prompt,
-                callbackState: callbackState
-            )
-        }
-        pendingPreparation = (id, task)
-        do {
-            try await task.value
-            if pendingPreparation?.id == id { pendingPreparation = nil }
-        } catch {
-            if pendingPreparation?.id == id { pendingPreparation = nil }
-            throw error
-        }
-    }
-
-    private func performPreparation(
-        _ profile: ResolvedDynamicProfile,
-        properties: SessionPropertyValues,
-        history: [Transcript.Entry],
-        prompt: Transcript.Prompt?,
-        callbackState: ProfileCallbackState
-    ) async throws {
-        let history = SessionHistoryBinding(history, isWritable: true)
-        if activeProfile?.identity != profile.identity {
-            if let previous = activeProfile {
-                await withBindings(properties: properties, history: history) {
-                    for action in previous.onDeactivate { await action() }
-                }
-            }
-            await withBindings(properties: properties, history: history) {
-                for action in profile.onActivate { await action() }
-            }
-            activeProfile = profile
-        } else {
-            activeProfile = profile
-        }
-
-        guard let prompt, callbackState.reserve(prompt.id) else { return }
-        do {
-            try await withBindings(properties: properties, history: history) {
-                for action in profile.onPrompt { try await action(prompt) }
-            }
-        } catch {
-            callbackState.release(prompt.id)
-            throw error
-        }
-    }
-
-    private func withBindings<Result: Sendable>(
-        properties: SessionPropertyValues,
-        history: SessionHistoryBinding,
-        operation: @Sendable () async throws -> Result
-    ) async rethrows -> Result {
-        return try await SessionPropertyBinding.$values.withValue(properties) {
-            try await SessionPropertyBinding.$history.withValue(history) {
-                try await operation()
-            }
-        }
-    }
-}
-
-struct MissingDynamicProfileModel: LanguageModel {
-    typealias UnavailableReason = Never
-
-    func respond<Content>(
-        within session: LanguageModelSession,
-        to prompt: Prompt,
-        generating type: Content.Type,
-        includeSchemaInPrompt: Bool,
-        options: GenerationOptions
-    ) async throws -> LanguageModelSession.Response<Content> where Content: Generable {
-        throw MissingDynamicProfileModelError.missingModelModifier
-    }
-
-    func streamResponse<Content>(
-        within session: LanguageModelSession,
-        to prompt: Prompt,
-        generating type: Content.Type,
-        includeSchemaInPrompt: Bool,
-        options: GenerationOptions
-    ) -> sending LanguageModelSession.ResponseStream<Content> where Content: Generable {
-        let stream = AsyncThrowingStream<LanguageModelSession.ResponseStream<Content>.Snapshot, any Error> {
-            continuation in
-            continuation.finish(throwing: MissingDynamicProfileModelError.missingModelModifier)
-        }
-        return LanguageModelSession.ResponseStream(stream: stream)
-    }
-}
-
-enum MissingDynamicProfileModelError: Error {
-    case missingModelModifier
 }

@@ -13,6 +13,24 @@ import Testing
     #if compiler(>=6.4)
         #if os(macOS) || os(iOS) || os(visionOS)
             @available(macOS 27.0, iOS 27.0, visionOS 27.0, *)
+            @Test func foundationModelsHistoryViewCollectionCompatibility() {
+                func requireContract<C>(_ history: C)
+                where
+                    C: RandomAccessCollection & MutableCollection & RangeReplaceableCollection
+                        & ExpressibleByArrayLiteral & Sendable,
+                    C.Element == Transcript.Entry, C.SubSequence == C, C.Index: Hashable & Strideable,
+                    C.Index.Stride == Int
+                {}
+                var history: Transcript.HistoryView = []
+                let empty: Transcript.HistoryView = history[history.startIndex ..< history.endIndex]
+                history[history.startIndex ..< history.endIndex] = empty
+                history.append(contentsOf: empty)
+                history.replaceSubrange(history.startIndex ..< history.endIndex, with: empty)
+                requireContract(history)
+                #expect(history.isEmpty)
+            }
+
+            @available(macOS 27.0, iOS 27.0, visionOS 27.0, *)
             extension SessionPropertyValues {
                 @SessionPropertyEntry var compatibilityRevision = 0
             }
@@ -74,10 +92,7 @@ import Testing
                     )
                     dynamicSession.properties.compatibilityRevision = 1
                     _ = dynamicSession.properties.history
-                    _ = LanguageModelSession(
-                        profile: CompatibilityDynamicProfile(model: model),
-                        history: session.transcript
-                    )
+                    _ = LanguageModelSession.AnyDynamicProfile(CompatibilityDynamicProfile(model: model))
                 }
             #endif
         #endif
