@@ -399,6 +399,7 @@ public final class LanguageModelSession: @unchecked Sendable {
             rawContent: rawContent,
             transcriptEntries: response.transcriptEntries,
             usage: response.usage,
+            context: response.context,
             providerMetadata: response.providerMetadata
         )
     }
@@ -450,6 +451,7 @@ public final class LanguageModelSession: @unchecked Sendable {
                                     rawContent: rawContent,
                                     transcriptEntries: lastSnapshot.transcriptEntries,
                                     usage: lastSnapshot.usage,
+                                    context: lastSnapshot.context,
                                     providerMetadata: lastSnapshot.providerMetadata
                                 )
                             )
@@ -646,6 +648,18 @@ public final class LanguageModelSession: @unchecked Sendable {
         ///   so code that uses it ports to Foundation Models on OS 27.
         public let usage: Usage
 
+        /// The input of the latest request, as the provider reports it: how much of the
+        /// model's context the response takes now.
+        /// A response that calls tools makes a request for each round,
+        /// each with the whole conversation so far,
+        /// so `usage` adds the rounds up and this is only the latest.
+        /// Zero counts for values the provider does not report.
+        /// ``SystemLanguageModel`` runs tool calls inside Foundation Models,
+        /// which reports one usage for the whole response, so there it's the input in `usage`.
+        ///
+        /// - Note: This property is exclusive to AnyLanguageModel.
+        public let context: Usage.Input
+
         internal let providerMetadata: [String: String]?
 
         /// Creates a response value from generated content and transcript entries.
@@ -677,6 +691,27 @@ public final class LanguageModelSession: @unchecked Sendable {
             )
         }
 
+        /// Creates a response that made more than one request, such as one that called tools:
+        /// `usage` adds the requests up, and `context` is the latest one's input.
+        ///
+        /// - Note: This initializer is exclusive to AnyLanguageModel.
+        public init(
+            content: Content,
+            rawContent: GeneratedContent,
+            transcriptEntries: ArraySlice<Transcript.Entry>,
+            usage: Usage,
+            context: Usage.Input
+        ) {
+            self.init(
+                content: content,
+                rawContent: rawContent,
+                transcriptEntries: transcriptEntries,
+                usage: usage,
+                context: context,
+                providerMetadata: nil
+            )
+        }
+
         internal init(
             content: Content,
             rawContent: GeneratedContent,
@@ -685,12 +720,14 @@ public final class LanguageModelSession: @unchecked Sendable {
                 input: .init(totalTokenCount: 0, cachedTokenCount: 0),
                 output: .init(totalTokenCount: 0, reasoningTokenCount: 0)
             ),
+            context: Usage.Input? = nil,
             providerMetadata: [String: String]?
         ) {
             self.content = content
             self.rawContent = rawContent
             self.transcriptEntries = transcriptEntries
             self.usage = usage
+            self.context = context ?? usage.input
             self.providerMetadata = providerMetadata
         }
     }
@@ -1530,6 +1567,18 @@ extension LanguageModelSession {
             ///   so code that uses it ports to Foundation Models on OS 27.
             public var usage: Usage
 
+            /// The input of the latest request, as the provider reports it: how much of the
+            /// model's context the response takes now.
+            /// A response that calls tools makes a request for each round,
+            /// each with the whole conversation so far,
+            /// so `usage` adds the rounds up and this is only the latest.
+            /// Zero counts for values the provider does not report.
+            /// ``SystemLanguageModel`` runs tool calls inside Foundation Models,
+            /// which reports one usage for the whole response, so there it's the input in `usage`.
+            ///
+            /// - Note: This property is exclusive to AnyLanguageModel.
+            public var context: Usage.Input
+
             internal var providerMetadata: [String: String]?
 
             /// Creates a snapshot from partially generated content and raw content.
@@ -1561,6 +1610,27 @@ extension LanguageModelSession {
                 )
             }
 
+            /// Creates a snapshot of a response that made more than one request, such as one that
+            /// called tools: `usage` adds the requests up, and `context` is the latest one's input.
+            ///
+            /// - Note: This initializer is exclusive to AnyLanguageModel.
+            public init(
+                content: Content.PartiallyGenerated,
+                rawContent: GeneratedContent,
+                transcriptEntries: ArraySlice<Transcript.Entry> = [],
+                usage: Usage,
+                context: Usage.Input
+            ) {
+                self.init(
+                    content: content,
+                    rawContent: rawContent,
+                    transcriptEntries: transcriptEntries,
+                    usage: usage,
+                    context: context,
+                    providerMetadata: nil
+                )
+            }
+
             internal init(
                 content: Content.PartiallyGenerated,
                 rawContent: GeneratedContent,
@@ -1569,12 +1639,14 @@ extension LanguageModelSession {
                     input: .init(totalTokenCount: 0, cachedTokenCount: 0),
                     output: .init(totalTokenCount: 0, reasoningTokenCount: 0)
                 ),
+                context: Usage.Input? = nil,
                 providerMetadata: [String: String]?
             ) {
                 self.content = content
                 self.rawContent = rawContent
                 self.transcriptEntries = transcriptEntries
                 self.usage = usage
+                self.context = context ?? usage.input
                 self.providerMetadata = providerMetadata
             }
         }
@@ -1640,6 +1712,7 @@ extension LanguageModelSession.ResponseStream: AsyncSequence {
                     rawContent: last.rawContent,
                     transcriptEntries: last.transcriptEntries,
                     usage: last.usage,
+                    context: last.context,
                     providerMetadata: last.providerMetadata
                 )
             }
@@ -1657,6 +1730,7 @@ extension LanguageModelSession.ResponseStream: AsyncSequence {
                 rawContent: fallbackSnapshot.rawContent,
                 transcriptEntries: fallbackSnapshot.transcriptEntries,
                 usage: fallbackSnapshot.usage,
+                context: fallbackSnapshot.context,
                 providerMetadata: fallbackSnapshot.providerMetadata
             )
         }

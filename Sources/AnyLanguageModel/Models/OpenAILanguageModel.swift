@@ -569,7 +569,8 @@ public struct OpenAILanguageModel: LanguageModel {
                         content: empty.content,
                         rawContent: empty.rawContent,
                         transcriptEntries: ArraySlice(entries),
-                        usage: usage.value
+                        usage: usage.value,
+                        context: usage.context
                     )
                 case .invocations(let invocations):
                     if !invocations.isEmpty {
@@ -599,7 +600,8 @@ public struct OpenAILanguageModel: LanguageModel {
                 content: text as! Content,
                 rawContent: GeneratedContent(text),
                 transcriptEntries: ArraySlice(entries),
-                usage: usage.value
+                usage: usage.value,
+                context: usage.context
             )
         }
 
@@ -609,7 +611,8 @@ public struct OpenAILanguageModel: LanguageModel {
             content: content,
             rawContent: generatedContent,
             transcriptEntries: ArraySlice(entries),
-            usage: usage.value
+            usage: usage.value,
+            context: usage.context
         )
     }
 
@@ -686,7 +689,8 @@ public struct OpenAILanguageModel: LanguageModel {
                         content: empty.content,
                         rawContent: empty.rawContent,
                         transcriptEntries: ArraySlice(entries),
-                        usage: usage.value
+                        usage: usage.value,
+                        context: usage.context
                     )
                 case .invocations(let invocations):
                     if !invocations.isEmpty {
@@ -720,7 +724,8 @@ public struct OpenAILanguageModel: LanguageModel {
                 content: text as! Content,
                 rawContent: GeneratedContent(text),
                 transcriptEntries: ArraySlice(entries),
-                usage: usage.value
+                usage: usage.value,
+                context: usage.context
             )
         }
 
@@ -731,7 +736,8 @@ public struct OpenAILanguageModel: LanguageModel {
                 content: content,
                 rawContent: generatedContent,
                 transcriptEntries: ArraySlice(entries),
-                usage: usage.value
+                usage: usage.value,
+                context: usage.context
             )
         }
         throw OpenAILanguageModelError.noResponseGenerated

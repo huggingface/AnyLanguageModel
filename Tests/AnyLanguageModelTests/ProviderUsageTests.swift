@@ -410,6 +410,8 @@ import Testing
             expected.add(provider.expected)
             #expect(last.usage == expected)
             #expect(session.usage == expected)
+            // Usage adds the three rounds up; the context is only the latest request's input.
+            #expect(last.context == provider.expected.input)
             #expect(last.transcriptEntries.count == 4)
             #expect(session.transcript.count == 6)
             #expect(tool.cities.withLock { $0 } == ["Paris", "London"])
@@ -884,8 +886,24 @@ import Testing
             #expect(response.usage.output.totalTokenCount == (provider == .gemini ? 50 : 40))
             #expect(response.usage.output.reasoningTokenCount == 10)
             #expect(response.usage.input.cachedTokenCount == 50)
+            // Usage adds the two rounds up; the context is only the latest request's input.
+            #expect(response.context.totalTokenCount == (provider == .gemini ? 110 : 100))
+            #expect(response.context.cachedTokenCount == 25)
             #expect(response.transcriptEntries.count == 2)
             #expect(UsageURLProtocol.recordedBodies.count == 2)
+        }
+
+        @Test(arguments: Provider.allCases)
+        func collectedToolRoundsKeepTheLatestContext(_ provider: Provider) async throws {
+            UsageURLProtocol.reset()
+            UsageURLProtocol.enqueue(json: try provider.toolStream())
+            UsageURLProtocol.enqueue(json: try provider.stream())
+            let session = provider.makeSession(tools: [RecordingWeatherTool()])
+            let response = try await session.streamResponse(to: "Weather?").collect()
+            var expected = provider.expected
+            expected.add(provider.expected)
+            #expect(response.usage == expected)
+            #expect(response.context == provider.expected.input)
         }
 
         private struct StopDelegate: ToolExecutionDelegate {

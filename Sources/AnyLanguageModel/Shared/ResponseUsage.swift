@@ -28,6 +28,9 @@ struct ReportedUsage: Sendable {
 
     var metadata: [String: GeneratedContent]
 
+    /// The input of the latest request added with ``add(_:)`` that reported one.
+    private(set) var latestInput: Input?
+
     init(input: Input = .init(), output: Output = .init(), metadata: [String: GeneratedContent] = [:]) {
         self.input = input
         self.output = output
@@ -68,6 +71,16 @@ struct ReportedUsage: Sendable {
         output.totalTokenCount = sum(output.totalTokenCount, other.output.totalTokenCount)
         output.reasoningTokenCount = sum(output.reasoningTokenCount, other.output.reasoningTokenCount)
         metadata.merge(other.metadata) { _, latest in latest }
+        if other.input.totalTokenCount != nil || other.input.cachedTokenCount != nil {
+            latestInput = other.input
+        }
+    }
+
+    /// The latest request's input: how much of the context the response takes now.
+    /// For a single request, it's the input in ``value``.
+    var context: LanguageModelSession.Usage.Input {
+        let input = latestInput ?? self.input
+        return .init(totalTokenCount: input.totalTokenCount ?? 0, cachedTokenCount: input.cachedTokenCount ?? 0)
     }
 
     /// Applies cumulative streaming updates;
@@ -79,6 +92,21 @@ struct ReportedUsage: Sendable {
         output.totalTokenCount = other.output.totalTokenCount ?? output.totalTokenCount
         output.reasoningTokenCount = other.output.reasoningTokenCount ?? output.reasoningTokenCount
         metadata.merge(other.metadata) { _, latest in latest }
+    }
+}
+
+/// The usage of a response made of rounds, each a request with the whole conversation so far,
+/// as a local model counts it: the rounds added up, and the latest round's input.
+struct RoundsUsage: Sendable {
+    /// Every round's usage, added up.
+    private(set) var total = LanguageModelSession.Usage.zero
+
+    /// The latest round's input: how much of the context the response takes now.
+    private(set) var context = LanguageModelSession.Usage.zero.input
+
+    mutating func add(_ round: LanguageModelSession.Usage) {
+        total.add(round)
+        context = round.input
     }
 }
 
@@ -118,14 +146,22 @@ extension LanguageModelSession.ResponseStream.Snapshot {
     /// Builds a snapshot from accumulated text,
     /// including metadata-only updates.
     ///
-    /// - Parameter wrapperProperty: The property that holds the response,
-    ///   if the provider's response schema wraps it.
-    init?(text: String, usage: LanguageModelSession.Usage, wrapperProperty: String? = nil) {
+    /// - Parameters:
+    ///   - wrapperProperty: The property that holds the response,
+    ///     if the provider's response schema wraps it.
+    ///   - context: The latest request's input, when it differs from the usage's.
+    init?(
+        text: String,
+        usage: LanguageModelSession.Usage,
+        wrapperProperty: String? = nil,
+        context: LanguageModelSession.Usage.Input? = nil
+    ) {
         if Content.self == String.self {
             self.init(
                 content: (text as! Content).asPartiallyGenerated(),
                 rawContent: GeneratedContent(text),
-                usage: usage
+                usage: usage,
+                context: context ?? usage.input
             )
         } else {
             let raw = ProviderResponseSchema.unwrapping(
@@ -133,7 +169,12 @@ extension LanguageModelSession.ResponseStream.Snapshot {
                 fromProperty: wrapperProperty
             )
             guard let content = try? Content(raw) else { return nil }
-            self.init(content: content.asPartiallyGenerated(), rawContent: raw, usage: usage)
+            self.init(
+                content: content.asPartiallyGenerated(),
+                rawContent: raw,
+                usage: usage,
+                context: context ?? usage.input
+            )
         }
     }
 }
