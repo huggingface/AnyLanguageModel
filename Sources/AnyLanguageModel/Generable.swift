@@ -168,7 +168,7 @@ extension Int: Generable {
     public static var generationSchema: GenerationSchema {
         GenerationSchema.primitive(
             Int.self,
-            node: .number(GenerationSchema.NumberNode(description: nil, minimum: nil, maximum: nil, integerOnly: true))
+            node: .number(.integer(description: nil, bounds: .unbounded))
         )
     }
 
@@ -200,7 +200,7 @@ extension Float: Generable {
     public static var generationSchema: GenerationSchema {
         GenerationSchema.primitive(
             Float.self,
-            node: .number(GenerationSchema.NumberNode(description: nil, minimum: nil, maximum: nil, integerOnly: false))
+            node: .number(.floatingPoint(description: nil, bounds: .unbounded))
         )
     }
 
@@ -232,7 +232,7 @@ extension Double: Generable {
     public static var generationSchema: GenerationSchema {
         GenerationSchema.primitive(
             Double.self,
-            node: .number(GenerationSchema.NumberNode(description: nil, minimum: nil, maximum: nil, integerOnly: false))
+            node: .number(.floatingPoint(description: nil, bounds: .unbounded))
         )
     }
 
@@ -264,7 +264,7 @@ extension Decimal: Generable {
     public static var generationSchema: GenerationSchema {
         GenerationSchema.primitive(
             Decimal.self,
-            node: .number(GenerationSchema.NumberNode(description: nil, minimum: nil, maximum: nil, integerOnly: false))
+            node: .number(.floatingPoint(description: nil, bounds: .unbounded))
         )
     }
 

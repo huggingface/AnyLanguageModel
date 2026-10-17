@@ -33,10 +33,7 @@ public struct GenerationSchema: Equatable, Codable, CustomDebugStringConvertible
                     && lhsString.enumChoices == rhsString.enumChoices
                     && lhsString.isConstant == rhsString.isConstant
             case (.number(let lhsNumber), .number(let rhsNumber)):
-                return lhsNumber.description == rhsNumber.description
-                    && lhsNumber.integerOnly == rhsNumber.integerOnly
-                    && lhsNumber.minimum == rhsNumber.minimum
-                    && lhsNumber.maximum == rhsNumber.maximum
+                return lhsNumber == rhsNumber
             case (.array(let lhsArray), .array(let rhsArray)):
                 return lhsArray.description == rhsArray.description
                     && lhsArray.minItems == rhsArray.minItems
@@ -125,15 +122,17 @@ public struct GenerationSchema: Equatable, Codable, CustomDebugStringConvertible
                 }
 
             case .number(let num):
-                try container.encode(num.integerOnly ? "integer" : "number", forKey: .type)
+                try container.encode(num.isInteger ? "integer" : "number", forKey: .type)
                 if let desc = num.description {
                     try container.encode(desc, forKey: .description)
                 }
-                if let min = num.minimum {
-                    try container.encode(min, forKey: .minimum)
-                }
-                if let max = num.maximum {
-                    try container.encode(max, forKey: .maximum)
+                switch num {
+                case .integer(_, let bounds):
+                    try container.encodeIfPresent(bounds.minimum, forKey: .minimum)
+                    try container.encodeIfPresent(bounds.maximum, forKey: .maximum)
+                case .floatingPoint(_, let bounds):
+                    try container.encodeIfPresent(bounds.minimum, forKey: .minimum)
+                    try container.encodeIfPresent(bounds.maximum, forKey: .maximum)
                 }
 
             case .boolean:
@@ -232,14 +231,25 @@ public struct GenerationSchema: Equatable, Codable, CustomDebugStringConvertible
             case "number", "integer":
                 let minimum = try container.decodeIfPresent(Double.self, forKey: .minimum)
                 let maximum = try container.decodeIfPresent(Double.self, forKey: .maximum)
-                self = .number(
-                    GenerationSchema.NumberNode(
-                        description: description,
-                        minimum: minimum,
-                        maximum: maximum,
-                        integerOnly: type == "integer"
-                    )
-                )
+                func impossible(_ reason: String) -> DecodingError {
+                    .dataCorruptedError(forKey: .minimum, in: container, debugDescription: reason)
+                }
+                if type == "integer" {
+                    // An integer at least 1.5 is at least 2: its bounds are the whole numbers within them.
+                    let wholeMinimum = minimum.map { Int(exactly: $0.rounded(.up)) }
+                    let wholeMaximum = maximum.map { Int(exactly: $0.rounded(.down)) }
+                    guard wholeMinimum != .some(nil), wholeMaximum != .some(nil),
+                        let bounds = Bounds(minimum: wholeMinimum ?? nil, maximum: wholeMaximum ?? nil)
+                    else {
+                        throw impossible("No Int is within minimum \(minimum as Any) and maximum \(maximum as Any).")
+                    }
+                    self = .number(.integer(description: description, bounds: bounds))
+                } else {
+                    guard let bounds = Bounds(minimum: minimum, maximum: maximum) else {
+                        throw impossible("The minimum \(minimum as Any) is above the maximum \(maximum as Any).")
+                    }
+                    self = .number(.floatingPoint(description: description, bounds: bounds))
+                }
 
             case "boolean":
                 self = .boolean
@@ -288,11 +298,28 @@ public struct GenerationSchema: Equatable, Codable, CustomDebugStringConvertible
         var isConstant = false
     }
 
-    struct NumberNode: Sendable, Codable {
-        var description: String?
-        var minimum: Double?
-        var maximum: Double?
-        var integerOnly: Bool
+    /// A number: an integer, whose bounds are integers, or a floating-point number.
+    enum NumberNode: Sendable, Equatable {
+        case integer(description: String?, bounds: Bounds<Int>)
+        case floatingPoint(description: String?, bounds: Bounds<Double>)
+
+        var description: String? {
+            get {
+                switch self {
+                case .integer(let description, _), .floatingPoint(let description, _): description
+                }
+            }
+            set {
+                switch self {
+                case .integer(_, let bounds): self = .integer(description: newValue, bounds: bounds)
+                case .floatingPoint(_, let bounds): self = .floatingPoint(description: newValue, bounds: bounds)
+                }
+            }
+        }
+
+        var isInteger: Bool {
+            if case .integer = self { true } else { false }
+        }
     }
 
     let root: Node
@@ -330,7 +357,7 @@ public struct GenerationSchema: Equatable, Codable, CustomDebugStringConvertible
             }
             return "string"
         case .number(let num):
-            return num.integerOnly ? "integer" : "number"
+            return num.isInteger ? "integer" : "number"
         case .boolean:
             return "boolean"
         case .null:
@@ -705,15 +732,15 @@ public struct GenerationSchema: Equatable, Codable, CustomDebugStringConvertible
                 )
             case .number:
                 return .number(
-                    NumberNode(description: dynamicProp?.description, minimum: nil, maximum: nil, integerOnly: false)
+                    .floatingPoint(description: dynamicProp?.description, bounds: .unbounded)
                 )
             case .integer:
                 return .number(
-                    NumberNode(description: dynamicProp?.description, minimum: nil, maximum: nil, integerOnly: true)
+                    .integer(description: dynamicProp?.description, bounds: .unbounded)
                 )
             case .decimal:
                 return .number(
-                    NumberNode(description: dynamicProp?.description, minimum: nil, maximum: nil, integerOnly: false)
+                    .floatingPoint(description: dynamicProp?.description, bounds: .unbounded)
                 )
             }
 
@@ -922,29 +949,28 @@ extension GenerationSchema {
                 }
                 return (.string(node), [:])
             } else if type == Int.self {
-                var minimum: Double?
-                var maximum: Double?
+                var minimum: Int?
+                var maximum: Int?
                 for guide in guides {
-                    if let min = guide.minimum { minimum = min }
-                    if let max = guide.maximum { maximum = max }
+                    if case .integer(let min)? = guide.minimum { minimum = min }
+                    if case .integer(let max)? = guide.maximum { maximum = max }
                 }
-                return (
-                    .number(
-                        NumberNode(description: description, minimum: minimum, maximum: maximum, integerOnly: true)
-                    ), [:]
-                )
+                // Guides that no value satisfies are a mistake in the code, as an inverted ClosedRange is.
+                guard let bounds = Bounds(minimum: minimum, maximum: maximum) else {
+                    preconditionFailure("A guide's minimum \(minimum!) is above its maximum \(maximum!).")
+                }
+                return (.number(.integer(description: description, bounds: bounds)), [:])
             } else if type == Float.self || type == Double.self || type == Decimal.self {
                 var minimum: Double?
                 var maximum: Double?
                 for guide in guides {
-                    if let min = guide.minimum { minimum = min }
-                    if let max = guide.maximum { maximum = max }
+                    if case .floatingPoint(let min)? = guide.minimum { minimum = min }
+                    if case .floatingPoint(let max)? = guide.maximum { maximum = max }
                 }
-                return (
-                    .number(
-                        NumberNode(description: description, minimum: minimum, maximum: maximum, integerOnly: false)
-                    ), [:]
-                )
+                guard let bounds = Bounds(minimum: minimum, maximum: maximum) else {
+                    preconditionFailure("A guide's minimum \(minimum!) is above its maximum \(maximum!).")
+                }
+                return (.number(.floatingPoint(description: description, bounds: bounds)), [:])
             } else {
                 // Complex type - use its schema
                 let schema = Value.generationSchema

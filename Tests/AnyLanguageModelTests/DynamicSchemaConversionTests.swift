@@ -244,6 +244,59 @@ import Foundation
             )
         }
 
+        /// A definition that is only a reference, such as a one-choice `anyOf`, keeps its name when
+        /// converted from a `GenerationSchema`'s nodes, so the references to it are defined.
+        @available(macOS 26.0, iOS 26.0, watchOS 27.0, tvOS 26.0, visionOS 26.0, *)
+        @Test func convertNamedOneChoiceReferenceFromGenerationSchema() throws {
+            let schema = try AnyLanguageModel.GenerationSchema(
+                root: .init(
+                    name: "Root",
+                    properties: [.init(name: "action", schema: .init(referenceTo: "Action"))]
+                ),
+                dependencies: [
+                    .init(name: "Action", anyOf: [.init(referenceTo: "ReplyAction")]),
+                    .init(name: "ReplyAction", properties: [.init(name: "value", schema: .init(type: String.self))]),
+                ]
+            )
+            _ = try FoundationModels.GenerationSchema(
+                root: convertToDynamicSchema(schema.root),
+                dependencies: schema.defs.map { name, node in convertToDynamicSchema(node, name: name) }
+            )
+        }
+
+        /// An integer's bounds from JSON become the whole numbers within them.
+        @available(macOS 26.0, iOS 26.0, watchOS 27.0, tvOS 26.0, visionOS 26.0, *)
+        @Test func integerBoundsFromJSONAreWholeNumbers() throws {
+            let schema = try JSONDecoder().decode(
+                AnyLanguageModel.GenerationSchema.self,
+                from: Data(#"{"type": "integer", "minimum": 1.5, "maximum": 9.5}"#.utf8)
+            )
+            #expect(schema.root == .number(.integer(description: nil, bounds: .closed(2 ... 9))))
+            _ = try FoundationModels.GenerationSchema(root: convertToDynamicSchema(schema.root), dependencies: [])
+        }
+
+        /// A bound no `Int` holds, or bounds no integer is within, aren't a schema.
+        @Test(arguments: [
+            #"{"type": "integer", "minimum": 1e300}"#,
+            #"{"type": "integer", "minimum": 2.5, "maximum": 2.7}"#,
+            #"{"type": "number", "minimum": 3, "maximum": 1}"#,
+        ])
+        func impossibleBoundsFromJSONDontDecode(json: String) {
+            #expect(throws: DecodingError.self) {
+                try JSONDecoder().decode(AnyLanguageModel.GenerationSchema.self, from: Data(json.utf8))
+            }
+        }
+
+        /// A stand-in number is the value within its bounds closest to zero.
+        @available(macOS 26.0, iOS 26.0, watchOS 27.0, tvOS 26.0, visionOS 26.0, *)
+        @Test(arguments: [
+            (Bounds<Int>.unbounded, 0.0), (.from(5), 5.0), (.through(-3), -3.0), (.closed(2 ... 4), 2.0),
+        ])
+        func standInIntegerIsWithinItsBounds(bounds: Bounds<Int>, expected: Double) {
+            let node = AnyLanguageModel.GenerationSchema.Node.number(.integer(description: nil, bounds: bounds))
+            #expect(placeholderGeneratedContent(from: node, defs: [:]).kind == .number(expected))
+        }
+
         // MARK: - Fallback Types
 
         @available(macOS 26.0, iOS 26.0, watchOS 27.0, tvOS 26.0, visionOS 26.0, *)
