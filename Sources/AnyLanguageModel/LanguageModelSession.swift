@@ -530,9 +530,10 @@ public final class LanguageModelSession: @unchecked Sendable {
                             )
                         )
                         session.withTranscriptMutation {
-                            session.state.withLock {
-                                $0.transcript.append(contentsOf: lastSnapshot.transcriptEntries)
-                                $0.transcript.append(responseEntry)
+                            session.state.withLock { state in
+                                guard state.transcript.contains(where: { $0.id == promptEntry.id }) else { return }
+                                state.transcript.append(contentsOf: lastSnapshot.transcriptEntries)
+                                state.transcript.append(responseEntry)
                             }
                         }
                         session.endResponding()
@@ -540,6 +541,7 @@ public final class LanguageModelSession: @unchecked Sendable {
                     } catch {
                         session.withTranscriptMutation {
                             session.state.withLock { state in
+                                guard state.transcript.contains(where: { $0.id == promptEntry.id }) else { return }
                                 if state.transcriptErrorHandlingPolicy == .preserveTranscript {
                                     state.transcript.append(contentsOf: lastSnapshot?.transcriptEntries ?? [])
                                 } else if state.transcriptErrorHandlingPolicy == .revertTranscript {
@@ -819,6 +821,7 @@ public final class LanguageModelSession: @unchecked Sendable {
             // Add tool entries and response to transcript
             withTranscriptMutation {
                 state.withLock { lockedState in
+                    guard lockedState.transcript.contains(where: { $0.id == promptID }) else { return }
                     lockedState.transcript.append(contentsOf: response.transcriptEntries)
                     lockedState.transcript.append(responseEntry)
                 }
@@ -1228,6 +1231,7 @@ extension LanguageModelSession {
             // Add tool entries and response to transcript
             withTranscriptMutation {
                 state.withLock { lockedState in
+                    guard lockedState.transcript.contains(where: { $0.id == promptID }) else { return }
                     lockedState.transcript.append(contentsOf: response.transcriptEntries)
                     lockedState.transcript.append(responseEntry)
                 }

@@ -18,6 +18,64 @@ enum SessionPropertyMode {
 
 @Suite("Session properties")
 struct SessionPropertyTests {
+    @Test func propertyDefaultsCanReadAnotherProperty() {
+        let session = LanguageModelSession(model: SessionPropertyFixtureModel())
+        SessionPropertyBinding.$values.withValue(session.properties) {
+            #expect(session.properties[DerivedPropertyKey.self] == 42)
+            session.properties[BasePropertyKey.self] = 7
+            #expect(session.properties[DerivedPropertyKey.self] == 42)
+        }
+    }
+
+    @Test(arguments: [false, true], [false, true])
+    func replacingHistoryDiscardsStaleGenerationCommits(streaming: Bool, images: Bool) async throws {
+        let (started, start) = AsyncStream<Void>.makeStream()
+        let (resume, resumeContinuation) = AsyncStream<Void>.makeStream()
+        let session = LanguageModelSession(
+            model: PausedHistoryModel(started: start, resume: resume),
+            instructions: "Keep instructions"
+        )
+        let request = Task {
+            if streaming {
+                let stream =
+                    images
+                    ? session.streamResponse(to: "Old request", images: [])
+                    : session.streamResponse(to: "Old request")
+                return try await stream.collect().content
+            }
+            let response =
+                try await images
+                ? session.respond(to: "Old request", images: [])
+                : session.respond(to: "Old request")
+            return response.content
+        }
+        for await _ in started.prefix(1) {}
+        let replacement = Transcript.Entry.prompt(.init(segments: [.text(.init(content: "New conversation"))]))
+        session.properties.history = [replacement]
+        resumeContinuation.yield()
+
+        #expect(try await request.value == "Done")
+        #expect(session.properties.history == [replacement])
+        #expect(session.transcript.count == 2)
+        #expect(!session.isResponding)
+    }
+
+    @Test func replacingHistoryDiscardsStaleStreamingFailureCheckpoint() async {
+        let (started, start) = AsyncStream<Void>.makeStream()
+        let (resume, resumeContinuation) = AsyncStream<Void>.makeStream()
+        let session = LanguageModelSession(model: PausedHistoryModel(started: start, resume: resume, fail: true))
+        session.transcriptErrorHandlingPolicy = .preserveTranscript
+        let request = Task { try await session.streamResponse(to: "Old request").collect() }
+        for await _ in started.prefix(1) {}
+        let replacement = Transcript.Entry.prompt(.init(segments: [.text(.init(content: "New conversation"))]))
+        session.properties.history = [replacement]
+        resumeContinuation.yield()
+
+        await #expect(throws: PausedHistoryError.self) { try await request.value }
+        #expect(session.properties.history == [replacement])
+        #expect(!session.isResponding)
+    }
+
     @Test func dynamicInstructionsReadAndUpdateSessionProperties() {
         let session = LanguageModelSession(
             model: SessionPropertyFixtureModel(),
@@ -213,6 +271,73 @@ struct SessionPropertyTests {
         #expect(session.transcript == Transcript(entries: [prompt]))
         #expect(context.instructions?.description == "History count 1")
         #expect(context.transcript.count == 2)
+    }
+}
+
+private enum BasePropertyKey: SessionPropertyKey {
+    static let defaultValue = 42
+}
+
+private enum DerivedPropertyKey: SessionPropertyKey {
+    static var defaultValue: Int {
+        SessionPropertyBinding.values![BasePropertyKey.self]
+    }
+}
+
+private enum PausedHistoryError: Error { case failed }
+
+private struct PausedHistoryModel: LanguageModel {
+    typealias UnavailableReason = Never
+    let started: AsyncStream<Void>.Continuation
+    let resume: AsyncStream<Void>
+    var fail = false
+
+    private var entries: [Transcript.Entry] {
+        [.reasoning(.init(segments: [.text(.init(content: "Old reasoning"))]))]
+    }
+
+    func respond<Content>(
+        within session: LanguageModelSession,
+        to prompt: Prompt,
+        generating type: Content.Type,
+        includeSchemaInPrompt: Bool,
+        options: GenerationOptions
+    ) async throws -> LanguageModelSession.Response<Content> where Content: Generable {
+        started.yield()
+        for await _ in resume.prefix(1) {}
+        let raw = GeneratedContent("Done")
+        return .init(content: try Content(raw), rawContent: raw, transcriptEntries: entries[...])
+    }
+
+    func streamResponse<Content>(
+        within session: LanguageModelSession,
+        to prompt: Prompt,
+        generating type: Content.Type,
+        includeSchemaInPrompt: Bool,
+        options: GenerationOptions
+    ) -> sending LanguageModelSession.ResponseStream<Content> where Content: Generable {
+        .init(
+            stream: AsyncThrowingStream { continuation in
+                Task {
+                    do {
+                        let raw = GeneratedContent("Done")
+                        continuation.yield(
+                            .init(
+                                content: try Content.PartiallyGenerated(raw),
+                                rawContent: raw,
+                                transcriptEntries: entries[...]
+                            )
+                        )
+                        started.yield()
+                        for await _ in resume.prefix(1) {}
+                        if fail { throw PausedHistoryError.failed }
+                        continuation.finish()
+                    } catch {
+                        continuation.finish(throwing: error)
+                    }
+                }
+            }
+        )
     }
 }
 
