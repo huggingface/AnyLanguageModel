@@ -690,10 +690,10 @@ private func convertSegmentsToOllama(_ segments: [Transcript.Segment]) -> (Strin
 }
 
 /// An error Ollama reported in place of a chat response, with its own message.
-public struct OllamaError: Error, Sendable, CustomStringConvertible {
-    public let message: String
+struct OllamaError: Error, Sendable, CustomStringConvertible {
+    let message: String
 
-    public var description: String { "Ollama: \(message)" }
+    var description: String { "Ollama: \(message)" }
 }
 
 /// What Ollama's chat endpoint replies with: a response, or an error it reports instead, as a
