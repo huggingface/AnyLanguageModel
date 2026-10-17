@@ -252,6 +252,21 @@ struct TranscriptTests {
         #expect(decoded.options[custom: OpenAILanguageModel.self] == nil)
     }
 
+    @Test func promptRoundTripsMaximumToolRounds() throws {
+        var options = GenerationOptions()
+        options.maximumToolRounds = 20
+        let prompt = Transcript.Prompt(id: "p", segments: [], options: options)
+        let decoded = try JSONDecoder().decode(Transcript.Prompt.self, from: JSONEncoder().encode(prompt))
+        #expect(decoded.options.maximumToolRounds == 20)
+    }
+
+    @Test func promptRejectsMaximumToolRoundsBelowOne() {
+        let json = #"{"id":"p","options":{"maximumToolRounds":0},"segments":[]}"#
+        #expect(throws: DecodingError.self) {
+            try JSONDecoder().decode(Transcript.Prompt.self, from: Data(json.utf8))
+        }
+    }
+
     @Test func promptRoundTripsDefaultOptions() throws {
         let prompt = Transcript.Prompt(id: "p", segments: [])
         let data = try JSONEncoder().encode(prompt)

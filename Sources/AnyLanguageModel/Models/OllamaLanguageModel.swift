@@ -253,7 +253,7 @@ public struct OllamaLanguageModel: LanguageModel {
                     let format = type == String.self ? nil : try JSONValue(convertSchemaToOllamaFormat(schema))
                     var inFlightMessages: [OllamaMessage] = []
                     var state = StreamingResponseState<Content>()
-                    var toolRounds = ToolRoundLimit(provider: "Ollama")
+                    var toolRounds = ToolRoundLimit(provider: "Ollama", options: options)
                     while true {
                         try Task.checkCancellation()
                         let requestContext = session.resolvedRequestContext()
@@ -291,7 +291,7 @@ public struct OllamaLanguageModel: LanguageModel {
                         }
                         guard !toolCalls.isEmpty else { break }
                         try Task.checkCancellation()
-                        try toolRounds.record()
+                        try toolRounds.record(completed: state.entries)
                         switch try await resolveToolCalls(
                             toolCalls,
                             tools: requestContext.tools,

@@ -121,6 +121,21 @@ public struct GenerationOptions: Sendable, Equatable {
     /// an error will be thrown.
     public var maximumResponseTokens: Int?
 
+    /// The most rounds of tool calls one response may take: a round past it ends the response
+    /// with ``LanguageModelSession/ToolRoundLimitExceeded``, which carries the rounds that ran.
+    /// Must be at least `1`.
+    ///
+    /// ``SystemLanguageModel`` ignores it: Foundation Models runs tool calls itself.
+    ///
+    /// - Note: This API is exclusive to AnyLanguageModel
+    ///   and using it means your code is no longer drop-in compatible
+    ///   with the Foundation Models framework.
+    public var maximumToolRounds: Int = 8 {
+        didSet {
+            precondition(maximumToolRounds >= 1, "maximumToolRounds must be at least 1, got \(maximumToolRounds)")
+        }
+    }
+
     /// Storage for model-specific custom options.
     private var customOptionsStorage: CustomOptionsStorage = .init()
 
@@ -179,8 +194,8 @@ extension GenerationOptions {
     ///
     /// `GenerationOptions` isn't `Codable`, matching Foundation Models,
     /// but ``Transcript/Prompt`` is, so it codes its options through this type.
-    /// It codes the sampling mode, temperature, and maximum response tokens
-    /// in the same format as earlier releases.
+    /// It codes the sampling mode, temperature, maximum response tokens,
+    /// and maximum tool rounds, in the same format as earlier releases.
     /// Custom options aren't coded,
     /// because decoding them would need a registry of every model's option types.
     struct TranscriptCoding: Codable {
@@ -191,19 +206,47 @@ extension GenerationOptions {
         var sampling: Sampling?
         var temperature: Double?
         var maximumResponseTokens: Int?
+        var maximumToolRounds: Int?
+
+        private enum CodingKeys: String, CodingKey {
+            case sampling, temperature, maximumResponseTokens, maximumToolRounds
+        }
 
         init(_ options: GenerationOptions) {
             self.sampling = options.sampling.map { Sampling(mode: $0.mode) }
             self.temperature = options.temperature
             self.maximumResponseTokens = options.maximumResponseTokens
+            // The default isn't written, so coded options read as they did before the option existed.
+            self.maximumToolRounds =
+                options.maximumToolRounds == GenerationOptions().maximumToolRounds ? nil : options.maximumToolRounds
+        }
+
+        init(from decoder: any Decoder) throws {
+            let container = try decoder.container(keyedBy: CodingKeys.self)
+            self.sampling = try container.decodeIfPresent(Sampling.self, forKey: .sampling)
+            self.temperature = try container.decodeIfPresent(Double.self, forKey: .temperature)
+            self.maximumResponseTokens = try container.decodeIfPresent(Int.self, forKey: .maximumResponseTokens)
+            self.maximumToolRounds = try container.decodeIfPresent(Int.self, forKey: .maximumToolRounds)
+            // Coded data can't stop the program: a value the options refuse is a decoding error.
+            if let maximumToolRounds, maximumToolRounds < 1 {
+                throw DecodingError.dataCorruptedError(
+                    forKey: .maximumToolRounds,
+                    in: container,
+                    debugDescription: "maximumToolRounds must be at least 1, got \(maximumToolRounds)"
+                )
+            }
         }
 
         var options: GenerationOptions {
-            GenerationOptions(
+            var options = GenerationOptions(
                 sampling: sampling.map { SamplingMode(mode: $0.mode) },
                 temperature: temperature,
                 maximumResponseTokens: maximumResponseTokens
             )
+            if let maximumToolRounds {
+                options.maximumToolRounds = maximumToolRounds
+            }
+            return options
         }
     }
 }
