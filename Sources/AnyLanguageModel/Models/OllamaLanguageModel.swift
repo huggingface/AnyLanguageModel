@@ -148,8 +148,11 @@ public struct OllamaLanguageModel: LanguageModel {
 
         let url = baseURL.appendingPathComponent("api/chat")
         let body = try encodeChatParams(params)
-        let chatResponse: ChatResponse = try await httpSession.fetch(HTTPRequest(method: .post, url: url), body: body,
-            dateDecodingStrategy: .iso8601WithFractionalSeconds)
+        let chatResponse: ChatResponse = try await httpSession.fetch(
+            HTTPRequest(method: .post, url: url),
+            body: body,
+            dateDecodingStrategy: .iso8601WithFractionalSeconds
+        )
 
         var entries: [Transcript.Entry] = []
         let usage = chatResponse.reportedUsage?.value ?? .zero
@@ -274,8 +277,11 @@ public struct OllamaLanguageModel: LanguageModel {
                             parameters: extractTopLevelChatParameters(options)
                         )
                         let body = try encodeChatParams(params)
-                        let chunks: AsyncThrowingStream<ChatResponse, any Error> = httpSession.fetchStream(HTTPRequest(method: .post, url: url), body: body,
-                            dateDecodingStrategy: .iso8601WithFractionalSeconds)
+                        let chunks: AsyncThrowingStream<ChatResponse, any Error> = httpSession.fetchStream(
+                            HTTPRequest(method: .post, url: url),
+                            body: body,
+                            dateDecodingStrategy: .iso8601WithFractionalSeconds
+                        )
                         var toolCalls: [OllamaToolCall] = []
                         var thinking = ""
                         for try await chunk in chunks {
@@ -294,7 +300,7 @@ public struct OllamaLanguageModel: LanguageModel {
                         }
                         guard !toolCalls.isEmpty else { break }
                         try Task.checkCancellation()
-                        try toolRounds.record(toolCalls.map(\.roundCall))
+                        try toolRounds.record()
                         switch try await resolveToolCalls(
                             toolCalls,
                             tools: requestContext.tools,
@@ -779,11 +785,5 @@ private struct OllamaToolFunction: Codable, Sendable {
     private enum CodingKeys: String, CodingKey {
         case name
         case arguments
-    }
-}
-
-extension OllamaToolCall {
-    var roundCall: ToolRoundLimit.Call {
-        .init(name: function.name, arguments: function.arguments)
     }
 }

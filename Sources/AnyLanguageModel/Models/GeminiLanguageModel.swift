@@ -267,7 +267,10 @@ public struct GeminiLanguageModel: LanguageModel {
 
             let body = try JSONEncoder().encode(params)
 
-            let response: GeminiGenerateContentResponse = try await httpSession.fetch(HTTPRequest(method: .post, url: url, headerFields: headers), body: body)
+            let response: GeminiGenerateContentResponse = try await httpSession.fetch(
+                HTTPRequest(method: .post, url: url, headerFields: headers),
+                body: body
+            )
 
             usage.add(response.usageMetadata?.reportedUsage)
 
@@ -287,7 +290,7 @@ public struct GeminiLanguageModel: LanguageModel {
 
             if !functionCalls.isEmpty {
                 // Resolve function calls
-                try toolRounds.record(functionCalls.map(\.roundCall))
+                try toolRounds.record()
                 let resolution = try await resolveFunctionCalls(
                     functionCalls,
                     tools: requestContext.tools,
@@ -439,7 +442,10 @@ public struct GeminiLanguageModel: LanguageModel {
                         )
                         let body = try JSONEncoder().encode(params)
                         let stream: AsyncThrowingStream<GeminiGenerateContentResponse, any Error> =
-                            httpSession.fetchEventStream(HTTPRequest(method: .post, url: url, headerFields: headers), body: body)
+                            httpSession.fetchEventStream(
+                                HTTPRequest(method: .post, url: url, headerFields: headers),
+                                body: body
+                            )
                         var parts: [GeminiPart] = []
                         var functionCalls: [GeminiFunctionCall] = []
                         for try await chunk in stream {
@@ -469,7 +475,7 @@ public struct GeminiLanguageModel: LanguageModel {
                         guard !functionCalls.isEmpty else { break }
                         try Task.checkCancellation()
                         let metadata = try textPartMetadata(parts, includeUnsignedText: true)
-                        try toolRounds.record(functionCalls.map(\.roundCall))
+                        try toolRounds.record()
                         switch try await resolveFunctionCalls(
                             functionCalls,
                             tools: requestContext.tools,
@@ -1180,12 +1186,6 @@ enum GeminiError: Error, CustomStringConvertible {
         case .noCandidate:
             return "No candidate in response"
         }
-    }
-}
-
-extension GeminiFunctionCall {
-    var roundCall: ToolRoundLimit.Call {
-        .init(name: name, arguments: args)
     }
 }
 
