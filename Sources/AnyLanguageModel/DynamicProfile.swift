@@ -38,7 +38,12 @@ extension LanguageModelSession {
         fileprivate let resolveValue: () -> ResolvedDynamicProfile
 
         public init(_ dynamicProfile: any DynamicProfile) {
-            resolveValue = { resolveDynamicProfile(dynamicProfile) }
+            let identity = String(reflecting: type(of: dynamicProfile))
+            resolveValue = {
+                var resolved = resolveDynamicProfile(dynamicProfile)
+                resolved.identity = identity + "/" + resolved.identity
+                return resolved
+            }
         }
 
         public init(erasing dynamicProfile: some DynamicProfile) {
@@ -519,6 +524,7 @@ actor ProfileLifecycle {
         prompt: Transcript.Prompt?,
         callbackState: ProfileCallbackState
     ) async throws {
+        let history = SessionHistoryBinding(history, isWritable: true)
         if activeProfile?.identity != profile.identity {
             if let previous = activeProfile {
                 await withBindings(properties: properties, history: history) {
@@ -546,10 +552,9 @@ actor ProfileLifecycle {
 
     private func withBindings<Result: Sendable>(
         properties: SessionPropertyValues,
-        history: [Transcript.Entry],
+        history: SessionHistoryBinding,
         operation: @Sendable () async throws -> Result
     ) async rethrows -> Result {
-        let history = SessionHistoryBinding(history, isWritable: true)
         return try await SessionPropertyBinding.$values.withValue(properties) {
             try await SessionPropertyBinding.$history.withValue(history) {
                 try await operation()

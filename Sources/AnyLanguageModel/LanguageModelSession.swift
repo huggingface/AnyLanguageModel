@@ -64,6 +64,7 @@ public final class LanguageModelSession: @unchecked Sendable {
     @ObservationIgnored private let state: Locked<State>
 
     @ObservationIgnored private let responseRelays = Locked<[UUID: Task<Void, Never>]>([:])
+    @ObservationIgnored private let lastResponseModel = Locked<(any LanguageModel)?>(nil)
 
     /// Waits for transcript cleanup of all streaming relays registered when this call begins.
     ///
@@ -120,6 +121,8 @@ public final class LanguageModelSession: @unchecked Sendable {
     nonisolated var usesDynamicInstructions: Bool {
         dynamicInstructions != nil || dynamicProfile != nil
     }
+
+    nonisolated var usesDynamicProfile: Bool { dynamicProfile != nil }
 
     /// A delegate that observes and controls tool execution.
     ///
@@ -449,13 +452,16 @@ public final class LanguageModelSession: @unchecked Sendable {
         currentRoundEntries: [Transcript.Entry]
     ) async throws {
         guard let profile = requestContext.profile else { return }
+        let history = SessionHistoryBinding(
+            requestContext.canonicalTranscript + currentRoundEntries,
+            isWritable: true
+        )
         for entry in entries {
             switch entry {
             case .reasoning(let reasoning):
                 guard requestContext.callbackState.reserve(entry.id) else { continue }
                 do {
-                    let history = requestContext.canonicalTranscript + currentRoundEntries
-                    try await withSessionProperties(history: history, isHistoryWritable: true) {
+                    try await withSessionProperties(history: history) {
                         for action in profile.onReasoning { try await action(reasoning) }
                     }
                 } catch {
@@ -465,8 +471,7 @@ public final class LanguageModelSession: @unchecked Sendable {
             case .response(let response):
                 guard requestContext.callbackState.reserve(entry.id) else { continue }
                 do {
-                    let history = requestContext.canonicalTranscript + currentRoundEntries
-                    try await withSessionProperties(history: history, isHistoryWritable: true) {
+                    try await withSessionProperties(history: history) {
                         for action in profile.onResponse { try await action(response) }
                     }
                 } catch {
@@ -499,6 +504,13 @@ public final class LanguageModelSession: @unchecked Sendable {
         operation: @Sendable () async throws -> Result
     ) async rethrows -> Result {
         let history = SessionHistoryBinding(history, isWritable: isHistoryWritable)
+        return try await withSessionProperties(history: history, operation: operation)
+    }
+
+    nonisolated private func withSessionProperties<Result: Sendable>(
+        history: SessionHistoryBinding,
+        operation: @Sendable () async throws -> Result
+    ) async rethrows -> Result {
         return try await SessionPropertyBinding.$values.withValue(properties) {
             try await SessionPropertyBinding.$history.withValue(history) {
                 try await operation()
@@ -718,6 +730,7 @@ public final class LanguageModelSession: @unchecked Sendable {
     }
 
     public func prewarm(promptPrefix: Prompt? = nil) {
+        let model = usesDynamicProfile ? resolvedRequestContext().model : self.model
         model.prewarm(for: self, promptPrefix: promptPrefix)
     }
 
@@ -891,6 +904,7 @@ public final class LanguageModelSession: @unchecked Sendable {
                                 requestContext: context,
                                 currentRoundEntries: []
                             )
+                            session.lastResponseModel.withLock { $0 = prepared.context.model }
                         }
                         session.endResponding()
                         continuation.finish()
@@ -1272,6 +1286,7 @@ public final class LanguageModelSession: @unchecked Sendable {
                 requestContext: context,
                 currentRoundEntries: []
             )
+            lastResponseModel.withLock { $0 = prepared.context.model }
         } catch {
             let ids = Set(response.transcriptEntries.map(\.id) + [responseEntry.id])
             withTranscriptMutation {
@@ -1980,7 +1995,10 @@ extension LanguageModelSession {
         issues: [LanguageModelFeedback.Issue] = [],
         desiredOutput: Transcript.Entry? = nil
     ) -> Data {
-        model.logFeedbackAttachment(
+        let model =
+            lastResponseModel.withLock { $0 }
+            ?? (usesDynamicProfile ? resolvedRequestContext().model : self.model)
+        return model.logFeedbackAttachment(
             within: self,
             sentiment: sentiment,
             issues: issues,

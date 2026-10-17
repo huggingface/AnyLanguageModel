@@ -14,6 +14,94 @@ extension SessionPropertyValues {
 
 @Suite("Dynamic profiles")
 struct DynamicProfileTests {
+    @Test func erasedConcreteProfilesKeepDistinctLifecycleIdentities() async throws {
+        let state = LifecycleFixtureState()
+        let session = LanguageModelSession(profile: ErasedRoutingProfile(state: state))
+        _ = try await session.respond(to: "First")
+        _ = try await session.respond(to: "Same profile")
+        state.useSecond.withLock { $0 = true }
+        _ = try await session.respond(to: "Switch")
+
+        #expect(state.events.withLock { $0 } == ["activate:A", "deactivate:A", "activate:B"])
+    }
+
+    @Test func lifecycleHistoryEditsAccumulateAcrossPreparationStages() async throws {
+        let state = LifecycleFixtureState()
+        let first = Transcript.Entry.prompt(.init(segments: [.text(.init(content: "First old entry"))]))
+        let second = Transcript.Entry.prompt(.init(segments: [.text(.init(content: "Second old entry"))]))
+        let seen = Locked<[[String]]>([])
+        let session = LanguageModelSession(
+            profile: HistoryEditingLifecycleProfile(state: state, first: first.id, second: second.id, seen: seen),
+            history: [first, second]
+        )
+        _ = try await session.respond(to: "Activate A")
+        state.useSecond.withLock { $0 = true }
+        _ = try await session.respond(to: "Activate B")
+
+        let stages = seen.withLock { $0 }
+        #expect(stages.count == 2)
+        #expect(stages.allSatisfy { !$0.contains(first.id) })
+        #expect(stages.last?.contains(second.id) == false)
+        #expect(!session.properties.history.contains { $0.id == first.id || $0.id == second.id })
+    }
+
+    @Test(arguments: [false, true])
+    func completionEntryCallbacksShareHistoryEdits(streaming: Bool) async throws {
+        let earlier = Transcript.Entry.prompt(.init(segments: [.text(.init(content: "Remove me"))]))
+        let marker = Transcript.Entry.prompt(.init(segments: [.text(.init(content: "Marker"))]))
+        let session = LanguageModelSession(
+            profile: LanguageModelSession.Profile { Instructions("Evolving callback history") }
+                .model(LifecycleFixtureModel())
+                .onReasoning { _ in
+                    let properties = try #require(SessionPropertyBinding.values)
+                    properties.history.removeAll { $0.id == earlier.id }
+                }
+                .onResponse { _ in
+                    let properties = try #require(SessionPropertyBinding.values)
+                    #expect(!properties.history.contains { $0.id == earlier.id })
+                    properties.history.append(marker)
+                },
+            history: [earlier]
+        )
+        if streaming {
+            _ = try await session.streamResponse(to: "Complete").collect()
+        } else {
+            _ = try await session.respond(to: "Complete")
+        }
+
+        #expect(!session.properties.history.contains { $0.id == earlier.id })
+        #expect(session.properties.history.last == marker)
+    }
+
+    @Test(arguments: [false, true])
+    func prewarmUsesActiveModelAndFeedbackUsesProducingModel(streaming: Bool) async throws {
+        let state = ProfileFixtureState()
+        let session = LanguageModelSession(
+            profile: FixtureProfile(
+                state: state,
+                first: ProfileFixtureModel(id: "a", state: state),
+                second: ProfileFixtureModel(id: "b", state: state)
+            )
+        )
+        session.prewarm(promptPrefix: Prompt("Prefix A"))
+        if streaming {
+            _ = try await session.streamResponse(to: "First").collect()
+        } else {
+            _ = try await session.respond(to: "First")
+        }
+        state.selectSecond()
+        session.prewarm(promptPrefix: Prompt("Prefix B"))
+        #expect(session.logFeedbackAttachment(sentiment: .positive) == Data("a".utf8))
+        if streaming {
+            _ = try await session.streamResponse(to: "Second").collect()
+        } else {
+            _ = try await session.respond(to: "Second")
+        }
+        #expect(session.logFeedbackAttachment(sentiment: .positive) == Data("b".utf8))
+        #expect(state.prewarms.withLock { $0 } == ["a:Prefix A", "b:Prefix B"])
+        #expect(state.feedback.withLock { $0 } == ["a", "b"])
+    }
+
     @Test func sameSessionReevaluatesModelInstructionsOptionsAndProperties() async throws {
         let state = ProfileFixtureState()
         let first = ProfileFixtureModel(id: "model-a", state: state)
@@ -241,6 +329,23 @@ struct DynamicProfileTests {
     }
 
     #if canImport(FoundationModels) && compiler(>=6.4) && !os(tvOS) && !os(watchOS)
+        @Test func nativeSessionEvaluatesOrdinaryDynamicInstructionsOnce() {
+            guard #available(macOS 27.0, iOS 27.0, visionOS 27.0, *) else { return }
+            let session = LanguageModelSession(
+                model: LifecycleFixtureModel(),
+                dynamicInstructions: CountingNativeInstructions()
+            )
+
+            _ = makeFoundationModelsSession(
+                model: FoundationModels.SystemLanguageModel.default,
+                session: session,
+                prompt: Prompt("Current")
+            )
+            #expect(session.properties.profileRevision == 1)
+            _ = FoundationModelsDynamicInstructionsAdapter(session: session).body
+            #expect(session.properties.profileRevision == 2)
+        }
+
         @Test func nativeSessionUsesProjectedHistory() throws {
             guard #available(macOS 27.0, iOS 27.0, visionOS 27.0, *) else { return }
             let earlier = Transcript.Entry.prompt(.init(segments: [.text(.init(content: "Earlier"))]))
@@ -529,6 +634,20 @@ private struct ProfileFixtureModel: LanguageModel {
     let id: String
     let state: ProfileFixtureState
 
+    func prewarm(for session: LanguageModelSession, promptPrefix: Prompt?) {
+        state.prewarms.withLock { $0.append("\(id):\(promptPrefix?.description ?? "")") }
+    }
+
+    func logFeedbackAttachment(
+        within session: LanguageModelSession,
+        sentiment: LanguageModelFeedback.Sentiment?,
+        issues: [LanguageModelFeedback.Issue],
+        desiredOutput: Transcript.Entry?
+    ) -> Data {
+        state.feedback.withLock { $0.append(id) }
+        return Data(id.utf8)
+    }
+
     func respond<Content>(
         within session: LanguageModelSession,
         to prompt: Prompt,
@@ -603,6 +722,8 @@ private final class ProfileFixtureState: @unchecked Sendable {
     let transformedHistory = Locked<[[String]]>([])
     let callbackEvents = Locked<[String]>([])
     let callbackHistories = Locked<[[String]]>([])
+    let prewarms = Locked<[String]>([])
+    let feedback = Locked<[String]>([])
 
     var usesSecond: Bool { selection.withLock { $0 } }
     func selectSecond() { selection.withLock { $0 = true } }
@@ -700,6 +821,70 @@ private final class LifecycleFixtureState: @unchecked Sendable {
 
     func record(_ value: String) {
         events.withLock { $0.append(value) }
+    }
+}
+
+private enum FirstErasedProfile {}
+private enum SecondErasedProfile {}
+
+private struct ErasedLeafProfile<Identity>: LanguageModelSession.DynamicProfile {
+    var body: some LanguageModelSession.DynamicProfile {
+        LanguageModelSession.Profile { Instructions("Same leaf type") }
+    }
+}
+
+private struct ErasedRoutingProfile: LanguageModelSession.DynamicProfile {
+    let state: LifecycleFixtureState
+
+    var body: some LanguageModelSession.DynamicProfile {
+        let second = state.useSecond.withLock { $0 }
+        let profile =
+            second
+            ? LanguageModelSession.AnyDynamicProfile(ErasedLeafProfile<SecondErasedProfile>())
+            : LanguageModelSession.AnyDynamicProfile(ErasedLeafProfile<FirstErasedProfile>())
+        let label = second ? "B" : "A"
+        return profile.model(LifecycleFixtureModel())
+            .onActivate { state.record("activate:\(label)") }
+            .onDeactivate { state.record("deactivate:\(label)") }
+    }
+}
+
+private struct HistoryEditingLifecycleProfile: LanguageModelSession.DynamicProfile {
+    let state: LifecycleFixtureState
+    let first: String
+    let second: String
+    let seen: Locked<[[String]]>
+
+    var body: some LanguageModelSession.DynamicProfile {
+        if state.useSecond.withLock({ $0 }) {
+            LanguageModelSession.Profile { Instructions("B") }
+                .model(LifecycleFixtureModel())
+                .onActivate {
+                    guard let properties = SessionPropertyBinding.values else { return }
+                    seen.withLock { $0.append(properties.history.map(\.id)) }
+                    properties.history.removeAll { $0.id == second }
+                }
+                .onPrompt { _ in
+                    let properties = try #require(SessionPropertyBinding.values)
+                    seen.withLock { $0.append(properties.history.map(\.id)) }
+                }
+        } else {
+            LanguageModelSession.Profile { Instructions("A") }
+                .model(LifecycleFixtureModel())
+                .onDeactivate {
+                    guard let properties = SessionPropertyBinding.values else { return }
+                    properties.history.removeAll { $0.id == first }
+                }
+        }
+    }
+}
+
+private struct CountingNativeInstructions: DynamicInstructions {
+    @SessionProperty(\.profileRevision) private var revision
+
+    var body: some DynamicInstructions {
+        revision += 1
+        return Instructions("Revision \(revision)")
     }
 }
 
