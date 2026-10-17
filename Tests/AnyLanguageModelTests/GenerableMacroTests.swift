@@ -129,6 +129,11 @@ private struct TestStructWithArray: Equatable {
     var items: [String]
 }
 
+@Generable
+struct CodableItem: Codable, Equatable {
+    var name: String
+}
+
 @Suite("Generable Macro")
 struct GenerableMacroTests {
     @Test("@Guide description with multiline string")
@@ -233,7 +238,20 @@ struct GenerableMacroTests {
         let args = try TestArguments(content)
         #expect(args.name == "Bob")
         #expect(args.age == 25)
-        #expect(args.asPartiallyGenerated().id == generationID)
+        // As in Foundation Models, the value keeps only its properties, not the generation's id.
+        let partial = args.asPartiallyGenerated()
+        #expect(partial.name == "Bob")
+        #expect(partial.age == 25)
+    }
+
+    /// A value that's also `Codable` encodes only its own properties: nothing generated rides
+    /// along with it.
+    @Test("Codable encodes only the declared properties")
+    func codableEncodesOnlyDeclaredProperties() throws {
+        let value = try CodableItem(GeneratedContent(properties: ["name": GeneratedContent("Bob")], id: GenerationID()))
+        let json = try JSONSerialization.jsonObject(with: JSONEncoder().encode(value)) as? [String: Any]
+        #expect(json?.keys.sorted() == ["name"])
+        #expect(value == CodableItem(name: "Bob"))
     }
 
     @Test("Array properties use partially generated element types")

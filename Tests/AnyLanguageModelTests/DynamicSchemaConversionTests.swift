@@ -5,7 +5,7 @@ import Foundation
 
 #if canImport(FoundationModels)
     import FoundationModels
-    import JSONSchema
+    import enum JSONSchema.JSONSchema
 
     private let isFoundationModelsAvailable: Bool = {
         if #available(macOS 26.0, iOS 26.0, watchOS 27.0, tvOS 26.0, visionOS 26.0, *) {
@@ -224,6 +224,24 @@ import Foundation
             )
 
             _ = try FoundationModels.GenerationSchema(root: root, dependencies: [enumDependency])
+        }
+
+        @available(macOS 26.0, iOS 26.0, watchOS 27.0, tvOS 26.0, visionOS 26.0, *)
+        @Test func convertNamedOneChoiceReferenceDependencySchema() throws {
+            let action: JSONSchema = .anyOf([.reference("#/$defs/ReplyAction")])
+            let reply = FoundationModels.DynamicGenerationSchema(
+                name: "ReplyAction",
+                properties: [.init(name: "value", schema: .init(type: String.self))]
+            )
+            let root = FoundationModels.DynamicGenerationSchema(
+                name: "Root",
+                properties: [.init(name: "action", schema: .init(referenceTo: "Action"))]
+            )
+
+            _ = try FoundationModels.GenerationSchema(
+                root: root,
+                dependencies: [convertToDynamicSchema(action, name: "Action"), reply]
+            )
         }
 
         // MARK: - Fallback Types

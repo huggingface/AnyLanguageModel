@@ -431,6 +431,79 @@ public struct GenerationSchema: Equatable, Codable, CustomDebugStringConvertible
         self.defs = [:]
     }
 
+    /// The property that names the case in the object of an enumeration case,
+    /// as in Foundation Models.
+    static let caseTypeProperty = "type"
+
+    /// Creates a schema for an enumeration whose cases carry values, the way Foundation Models
+    /// describes one: one object for each case, with a `type` property that names the case and a
+    /// property for each of its values.
+    ///
+    /// - Parameters:
+    ///   - type: The type this schema represents.
+    ///   - description: A natural language description of this schema, given to each case.
+    ///   - cases: Each case's name, with a property for each of its values.
+    public init(
+        type: any Generable.Type,
+        description: String? = nil,
+        cases: [(name: String, properties: [GenerationSchema.Property])]
+    ) {
+        let typeName = String(reflecting: type)
+        var members: [Node] = []
+        var allDefs: [String: Node] = [:]
+
+        // Collect the values' types first,
+        // so that no case's definition takes the name of one of them.
+        for (_, properties) in cases {
+            for property in properties {
+                for (defName, defNode) in property.deps {
+                    if let existing = allDefs[defName], existing != defNode {
+                        fatalError("Duplicate type '\(defName)' with different structure")
+                    }
+                    allDefs[defName] = defNode
+                }
+            }
+        }
+
+        for (name, properties) in cases {
+            // Like Foundation Models, `type` is a constant.
+            // Providers whose schemas don't support `const` get a one-choice `enum`.
+            let typeProperty = Self.caseTypeProperty
+            var props: [String: Node] = [typeProperty: .string(StringNode(enumChoices: [name], isConstant: true))]
+            var required: Set<String> = [typeProperty]
+            for property in properties {
+                props[property.name] = property.node
+                if !property.isOptional {
+                    required.insert(property.name)
+                }
+            }
+            // Name the case as Foundation Models does, after the enumeration.
+            // Cases whose names differ only in their first letter, like `foo` and `Foo`,
+            // or a value's type with the same name,
+            // get the first free numeric suffix, starting at 2.
+            let baseName = "\(typeName).Discriminated\(name.prefix(1).uppercased() + name.dropFirst())"
+            var caseName = baseName
+            var suffix = 2
+            while caseName == typeName || allDefs[caseName] != nil {
+                caseName = "\(baseName)\(suffix)"
+                suffix += 1
+            }
+            allDefs[caseName] = .object(
+                ObjectNode(
+                    description: description,
+                    properties: props,
+                    required: required,
+                    propertyOrder: [typeProperty] + properties.map(\.name)
+                )
+            )
+            members.append(.ref(caseName))
+        }
+
+        allDefs[typeName] = .anyOf(members)
+        self.root = .ref(typeName)
+        self.defs = allDefs
+    }
+
     /// Creates a schema as the union of several other types.
     ///
     /// - Parameters:
@@ -535,7 +608,7 @@ public struct GenerationSchema: Equatable, Codable, CustomDebugStringConvertible
         self.defs = allDefs
     }
 
-    private init(root: Node, defs: [String: Node]) {
+    init(root: Node, defs: [String: Node]) {
         self.root = root
         self.defs = defs
     }
@@ -1087,7 +1160,8 @@ extension GenerationSchema {
         }
     }
 
-    private func resolving(_ node: Node, depth: Int) -> Node? {
+    /// Returns the node that a reference refers to, following any chain of references.
+    func resolving(_ node: Node, depth: Int = 0) -> Node? {
         guard depth < 64 else { return nil }
         guard case .ref(let name) = node else { return node }
         return defs[name].flatMap { resolving($0, depth: depth + 1) }
