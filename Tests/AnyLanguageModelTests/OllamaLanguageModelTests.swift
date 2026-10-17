@@ -309,6 +309,33 @@ struct OllamaTopLevelChatParametersTests {
         #expect(requestOptions["repeat_penalty"] == .double(1.1))
     }
 
+    @Test func routesTruncateToTheTopLevelOfTheRequest() throws {
+        var options = GenerationOptions()
+        options[custom: OllamaLanguageModel.self] = [
+            "truncate": .bool(false),
+            "repeat_penalty": .double(1.1),
+        ]
+
+        let params = try createChatParams(
+            model: "qwen3:8b",
+            messages: [OllamaMessage(role: .user, content: "Hello")],
+            tools: nil,
+            options: convertOptions(options),
+            stream: false,
+            format: nil,
+            parameters: extractTopLevelChatParameters(options)
+        )
+
+        #expect(params["truncate"] == .bool(false))
+
+        guard case .object(let requestOptions)? = params["options"] else {
+            Issue.record("Expected options to encode as an object")
+            return
+        }
+        #expect(requestOptions["truncate"] == nil)
+        #expect(requestOptions["repeat_penalty"] == .double(1.1))
+    }
+
     @Test func topLevelParametersDoNotOverrideReservedKeys() throws {
         let params = try createChatParams(
             model: "gpt-oss:20b",

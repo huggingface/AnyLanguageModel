@@ -510,7 +510,7 @@ func convertOptions(_ options: GenerationOptions) -> [String: JSONValue]? {
 
 /// Custom option keys that Ollama's `/api/chat` endpoint reads from the top level
 /// of the request body rather than from `options`.
-private let topLevelChatParameterKeys: Set<String> = ["think", "keep_alive"]
+private let topLevelChatParameterKeys: Set<String> = ["think", "keep_alive", "truncate"]
 
 func extractTopLevelChatParameters(_ options: GenerationOptions) -> [String: JSONValue]? {
     guard let customOptions: [String: JSONValue] = options[custom: OllamaLanguageModel.self] else {
