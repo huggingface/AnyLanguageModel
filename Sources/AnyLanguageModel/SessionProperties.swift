@@ -6,7 +6,50 @@ extension Transcript {
     ///
     /// - Note: This API is exclusive to AnyLanguageModel on OS 26. It mirrors
     ///   Foundation Models 27's `Transcript.HistoryView` role with value semantics.
-    public typealias HistoryView = [Entry]
+    public struct HistoryView: RandomAccessCollection, MutableCollection, RangeReplaceableCollection,
+        ExpressibleByArrayLiteral, Sendable
+    {
+        public typealias Element = Entry
+        public typealias SubSequence = HistoryView
+        public typealias Indices = Range<Index>
+        private var entries: ArraySlice<Entry>
+
+        public struct Index: Comparable, Hashable, Strideable, Sendable {
+            fileprivate let offset: Int
+
+            public static func < (lhs: Self, rhs: Self) -> Bool { lhs.offset < rhs.offset }
+            public func distance(to other: Self) -> Int { other.offset - offset }
+            public func advanced(by n: Int) -> Self { Self(offset: offset + n) }
+        }
+
+        public init() { entries = [] }
+        public init<S: Sequence>(_ elements: S) where S.Element == Entry { entries = Array(elements)[...] }
+        public init(arrayLiteral elements: Entry...) { entries = elements[...] }
+        private init(entries: ArraySlice<Entry>) { self.entries = entries }
+
+        public var startIndex: Index { Index(offset: entries.startIndex) }
+        public var endIndex: Index { Index(offset: entries.endIndex) }
+        public var indices: Indices { startIndex ..< endIndex }
+        public func index(after i: Index) -> Index { i.advanced(by: 1) }
+        public func index(before i: Index) -> Index { i.advanced(by: -1) }
+        public func index(_ i: Index, offsetBy distance: Int) -> Index { i.advanced(by: distance) }
+        public func distance(from start: Index, to end: Index) -> Int { start.distance(to: end) }
+
+        public subscript(position: Index) -> Entry {
+            get { entries[position.offset] }
+            set { entries[position.offset] = newValue }
+        }
+
+        public subscript(bounds: Range<Index>) -> HistoryView {
+            get { HistoryView(entries: entries[bounds.lowerBound.offset ..< bounds.upperBound.offset]) }
+            set { replaceSubrange(bounds, with: newValue) }
+        }
+
+        public mutating func replaceSubrange<C: Collection>(_ subrange: Range<Index>, with newElements: C)
+        where C.Element == Entry {
+            entries.replaceSubrange(subrange.lowerBound.offset ..< subrange.upperBound.offset, with: newElements)
+        }
+    }
 }
 
 /// A type-keyed session property.
@@ -32,12 +75,12 @@ public macro SessionPropertyEntry() =
 public final class SessionPropertyValues: @unchecked Sendable {
     @ObservationIgnored private let sessionPropertyRegistrar = ObservationRegistrar()
     @ObservationIgnored private let customValues = Locked<[ObjectIdentifier: Any]>([:])
-    @ObservationIgnored private let historyGetter: @Sendable () -> Transcript.HistoryView
-    @ObservationIgnored private let historySetter: @Sendable (Transcript.HistoryView) -> Void
+    @ObservationIgnored private let historyGetter: @Sendable () -> [Transcript.Entry]
+    @ObservationIgnored private let historySetter: @Sendable ([Transcript.Entry]) -> Void
 
     init(
-        historyGetter: @escaping @Sendable () -> Transcript.HistoryView,
-        historySetter: @escaping @Sendable (Transcript.HistoryView) -> Void
+        historyGetter: @escaping @Sendable () -> [Transcript.Entry],
+        historySetter: @escaping @Sendable ([Transcript.Entry]) -> Void
     ) {
         self.historyGetter = historyGetter
         self.historySetter = historySetter
@@ -48,13 +91,13 @@ public final class SessionPropertyValues: @unchecked Sendable {
         get {
             _accessSessionProperty(keyPath: \.history)
             if SessionPropertyBinding.values === self, let history = SessionPropertyBinding.history {
-                return history.entries
+                return Transcript.HistoryView(history.entries)
             }
-            return historyGetter()
+            return Transcript.HistoryView(historyGetter())
         }
         set {
             _withSessionPropertyMutation(keyPath: \.history) {
-                let newValue = newValue.filter { entry in
+                let newValue = Array(newValue).filter { entry in
                     if case .instructions = entry { return false }
                     return true
                 }
@@ -92,12 +135,12 @@ public final class SessionPropertyValues: @unchecked Sendable {
     }
 
     func historyBinding(
-        _ entries: Transcript.HistoryView,
+        _ entries: [Transcript.Entry],
         isWritable: Bool,
         protecting protectedEntryIDs: Set<String> = [],
-        onChange: (@Sendable (Transcript.HistoryView) -> Void)? = nil
+        onChange: (@Sendable ([Transcript.Entry]) -> Void)? = nil
     ) -> SessionHistoryBinding {
-        let persist: (@Sendable (Transcript.HistoryView) -> Void)?
+        let persist: (@Sendable ([Transcript.Entry]) -> Void)?
         if isWritable {
             persist = { [historySetter] updated in
                 onChange?(updated)
@@ -142,16 +185,16 @@ enum SessionPropertyBinding {
 }
 
 final class SessionHistoryBinding: @unchecked Sendable {
-    private let storage: Locked<Transcript.HistoryView>
+    private let storage: Locked<[Transcript.Entry]>
     let isWritable: Bool
     private let protectedEntryIDs: Set<String>
-    private let persistValue: (@Sendable (Transcript.HistoryView) -> Void)?
+    private let persistValue: (@Sendable ([Transcript.Entry]) -> Void)?
 
     init(
-        _ entries: Transcript.HistoryView,
+        _ entries: [Transcript.Entry],
         isWritable: Bool,
         protectedEntryIDs: Set<String> = [],
-        persist: (@Sendable (Transcript.HistoryView) -> Void)? = nil
+        persist: (@Sendable ([Transcript.Entry]) -> Void)? = nil
     ) {
         storage = Locked(
             entries.filter { entry in
@@ -164,7 +207,7 @@ final class SessionHistoryBinding: @unchecked Sendable {
         self.persistValue = persist
     }
 
-    var entries: Transcript.HistoryView {
+    var entries: [Transcript.Entry] {
         get { storage.withLock { $0 } }
         set {
             storage.withLock { current in
@@ -174,7 +217,7 @@ final class SessionHistoryBinding: @unchecked Sendable {
         }
     }
 
-    func persist(_ entries: Transcript.HistoryView) {
+    func persist(_ entries: [Transcript.Entry]) {
         persistValue?(entries)
     }
 }
@@ -218,4 +261,33 @@ extension DynamicInstructions {
 
 extension Tool {
     public typealias SessionProperty = LanguageModelSession.SessionProperty
+}
+
+extension Tool {
+    func bindingSessionProperties(_ properties: SessionPropertyValues, history: [Transcript.Entry]) -> any Tool {
+        SessionPropertyTool(wrapped: self, properties: properties, history: history)
+    }
+}
+
+private struct SessionPropertyTool<Wrapped: Tool>: Tool {
+    let wrapped: Wrapped
+    let properties: SessionPropertyValues
+    let history: [Transcript.Entry]
+
+    var name: String { wrapped.name }
+    var description: String { wrapped.description }
+    var parameters: GenerationSchema { wrapped.parameters }
+    var includesSchemaInInstructions: Bool { wrapped.includesSchemaInInstructions }
+
+    func call(arguments: Wrapped.Arguments) async throws -> Wrapped.Output {
+        let entries =
+            SessionPropertyBinding.values === properties
+            ? SessionPropertyBinding.history?.entries ?? history : history
+        let history = SessionHistoryBinding(entries, isWritable: false)
+        return try await SessionPropertyBinding.$values.withValue(properties) {
+            try await SessionPropertyBinding.$history.withValue(history) {
+                try await wrapped.call(arguments: arguments)
+            }
+        }
+    }
 }

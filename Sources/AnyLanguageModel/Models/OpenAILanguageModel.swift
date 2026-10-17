@@ -17,7 +17,7 @@ import JSONSchema
 ///     model: "gpt-4"
 /// )
 /// ```
-public struct OpenAILanguageModel: LanguageModel, ProfileRequestIdentifiedLanguageModel {
+public struct OpenAILanguageModel: LanguageModel {
     /// The reason the model is unavailable.
     /// This model is always available.
     public typealias UnavailableReason = Never
@@ -398,7 +398,6 @@ public struct OpenAILanguageModel: LanguageModel, ProfileRequestIdentifiedLangua
     public let apiVariant: APIVariant
 
     private let httpSession: HTTPSession
-    let profileRequestIdentity = UUID()
 
     /// Creates an OpenAI language model.
     ///
@@ -472,19 +471,15 @@ public struct OpenAILanguageModel: LanguageModel, ProfileRequestIdentifiedLangua
         switch apiVariant {
         case .chatCompletions:
             return try await respondWithChatCompletions(
-                prompt: prompt,
                 generating: type,
                 schema: schema,
-                includeSchemaInPrompt: includeSchemaInPrompt,
                 options: options,
                 session: session
             )
         case .responses:
             return try await respondWithResponses(
-                prompt: prompt,
                 generating: type,
                 schema: schema,
-                includeSchemaInPrompt: includeSchemaInPrompt,
                 options: options,
                 session: session
             )
@@ -492,10 +487,8 @@ public struct OpenAILanguageModel: LanguageModel, ProfileRequestIdentifiedLangua
     }
 
     private func respondWithChatCompletions<Content>(
-        prompt: Prompt,
         generating type: Content.Type,
         schema: GenerationSchema,
-        includeSchemaInPrompt: Bool,
         options: GenerationOptions,
         session: LanguageModelSession
     ) async throws -> LanguageModelSession.Response<Content> where Content: Generable {
@@ -508,41 +501,21 @@ public struct OpenAILanguageModel: LanguageModel, ProfileRequestIdentifiedLangua
         var earlierText = ""
         var inFlightMessages: [OpenAIMessage] = []
 
-        let toolRounds = session.toolRoundLimit(for: "OpenAI")
+        var toolRounds = ToolRoundLimit(provider: "OpenAI")
         // Loop until no more tool calls
         while true {
-            let requestContext = try await session.resolvedRequestContext(
-                including: entries,
-                options: options
-            )
-            if let continuation = try await session.profileContinuationResponse(
-                ifSelectedModelDiffersFrom: profileRequestIdentity,
-                requestContext: requestContext,
-                prompt: prompt,
-                generating: type,
-                schema: schema,
-                includeSchemaInPrompt: includeSchemaInPrompt,
-                prefixEntries: entries,
-                prefixUsage: usage.value,
-                prefixText: earlierText
-            ) {
-                return continuation
-            }
+            let requestContext = session.resolvedRequestContext()
             let tools =
                 requestContext.tools.isEmpty
                 ? nil : requestContext.tools.map(convertToolToOpenAIFormat)
-            let messages = openAIMessages(
-                from: requestContext.transcript,
-                replacing: entries,
-                with: inFlightMessages
-            )
+            let messages = requestContext.transcript.toOpenAIMessages() + inFlightMessages
             let params = try ChatCompletions.createRequestBody(
                 model: model,
                 messages: messages,
                 tools: tools,
                 generating: type,
                 schema: responseSchema.schema,
-                options: requestContext.options,
+                options: options,
                 stream: false
             )
 
@@ -580,11 +553,10 @@ public struct OpenAILanguageModel: LanguageModel, ProfileRequestIdentifiedLangua
                 if let value = try? JSONValue(toolCallMessage) {
                     inFlightMessages.append(OpenAIMessage(role: .raw(rawContent: value), content: .text("")))
                 }
-                try toolRounds.record(toolCalls.map(\.roundCall))
+                try toolRounds.record()
                 let resolution = try await resolveToolCalls(
                     toolCalls,
-                    requestContext: requestContext,
-                    currentRoundEntries: entries,
+                    tools: requestContext.tools,
                     session: session
                 )
                 switch resolution {
@@ -642,10 +614,8 @@ public struct OpenAILanguageModel: LanguageModel, ProfileRequestIdentifiedLangua
     }
 
     private func respondWithResponses<Content>(
-        prompt: Prompt,
         generating type: Content.Type,
         schema: GenerationSchema,
-        includeSchemaInPrompt: Bool,
         options: GenerationOptions,
         session: LanguageModelSession
     ) async throws -> LanguageModelSession.Response<Content> where Content: Generable {
@@ -661,41 +631,21 @@ public struct OpenAILanguageModel: LanguageModel, ProfileRequestIdentifiedLangua
 
         let url = baseURL.appendingPathComponent("responses")
 
-        let toolRounds = session.toolRoundLimit(for: "OpenAI")
+        var toolRounds = ToolRoundLimit(provider: "OpenAI")
         // Loop until no more tool calls
         while true {
-            let requestContext = try await session.resolvedRequestContext(
-                including: entries,
-                options: options
-            )
-            if let continuation = try await session.profileContinuationResponse(
-                ifSelectedModelDiffersFrom: profileRequestIdentity,
-                requestContext: requestContext,
-                prompt: prompt,
-                generating: type,
-                schema: schema,
-                includeSchemaInPrompt: includeSchemaInPrompt,
-                prefixEntries: entries,
-                prefixUsage: usage.value,
-                prefixText: earlierText
-            ) {
-                return continuation
-            }
+            let requestContext = session.resolvedRequestContext()
             let tools =
                 requestContext.tools.isEmpty
                 ? nil : requestContext.tools.map(convertToolToOpenAIFormat)
-            let messages = openAIMessages(
-                from: requestContext.transcript,
-                replacing: entries,
-                with: inFlightMessages
-            )
+            let messages = requestContext.transcript.toOpenAIMessages() + inFlightMessages
             let params = try Responses.createRequestBody(
                 model: model,
                 messages: messages,
                 tools: tools,
                 generating: type,
                 schema: responseSchema.schema,
-                options: requestContext.options,
+                options: options,
                 stream: false
             )
 
@@ -720,11 +670,10 @@ public struct OpenAILanguageModel: LanguageModel, ProfileRequestIdentifiedLangua
                         inFlightMessages.append(OpenAIMessage(role: .raw(rawContent: msg), content: .text("")))
                     }
                 }
-                try toolRounds.record(toolCalls.map(\.roundCall))
+                try toolRounds.record()
                 let resolution = try await resolveToolCalls(
                     toolCalls,
-                    requestContext: requestContext,
-                    currentRoundEntries: entries,
+                    tools: requestContext.tools,
                     session: session
                 )
                 switch resolution {
@@ -838,36 +787,14 @@ public struct OpenAILanguageModel: LanguageModel, ProfileRequestIdentifiedLangua
                 do {
                     var inFlightMessages: [OpenAIMessage] = []
                     var state = StreamingResponseState<Content>(wrapperProperty: responseSchema.wrapperProperty)
-                    let toolRounds = session.toolRoundLimit(for: "OpenAI")
+                    var toolRounds = ToolRoundLimit(provider: "OpenAI")
                     while true {
                         try Task.checkCancellation()
-                        let requestContext = try await session.resolvedRequestContext(
-                            including: state.entries,
-                            options: options
-                        )
-                        if let handoff = session.profileContinuationStream(
-                            ifSelectedModelDiffersFrom: profileRequestIdentity,
-                            requestContext: requestContext,
-                            prompt: prompt,
-                            generating: type,
-                            schema: schema,
-                            includeSchemaInPrompt: includeSchemaInPrompt,
-                            prefixEntries: state.entries,
-                            prefixUsage: state.totalUsage,
-                            prefixText: state.responseText
-                        ) {
-                            for try await snapshot in handoff { continuation.yield(snapshot) }
-                            continuation.finish()
-                            return
-                        }
+                        let requestContext = session.resolvedRequestContext()
                         let tools =
                             requestContext.tools.isEmpty
                             ? nil : requestContext.tools.map(convertToolToOpenAIFormat)
-                        let messages = openAIMessages(
-                            from: requestContext.transcript,
-                            replacing: state.entries,
-                            with: inFlightMessages
-                        )
+                        let messages = requestContext.transcript.toOpenAIMessages() + inFlightMessages
                         let params: JSONValue
                         let path: String
                         switch apiVariant {
@@ -879,7 +806,7 @@ public struct OpenAILanguageModel: LanguageModel, ProfileRequestIdentifiedLangua
                                 tools: tools,
                                 generating: type,
                                 schema: responseSchema.schema,
-                                options: requestContext.options,
+                                options: options,
                                 stream: true
                             )
                         case .chatCompletions:
@@ -890,7 +817,7 @@ public struct OpenAILanguageModel: LanguageModel, ProfileRequestIdentifiedLangua
                                 tools: tools,
                                 generating: type,
                                 schema: responseSchema.schema,
-                                options: requestContext.options,
+                                options: options,
                                 stream: true,
                                 includeUsage: baseURL.host == Self.defaultBaseURL.host
                             )
@@ -965,11 +892,10 @@ public struct OpenAILanguageModel: LanguageModel, ProfileRequestIdentifiedLangua
 
                         guard !toolCalls.isEmpty else { break }
                         try Task.checkCancellation()
-                        try toolRounds.record(toolCalls.map(\.roundCall))
+                        try toolRounds.record()
                         switch try await resolveToolCalls(
                             toolCalls,
-                            requestContext: requestContext,
-                            currentRoundEntries: state.entries,
+                            tools: requestContext.tools,
                             session: session
                         ) {
                         case .stop(let calls):
@@ -1815,11 +1741,17 @@ private enum OpenAIToolResolutionOutcome {
 
 private func resolveToolCalls(
     _ toolCalls: [OpenAIToolCall],
-    requestContext: LanguageModelSession.RequestContext,
-    currentRoundEntries: [Transcript.Entry],
+    tools: [any Tool],
     session: LanguageModelSession
 ) async throws -> OpenAIToolResolutionOutcome {
     if toolCalls.isEmpty { return .invocations([]) }
+
+    var toolsByName: [String: any Tool] = [:]
+    for tool in tools {
+        if toolsByName[tool.name] == nil {
+            toolsByName[tool.name] = tool
+        }
+    }
 
     var transcriptCalls: [Transcript.ToolCall] = []
     transcriptCalls.reserveCapacity(toolCalls.count)
@@ -1836,50 +1768,85 @@ private func resolveToolCalls(
         )
     }
 
-    guard !transcriptCalls.isEmpty else { return .invocations([]) }
-    let entries = currentRoundEntries + [.toolCalls(.init(transcriptCalls))]
-    switch try await session.resolveProfileToolCalls(
-        transcriptCalls,
-        requestContext: requestContext,
-        currentRoundEntries: entries
-    ) {
-    case .stop(let calls):
-        return .stop(calls: calls)
-    case .invocations(let invocations):
-        return .invocations(
-            invocations.map { .init(call: $0.call, output: $0.output) }
-        )
+    if let delegate = session.toolExecutionDelegate {
+        await delegate.didGenerateToolCalls(transcriptCalls, in: session)
     }
+
+    guard !transcriptCalls.isEmpty else { return .invocations([]) }
+
+    var decisions: [ToolExecutionDecision] = []
+    decisions.reserveCapacity(transcriptCalls.count)
+
+    if let delegate = session.toolExecutionDelegate {
+        for call in transcriptCalls {
+            let decision = await delegate.toolCallDecision(for: call, in: session)
+            if case .stop = decision {
+                return .stop(calls: transcriptCalls)
+            }
+            decisions.append(decision)
+        }
+    } else {
+        decisions = Array(repeating: .execute, count: transcriptCalls.count)
+    }
+
+    var results: [OpenAIToolInvocationResult] = []
+    results.reserveCapacity(transcriptCalls.count)
+
+    for (index, call) in transcriptCalls.enumerated() {
+        switch decisions[index] {
+        case .stop:
+            // This branch should be unreachable because `.stop` returns during decision collection.
+            // Keep it as a defensive guard in case that logic changes.
+            return .stop(calls: transcriptCalls)
+        case .provideOutput(let segments):
+            let output = Transcript.ToolOutput(
+                id: call.id,
+                toolName: call.toolName,
+                segments: segments
+            )
+            if let delegate = session.toolExecutionDelegate {
+                await delegate.didExecuteToolCall(call, output: output, in: session)
+            }
+            results.append(OpenAIToolInvocationResult(call: call, output: output))
+        case .execute:
+            guard let tool = toolsByName[call.toolName] else {
+                let message = Transcript.Segment.text(.init(content: "Tool not found: \(call.toolName)"))
+                let output = Transcript.ToolOutput(
+                    id: call.id,
+                    toolName: call.toolName,
+                    segments: [message]
+                )
+                if let delegate = session.toolExecutionDelegate {
+                    await delegate.didExecuteToolCall(call, output: output, in: session)
+                }
+                results.append(OpenAIToolInvocationResult(call: call, output: output))
+                continue
+            }
+
+            do {
+                let segments = try await tool.makeOutputSegments(from: call.arguments)
+                let output = Transcript.ToolOutput(
+                    id: call.id,
+                    toolName: tool.name,
+                    segments: segments
+                )
+                if let delegate = session.toolExecutionDelegate {
+                    await delegate.didExecuteToolCall(call, output: output, in: session)
+                }
+                results.append(OpenAIToolInvocationResult(call: call, output: output))
+            } catch {
+                if let delegate = session.toolExecutionDelegate {
+                    await delegate.didFailToolCall(call, error: error, in: session)
+                }
+                throw LanguageModelSession.ToolCallError(tool: tool, underlyingError: error)
+            }
+        }
+    }
+
+    return .invocations(results)
 }
 
 // MARK: - Converters
-
-private func openAIMessages(
-    from transcript: Transcript,
-    replacing currentRoundEntries: [Transcript.Entry],
-    with continuation: [OpenAIMessage]
-) -> [OpenAIMessage] {
-    guard !continuation.isEmpty, !currentRoundEntries.isEmpty else {
-        return transcript.toOpenAIMessages()
-    }
-    let projected = Array(transcript)
-    let count = currentRoundEntries.count
-    let ranges = projected.indices.compactMap { start -> Range<Int>? in
-        let end = start + count
-        guard end <= projected.count,
-            Array(projected[start ..< end]) == currentRoundEntries
-        else { return nil }
-        return start ..< end
-    }
-    guard ranges.count == 1, let range = ranges.first else {
-        // A legal request projection may remove or reorder the current Tool round.
-        // In that case its mapped transcript is authoritative and opaque replay is reset.
-        return transcript.toOpenAIMessages()
-    }
-    return Transcript(entries: projected[..<range.lowerBound]).toOpenAIMessages()
-        + continuation
-        + Transcript(entries: projected[range.upperBound...]).toOpenAIMessages()
-}
 
 private func convertToolToOpenAIFormat(_ tool: any Tool) -> OpenAITool {
     // Prefer passing through a JSONSchema value built from GenerationSchema
@@ -2147,11 +2114,5 @@ private struct ChatCompletionsUsage: Decodable, Sendable {
                 reasoningTokenCount: completionTokensDetails?.reasoningTokens
             )
         ).normalized
-    }
-}
-
-extension OpenAIToolCall {
-    var roundCall: ToolRoundLimit.Call {
-        .init(name: function?.name ?? "", jsonArguments: function?.arguments)
     }
 }

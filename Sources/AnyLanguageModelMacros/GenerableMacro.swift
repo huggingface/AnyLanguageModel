@@ -19,7 +19,6 @@ public struct GenerableMacro: MemberMacro, ExtensionMacro {
             let properties = extractGuidedProperties(from: structDecl)
 
             return [
-                generateRawContentProperty(),
                 generateMemberwiseInit(properties: properties, explicitNil: explicitNil),
                 generateInitFromGeneratedContent(structName: structName, properties: properties),
                 generateGeneratedContentProperty(
@@ -606,21 +605,11 @@ public struct GenerableMacro: MemberMacro, ExtensionMacro {
         }
     }
 
-    private static func generateRawContentProperty() -> DeclSyntax {
-        return DeclSyntax(
-            stringLiteral: """
-                private let _rawGeneratedContent: GeneratedContent
-                """
-        )
-    }
-
     private static func generateMemberwiseInit(properties: [PropertyInfo], explicitNil: Bool) -> DeclSyntax {
         if properties.isEmpty {
             return DeclSyntax(
                 stringLiteral: """
-                    nonisolated public init() {
-                        self._rawGeneratedContent = GeneratedContent(kind: .structure(properties: [:], orderedKeys: []))
-                    }
+                    nonisolated public init() {}
                     """
             )
         }
@@ -633,48 +622,10 @@ public struct GenerableMacro: MemberMacro, ExtensionMacro {
             "self.\(prop.name) = \(prop.name)"
         }.joined(separator: "\n        ")
 
-        let propertyConversions = properties.map { prop in
-            let propName = prop.name
-            let propType = prop.type
-
-            if propType.hasSuffix("?") {
-                return optionalPropertyConversion(
-                    propertyName: propName,
-                    baseType: String(propType.dropLast()),
-                    explicitNil: explicitNil
-                )
-            } else if isDictionaryType(propType) {
-                return "properties[\"\(propName)\"] = \(propName).generatedContent"
-            } else if propType.hasPrefix("[") && propType.hasSuffix("]") {
-                return "properties[\"\(propName)\"] = GeneratedContent(elements: \(propName))"
-            } else {
-                switch propType {
-                case "String":
-                    return "properties[\"\(propName)\"] = GeneratedContent(\(propName))"
-                case "Int", "Double", "Float", "Bool", "Decimal":
-                    return "properties[\"\(propName)\"] = \(propName).generatedContent"
-                default:
-                    return "properties[\"\(propName)\"] = \(propName).generatedContent"
-                }
-            }
-        }.joined(separator: "\n        ")
-
-        let orderedKeys = properties.map { "\"\($0.name)\"" }.joined(separator: ", ")
-
         return DeclSyntax(
             stringLiteral: """
                 nonisolated public init(\(parameters)) {
                     \(assignments)
-                    
-                    var properties: [String: GeneratedContent] = [:]
-                    \(propertyConversions)
-                    
-                    self._rawGeneratedContent = GeneratedContent(
-                        kind: .structure(
-                            properties: properties,
-                            orderedKeys: [\(orderedKeys)].filter { properties[$0] != nil }
-                        )
-                    )
                 }
                 """
         )
@@ -692,8 +643,6 @@ public struct GenerableMacro: MemberMacro, ExtensionMacro {
             return DeclSyntax(
                 stringLiteral: """
                     nonisolated public init(_ generatedContent: GeneratedContent) throws {
-                        self._rawGeneratedContent = generatedContent
-
                         guard case .structure = generatedContent.kind else {
                             throw DecodingError.typeMismatch(
                                 \(structName).self,
@@ -707,8 +656,6 @@ public struct GenerableMacro: MemberMacro, ExtensionMacro {
             return DeclSyntax(
                 stringLiteral: """
                     nonisolated public init(_ generatedContent: GeneratedContent) throws {
-                        self._rawGeneratedContent = generatedContent
-
                         guard case .structure(let properties, _) = generatedContent.kind else {
                             throw DecodingError.typeMismatch(
                                 \(structName).self,
@@ -970,7 +917,7 @@ public struct GenerableMacro: MemberMacro, ExtensionMacro {
         return DeclSyntax(
             stringLiteral: """
                 nonisolated public func asPartiallyGenerated() -> PartiallyGenerated {
-                    return try! PartiallyGenerated(_rawGeneratedContent)
+                    return try! PartiallyGenerated(generatedContent)
                 }
                 """
         )

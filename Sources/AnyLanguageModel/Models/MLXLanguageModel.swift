@@ -802,24 +802,6 @@ import Foundation
             )
         }
 
-        private static func maxToolIterationsExceededError(limit: Int) -> LanguageModelSession.GenerationError {
-            .decodingFailure(
-                .init(
-                    debugDescription:
-                        "Exceeded maximum tool iterations (\(limit)) while processing MLX tool calls."
-                )
-            )
-        }
-
-        private static func repeatedToolCallLoopError() -> LanguageModelSession.GenerationError {
-            .decodingFailure(
-                .init(
-                    debugDescription:
-                        "Detected repeated MLX tool-call signature and aborted to avoid an infinite tool loop."
-                )
-            )
-        }
-
         private static func acquireGenerationSlot(for session: LanguageModelSession) -> Bool {
             sessionGenerationGate.acquire(session: session)
         }
@@ -1146,9 +1128,7 @@ import Foundation
             var usage = LanguageModelSession.Usage.zero
             var allTextChunks: [String] = []
             var allEntries: [Transcript.Entry] = []
-            let maxToolIterations = 8
-            var toolIteration = 0
-            var previousToolCallSignature: String?
+            var toolRounds = ToolRoundLimit(provider: "MLX")
 
             // Loop until no more tool calls
             while true {
@@ -1213,30 +1193,9 @@ import Foundation
                 let assistantText = chunks.joined()
                 allTextChunks.append(assistantText)
 
-                // Add assistant response to chat history
-                if !assistantText.isEmpty {
-                    pendingChat.append(.assistant(assistantText))
-                }
-
                 // If there are tool calls, execute them and continue
                 if !collectedToolCalls.isEmpty {
-                    toolIteration += 1
-                    if toolIteration > maxToolIterations {
-                        let unresolvedCalls = try makeTranscriptToolCalls(from: collectedToolCalls)
-                        allEntries.append(Transcript.Entry.toolCalls(Transcript.ToolCalls(unresolvedCalls)))
-                        throw Self.maxToolIterationsExceededError(limit: maxToolIterations)
-                    }
-
-                    let signature =
-                        collectedToolCalls
-                        .map { "\($0.function.name):\($0.function.arguments)" }
-                        .joined(separator: "|")
-                    if signature == previousToolCallSignature {
-                        let unresolvedCalls = try makeTranscriptToolCalls(from: collectedToolCalls)
-                        allEntries.append(Transcript.Entry.toolCalls(Transcript.ToolCalls(unresolvedCalls)))
-                        throw Self.repeatedToolCallLoopError()
-                    }
-                    previousToolCallSignature = signature
+                    try toolRounds.record()
 
                     let resolution = try await resolveToolCalls(
                         collectedToolCalls,
@@ -1261,11 +1220,8 @@ import Foundation
                             // Execute each tool and add results to chat
                             for invocation in invocations {
                                 allEntries.append(.toolOutput(invocation.output))
-
-                                // Convert tool output to JSON string for MLX
-                                let toolResultJSON = toolOutputToJSON(invocation.output)
-                                pendingChat.append(.tool(toolResultJSON))
                             }
+                            pendingChat += toolCallMessages(for: invocations, text: assistantText)
 
                             // Continue loop to generate with tool results
                             continue
@@ -1398,9 +1354,7 @@ import Foundation
                         var usage = LanguageModelSession.Usage.zero
                         var accumulatedText = ""
                         var accumulatedEntries: [Transcript.Entry] = []
-                        let maxToolIterations = 8
-                        var toolIteration = 0
-                        var previousToolCallSignature: String?
+                        var toolRounds = ToolRoundLimit(provider: "MLX")
 
                         // Yields a snapshot carrying the cumulative text and tool entries so far.
                         func yieldSnapshot() {
@@ -1480,27 +1434,9 @@ import Foundation
                                 session: session
                             )
 
-                            // Feed this round's assistant text back into the chat history.
-                            let roundText = String(accumulatedText.dropFirst(roundStartTextCount))
-                            if !roundText.isEmpty {
-                                pendingChat.append(.assistant(roundText))
-                            }
-
                             guard !collectedToolCalls.isEmpty else { break }
 
-                            toolIteration += 1
-                            if toolIteration > maxToolIterations {
-                                throw Self.maxToolIterationsExceededError(limit: maxToolIterations)
-                            }
-
-                            let signature =
-                                collectedToolCalls
-                                .map { "\($0.function.name):\($0.function.arguments)" }
-                                .joined(separator: "|")
-                            if signature == previousToolCallSignature {
-                                throw Self.repeatedToolCallLoopError()
-                            }
-                            previousToolCallSignature = signature
+                            try toolRounds.record()
 
                             let resolution = try await resolveToolCalls(
                                 collectedToolCalls,
@@ -1522,8 +1458,11 @@ import Foundation
                                 )
                                 for invocation in invocations {
                                     accumulatedEntries.append(.toolOutput(invocation.output))
-                                    pendingChat.append(.tool(toolOutputToJSON(invocation.output)))
                                 }
+                                pendingChat += toolCallMessages(
+                                    for: invocations,
+                                    text: String(accumulatedText.dropFirst(roundStartTextCount))
+                                )
                                 yieldSnapshot()
                             }
                         }
@@ -1698,7 +1637,7 @@ import Foundation
 
     // MARK: - Transcript Conversion
 
-    private func convertTranscriptToMLXChat(
+    func convertTranscriptToMLXChat(
         requestContext: LanguageModelSession.RequestContext,
         fallbackPrompt: String
     ) -> [MLXLMCommon.Chat.Message] {
@@ -1718,7 +1657,9 @@ import Foundation
             chat.append(.init(role: .system, content: instructions))
         }
 
-        // Convert each transcript entry
+        // Convert each transcript entry. A tool call is sent with its result,
+        // so calls wait here until their outputs arrive.
+        var pendingCalls: [String: Transcript.ToolCall] = [:]
         for entry in requestContext.transcript {
             switch entry {
             case .instructions(let instr):
@@ -1734,13 +1675,17 @@ import Foundation
                 let content = response.segments.map { extractText(from: $0) }.joined(separator: "\n")
                 chat.append(.assistant(content))
 
-            case .toolCalls:
-                // Tool calls are handled inline during generation loop
-                break
+            case .toolCalls(let toolCalls):
+                for call in toolCalls {
+                    pendingCalls[call.id] = call
+                }
 
             case .toolOutput(let toolOutput):
-                let content = toolOutput.segments.map { extractText(from: $0) }.joined(separator: "\n")
-                chat.append(.tool(content))
+                if let call = pendingCalls.removeValue(forKey: toolOutput.id) {
+                    chat += toolCallMessages(for: [ToolInvocationResult(call: call, output: toolOutput)])
+                } else {
+                    chat.append(.tool(toolOutputToJSON(toolOutput), id: toolOutput.id, name: toolOutput.toolName))
+                }
             }
         }
 
@@ -1897,7 +1842,8 @@ import Foundation
         transcriptCalls.reserveCapacity(toolCalls.count)
         for call in toolCalls {
             let args = try toGeneratedContent(call.function.arguments)
-            let callID = UUID().uuidString
+            // mlx-swift-lm formats the ID for the model's tool-call syntax, which some chat templates check.
+            let callID = call.id ?? UUID().uuidString
             transcriptCalls.append(
                 Transcript.ToolCall(
                     id: callID,
@@ -2025,6 +1971,34 @@ import Foundation
             }
         }
         return textParts.joined(separator: "\n")
+    }
+
+    /// The messages that send a round of tool calls back to the model:
+    /// for each call, the assistant message that made it, then its result.
+    /// The round's text goes with the first call.
+    ///
+    /// Each call gets its own assistant message,
+    /// because some chat templates, like Llama 3's,
+    /// reject a message with more than one tool call.
+    private func toolCallMessages(
+        for invocations: [ToolInvocationResult],
+        text: String = ""
+    ) -> [MLXLMCommon.Chat.Message] {
+        invocations.enumerated().flatMap { index, invocation -> [MLXLMCommon.Chat.Message] in
+            let call = invocation.call
+            let arguments = try? JSONDecoder().decode(
+                [String: MLXLMCommon.JSONValue].self,
+                from: Data(call.arguments.jsonString.utf8)
+            )
+            let toolCall = MLXLMCommon.ToolCall(
+                function: .init(name: call.toolName, arguments: arguments ?? [:]),
+                id: call.id
+            )
+            return [
+                .assistant(index == 0 ? text : "", toolCalls: [toolCall]),
+                .tool(toolOutputToJSON(invocation.output), id: call.id, name: call.toolName),
+            ]
+        }
     }
 
     /// Builds a JSONSchema-informed prompt for structured output.

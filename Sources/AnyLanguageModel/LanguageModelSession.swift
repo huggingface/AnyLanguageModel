@@ -147,6 +147,7 @@ public final class LanguageModelSession: @unchecked Sendable {
     ///   with the Foundation Models framework.
     ///   It's public so that language models outside this module
     ///   can read the inputs for each request.
+    @_spi(Compatibility)
     public struct RequestContext: Sendable {
         /// The transcript to send with the request.
         public let transcript: Transcript
@@ -173,7 +174,7 @@ public final class LanguageModelSession: @unchecked Sendable {
         fileprivate let canonicalTranscript: [Transcript.Entry]
         fileprivate let pendingEntryIDs: Set<String>
         fileprivate let callbackState: ProfileCallbackState
-        fileprivate let callbackHistory = Locked<Transcript.HistoryView?>(nil)
+        fileprivate let callbackHistory = Locked<[Transcript.Entry]?>(nil)
 
         var hasDynamicProfile: Bool { profile != nil }
 
@@ -237,13 +238,14 @@ public final class LanguageModelSession: @unchecked Sendable {
 
     /// Returns the transcript, instructions, and tools for the next model request.
     ///
-    /// Calling this method doesn't change the session.
+    /// Profile resolution may mutate session properties and canonical history.
     ///
     /// - Note: This API is exclusive to AnyLanguageModel
     ///   and using it means your code is no longer drop-in compatible
     ///   with the Foundation Models framework.
     ///   It's public so that language models outside this module
     ///   can read the inputs for each request.
+    @_spi(Compatibility)
     nonisolated public func resolvedRequestContext() -> RequestContext {
         if let prepared = ProfileRequestBinding.prepared,
             prepared.session === self
@@ -284,6 +286,7 @@ public final class LanguageModelSession: @unchecked Sendable {
     /// - Note: This overload is exclusive to AnyLanguageModel. Compatibility
     ///   executors use it to preserve Foundation Models 27 request timing while
     ///   AnyLanguageModel still exposes its legacy model interface.
+    @_spi(Compatibility)
     nonisolated public func resolvedRequestContext(
         including additionalEntries: [Transcript.Entry],
         options: GenerationOptions = .init()
@@ -351,7 +354,7 @@ public final class LanguageModelSession: @unchecked Sendable {
                 return RequestContext(
                     transcript: Transcript(entries: canonical),
                     instructions: instructions,
-                    tools: tools,
+                    tools: tools.map { $0.bindingSessionProperties(properties, history: canonical) },
                     model: model,
                     options: options,
                     transcriptErrorHandlingPolicy: sessionErrorPolicy,
@@ -379,7 +382,7 @@ public final class LanguageModelSession: @unchecked Sendable {
             return RequestContext(
                 transcript: requestTranscript,
                 instructions: resolved.instructions,
-                tools: resolved.tools,
+                tools: resolved.tools.map { $0.bindingSessionProperties(properties, history: canonical) },
                 model: model,
                 options: options,
                 transcriptErrorHandlingPolicy: sessionErrorPolicy,
@@ -438,7 +441,7 @@ public final class LanguageModelSession: @unchecked Sendable {
         return RequestContext(
             transcript: requestTranscript,
             instructions: resolved.instructions,
-            tools: resolved.tools,
+            tools: resolved.tools.map { $0.bindingSessionProperties(properties, history: canonical) },
             model: resolved.model ?? model,
             options: resolvedOptions,
             contextOptions: .init(
@@ -470,6 +473,7 @@ public final class LanguageModelSession: @unchecked Sendable {
     }
 
     /// Runs the active request snapshot's Tool-call callbacks.
+    @_spi(Compatibility)
     nonisolated public func profileWillExecuteToolCall(
         _ call: Transcript.ToolCall,
         requestContext: RequestContext,
@@ -491,6 +495,7 @@ public final class LanguageModelSession: @unchecked Sendable {
     }
 
     /// Runs the active request snapshot's Tool-output callbacks.
+    @_spi(Compatibility)
     nonisolated public func profileDidProduceToolOutput(
         for call: Transcript.ToolCall,
         output: Transcript.ToolOutput,
@@ -518,6 +523,7 @@ public final class LanguageModelSession: @unchecked Sendable {
     ///
     /// - Note: This API is exclusive to AnyLanguageModel's compatibility model
     ///   seam. Ordinary callers compose callbacks through ``DynamicProfile``.
+    @_spi(Compatibility)
     nonisolated public func profileDidProduceEntries(
         _ entries: [Transcript.Entry],
         requestContext: RequestContext,
@@ -565,6 +571,7 @@ public final class LanguageModelSession: @unchecked Sendable {
     /// Executes compatibility-model Tool work with session properties bound to
     /// the producing request. Custom properties remain mutable, while the
     /// canonical history is read-only in a Tool, matching Foundation Models 27.
+    @_spi(Compatibility)
     nonisolated public func withProfileToolExecution<Result: Sendable>(
         requestContext: RequestContext,
         currentRoundEntries: [Transcript.Entry],
@@ -616,7 +623,7 @@ public final class LanguageModelSession: @unchecked Sendable {
         history: [Transcript.Entry],
         isHistoryWritable: Bool,
         protectedEntryIDs: Set<String> = [],
-        onHistoryChange: (@Sendable (Transcript.HistoryView) -> Void)? = nil,
+        onHistoryChange: (@Sendable ([Transcript.Entry]) -> Void)? = nil,
         operation: @Sendable () async throws -> Result
     ) async rethrows -> Result {
         let history = properties.historyBinding(
@@ -738,6 +745,7 @@ public final class LanguageModelSession: @unchecked Sendable {
 
     /// Creates a session whose active model, instructions, Tools, and request
     /// projection are resolved before every model request.
+    @_spi(Compatibility)
     public convenience init(
         profile: sending some DynamicProfile,
         history: some Collection<Transcript.Entry> = []
@@ -796,7 +804,7 @@ public final class LanguageModelSession: @unchecked Sendable {
 
         let state = Locked(State(finalTranscript))
         self.state = state
-        let setHistory: @Sendable (Transcript.HistoryView) -> Void = { history in
+        let setHistory: @Sendable ([Transcript.Entry]) -> Void = { history in
             let history = history.filter { entry in
                 if case .instructions = entry { return false }
                 return true
@@ -809,7 +817,7 @@ public final class LanguageModelSession: @unchecked Sendable {
                 locked.transcript = Transcript(entries: Array(instructions) + history)
             }
         }
-        let observedHistorySetter = Locked<(@Sendable (Transcript.HistoryView) -> Void)?>(nil)
+        let observedHistorySetter = Locked<(@Sendable ([Transcript.Entry]) -> Void)?>(nil)
         self.properties = SessionPropertyValues(
             historyGetter: {
                 state.withLock { locked in
