@@ -95,6 +95,21 @@ struct ReportedUsage: Sendable {
     }
 }
 
+/// The usage of a response made of rounds, each a request with the whole conversation so far,
+/// as a local model counts it: the rounds added up, and the latest round's input.
+struct RoundsUsage: Sendable {
+    /// Every round's usage, added up.
+    private(set) var total = LanguageModelSession.Usage.zero
+
+    /// The latest round's input: how much of the context the response takes now.
+    private(set) var context = LanguageModelSession.Usage.zero.input
+
+    mutating func add(_ round: LanguageModelSession.Usage) {
+        total.add(round)
+        context = round.input
+    }
+}
+
 /// Usage fields shared by OpenAI's Responses API and Open Responses.
 struct ResponsesUsage: Decodable, Sendable {
     let inputTokens: Int?
@@ -136,7 +151,9 @@ extension LanguageModelSession.ResponseStream.Snapshot {
     ///     if the provider's response schema wraps it.
     ///   - context: The latest request's input, when it differs from the usage's.
     init?(
-        text: String, usage: LanguageModelSession.Usage, wrapperProperty: String? = nil,
+        text: String,
+        usage: LanguageModelSession.Usage,
+        wrapperProperty: String? = nil,
         context: LanguageModelSession.Usage.Input? = nil
     ) {
         if Content.self == String.self {
@@ -152,7 +169,12 @@ extension LanguageModelSession.ResponseStream.Snapshot {
                 fromProperty: wrapperProperty
             )
             guard let content = try? Content(raw) else { return nil }
-            self.init(content: content.asPartiallyGenerated(), rawContent: raw, usage: usage, context: context ?? usage.input)
+            self.init(
+                content: content.asPartiallyGenerated(),
+                rawContent: raw,
+                usage: usage,
+                context: context ?? usage.input
+            )
         }
     }
 }
