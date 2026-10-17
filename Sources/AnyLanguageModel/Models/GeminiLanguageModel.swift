@@ -254,7 +254,7 @@ public struct GeminiLanguageModel: LanguageModel {
                 requestTranscript.append(entry)
             }
             let params = try createGenerateContentParams(
-                contents: requestTranscript.toGeminiContent(),
+                contents: try requestTranscript.toGeminiContent(),
                 tools: geminiTools,
                 generating: type,
                 schema: responseSchema.schema,
@@ -432,7 +432,7 @@ public struct GeminiLanguageModel: LanguageModel {
                             requestTranscript.append(entry)
                         }
                         let params = try createGenerateContentParams(
-                            contents: requestTranscript.toGeminiContent(),
+                            contents: try requestTranscript.toGeminiContent(),
                             tools: geminiTools,
                             generating: type,
                             schema: responseSchema.schema,
@@ -773,32 +773,85 @@ private func emptyResponseContent<Content: Generable>(
     }
 }
 
-private func toJSONValue(_ toolOutput: Transcript.ToolOutput) throws -> [String: JSONValue] {
-    var result: [String: JSONValue] = [:]
+private func toGeminiFunctionResponse(
+    _ toolOutput: Transcript.ToolOutput
+) throws -> GeminiFunctionResponse {
+    var resultValues: [String] = []
+    var parts: [GeminiPart] = []
 
     for segment in toolOutput.segments {
         switch segment {
         case .text(let text):
-            result["result"] = .string(text.content)
+            resultValues.append(text.content)
         case .structure(let structured):
-            // For structured segments, encode the content
             let data = try JSONEncoder().encode(structured.content)
             if let jsonString = String(data: data, encoding: .utf8) {
-                result["result"] = .string(jsonString)
+                resultValues.append(jsonString)
             }
-        case .image:
-            // Ignore images in tool outputs for Gemini conversion
-            break
+        case .image(let image):
+            switch image.source {
+            case .data(let data, let mimeType):
+                parts.append(
+                    .inlineData(
+                        GeminiInlineData(
+                            mimeType: mimeType,
+                            data: data.base64EncodedString()
+                        )
+                    )
+                )
+            case .url(let url):
+                parts.append(.inlineData(try geminiFunctionResponseData(from: url)))
+            }
         }
     }
 
-    return result
+    var response: [String: JSONValue] = [:]
+    if !resultValues.isEmpty {
+        response["result"] = .string(resultValues.joined(separator: "\n"))
+    }
+    return GeminiFunctionResponse(
+        name: toolOutput.toolName,
+        response: response,
+        parts: parts.isEmpty ? nil : parts
+    )
+}
+
+private enum GeminiFunctionResponseAttachmentError: LocalizedError {
+    case unsupportedURL(URL)
+    case unsupportedImageType(URL)
+
+    var errorDescription: String? {
+        switch self {
+        case .unsupportedURL(let url):
+            "Gemini Tool output attachments require a local file URL; cannot inline \(url.absoluteString)."
+        case .unsupportedImageType(let url):
+            "Gemini Tool output attachments support PNG, JPEG, and WebP files; cannot determine a supported MIME type for \(url.lastPathComponent)."
+        }
+    }
+}
+
+private func geminiFunctionResponseData(from url: URL) throws -> GeminiInlineData {
+    guard url.isFileURL else {
+        throw GeminiFunctionResponseAttachmentError.unsupportedURL(url)
+    }
+
+    let mimeType =
+        switch url.pathExtension.lowercased() {
+        case "png": "image/png"
+        case "jpg", "jpeg": "image/jpeg"
+        case "webp": "image/webp"
+        default: throw GeminiFunctionResponseAttachmentError.unsupportedImageType(url)
+        }
+    return try GeminiInlineData(
+        mimeType: mimeType,
+        data: Data(contentsOf: url).base64EncodedString()
+    )
 }
 
 // MARK: - Supporting Types
 
 extension Transcript {
-    fileprivate func toGeminiContent() -> [GeminiContent] {
+    fileprivate func toGeminiContent() throws -> [GeminiContent] {
         var messages = [GeminiContent]()
         for item in self {
             switch item {
@@ -848,11 +901,7 @@ extension Transcript {
                 )
             case .toolOutput(let toolOutput):
                 // Add function response as a user message (Gemini API expects function responses from user role)
-                let response = try? toJSONValue(toolOutput)
-                let functionResponse = GeminiFunctionResponse(
-                    name: toolOutput.toolName,
-                    response: response ?? [:]
-                )
+                let functionResponse = try toGeminiFunctionResponse(toolOutput)
                 messages.append(
                     .init(
                         role: .user,
@@ -1120,6 +1169,7 @@ private struct GeminiFunctionCall: Codable, Sendable {
 private struct GeminiFunctionResponse: Codable, Sendable {
     let name: String
     let response: [String: JSONValue]
+    let parts: [GeminiPart]?
 }
 
 private struct GeminiGenerateContentResponse: Codable, Sendable {
