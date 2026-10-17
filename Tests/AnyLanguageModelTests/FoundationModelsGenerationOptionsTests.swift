@@ -67,6 +67,42 @@ import Testing
             #endif
             #expect(converted.temperature == nil)
             #expect(converted.maximumResponseTokens == nil)
+            #if compiler(>=6.4) && !os(tvOS)
+                if #available(macOS 27, iOS 27, visionOS 27, watchOS 27, *) {
+                    #expect(converted.toolCallingMode == nil)
+                }
+            #endif
         }
+
+        #if compiler(>=6.4) && !os(tvOS)
+            @available(macOS 27, iOS 27, visionOS 27, watchOS 27, *)
+            @Test(
+                "Forwards tool calling modes",
+                arguments: [
+                    (
+                        AnyLanguageModel.GenerationOptions.ToolCallingMode.allowed,
+                        FoundationModels.GenerationOptions.ToolCallingMode.Kind.allowed
+                    ),
+                    (
+                        AnyLanguageModel.GenerationOptions.ToolCallingMode.required,
+                        FoundationModels.GenerationOptions.ToolCallingMode.Kind.required
+                    ),
+                    (
+                        AnyLanguageModel.GenerationOptions.ToolCallingMode.disallowed,
+                        FoundationModels.GenerationOptions.ToolCallingMode.Kind.disallowed
+                    ),
+                ]
+            )
+            func forwardsToolCallingMode(
+                mode: AnyLanguageModel.GenerationOptions.ToolCallingMode,
+                expected: FoundationModels.GenerationOptions.ToolCallingMode.Kind
+            ) {
+                let converted = AnyLanguageModel.GenerationOptions(
+                    toolCallingMode: mode
+                ).toFoundationModels()
+
+                #expect(converted.toolCallingMode?.kind == expected)
+            }
+        #endif
     }
 #endif

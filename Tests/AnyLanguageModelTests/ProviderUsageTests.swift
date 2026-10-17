@@ -9,32 +9,34 @@ import Testing
         enum Provider: CaseIterable, Equatable, Sendable {
             case chat, responses, openResponses, anthropic, gemini, ollama
 
-            func makeSession(tools: [any Tool] = []) -> LanguageModelSession {
+            func makeModel() -> any LanguageModel {
                 let http = UsageURLProtocol.makeSession()
-                let model: any LanguageModel
                 switch self {
                 case .chat, .responses:
-                    model = OpenAILanguageModel(
+                    return OpenAILanguageModel(
                         apiKey: "test",
                         model: "test",
                         apiVariant: self == .chat ? .chatCompletions : .responses,
                         session: http
                     )
                 case .openResponses:
-                    model = OpenResponsesLanguageModel(
+                    return OpenResponsesLanguageModel(
                         baseURL: URL(string: "https://example.com/v1")!,
                         apiKey: "test",
                         model: "test",
                         session: http
                     )
                 case .anthropic:
-                    model = AnthropicLanguageModel(apiKey: "test", model: "test", session: http)
+                    return AnthropicLanguageModel(apiKey: "test", model: "test", session: http)
                 case .gemini:
-                    model = GeminiLanguageModel(apiKey: "test", model: "test", session: http)
+                    return GeminiLanguageModel(apiKey: "test", model: "test", session: http)
                 case .ollama:
-                    model = OllamaLanguageModel(model: "test", session: http)
+                    return OllamaLanguageModel(model: "test", session: http)
                 }
-                return LanguageModelSession(model: model, tools: tools)
+            }
+
+            func makeSession(tools: [any Tool] = []) -> LanguageModelSession {
+                LanguageModelSession(model: makeModel(), tools: tools)
             }
 
             var counts: [String: Any] {
@@ -800,7 +802,7 @@ import Testing
         }
 
         /// Returns the debug description of the decoding failure that `body` throws, if any.
-        private static func decodingFailureDescription(_ body: () async throws -> Void) async -> String? {
+        static func decodingFailureDescription(_ body: () async throws -> Void) async -> String? {
             do {
                 try await body()
                 return nil
@@ -909,7 +911,7 @@ import Testing
     /// A `URLProtocol` that answers requests from a queue of canned responses
     /// and records every request body it sees,
     /// so request/response round trips can be asserted offline.
-    private final class UsageURLProtocol: URLProtocol {
+    final class UsageURLProtocol: URLProtocol {
         struct Exchange: Sendable {
             var statusCode: Int = 200
             var body: Data
