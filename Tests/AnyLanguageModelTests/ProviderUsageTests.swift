@@ -482,6 +482,57 @@ import Testing
             #expect(UsageURLProtocol.recordedBodies.count == 2)
         }
 
+        @Test(arguments: [false, true])
+        func anthropicInlinesLocalToolImagesAndReplaysThem(_ streaming: Bool) async throws {
+            let provider = Provider.anthropic
+            UsageURLProtocol.reset()
+            UsageURLProtocol.enqueue(
+                json: try streaming ? provider.toolStream() : Self.json(provider.response(text: "", tool: true))
+            )
+            if streaming {
+                UsageURLProtocol.enqueue(json: try provider.stream())
+            }
+            UsageURLProtocol.enqueue(json: try Self.json(provider.response()))
+            let url = FileManager.default.temporaryDirectory
+                .appendingPathComponent(UUID().uuidString)
+                .appendingPathExtension("png")
+            try testImageData.write(to: url)
+            defer { try? FileManager.default.removeItem(at: url) }
+            let session = provider.makeSession(tools: [LocalImageWeatherTool(url: url)])
+
+            if streaming {
+                _ = try await session.streamResponse(to: "Weather?").collect()
+            } else {
+                _ = try await session.respond(to: "Weather?")
+            }
+            _ = try await session.respond(to: "Review the image")
+
+            #expect(UsageURLProtocol.recordedBodies.count == (streaming ? 3 : 2))
+            for body in UsageURLProtocol.recordedBodies.dropFirst() {
+                let request = try JSONDecoder().decode([String: JSONValue].self, from: body)
+                let messages = try #require(request["messages"]?.arrayValue)
+                let results = messages.flatMap { $0.objectValue?["content"]?.arrayValue ?? [] }
+                    .filter { $0.objectValue?["type"] == .string("tool_result") }
+                let content = try #require(results.first?.objectValue?["content"]?.arrayValue)
+                let image = try #require(content.first { $0.objectValue?["type"] == .string("image") })
+                let source = try #require(image.objectValue?["source"]?.objectValue)
+                #expect(source["type"] == .string("base64"))
+                #expect(source["media_type"] == .string("image/png"))
+                #expect(source["data"] == .string(testImageData.base64EncodedString()))
+                #expect(source["url"] == nil)
+            }
+        }
+
+        private struct LocalImageWeatherTool: Tool {
+            let name = "getWeather"
+            let description = "Get weather as an image"
+            let url: URL
+
+            func call(arguments: WeatherTool.Arguments) async throws -> Prompt {
+                Prompt { Attachment(imageURL: url) }
+            }
+        }
+
         @Test(arguments: Provider.allCases)
         func stoppedStreamedTools(_ provider: Provider) async throws {
             UsageURLProtocol.reset()
