@@ -799,15 +799,18 @@ import Testing
             #expect(response.usage == .zero)
         }
 
-        /// Returns the debug description of the decoding failure that `body` throws, if any.
-        private static func decodingFailureDescription(_ body: () async throws -> Void) async -> String? {
+        /// Returns what `body` throws when it goes past its tool-round limit, if it does.
+        private static func toolRoundLimitExceeded(
+            _ body: () async throws -> Void
+        ) async -> LanguageModelSession.ToolRoundLimitExceeded? {
             do {
                 try await body()
                 return nil
-            } catch LanguageModelSession.GenerationError.decodingFailure(let context) {
-                return context.debugDescription
+            } catch let error as LanguageModelSession.ToolRoundLimitExceeded {
+                return error
             } catch {
-                return "\(error)"
+                Issue.record("Expected the tool-round limit, got \(error)")
+                return nil
             }
         }
 
@@ -820,13 +823,49 @@ import Testing
             }
             let tool = RecordingWeatherTool()
             let session = provider.makeSession(tools: [tool])
-            let description = await Self.decodingFailureDescription {
-                _ = try await session.streamResponse(to: "Weather?").collect()
-            }
-            #expect(description?.contains("Exceeded maximum tool iterations (\(limit))") == true)
+            let exceeded = try #require(
+                await Self.toolRoundLimitExceeded {
+                    _ = try await session.streamResponse(to: "Weather?").collect()
+                }
+            )
+            #expect(exceeded.limit == limit)
+            // The rounds that ran are carried, each call followed by its output; the round past the limit isn't.
+            #expect(Self.toolCallCount(in: exceeded.transcriptEntries) == limit)
+            #expect(Self.toolOutputCount(in: exceeded.transcriptEntries) == limit)
             #expect(tool.cities.withLock { $0.count } == limit)
             #expect(UsageURLProtocol.recordedBodies.count == limit + 1)
             #expect(!session.isResponding)
+        }
+
+        @Test(arguments: [Provider.chat, .responses, .openResponses, .gemini])
+        func toolRoundsStopAtLimit(_ provider: Provider) async throws {
+            UsageURLProtocol.reset()
+            var options = GenerationOptions()
+            options.maximumToolRounds = 2
+            for _ in 0 ... options.maximumToolRounds {
+                UsageURLProtocol.enqueue(json: try Self.json(provider.response(text: "", tool: true)))
+            }
+            let tool = RecordingWeatherTool()
+            let session = provider.makeSession(tools: [tool])
+            let exceeded = try #require(
+                await Self.toolRoundLimitExceeded {
+                    _ = try await session.respond(to: "Weather?", options: options)
+                }
+            )
+            #expect(exceeded.limit == 2)
+            #expect(Self.toolCallCount(in: exceeded.transcriptEntries) == 2)
+            #expect(Self.toolOutputCount(in: exceeded.transcriptEntries) == 2)
+            #expect(tool.cities.withLock { $0.count } == 2)
+        }
+
+        private static func toolCallCount(in entries: ArraySlice<Transcript.Entry>) -> Int {
+            entries.reduce(0) { count, entry in
+                if case .toolCalls(let calls) = entry { count + calls.count } else { count }
+            }
+        }
+
+        private static func toolOutputCount(in entries: ArraySlice<Transcript.Entry>) -> Int {
+            entries.filter { if case .toolOutput = $0 { true } else { false } }.count
         }
 
         @Test(arguments: Provider.allCases)

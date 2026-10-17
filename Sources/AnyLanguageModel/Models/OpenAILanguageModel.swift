@@ -553,7 +553,7 @@ public struct OpenAILanguageModel: LanguageModel {
                 if let value = try? JSONValue(toolCallMessage) {
                     inFlightMessages.append(OpenAIMessage(role: .raw(rawContent: value), content: .text("")))
                 }
-                try toolRounds.record()
+                try toolRounds.record(completed: entries)
                 let resolution = try await resolveToolCalls(
                     toolCalls,
                     tools: requestContext.tools,
@@ -670,7 +670,7 @@ public struct OpenAILanguageModel: LanguageModel {
                         inFlightMessages.append(OpenAIMessage(role: .raw(rawContent: msg), content: .text("")))
                     }
                 }
-                try toolRounds.record()
+                try toolRounds.record(completed: entries)
                 let resolution = try await resolveToolCalls(
                     toolCalls,
                     tools: requestContext.tools,
@@ -892,7 +892,7 @@ public struct OpenAILanguageModel: LanguageModel {
 
                         guard !toolCalls.isEmpty else { break }
                         try Task.checkCancellation()
-                        try toolRounds.record()
+                        try toolRounds.record(completed: state.entries)
                         switch try await resolveToolCalls(
                             toolCalls,
                             tools: requestContext.tools,

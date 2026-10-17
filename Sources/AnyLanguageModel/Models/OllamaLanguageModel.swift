@@ -291,7 +291,7 @@ public struct OllamaLanguageModel: LanguageModel {
                         }
                         guard !toolCalls.isEmpty else { break }
                         try Task.checkCancellation()
-                        try toolRounds.record()
+                        try toolRounds.record(completed: state.entries)
                         switch try await resolveToolCalls(
                             toolCalls,
                             tools: requestContext.tools,

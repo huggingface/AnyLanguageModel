@@ -695,7 +695,7 @@ public struct AnthropicLanguageModel: LanguageModel {
                         }
                         guard !toolUses.isEmpty else { break }
                         try Task.checkCancellation()
-                        try toolRounds.record()
+                        try toolRounds.record(completed: state.entries)
                         switch try await resolveToolUses(
                             toolUses,
                             tools: requestContext.tools,

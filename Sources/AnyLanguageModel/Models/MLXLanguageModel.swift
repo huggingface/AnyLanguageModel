@@ -1195,7 +1195,7 @@ import Foundation
 
                 // If there are tool calls, execute them and continue
                 if !collectedToolCalls.isEmpty {
-                    try toolRounds.record()
+                    try toolRounds.record(completed: allEntries)
 
                     let resolution = try await resolveToolCalls(
                         collectedToolCalls,
@@ -1436,7 +1436,7 @@ import Foundation
 
                             guard !collectedToolCalls.isEmpty else { break }
 
-                            try toolRounds.record()
+                            try toolRounds.record(completed: accumulatedEntries)
 
                             let resolution = try await resolveToolCalls(
                                 collectedToolCalls,

@@ -550,7 +550,7 @@ public struct OpenResponsesLanguageModel: LanguageModel {
                         }
                         guard !toolCalls.isEmpty else { break }
                         try Task.checkCancellation()
-                        try toolRounds.record()
+                        try toolRounds.record(completed: state.entries)
                         switch try await resolveToolCalls(
                             toolCalls,
                             tools: requestContext.tools,
@@ -642,7 +642,7 @@ public struct OpenResponsesLanguageModel: LanguageModel {
                         )
                     }
                 }
-                try toolRounds.record()
+                try toolRounds.record(completed: entries)
                 let resolution = try await resolveToolCalls(
                     toolCalls,
                     tools: requestContext.tools,

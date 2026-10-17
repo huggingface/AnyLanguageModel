@@ -23,16 +23,42 @@ struct ToolRoundLimit {
 
     /// Records a round of tool calls before any of them runs.
     ///
-    /// - Throws: A decoding failure when the round is past the most rounds the options allow.
-    mutating func record() throws {
+    /// - Parameter completed: The response's entries so far: the rounds that ran, each call
+    ///   followed by its output.
+    /// - Throws: ``LanguageModelSession/ToolRoundLimitExceeded`` with `completed`
+    ///   when the round is past the most rounds the options allow.
+    mutating func record(completed: [Transcript.Entry]) throws {
         taken += 1
         if taken > maximumRounds {
-            throw LanguageModelSession.GenerationError.decodingFailure(
-                .init(
-                    debugDescription:
-                        "Exceeded maximum tool iterations (\(maximumRounds)) while processing \(provider) tool calls."
-                )
+            throw LanguageModelSession.ToolRoundLimitExceeded(
+                limit: maximumRounds,
+                provider: provider,
+                transcriptEntries: ArraySlice(completed)
             )
+        }
+    }
+}
+
+extension LanguageModelSession {
+    /// A response that called tools in more rounds than ``GenerationOptions/maximumToolRounds`` allows.
+    ///
+    /// The rounds that ran are in `transcriptEntries`, each tool call followed by its output,
+    /// so a caller can add them to the transcript and continue from there.
+    /// The round past the limit didn't run, and isn't included.
+    ///
+    /// - Note: This API is exclusive to AnyLanguageModel.
+    public struct ToolRoundLimitExceeded: Error, CustomStringConvertible, Sendable {
+        /// The most rounds the response could take.
+        public let limit: Int
+
+        /// The provider whose response called tools past the limit.
+        public let provider: String
+
+        /// The rounds that ran, each tool call followed by its output.
+        public let transcriptEntries: ArraySlice<Transcript.Entry>
+
+        public var description: String {
+            "Exceeded maximum tool iterations (\(limit)) while processing \(provider) tool calls."
         }
     }
 }
