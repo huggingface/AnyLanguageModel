@@ -267,6 +267,57 @@ struct TranscriptTests {
         }
     }
 
+    @Test(arguments: [
+        (GenerationOptions.ToolCallingMode.allowed, "allowed"),
+        (.required, "required"),
+        (.disallowed, "disallowed"),
+    ])
+    func promptRoundTripsToolCallingModeWithMaximumToolRounds(
+        toolCallingMode: GenerationOptions.ToolCallingMode,
+        encodedMode: String
+    ) throws {
+        var options = GenerationOptions(samplingMode: .greedy, toolCallingMode: toolCallingMode)
+        options.maximumToolRounds = 20
+        let prompt = Transcript.Prompt(id: "p", segments: [], options: options)
+
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = .sortedKeys
+        let json = String(decoding: try encoder.encode(prompt), as: UTF8.self)
+        #expect(
+            json
+                == #"{"id":"p","options":{"maximumToolRounds":20,"sampling":{"mode":{"greedy":{}}},"toolCallingMode":""#
+                + encodedMode
+                + #""},"segments":[]}"#
+        )
+
+        let decoded = try JSONDecoder().decode(Transcript.Prompt.self, from: Data(json.utf8))
+        #expect(decoded.options == options)
+        #expect(decoded.options.toolCallingMode == toolCallingMode)
+        #expect(decoded.options.maximumToolRounds == 20)
+    }
+
+    @Test func promptDecodesOptionsWithoutToolCallingModeOrMaximumToolRounds() throws {
+        // Earlier releases coded only the sampling mode, temperature, and maximum response tokens.
+        let json = #"""
+            {"id":"p","options":{"maximumResponseTokens":64,"sampling":{"mode":{"topK":{"_0":40,"seed":7}}},
+            "temperature":0.5},"segments":[]}
+            """#
+        let decoded = try JSONDecoder().decode(Transcript.Prompt.self, from: Data(json.utf8))
+        #expect(decoded.options.toolCallingMode == nil)
+        #expect(decoded.options.maximumToolRounds == GenerationOptions().maximumToolRounds)
+        #expect(
+            decoded.options
+                == GenerationOptions(sampling: .random(top: 40, seed: 7), temperature: 0.5, maximumResponseTokens: 64)
+        )
+    }
+
+    @Test func promptRejectsUnknownToolCallingMode() {
+        let json = #"{"id":"p","options":{"toolCallingMode":"sometimes"},"segments":[]}"#
+        #expect(throws: DecodingError.self) {
+            try JSONDecoder().decode(Transcript.Prompt.self, from: Data(json.utf8))
+        }
+    }
+
     @Test func promptRoundTripsDefaultOptions() throws {
         let prompt = Transcript.Prompt(id: "p", segments: [])
         let data = try JSONEncoder().encode(prompt)
