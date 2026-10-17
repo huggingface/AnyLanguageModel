@@ -594,7 +594,7 @@
     @available(macOS 26.0, iOS 26.0, watchOS 27.0, tvOS 26.0, visionOS 26.0, *)
     private struct AnyToolWrapper: FoundationModels.Tool {
         typealias Arguments = FoundationModels.GeneratedContent
-        typealias Output = String
+        typealias Output = FoundationModels.Prompt
 
         let name: String
         let description: String
@@ -613,7 +613,7 @@
 
         func call(arguments: FoundationModels.GeneratedContent) async throws -> Output {
             let output = try await wrappedTool.callFunction(arguments: arguments)
-            return output.promptRepresentation.description
+            return try output.promptRepresentation.toFoundationModels()
         }
     }
 
