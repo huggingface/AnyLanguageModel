@@ -123,7 +123,15 @@ struct PromptAttachmentTests {
     }
 
     @Test func ordinaryToolReturnsOrderedImageSegments() async throws {
-        let segments = try await ImageTool(output: prompt()).makeOutputSegments(
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString + ".png")
+        try testImageData.write(to: url)
+        defer { try? FileManager.default.removeItem(at: url) }
+        let output = AnyLanguageModel.Prompt {
+            "before"
+            AnyLanguageModel.Attachment(imageURL: url)
+            "after"
+        }
+        let segments = try await ImageTool(output: output).makeOutputSegments(
             from: AnyLanguageModel.GeneratedContent("read")
         )
         #expect(segments.count == 3)
@@ -136,13 +144,28 @@ struct PromptAttachmentTests {
         }
         #expect(before.content == "before")
         #expect(after.content == "after")
-        #expect(image.source == .url(imageURL))
+        #expect(image.source == .data(testImageData, mimeType: "image/png"))
+        try FileManager.default.removeItem(at: url)
 
         let transcript = AnyLanguageModel.Transcript(entries: [
             .toolOutput(.init(id: "image-call", toolName: "image", segments: segments))
         ])
         let encoded = try JSONEncoder().encode(transcript)
         #expect(try JSONDecoder().decode(AnyLanguageModel.Transcript.self, from: encoded) == transcript)
+    }
+
+    @Test func ordinaryToolRetainsRemoteImageURLs() async throws {
+        let url = try #require(URL(string: "https://example.com/image.png"))
+        let segments = try await ImageTool(
+            output: AnyLanguageModel.Prompt {
+                AnyLanguageModel.Attachment(imageURL: url)
+            }
+        ).makeOutputSegments(from: AnyLanguageModel.GeneratedContent("read"))
+        guard case .image(let image) = try #require(segments.first) else {
+            Issue.record("Missing image")
+            return
+        }
+        #expect(image.source == .url(url))
     }
 
     #if canImport(CoreGraphics) && canImport(ImageIO)

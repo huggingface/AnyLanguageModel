@@ -409,6 +409,11 @@ they throw an error when a prompt has an attachment.
 The system bridge requires local file URLs; other provider adapters retain URL
 images in their existing transcript representation.
 
+Ordinary Tool outputs read local image files once when the output is created,
+and retain the image bytes and MIME type in the compatibility transcript.
+Continuations and saved transcript replay therefore do not depend on the original
+file remaining at its URL. Remote image URLs are retained without downloading.
+
 This compatibility surface covers `CGImage` and `imageURL` attachments in
 prompts and ordinary Tool outputs. Instruction attachments, labels, `CIImage`,
 pixel buffers, and newer data attachments remain outside this change.
