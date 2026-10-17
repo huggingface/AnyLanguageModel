@@ -226,6 +226,37 @@ import Foundation
             _ = try FoundationModels.GenerationSchema(root: root, dependencies: [enumDependency])
         }
 
+        /// A definition that is only a reference, such as a one-choice `anyOf`, keeps its name when
+        /// converted from a `GenerationSchema`'s nodes, so the references to it are defined.
+        @available(macOS 26.0, iOS 26.0, watchOS 27.0, tvOS 26.0, visionOS 26.0, *)
+        @Test func convertNamedOneChoiceReferenceFromGenerationSchema() throws {
+            let schema = try AnyLanguageModel.GenerationSchema(
+                root: .init(
+                    name: "Root",
+                    properties: [.init(name: "action", schema: .init(referenceTo: "Action"))]
+                ),
+                dependencies: [
+                    .init(name: "Action", anyOf: [.init(referenceTo: "ReplyAction")]),
+                    .init(name: "ReplyAction", properties: [.init(name: "value", schema: .init(type: String.self))]),
+                ]
+            )
+            _ = try FoundationModels.GenerationSchema(
+                root: convertToDynamicSchema(schema.root),
+                dependencies: schema.defs.map { name, node in convertToDynamicSchema(node, name: name) }
+            )
+        }
+
+        /// An integer's bounds become the whole numbers within them, and a bound no `Int` holds
+        /// sets no guide, rather than trapping.
+        @available(macOS 26.0, iOS 26.0, watchOS 27.0, tvOS 26.0, visionOS 26.0, *)
+        @Test func convertIntegerBoundsThatIntCannotHold() throws {
+            let schema = try JSONDecoder().decode(
+                AnyLanguageModel.GenerationSchema.self,
+                from: Data(#"{"type": "integer", "minimum": 1.5, "maximum": 1e300}"#.utf8)
+            )
+            _ = try FoundationModels.GenerationSchema(root: convertToDynamicSchema(schema.root), dependencies: [])
+        }
+
         // MARK: - Fallback Types
 
         @available(macOS 26.0, iOS 26.0, watchOS 27.0, tvOS 26.0, visionOS 26.0, *)

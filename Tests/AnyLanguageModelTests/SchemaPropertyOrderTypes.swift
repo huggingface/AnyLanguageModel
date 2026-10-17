@@ -17,9 +17,3 @@ struct OrderedItem {
     var words: String
     var items: [OrderedLeaf]
 }
-
-/// Whether `names` first appear in `text` in the order given.
-func appearInOrder(_ names: [String], in text: String) -> Bool {
-    let positions = names.compactMap { text.range(of: "\"\($0)\"")?.lowerBound }
-    return positions.count == names.count && positions == positions.sorted()
-}
