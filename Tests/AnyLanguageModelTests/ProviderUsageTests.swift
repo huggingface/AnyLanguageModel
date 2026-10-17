@@ -583,6 +583,101 @@ import Testing
             #expect(UsageURLProtocol.recordedBodies.count == limit + 1)
         }
 
+        private enum HandoffResponseFormat: CaseIterable {
+            case text, typed, schema, images
+        }
+
+        @Test(arguments: Provider.allCases, [false, true])
+        func modelHandoffsRestoreOriginalSchemaPromptOption(_ provider: Provider, _ streaming: Bool) async throws {
+            for format in HandoffResponseFormat.allCases {
+                for callSiteValue in [false, true] {
+                    UsageURLProtocol.reset()
+                    UsageURLProtocol.enqueue(
+                        json: try streaming
+                            ? provider.toolStream()
+                            : Self.json(provider.response(text: "", tool: true))
+                    )
+                    let state = ProviderProfileState()
+                    let raw =
+                        format == .text
+                        ? GeneratedContent("Switched")
+                        : GeneratedContent(properties: ["answer": "Switched"])
+                    let session = LanguageModelSession(
+                        profile: ProviderProfile(
+                            state: state,
+                            model: provider.makeModel(),
+                            continuationModel: ProviderProfileTerminalModel(state: state, rawResponse: raw),
+                            initialSchemaOverride: !callSiteValue
+                        )
+                    )
+
+                    switch format {
+                    case .text:
+                        let result =
+                            try await streaming
+                            ? session.streamResponse(
+                                to: "Weather?",
+                                generating: String.self,
+                                includeSchemaInPrompt: callSiteValue
+                            ).collect()
+                            : session.respond(
+                                to: "Weather?",
+                                generating: String.self,
+                                includeSchemaInPrompt: callSiteValue
+                            )
+                        #expect(result.content == "Switched")
+                    case .typed:
+                        let result =
+                            try await streaming
+                            ? session.streamResponse(
+                                to: "Weather?",
+                                generating: Answer.self,
+                                includeSchemaInPrompt: callSiteValue
+                            ).collect()
+                            : session.respond(
+                                to: "Weather?",
+                                generating: Answer.self,
+                                includeSchemaInPrompt: callSiteValue
+                            )
+                        #expect(result.content.answer == "Switched")
+                    case .schema:
+                        let result =
+                            try await streaming
+                            ? session.streamResponse(
+                                to: "Weather?",
+                                schema: Answer.generationSchema,
+                                includeSchemaInPrompt: callSiteValue
+                            ).collect()
+                            : session.respond(
+                                to: "Weather?",
+                                schema: Answer.generationSchema,
+                                includeSchemaInPrompt: callSiteValue
+                            )
+                        #expect(try result.content.value(String.self, forProperty: "answer") == "Switched")
+                    case .images:
+                        let result =
+                            try await streaming
+                            ? session.streamResponse(
+                                to: "Weather?",
+                                images: [],
+                                generating: Answer.self,
+                                includeSchemaInPrompt: callSiteValue
+                            ).collect()
+                            : session.respond(
+                                to: "Weather?",
+                                images: [],
+                                generating: Answer.self,
+                                includeSchemaInPrompt: callSiteValue
+                            )
+                        #expect(result.content.answer == "Switched")
+                    }
+                    let selected = try #require(state.selectedRequests.withLock { $0.last })
+                    #expect(selected.includeSchemaInPrompt == callSiteValue)
+                    #expect(UsageURLProtocol.recordedBodies.count == 1)
+                }
+            }
+        }
+
         @Test(arguments: Provider.allCases, [false, true])
         func modelHandoffsPreserveEarlierToolResultsAndHistoryWrites(
             _ provider: Provider,
@@ -1140,6 +1235,7 @@ import Testing
                 let temperature: Double?
                 let tools: [String]
                 let sawToolOutput: Bool
+                let includeSchemaInPrompt: Bool
             }
 
             let useSecond = Locked(false)
@@ -1153,6 +1249,7 @@ import Testing
             let state: ProviderProfileState
             let model: any LanguageModel
             var continuationModel: (any LanguageModel)? = nil
+            var initialSchemaOverride: Bool? = nil
 
             var body: some LanguageModelSession.DynamicProfile {
                 if state.useSecond.withLock({ $0 }) {
@@ -1171,6 +1268,7 @@ import Testing
                         ProviderProfileWeatherTool(state: state)
                     }
                     .model(model)
+                    .includeSchemaInPrompt(initialSchemaOverride)
                     .temperature(0.2)
                     .historyTransform(transform)
                     .onToolCall { _ in state.events.withLock { $0.append("call:A") } }
@@ -1321,6 +1419,7 @@ import Testing
         private struct ProviderProfileTerminalModel: LanguageModel {
             typealias UnavailableReason = Never
             let state: ProviderProfileState
+            var rawResponse = GeneratedContent("Switched")
 
             func respond<Content>(
                 within session: LanguageModelSession,
@@ -1338,11 +1437,12 @@ import Testing
                             tools: context.tools.map(\.name),
                             sawToolOutput: context.transcript.contains {
                                 if case .toolOutput = $0 { true } else { false }
-                            }
+                            },
+                            includeSchemaInPrompt: includeSchemaInPrompt
                         )
                     )
                 }
-                let raw = GeneratedContent("Switched")
+                let raw = rawResponse
                 return .init(
                     content: try Content(raw),
                     rawContent: raw,

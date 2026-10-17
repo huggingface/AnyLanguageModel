@@ -64,7 +64,7 @@ public final class SessionPropertyValues: @unchecked Sendable {
                         "Session history is read-only while dynamic instructions or a Tool is active"
                     )
                     history.entries = newValue
-                    history.persist(newValue)
+                    history.persist(history.entries)
                 } else {
                     historySetter(newValue)
                 }
@@ -94,11 +94,13 @@ public final class SessionPropertyValues: @unchecked Sendable {
     func historyBinding(
         _ entries: Transcript.HistoryView,
         isWritable: Bool,
-        protecting protectedEntryIDs: Set<String> = []
+        protecting protectedEntryIDs: Set<String> = [],
+        onChange: (@Sendable (Transcript.HistoryView) -> Void)? = nil
     ) -> SessionHistoryBinding {
         let persist: (@Sendable (Transcript.HistoryView) -> Void)?
         if isWritable {
             persist = { [historySetter] updated in
+                onChange?(updated)
                 historySetter(
                     updated.filter { !protectedEntryIDs.contains($0.id) }
                 )

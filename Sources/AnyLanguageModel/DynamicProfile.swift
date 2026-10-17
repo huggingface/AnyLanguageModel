@@ -528,6 +528,7 @@ actor ProfileLifecycle {
         history: [Transcript.Entry],
         prompt: Transcript.Prompt?,
         callbackState: ProfileCallbackState,
+        historyEdits: Locked<Transcript.HistoryView?>,
         protectedEntryIDs: Set<String> = []
     ) async throws {
         let previous = pendingPreparation?.task
@@ -541,6 +542,7 @@ actor ProfileLifecycle {
                 history: history,
                 prompt: prompt,
                 callbackState: callbackState,
+                historyEdits: historyEdits,
                 protectedEntryIDs: protectedEntryIDs
             )
         }
@@ -560,9 +562,15 @@ actor ProfileLifecycle {
         history: [Transcript.Entry],
         prompt: Transcript.Prompt?,
         callbackState: ProfileCallbackState,
+        historyEdits: Locked<Transcript.HistoryView?>,
         protectedEntryIDs: Set<String>
     ) async throws {
-        let history = properties.historyBinding(history, isWritable: true, protecting: protectedEntryIDs)
+        let history = properties.historyBinding(
+            history,
+            isWritable: true,
+            protecting: protectedEntryIDs,
+            onChange: { updated in historyEdits.withLock { $0 = updated } }
+        )
         if activeProfile?.identity != profile.identity {
             if let previous = activeProfile {
                 await withBindings(

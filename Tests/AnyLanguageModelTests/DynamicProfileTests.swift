@@ -14,6 +14,78 @@ extension SessionPropertyValues {
 
 @Suite("Dynamic profiles")
 struct DynamicProfileTests {
+    @Test func callbacksAndToolExecutionRetainRequestScopedHistoryEdits() async throws {
+        let earlier = Transcript.Entry.prompt(.init(segments: [.text(.init(content: "Remove me"))]))
+        let promptMarker = Transcript.Entry.prompt(.init(segments: [.text(.init(content: "Prompt marker"))]))
+        let callMarker = Transcript.Entry.prompt(.init(segments: [.text(.init(content: "Call marker"))]))
+        let outputMarker = Transcript.Entry.prompt(.init(segments: [.text(.init(content: "Output marker"))]))
+        let responseMarker = Transcript.Entry.prompt(.init(segments: [.text(.init(content: "Response marker"))]))
+        let session = LanguageModelSession(
+            profile: LanguageModelSession.Profile { Instructions("Evolving history") }
+                .model(LifecycleFixtureModel())
+                .onPrompt { _ in
+                    let properties = try #require(SessionPropertyBinding.values)
+                    properties.history.removeAll { $0.id == earlier.id }
+                    properties.history.append(promptMarker)
+                }
+                .onToolCall { _ in
+                    let properties = try #require(SessionPropertyBinding.values)
+                    #expect(!properties.history.contains { $0.id == earlier.id })
+                    #expect(properties.history.contains(promptMarker))
+                    properties.history.append(callMarker)
+                }
+                .onToolOutput { _, _ in
+                    let properties = try #require(SessionPropertyBinding.values)
+                    #expect(!properties.history.contains { $0.id == earlier.id })
+                    #expect(properties.history.contains(callMarker))
+                    properties.history.removeAll { $0.id == callMarker.id }
+                    properties.history.append(outputMarker)
+                }
+                .onReasoning { _ in
+                    let properties = try #require(SessionPropertyBinding.values)
+                    #expect(!properties.history.contains { $0.id == earlier.id || $0.id == callMarker.id })
+                    #expect(properties.history.contains(outputMarker))
+                    properties.history = properties.history
+                }
+                .onResponse { _ in
+                    let properties = try #require(SessionPropertyBinding.values)
+                    #expect(!properties.history.contains { $0.id == earlier.id || $0.id == callMarker.id })
+                    properties.history.append(responseMarker)
+                },
+            history: [earlier]
+        )
+        let context = try await session.resolvedRequestContext(including: [])
+        let call = Transcript.ToolCall(id: "call", toolName: "fixture", arguments: .init(properties: [:]))
+        let calls = Transcript.Entry.toolCalls(.init([call]))
+        let output = Transcript.ToolOutput(
+            id: call.id,
+            toolName: call.toolName,
+            segments: [.text(.init(content: "Done"))]
+        )
+        let reasoning = Transcript.Entry.reasoning(.init(segments: [.text(.init(content: "Thinking"))]))
+        let response = Transcript.Entry.response(.init(assetIDs: [], segments: [.text(.init(content: "Answer"))]))
+        try await session.profileWillExecuteToolCall(call, requestContext: context, currentRoundEntries: [calls])
+        let toolHistory = await session.withProfileToolExecution(requestContext: context, currentRoundEntries: [calls])
+        {
+            session.properties.history
+        }
+        #expect(!toolHistory.contains { $0.id == earlier.id })
+        #expect(toolHistory.contains(callMarker))
+        try await session.profileDidProduceToolOutput(
+            for: call,
+            output: output,
+            requestContext: context,
+            currentRoundEntries: [calls, .toolOutput(output)]
+        )
+        try await session.profileDidProduceEntries(
+            [reasoning, response],
+            requestContext: context,
+            currentRoundEntries: [calls, .toolOutput(output), reasoning, response]
+        )
+
+        #expect(session.properties.history == [promptMarker, outputMarker, responseMarker])
+    }
+
     @Test func erasedConcreteProfilesKeepDistinctLifecycleIdentities() async throws {
         let state = LifecycleFixtureState()
         let session = LanguageModelSession(profile: ErasedRoutingProfile(state: state))

@@ -173,6 +173,7 @@ public final class LanguageModelSession: @unchecked Sendable {
         fileprivate let canonicalTranscript: [Transcript.Entry]
         fileprivate let pendingEntryIDs: Set<String>
         fileprivate let callbackState: ProfileCallbackState
+        fileprivate let callbackHistory = Locked<Transcript.HistoryView?>(nil)
 
         var hasDynamicProfile: Bool { profile != nil }
 
@@ -261,6 +262,19 @@ public final class LanguageModelSession: @unchecked Sendable {
         return prepared.toolRoundLimit(for: provider)
     }
 
+    nonisolated func profileIncludeSchemaInPrompt(
+        for context: RequestContext,
+        callSiteValue: Bool
+    ) -> Bool {
+        let originalValue: Bool
+        if let prepared = ProfileRequestBinding.prepared, prepared.session === self {
+            originalValue = prepared.callSiteIncludeSchemaInPrompt
+        } else {
+            originalValue = callSiteValue
+        }
+        return context.contextOptions.includeSchemaInPrompt ?? originalValue
+    }
+
     /// Resolves the active profile for one actual model request.
     ///
     /// `additionalEntries` supplies canonical entries produced in the current Tool
@@ -312,6 +326,7 @@ public final class LanguageModelSession: @unchecked Sendable {
                         return nil
                     }.first,
                 callbackState: context.callbackState,
+                historyEdits: context.callbackHistory,
                 protectedEntryIDs: context.pendingEntryIDs
             )
         }
@@ -468,7 +483,8 @@ public final class LanguageModelSession: @unchecked Sendable {
         try await withSessionProperties(
             history: history.entries,
             isHistoryWritable: true,
-            protectedEntryIDs: history.protectedEntryIDs
+            protectedEntryIDs: history.protectedEntryIDs,
+            onHistoryChange: { updated in requestContext.callbackHistory.withLock { $0 = updated } }
         ) {
             for action in profile.onToolCall { try await action(call) }
         }
@@ -489,7 +505,8 @@ public final class LanguageModelSession: @unchecked Sendable {
         try await withSessionProperties(
             history: history.entries,
             isHistoryWritable: true,
-            protectedEntryIDs: history.protectedEntryIDs
+            protectedEntryIDs: history.protectedEntryIDs,
+            onHistoryChange: { updated in requestContext.callbackHistory.withLock { $0 = updated } }
         ) {
             for action in profile.onToolOutput { try await action(call, output) }
         }
@@ -514,7 +531,8 @@ public final class LanguageModelSession: @unchecked Sendable {
         let binding = properties.historyBinding(
             history.entries,
             isWritable: true,
-            protecting: history.protectedEntryIDs
+            protecting: history.protectedEntryIDs,
+            onChange: { updated in requestContext.callbackHistory.withLock { $0 = updated } }
         )
         for entry in entries {
             switch entry {
@@ -569,11 +587,28 @@ public final class LanguageModelSession: @unchecked Sendable {
         requestContext: RequestContext,
         currentRoundEntries: [Transcript.Entry]
     ) -> (entries: [Transcript.Entry], protectedEntryIDs: Set<String>) {
-        var entryIDs = Set(requestContext.canonicalTranscript.map(\.id))
-        let additionalEntries = currentRoundEntries.filter { entryIDs.insert($0.id).inserted }
+        let canonicalIDs = Set(requestContext.canonicalTranscript.map(\.id))
+        let pending = currentRoundEntries.filter {
+            !canonicalIDs.contains($0.id) || requestContext.pendingEntryIDs.contains($0.id)
+        }
+        let history = requestContext.callbackHistory.withLock { history in
+            var entries = history ?? requestContext.canonicalTranscript
+            var indices: [String: Int] = [:]
+            for (index, entry) in entries.enumerated() { indices[entry.id] = index }
+            for entry in pending {
+                if let index = indices[entry.id] {
+                    entries[index] = entry
+                } else {
+                    indices[entry.id] = entries.count
+                    entries.append(entry)
+                }
+            }
+            history = entries
+            return entries
+        }
         return (
-            requestContext.canonicalTranscript + additionalEntries,
-            requestContext.pendingEntryIDs.union(additionalEntries.map(\.id))
+            history,
+            requestContext.pendingEntryIDs.union(pending.map(\.id))
         )
     }
 
@@ -581,12 +616,14 @@ public final class LanguageModelSession: @unchecked Sendable {
         history: [Transcript.Entry],
         isHistoryWritable: Bool,
         protectedEntryIDs: Set<String> = [],
+        onHistoryChange: (@Sendable (Transcript.HistoryView) -> Void)? = nil,
         operation: @Sendable () async throws -> Result
     ) async rethrows -> Result {
         let history = properties.historyBinding(
             history,
             isWritable: isHistoryWritable,
-            protecting: protectedEntryIDs
+            protecting: protectedEntryIDs,
+            onChange: onHistoryChange
         )
         return try await withSessionProperties(history: history, operation: operation)
     }
@@ -1237,7 +1274,12 @@ public final class LanguageModelSession: @unchecked Sendable {
             options: options,
             profileTracker: profileTracker
         ) { requestPrompt in
-            try await profiledResponse(prompt: requestPrompt, options: options, tracker: profileTracker) {
+            try await profiledResponse(
+                prompt: requestPrompt,
+                includeSchemaInPrompt: includeSchemaInPrompt,
+                options: options,
+                tracker: profileTracker
+            ) {
                 model,
                 resolvedOptions,
                 contextOptions in
@@ -1255,6 +1297,7 @@ public final class LanguageModelSession: @unchecked Sendable {
 
     nonisolated private func profiledResponse<Content>(
         prompt: Transcript.Prompt,
+        includeSchemaInPrompt: Bool,
         options: GenerationOptions,
         tracker: PreparedProfileRequestTracker?,
         generate: (
@@ -1274,7 +1317,8 @@ public final class LanguageModelSession: @unchecked Sendable {
             session: self,
             context: context,
             prompt: prompt,
-            callSiteOptions: options
+            callSiteOptions: options,
+            callSiteIncludeSchemaInPrompt: includeSchemaInPrompt
         )
         tracker?.prepared = prepared
         let response = try await ProfileRequestBinding.$prepared.withValue(prepared) {
@@ -1284,7 +1328,8 @@ public final class LanguageModelSession: @unchecked Sendable {
                     properties: properties,
                     history: context.canonicalTranscript,
                     prompt: prepared.prompt,
-                    callbackState: context.callbackState
+                    callbackState: context.callbackState,
+                    historyEdits: context.callbackHistory
                 )
             }
             return try await generate(context.model, context.options, context.contextOptions)
@@ -1447,7 +1492,12 @@ public final class LanguageModelSession: @unchecked Sendable {
         options: GenerationOptions,
         tracker: PreparedProfileRequestTracker
     ) -> ResponseStream<Content> where Content: Generable {
-        profileDispatchedStream(requestPrompt: requestPrompt, options: options, tracker: tracker) {
+        profileDispatchedStream(
+            requestPrompt: requestPrompt,
+            includeSchemaInPrompt: includeSchemaInPrompt,
+            options: options,
+            tracker: tracker
+        ) {
             model,
             resolvedOptions,
             contextOptions in
@@ -1464,6 +1514,7 @@ public final class LanguageModelSession: @unchecked Sendable {
 
     nonisolated private func profileDispatchedStream<Content>(
         requestPrompt: Transcript.Prompt,
+        includeSchemaInPrompt: Bool,
         options: GenerationOptions,
         tracker: PreparedProfileRequestTracker,
         generate:
@@ -1484,7 +1535,8 @@ public final class LanguageModelSession: @unchecked Sendable {
                         session: self,
                         context: context,
                         prompt: requestPrompt,
-                        callSiteOptions: options
+                        callSiteOptions: options,
+                        callSiteIncludeSchemaInPrompt: includeSchemaInPrompt
                     )
                     tracker.prepared = prepared
                     try await ProfileRequestBinding.$prepared.withValue(prepared) {
@@ -1494,7 +1546,8 @@ public final class LanguageModelSession: @unchecked Sendable {
                                 properties: self.properties,
                                 history: context.canonicalTranscript,
                                 prompt: prepared.prompt,
-                                callbackState: context.callbackState
+                                callbackState: context.callbackState,
+                                historyEdits: context.callbackHistory
                             )
                         }
                         let upstream = generate(
@@ -1595,7 +1648,12 @@ extension LanguageModelSession {
             options: options,
             profileTracker: profileTracker
         ) { requestPrompt in
-            try await profiledResponse(prompt: requestPrompt, options: options, tracker: profileTracker) {
+            try await profiledResponse(
+                prompt: requestPrompt,
+                includeSchemaInPrompt: includeSchemaInPrompt,
+                options: options,
+                tracker: profileTracker
+            ) {
                 model,
                 resolvedOptions,
                 contextOptions in
@@ -1676,7 +1734,12 @@ extension LanguageModelSession {
         if dynamicProfile != nil {
             let tracker = PreparedProfileRequestTracker()
             profileTracker = tracker
-            upstream = profileDispatchedStream(requestPrompt: requestPrompt, options: options, tracker: tracker) {
+            upstream = profileDispatchedStream(
+                requestPrompt: requestPrompt,
+                includeSchemaInPrompt: includeSchemaInPrompt,
+                options: options,
+                tracker: tracker
+            ) {
                 model,
                 resolvedOptions,
                 contextOptions in
@@ -1896,8 +1959,12 @@ extension LanguageModelSession {
             // Extract text content for the Prompt parameter
             let textPrompt = Prompt(prompt)
 
-            let profiled = try await profiledResponse(prompt: requestPrompt, options: options, tracker: profileTracker)
-            {
+            let profiled = try await profiledResponse(
+                prompt: requestPrompt,
+                includeSchemaInPrompt: includeSchemaInPrompt,
+                options: options,
+                tracker: profileTracker
+            ) {
                 model,
                 resolvedOptions,
                 contextOptions in
@@ -2039,7 +2106,12 @@ extension LanguageModelSession {
         if dynamicProfile != nil {
             let tracker = PreparedProfileRequestTracker()
             profileTracker = tracker
-            upstream = profileDispatchedStream(requestPrompt: requestPrompt, options: options, tracker: tracker) {
+            upstream = profileDispatchedStream(
+                requestPrompt: requestPrompt,
+                includeSchemaInPrompt: includeSchemaInPrompt,
+                options: options,
+                tracker: tracker
+            ) {
                 model,
                 resolvedOptions,
                 contextOptions in
@@ -2472,6 +2544,7 @@ private final class PreparedProfileRequest: @unchecked Sendable {
     let session: LanguageModelSession
     let prompt: Transcript.Prompt
     let callSiteOptions: GenerationOptions
+    let callSiteIncludeSchemaInPrompt: Bool
     private let state: Locked<State>
     private let toolRoundLimitStorage = Locked<ToolRoundLimit?>(nil)
 
@@ -2479,11 +2552,13 @@ private final class PreparedProfileRequest: @unchecked Sendable {
         session: LanguageModelSession,
         context: LanguageModelSession.RequestContext,
         prompt: Transcript.Prompt,
-        callSiteOptions: GenerationOptions
+        callSiteOptions: GenerationOptions,
+        callSiteIncludeSchemaInPrompt: Bool
     ) {
         self.session = session
         self.prompt = prompt
         self.callSiteOptions = callSiteOptions
+        self.callSiteIncludeSchemaInPrompt = callSiteIncludeSchemaInPrompt
         state = Locked(State(context: context))
     }
 

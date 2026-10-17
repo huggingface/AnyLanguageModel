@@ -33,14 +33,17 @@ extension LanguageModelSession {
             return nil
         }
 
+        let includeSchemaInPrompt = profileIncludeSchemaInPrompt(
+            for: requestContext,
+            callSiteValue: includeSchemaInPrompt
+        )
         let response: Response<Content>
         if type == GeneratedContent.self {
             let generated = try await requestContext.model.respond(
                 within: self,
                 to: prompt,
                 schema: schema,
-                includeSchemaInPrompt: requestContext.contextOptions.includeSchemaInPrompt
-                    ?? includeSchemaInPrompt,
+                includeSchemaInPrompt: includeSchemaInPrompt,
                 options: requestContext.options
             )
             guard let typed = generated as? Response<Content> else {
@@ -52,8 +55,7 @@ extension LanguageModelSession {
                 within: self,
                 to: prompt,
                 generating: type,
-                includeSchemaInPrompt: requestContext.contextOptions.includeSchemaInPrompt
-                    ?? includeSchemaInPrompt,
+                includeSchemaInPrompt: includeSchemaInPrompt,
                 options: requestContext.options
             )
         }
@@ -94,14 +96,17 @@ extension LanguageModelSession {
             return nil
         }
 
+        let includeSchemaInPrompt = profileIncludeSchemaInPrompt(
+            for: requestContext,
+            callSiteValue: includeSchemaInPrompt
+        )
         let upstream: ResponseStream<Content>
         if type == GeneratedContent.self {
             let generated = requestContext.model.streamResponse(
                 within: self,
                 to: prompt,
                 schema: schema,
-                includeSchemaInPrompt: requestContext.contextOptions.includeSchemaInPrompt
-                    ?? includeSchemaInPrompt,
+                includeSchemaInPrompt: includeSchemaInPrompt,
                 options: requestContext.options
             )
             guard let typed = generated as? ResponseStream<Content> else {
@@ -113,8 +118,7 @@ extension LanguageModelSession {
                 within: self,
                 to: prompt,
                 generating: type,
-                includeSchemaInPrompt: requestContext.contextOptions.includeSchemaInPrompt
-                    ?? includeSchemaInPrompt,
+                includeSchemaInPrompt: includeSchemaInPrompt,
                 options: requestContext.options
             )
         }
