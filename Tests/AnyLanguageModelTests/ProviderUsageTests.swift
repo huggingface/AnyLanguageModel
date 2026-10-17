@@ -829,34 +829,34 @@ import Testing
             #expect(!session.isResponding)
         }
 
+        /// Calling the same tool with the same arguments again can be what's asked,
+        /// so a round that repeats the previous one runs like any other.
         @Test(arguments: Provider.allCases)
-        func streamedRepeatedToolRoundStops(_ provider: Provider) async throws {
+        func streamedRepeatedToolRoundRuns(_ provider: Provider) async throws {
             UsageURLProtocol.reset()
             UsageURLProtocol.enqueue(json: try provider.toolStream())
             UsageURLProtocol.enqueue(json: try provider.toolStream(callID: "call_2"))
+            UsageURLProtocol.enqueue(json: try provider.stream())
             let tool = RecordingWeatherTool()
             let session = provider.makeSession(tools: [tool])
-            let description = await Self.decodingFailureDescription {
-                _ = try await session.streamResponse(to: "Weather?").collect()
-            }
-            #expect(description?.contains("repeated") == true)
-            #expect(tool.cities.withLock { $0 } == ["Paris"])
-            #expect(UsageURLProtocol.recordedBodies.count == 2)
+            let response = try await session.streamResponse(to: "Weather?").collect()
+            #expect(response.content == "Hello")
+            #expect(tool.cities.withLock { $0 } == ["Paris", "Paris"])
+            #expect(UsageURLProtocol.recordedBodies.count == 3)
         }
 
         @Test(arguments: [Provider.chat, .responses, .openResponses, .gemini])
-        func repeatedToolRoundStops(_ provider: Provider) async throws {
+        func repeatedToolRoundRuns(_ provider: Provider) async throws {
             UsageURLProtocol.reset()
-            UsageURLProtocol.enqueue(json: try Self.json(provider.response(tool: true)))
-            UsageURLProtocol.enqueue(json: try Self.json(provider.response(tool: true)))
+            UsageURLProtocol.enqueue(json: try Self.json(provider.response(text: "", tool: true)))
+            UsageURLProtocol.enqueue(json: try Self.json(provider.response(text: "", tool: true)))
+            UsageURLProtocol.enqueue(json: try Self.json(provider.response()))
             let tool = RecordingWeatherTool()
             let session = provider.makeSession(tools: [tool])
-            let description = await Self.decodingFailureDescription {
-                _ = try await session.respond(to: "Weather?")
-            }
-            #expect(description?.contains("repeated") == true)
-            #expect(tool.cities.withLock { $0 } == ["Paris"])
-            #expect(UsageURLProtocol.recordedBodies.count == 2)
+            let response = try await session.respond(to: "Weather?")
+            #expect(response.content == "Hello")
+            #expect(tool.cities.withLock { $0 } == ["Paris", "Paris"])
+            #expect(UsageURLProtocol.recordedBodies.count == 3)
         }
 
         @Test(arguments: [Provider.responses, .openResponses])
