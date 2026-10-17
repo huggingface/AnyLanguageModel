@@ -27,6 +27,18 @@ import Testing
             #expect(messages.map { $0["role"] as? String } == ["system", "user", "assistant", "user"])
             #expect(messages.map { $0["content"] as? String } == ["Be brief.", "Hello", "Hi", "Again"])
         }
+
+        @Test func anErrorReplyIsThrownWithOllamasMessage() async throws {
+            OllamaHistoryURLProtocol.reset(responses: [#"{"error": "model requires more system memory"}"#])
+
+            let model = OllamaLanguageModel(model: "test", session: OllamaHistoryURLProtocol.makeSession())
+            let session = LanguageModelSession(model: model)
+            await #expect {
+                _ = try await session.respond(to: "Hello")
+            } throws: { error in
+                String(describing: error).contains("model requires more system memory")
+            }
+        }
     }
 
     /// A `URLProtocol` with its own queue of JSON responses,
