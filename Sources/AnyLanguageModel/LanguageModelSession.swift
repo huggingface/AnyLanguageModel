@@ -871,16 +871,20 @@ public final class LanguageModelSession: @unchecked Sendable {
                                 providerMetadata: lastSnapshot.providerMetadata
                             )
                         )
-                        session.withTranscriptMutation {
-                            session.state.withLock {
-                                $0.transcript.append(contentsOf: lastSnapshot.transcriptEntries)
-                                $0.transcript.append(responseEntry)
+                        let committed = session.withTranscriptMutation {
+                            session.state.withLock { state in
+                                guard state.transcript.contains(where: { $0.id == promptEntry.id }) else {
+                                    return false
+                                }
+                                state.transcript.append(contentsOf: lastSnapshot.transcriptEntries)
+                                state.transcript.append(responseEntry)
+                                return true
                             }
                         }
-                        committedEntryIDs = Set(
-                            lastSnapshot.transcriptEntries.map(\.id) + [responseEntry.id]
-                        )
-                        if let prepared = profileTracker?.prepared {
+                        if committed {
+                            committedEntryIDs = Set(lastSnapshot.transcriptEntries.map(\.id) + [responseEntry.id])
+                        }
+                        if committed, let prepared = profileTracker?.prepared {
                             let context = prepared.context.withCanonicalTranscript(Array(session.transcript))
                             try await session.profileDidProduceEntries(
                                 Array(lastSnapshot.transcriptEntries) + [responseEntry],
@@ -900,6 +904,7 @@ public final class LanguageModelSession: @unchecked Sendable {
                                         }
                                     )
                                 }
+                                guard state.transcript.contains(where: { $0.id == promptEntry.id }) else { return }
                                 let policy: TranscriptErrorHandlingPolicy?
                                 if let prepared = profileTracker?.prepared {
                                     policy = prepared.context.transcriptErrorHandlingPolicy
@@ -1236,6 +1241,7 @@ public final class LanguageModelSession: @unchecked Sendable {
             try await commitResponse(
                 response,
                 entry: responseEntry,
+                promptID: promptID,
                 prepared: profiled.prepared
             )
 
@@ -1246,16 +1252,19 @@ public final class LanguageModelSession: @unchecked Sendable {
     nonisolated private func commitResponse<Content>(
         _ response: Response<Content>,
         entry responseEntry: Transcript.Entry,
+        promptID: String,
         prepared: PreparedProfileRequest?
     ) async throws where Content: Generable {
-        withTranscriptMutation {
+        let committed = withTranscriptMutation {
             state.withLock { lockedState in
+                guard lockedState.transcript.contains(where: { $0.id == promptID }) else { return false }
                 lockedState.transcript.append(contentsOf: response.transcriptEntries)
                 lockedState.transcript.append(responseEntry)
+                return true
             }
         }
 
-        guard let prepared else { return }
+        guard committed, let prepared else { return }
         let context = prepared.context.withCanonicalTranscript(Array(transcript))
         do {
             try await profileDidProduceEntries(
@@ -1828,6 +1837,7 @@ extension LanguageModelSession {
             try await commitResponse(
                 response,
                 entry: responseEntry,
+                promptID: promptID,
                 prepared: profiled.prepared
             )
 

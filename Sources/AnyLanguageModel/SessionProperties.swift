@@ -72,11 +72,14 @@ public final class SessionPropertyValues: @unchecked Sendable {
 
     public subscript<Key>(key: Key.Type) -> Key.Value where Key: SessionPropertyKey {
         get {
-            customValues.withLock { values in
-                if let value = values[ObjectIdentifier(key)] as? Key.Value { return value }
-                let value = Key.defaultValue
-                values[ObjectIdentifier(key)] = value
+            if let value = customValues.withLock({ $0[ObjectIdentifier(key)] as? Key.Value }) {
                 return value
+            }
+            let defaultValue = Key.defaultValue
+            return customValues.withLock { values in
+                if let value = values[ObjectIdentifier(key)] as? Key.Value { return value }
+                values[ObjectIdentifier(key)] = defaultValue
+                return defaultValue
             }
         }
         set {
