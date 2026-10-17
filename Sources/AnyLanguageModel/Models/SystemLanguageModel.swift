@@ -403,10 +403,12 @@
                 // so the history leaves out the instructions entry.
                 let history = fmTranscriptDroppingDuplicatePrompt(
                     Transcript(
-                        entries: session.transcript.filter { entry in
-                            if case .instructions = entry { return false }
-                            return true
-                        }
+                        entries: (session.usesDynamicProfile
+                            ? session.resolvedRequestContext().transcript
+                            : session.transcript).filter { entry in
+                                if case .instructions = entry { return false }
+                                return true
+                            }
                     ),
                     prompt: prompt
                 ).toFoundationModels(instructions: nil, toolDefinitions: [])
