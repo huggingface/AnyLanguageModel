@@ -1,227 +1,74 @@
 #if canImport(AsyncHTTPClient)
-    // AsyncHTTPClient.HTTPHandler introduces a Task type that clashes with Swift's Task.
-    // Bind Swift's structured-concurrency Task before importing AsyncHTTPClient.
-    typealias SwiftTask = Task
-
-    /// Holds the body-read task for `fetchEventStream` so outer stream cancellation can stop NIO body iteration.
-    private final class HTTPClientBodyReaderTaskBox: @unchecked Sendable {
-        var task: SwiftTask<Void, Never>?
-    }
-
     import AsyncHTTPClient
-    import EventSource
     import Foundation
+    import HTTPTypes
     import NIOCore
     import NIOHTTP1
 
-    extension HTTPClient {
-        func fetch<T: Decodable>(
-            _ method: HTTP.Method,
-            url: URL,
-            headers: [String: String] = [:],
-            body: Data? = nil,
-            dateDecodingStrategy: JSONDecoder.DateDecodingStrategy = .deferredToDate
-        ) async throws -> T {
-            var request = HTTPClientRequest(url: url.absoluteString)
-            request.method = HTTPMethod(rawValue: method.rawValue)
-            request.headers.add(name: "Accept", value: "application/json")
-
-            for (key, value) in headers {
-                request.headers.add(name: key, value: value)
+    /// AsyncHTTPClient sends a model's requests, reading each response's body as it arrives.
+    extension HTTPClient: HTTPTransport {
+        public func perform<Return>(
+            request: HTTPRequest,
+            body: Data?,
+            timeout: Duration,
+            responseHandler: (HTTPResponse, HTTPResponseBody) async throws -> Return
+        ) async throws -> Return {
+            guard let scheme = request.scheme, let authority = request.authority, let path = request.path else {
+                throw HTTPTransportError.invalidRequest
             }
-
+            var sent = HTTPClientRequest(url: "\(scheme)://\(authority)\(path)")
+            sent.method = HTTPMethod(rawValue: request.method.rawValue)
+            for field in request.headerFields {
+                sent.headers.add(name: field.name.rawName, value: field.value)
+            }
             if let body {
-                request.body = .bytes(ByteBuffer(bytes: body))
-                request.headers.add(name: "Content-Type", value: "application/json")
+                sent.body = .bytes(ByteBuffer(bytes: body))
             }
 
-            let response = try await self.execute(request, timeout: .seconds(180))
-
-            guard (200 ..< 300).contains(response.status.code) else {
-                let bodyData = try await Data(response.body.collect(upTo: 1024 * 1024).readableBytesView)
-                if let errorString = String(data: bodyData, encoding: .utf8) {
-                    throw HTTPClientError.httpError(statusCode: Int(response.status.code), detail: errorString)
-                }
-                throw HTTPClientError.httpError(statusCode: Int(response.status.code), detail: "Invalid response")
+            let (seconds, attoseconds) = timeout.components
+            let received = try await execute(
+                sent,
+                timeout: .nanoseconds(seconds * 1_000_000_000 + attoseconds / 1_000_000_000)
+            )
+            var fields = HTTPFields()
+            for (name, value) in received.headers {
+                guard let name = HTTPField.Name(name) else { continue }
+                fields.append(HTTPField(name: name, value: value))
             }
-
-            let bodyData = try await Data(response.body.collect(upTo: 1024 * 1024).readableBytesView)
-
-            let decoder = JSONDecoder()
-            decoder.dateDecodingStrategy = dateDecodingStrategy
-
-            do {
-                return try decoder.decode(T.self, from: bodyData)
-            } catch {
-                throw HTTPClientError.decodingError(detail: error.localizedDescription)
-            }
-        }
-
-        func fetchStream<T: Decodable & Sendable>(
-            _ method: HTTP.Method,
-            url: URL,
-            headers: [String: String] = [:],
-            body: Data? = nil,
-            dateDecodingStrategy: JSONDecoder.DateDecodingStrategy = .deferredToDate
-        ) -> AsyncThrowingStream<T, any Error> {
-            AsyncThrowingStream { continuation in
-                let task = SwiftTask { @Sendable in
-                    let decoder = JSONDecoder()
-                    decoder.dateDecodingStrategy = dateDecodingStrategy
-
-                    do {
-                        var request = HTTPClientRequest(url: url.absoluteString)
-                        request.method = HTTPMethod(rawValue: method.rawValue)
-                        request.headers.add(name: "Accept", value: "application/json")
-
-                        for (key, value) in headers {
-                            request.headers.add(name: key, value: value)
-                        }
-
-                        if let body {
-                            request.body = .bytes(ByteBuffer(bytes: body))
-                            request.headers.add(name: "Content-Type", value: "application/json")
-                        }
-
-                        let response = try await self.execute(request, timeout: .seconds(60))
-
-                        guard (200 ..< 300).contains(response.status.code) else {
-                            let bodyData = try await Data(response.body.collect(upTo: 1024 * 1024).readableBytesView)
-                            if let errorString = String(data: bodyData, encoding: .utf8) {
-                                throw HTTPClientError.httpError(
-                                    statusCode: Int(response.status.code),
-                                    detail: errorString
-                                )
-                            }
-                            throw HTTPClientError.httpError(
-                                statusCode: Int(response.status.code),
-                                detail: "Invalid response"
-                            )
-                        }
-
-                        var lines = JSONLines()
-                        for try await chunk in response.body {
-                            try SwiftTask.checkCancellation()
-                            for line in lines.append(contentsOf: chunk.readableBytesView) {
-                                continuation.yield(try decoder.decode(T.self, from: Data(line)))
-                            }
-                        }
-                        if let line = lines.finish() {
-                            continuation.yield(try decoder.decode(T.self, from: Data(line)))
-                        }
-
-                        continuation.finish()
-                    } catch {
-                        continuation.finish(throwing: error)
-                    }
-                }
-
-                continuation.onTermination = { _ in
-                    task.cancel()
-                }
-            }
-        }
-
-        func fetchEventStream<T: Decodable & Sendable>(
-            _ method: HTTP.Method,
-            url: URL,
-            headers: [String: String] = [:],
-            body: Data? = nil
-        ) -> AsyncThrowingStream<T, any Error> {
-            AsyncThrowingStream { continuation in
-                let bodyReaderBox = HTTPClientBodyReaderTaskBox()
-
-                let task = SwiftTask { @Sendable in
-                    do {
-                        var request = HTTPClientRequest(url: url.absoluteString)
-                        request.method = HTTPMethod(rawValue: method.rawValue)
-                        request.headers.add(name: "Accept", value: "text/event-stream")
-
-                        for (key, value) in headers {
-                            request.headers.add(name: key, value: value)
-                        }
-
-                        if let body {
-                            request.body = .bytes(ByteBuffer(bytes: body))
-                            request.headers.add(name: "Content-Type", value: "application/json")
-                        }
-
-                        let response = try await self.execute(request, timeout: .seconds(60))
-
-                        guard (200 ..< 300).contains(response.status.code) else {
-                            let bodyData = try await Data(response.body.collect(upTo: 1024 * 1024).readableBytesView)
-                            if let errorString = String(data: bodyData, encoding: .utf8) {
-                                throw HTTPClientError.httpError(
-                                    statusCode: Int(response.status.code),
-                                    detail: errorString
-                                )
-                            }
-                            throw HTTPClientError.httpError(
-                                statusCode: Int(response.status.code),
-                                detail: "Invalid response"
-                            )
-                        }
-
-                        let asyncBytes = AsyncStream<UInt8> { byteContinuation in
-                            bodyReaderBox.task = SwiftTask {
-                                do {
-                                    for try await buffer in response.body {
-                                        try SwiftTask.checkCancellation()
-                                        for byte in buffer.readableBytesView {
-                                            byteContinuation.yield(byte)
-                                        }
-                                    }
-                                    byteContinuation.finish()
-                                } catch {
-                                    byteContinuation.finish()
-                                }
-                            }
-                            byteContinuation.onTermination = { _ in
-                                bodyReaderBox.task?.cancel()
-                            }
-                        }
-
-                        try await self.decodeAndYieldEventStream(asyncBytes, to: continuation)
-                        continuation.finish()
-                    } catch {
-                        continuation.finish(throwing: error)
-                    }
-                }
-
-                continuation.onTermination = { _ in
-                    bodyReaderBox.task?.cancel()
-                    task.cancel()
-                }
-            }
-        }
-
-        private func decodeAndYieldEventStream<T: Decodable & Sendable, Bytes>(
-            _ asyncBytes: Bytes,
-            to continuation: AsyncThrowingStream<T, any Error>.Continuation
-        ) async throws where Bytes: AsyncSequence, Bytes.Element == UInt8 {
-            let decoder = JSONDecoder()
-            for try await event in asyncBytes.events {
-                guard let data = event.data.data(using: .utf8) else { continue }
-                if let decoded = try? decoder.decode(T.self, from: data) {
-                    continuation.yield(decoded)
-                }
-            }
+            let response = HTTPResponse(
+                status: HTTPResponse.Status(
+                    code: Int(received.status.code),
+                    reasonPhrase: received.status.reasonPhrase
+                ),
+                headerFields: fields
+            )
+            return try await responseHandler(response, HTTPResponseBody(Bytes(received.body)))
         }
     }
 
-    enum HTTPClientError: Error, CustomStringConvertible {
-        case invalidResponse
-        case httpError(statusCode: Int, detail: String)
-        case decodingError(detail: String)
+    /// A response body's bytes, one at a time from each buffer as it arrives.
+    private struct Bytes<Buffers: AsyncSequence>: AsyncSequence where Buffers.Element == ByteBuffer {
+        typealias Element = UInt8
+        let buffers: Buffers
 
-        var description: String {
-            switch self {
-            case .invalidResponse:
-                return "Invalid response"
-            case .httpError(let statusCode, let detail):
-                return "HTTP error (Status \(statusCode)): \(detail)"
-            case .decodingError(let detail):
-                return "Decoding error: \(detail)"
+        init(_ buffers: Buffers) {
+            self.buffers = buffers
+        }
+
+        func makeAsyncIterator() -> AsyncIterator {
+            AsyncIterator(buffers: buffers.makeAsyncIterator())
+        }
+
+        struct AsyncIterator: AsyncIteratorProtocol {
+            var buffers: Buffers.AsyncIterator
+            var current = ByteBuffer()
+
+            mutating func next() async throws -> UInt8? {
+                while current.readableBytes == 0 {
+                    guard let buffer = try await buffers.next() else { return nil }
+                    current = buffer
+                }
+                return current.readInteger(as: UInt8.self)
             }
         }
     }
