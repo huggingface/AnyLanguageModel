@@ -1,5 +1,7 @@
 import EventSource
 import Foundation
+import HTTPTypes
+import HTTPTypesFoundation
 import JSONSchema
 import OrderedCollections
 
@@ -369,7 +371,7 @@ public struct AnthropicLanguageModel: LanguageModel {
     /// The model identifier to use for generation.
     public let model: String
 
-    private let httpSession: HTTPSession
+    private let httpSession: any HTTPTransport
 
     /// Creates an Anthropic language model.
     ///
@@ -379,14 +381,14 @@ public struct AnthropicLanguageModel: LanguageModel {
     ///   - apiVersion: The API version to use for requests. Defaults to `2023-06-01`.
     ///   - betas: Optional beta version(s) of the API to use.
     ///   - model: The model identifier (for example, "claude-3-5-sonnet-20241022").
-    ///   - session: The HTTP session or client used for network requests.
+    ///   - session: How it sends its requests: by default AnyLanguageModel's default session.
     public init(
         baseURL: URL = defaultBaseURL,
         apiKey tokenProvider: @escaping @autoclosure @Sendable () -> String,
         apiVersion: String = defaultAPIVersion,
         betas: [String]? = nil,
         model: String,
-        session: HTTPSession = makeDefaultSession(),
+        session: any HTTPTransport = makeDefaultSession(),
     ) {
         var baseURL = baseURL
         if !baseURL.path.hasSuffix("/") {
@@ -465,9 +467,7 @@ public struct AnthropicLanguageModel: LanguageModel {
         let body = try JSONEncoder().encode(params)
 
         let message: AnthropicMessageResponse = try await httpSession.fetch(
-            .post,
-            url: url,
-            headers: headers,
+            HTTPRequest(method: .post, url: url, headerFields: headers),
             body: body
         )
 
@@ -612,7 +612,10 @@ public struct AnthropicLanguageModel: LanguageModel {
                         params["stream"] = .bool(true)
                         let body = try JSONEncoder().encode(params)
                         let events: AsyncThrowingStream<AnthropicStreamEvent, any Error> =
-                            httpSession.fetchEventStream(.post, url: url, headers: headers, body: body)
+                            httpSession.fetchEventStream(
+                                HTTPRequest(method: .post, url: url, headerFields: headers),
+                                body: body
+                            )
                         var blocks: [Int: AnthropicStreamBlock] = [:]
                         var lastSnapshot: LanguageModelSession.ResponseStream<Content>.Snapshot?
 
@@ -738,14 +741,14 @@ public struct AnthropicLanguageModel: LanguageModel {
         return LanguageModelSession.ResponseStream(stream: stream)
     }
 
-    private func buildHeaders() -> [String: String] {
-        var headers: [String: String] = [
-            "x-api-key": tokenProvider(),
-            "anthropic-version": apiVersion,
+    private func buildHeaders() -> HTTPFields {
+        var headers: HTTPFields = [
+            .anthropicAPIKey: tokenProvider(),
+            .anthropicVersion: apiVersion,
         ]
 
         if let betas = betas, !betas.isEmpty {
-            headers["anthropic-beta"] = betas.joined(separator: ",")
+            headers[.anthropicBeta] = betas.joined(separator: ",")
         }
 
         return headers
@@ -1576,4 +1579,10 @@ private struct AnthropicUsage: Codable, Sendable {
             metadata: metadata
         ).normalized
     }
+}
+
+extension HTTPField.Name {
+    fileprivate static let anthropicAPIKey = Self("x-api-key")!
+    fileprivate static let anthropicVersion = Self("anthropic-version")!
+    fileprivate static let anthropicBeta = Self("anthropic-beta")!
 }

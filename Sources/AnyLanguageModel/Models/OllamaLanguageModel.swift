@@ -1,4 +1,6 @@
 import Foundation
+import HTTPTypes
+import HTTPTypesFoundation
 import JSONSchema
 import OrderedCollections
 
@@ -54,18 +56,18 @@ public struct OllamaLanguageModel: LanguageModel {
     /// The model identifier to use for generation.
     public let model: String
 
-    private let httpSession: HTTPSession
+    private let httpSession: any HTTPTransport
 
     /// Creates an Ollama language model.
     ///
     /// - Parameters:
     ///   - baseURL: The base URL for the Ollama server. Defaults to `http://localhost:11434`.
     ///   - model: The model identifier (for example, "qwen2.5" or "llama3.3").
-    ///   - session: The HTTP session or client used for network requests.
+    ///   - session: How it sends its requests: by default AnyLanguageModel's default session.
     public init(
         baseURL: URL = defaultBaseURL,
         model: String,
-        session: HTTPSession = makeDefaultSession(),
+        session: any HTTPTransport = makeDefaultSession(),
     ) {
         var baseURL = baseURL
         if !baseURL.path.hasSuffix("/") {
@@ -147,8 +149,7 @@ public struct OllamaLanguageModel: LanguageModel {
         let url = baseURL.appendingPathComponent("api/chat")
         let body = try encodeChatParams(params)
         let chatResponse: ChatResponse = try await httpSession.fetch(
-            .post,
-            url: url,
+            HTTPRequest(method: .post, url: url),
             body: body,
             dateDecodingStrategy: .iso8601WithFractionalSeconds
         )
@@ -274,8 +275,7 @@ public struct OllamaLanguageModel: LanguageModel {
                         )
                         let body = try encodeChatParams(params)
                         let chunks: AsyncThrowingStream<ChatResponse, any Error> = httpSession.fetchStream(
-                            .post,
-                            url: url,
+                            HTTPRequest(method: .post, url: url),
                             body: body,
                             dateDecodingStrategy: .iso8601WithFractionalSeconds
                         )
