@@ -1,6 +1,6 @@
 import Testing
 
-@testable import AnyLanguageModel
+@_spi(Compatibility) @testable import AnyLanguageModel
 
 @Suite("Request context")
 struct RequestContextTests {
