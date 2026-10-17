@@ -473,7 +473,10 @@ public struct AnthropicLanguageModel: LanguageModel {
 
         let body = try JSONEncoder().encode(params)
 
-        let message: AnthropicMessageResponse = try await httpSession.fetch(HTTPRequest(method: .post, url: url, headerFields: headers), body: body)
+        let message: AnthropicMessageResponse = try await httpSession.fetch(
+            HTTPRequest(method: .post, url: url, headerFields: headers),
+            body: body
+        )
 
         var entries: [Transcript.Entry] = message.content.compactMap { block in
             switch block {
@@ -616,7 +619,11 @@ public struct AnthropicLanguageModel: LanguageModel {
                         params["stream"] = .bool(true)
                         let body = try JSONEncoder().encode(params)
                         let events: AsyncThrowingStream<AnthropicStreamEvent, any Error> =
-                            httpSession.fetchEventStream(HTTPRequest(method: .post, url: url, headerFields: headers), body: body, timeout: responseStartTimeout)
+                            httpSession.fetchEventStream(
+                                HTTPRequest(method: .post, url: url, headerFields: headers),
+                                body: body,
+                                timeout: responseStartTimeout
+                            )
                         var blocks: [Int: AnthropicStreamBlock] = [:]
                         var lastSnapshot: LanguageModelSession.ResponseStream<Content>.Snapshot?
 
@@ -699,7 +706,7 @@ public struct AnthropicLanguageModel: LanguageModel {
                         }
                         guard !toolUses.isEmpty else { break }
                         try Task.checkCancellation()
-                        try toolRounds.record(toolUses.map(\.roundCall))
+                        try toolRounds.record()
                         switch try await resolveToolUses(
                             toolUses,
                             tools: requestContext.tools,
@@ -1579,12 +1586,6 @@ private struct AnthropicUsage: Codable, Sendable {
             output: .init(totalTokenCount: outputTokens),
             metadata: metadata
         ).normalized
-    }
-}
-
-extension AnthropicToolUse {
-    var roundCall: ToolRoundLimit.Call {
-        .init(name: name, arguments: input)
     }
 }
 

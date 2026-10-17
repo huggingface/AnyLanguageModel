@@ -530,7 +530,10 @@ public struct OpenAILanguageModel: LanguageModel {
 
             let url = baseURL.appendingPathComponent("chat/completions")
             let body = try JSONEncoder().encode(params)
-            let resp: ChatCompletions.Response = try await httpSession.fetch(HTTPRequest(method: .post, url: url, headerFields: [.authorization: "Bearer \(tokenProvider())"]), body: body)
+            let resp: ChatCompletions.Response = try await httpSession.fetch(
+                HTTPRequest(method: .post, url: url, headerFields: [.authorization: "Bearer \(tokenProvider())"]),
+                body: body
+            )
 
             usage.add(resp.usage?.reportedUsage)
 
@@ -555,7 +558,7 @@ public struct OpenAILanguageModel: LanguageModel {
                 if let value = try? JSONValue(toolCallMessage) {
                     inFlightMessages.append(OpenAIMessage(role: .raw(rawContent: value), content: .text("")))
                 }
-                try toolRounds.record(toolCalls.map(\.roundCall))
+                try toolRounds.record()
                 let resolution = try await resolveToolCalls(
                     toolCalls,
                     tools: requestContext.tools,
@@ -653,7 +656,10 @@ public struct OpenAILanguageModel: LanguageModel {
 
             let encoder = JSONEncoder()
             let body = try encoder.encode(params)
-            let resp: Responses.Response = try await httpSession.fetch(HTTPRequest(method: .post, url: url, headerFields: [.authorization: "Bearer \(tokenProvider())"]), body: body)
+            let resp: Responses.Response = try await httpSession.fetch(
+                HTTPRequest(method: .post, url: url, headerFields: [.authorization: "Bearer \(tokenProvider())"]),
+                body: body
+            )
 
             usage.add(resp.usage?.reportedUsage)
 
@@ -665,7 +671,7 @@ public struct OpenAILanguageModel: LanguageModel {
                         inFlightMessages.append(OpenAIMessage(role: .raw(rawContent: msg), content: .text("")))
                     }
                 }
-                try toolRounds.record(toolCalls.map(\.roundCall))
+                try toolRounds.record()
                 let resolution = try await resolveToolCalls(
                     toolCalls,
                     tools: requestContext.tools,
@@ -825,7 +831,11 @@ public struct OpenAILanguageModel: LanguageModel {
                         switch apiVariant {
                         case .responses:
                             let events: AsyncThrowingStream<OpenAIResponsesServerEvent, any Error> =
-                                httpSession.fetchEventStream(HTTPRequest(method: .post, url: url, headerFields: headers), body: body, timeout: responseStartTimeout)
+                                httpSession.fetchEventStream(
+                                    HTTPRequest(method: .post, url: url, headerFields: headers),
+                                    body: body,
+                                    timeout: responseStartTimeout
+                                )
                             responseEvents: for try await event in events {
                                 switch event {
                                 case .outputTextDelta(let delta):
@@ -856,7 +866,11 @@ public struct OpenAILanguageModel: LanguageModel {
                             }
                         case .chatCompletions:
                             let events: AsyncThrowingStream<OpenAIChatCompletionsChunk, any Error> =
-                                httpSession.fetchEventStream(HTTPRequest(method: .post, url: url, headerFields: headers), body: body, timeout: responseStartTimeout)
+                                httpSession.fetchEventStream(
+                                    HTTPRequest(method: .post, url: url, headerFields: headers),
+                                    body: body,
+                                    timeout: responseStartTimeout
+                                )
                             var calls: [Int: OpenAIStreamedToolCall] = [:]
                             for try await chunk in events {
                                 state.usage.merge(chunk.usage?.reportedUsage)
@@ -887,7 +901,7 @@ public struct OpenAILanguageModel: LanguageModel {
 
                         guard !toolCalls.isEmpty else { break }
                         try Task.checkCancellation()
-                        try toolRounds.record(toolCalls.map(\.roundCall))
+                        try toolRounds.record()
                         switch try await resolveToolCalls(
                             toolCalls,
                             tools: requestContext.tools,
@@ -2109,11 +2123,5 @@ private struct ChatCompletionsUsage: Decodable, Sendable {
                 reasoningTokenCount: completionTokensDetails?.reasoningTokens
             )
         ).normalized
-    }
-}
-
-extension OpenAIToolCall {
-    var roundCall: ToolRoundLimit.Call {
-        .init(name: function?.name ?? "", jsonArguments: function?.arguments)
     }
 }

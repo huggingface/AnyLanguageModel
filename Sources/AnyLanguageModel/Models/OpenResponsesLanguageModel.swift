@@ -522,7 +522,15 @@ public struct OpenResponsesLanguageModel: LanguageModel {
                         )
                         let body = try JSONEncoder().encode(params)
                         let events: AsyncThrowingStream<OpenResponsesStreamEvent, any Error> =
-                            httpSession.fetchEventStream(HTTPRequest(method: .post, url: url, headerFields: [.authorization: "Bearer \(tokenProvider())"]), body: body, timeout: responseStartTimeout)
+                            httpSession.fetchEventStream(
+                                HTTPRequest(
+                                    method: .post,
+                                    url: url,
+                                    headerFields: [.authorization: "Bearer \(tokenProvider())"]
+                                ),
+                                body: body,
+                                timeout: responseStartTimeout
+                            )
                         var toolCalls: [OpenResponsesToolCall] = []
                         responseEvents: for try await event in events {
                             switch event {
@@ -554,7 +562,7 @@ public struct OpenResponsesLanguageModel: LanguageModel {
                         }
                         guard !toolCalls.isEmpty else { break }
                         try Task.checkCancellation()
-                        try toolRounds.record(toolCalls.map(\.roundCall))
+                        try toolRounds.record()
                         switch try await resolveToolCalls(
                             toolCalls,
                             tools: requestContext.tools,
@@ -627,7 +635,10 @@ public struct OpenResponsesLanguageModel: LanguageModel {
                 stream: false
             )
             let body = try JSONEncoder().encode(params)
-            let resp: OpenResponsesAPI.Response = try await httpSession.fetch(HTTPRequest(method: .post, url: url, headerFields: [.authorization: "Bearer \(tokenProvider())"]), body: body)
+            let resp: OpenResponsesAPI.Response = try await httpSession.fetch(
+                HTTPRequest(method: .post, url: url, headerFields: [.authorization: "Bearer \(tokenProvider())"]),
+                body: body
+            )
 
             usage.add(resp.usage?.reportedUsage)
 
@@ -641,7 +652,7 @@ public struct OpenResponsesLanguageModel: LanguageModel {
                         )
                     }
                 }
-                try toolRounds.record(toolCalls.map(\.roundCall))
+                try toolRounds.record()
                 let resolution = try await resolveToolCalls(
                     toolCalls,
                     tools: requestContext.tools,
@@ -1304,11 +1315,5 @@ private extension GenerationSchema {
             value = .object(obj)
         }
         return value
-    }
-}
-
-extension OpenResponsesToolCall {
-    var roundCall: ToolRoundLimit.Call {
-        .init(name: name, jsonArguments: arguments)
     }
 }

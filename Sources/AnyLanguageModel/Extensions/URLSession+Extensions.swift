@@ -115,11 +115,15 @@ extension URLSession: HTTPTransport {
             try await withLinuxRequestLock {
                 started = try await self.linuxBytes(for: urlRequest)
             }
-            guard let started, let response = (started.response as? HTTPURLResponse)?.httpResponse else { throw HTTPTransportError.invalidResponse }
+            guard let started, let response = (started.response as? HTTPURLResponse)?.httpResponse else {
+                throw HTTPTransportError.invalidResponse
+            }
             return try await responseHandler(response, HTTPResponseBody(started.bytes))
         #else
             let (bytes, urlResponse) = try await self.bytes(for: urlRequest)
-            guard let response = (urlResponse as? HTTPURLResponse)?.httpResponse else { throw HTTPTransportError.invalidResponse }
+            guard let response = (urlResponse as? HTTPURLResponse)?.httpResponse else {
+                throw HTTPTransportError.invalidResponse
+            }
             return try await responseHandler(response, HTTPResponseBody(bytes))
         #endif
     }
