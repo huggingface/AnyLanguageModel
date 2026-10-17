@@ -288,7 +288,11 @@ import Testing
         for call in [second, first] {
             await record.ran(
                 call,
-                output: Transcript.ToolOutput(id: call.id, toolName: call.toolName, segments: [.text(.init(content: "Sunny"))])
+                output: Transcript.ToolOutput(
+                    id: call.id,
+                    toolName: call.toolName,
+                    segments: [.text(.init(content: "Sunny"))]
+                )
             )
         }
         let order = await record.entries.compactMap { entry -> String? in
