@@ -1376,7 +1376,7 @@
     }
 
     /// Builds a minimal generated content tree from a schema node.
-    private func placeholderGeneratedContent(
+    func placeholderGeneratedContent(
         from node: GenerationSchema.Node,
         defs: [String: GenerationSchema.Node]
     ) -> GeneratedContent {
@@ -1409,10 +1409,13 @@
             return GeneratedContent("placeholder")
 
         case .number(let num):
+            // The smallest value the minimum allows, as far as the type can hold it.
+            let minimum = num.minimum.flatMap { $0.isFinite ? $0 : nil }
             if num.integerOnly {
-                return GeneratedContent(Int(num.minimum ?? 0))
+                guard let minimum else { return GeneratedContent(0) }
+                return GeneratedContent(Int(exactly: minimum.rounded(.up)) ?? (minimum > 0 ? .max : 0))
             } else {
-                return GeneratedContent(num.minimum ?? 0)
+                return GeneratedContent(minimum ?? 0)
             }
 
         case .boolean:

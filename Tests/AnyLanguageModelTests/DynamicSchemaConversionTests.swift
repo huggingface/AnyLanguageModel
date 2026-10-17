@@ -257,6 +257,17 @@ import Foundation
             _ = try FoundationModels.GenerationSchema(root: convertToDynamicSchema(schema.root), dependencies: [])
         }
 
+        /// A stand-in integer is the smallest whole number the minimum allows, and the nearest an
+        /// `Int` can hold when it holds none, rather than trapping.
+        @available(macOS 26.0, iOS 26.0, watchOS 27.0, tvOS 26.0, visionOS 26.0, *)
+        @Test(arguments: [(1.5, 2.0), (1e300, Double(Int.max)), (-1e300, 0.0), (-Double.infinity, 0.0)])
+        func standInIntegerFromItsMinimum(minimum: Double, expected: Double) {
+            let node = AnyLanguageModel.GenerationSchema.Node.number(
+                .init(description: nil, minimum: minimum, maximum: nil, integerOnly: true)
+            )
+            #expect(placeholderGeneratedContent(from: node, defs: [:]).kind == .number(expected))
+        }
+
         // MARK: - Fallback Types
 
         @available(macOS 26.0, iOS 26.0, watchOS 27.0, tvOS 26.0, visionOS 26.0, *)
