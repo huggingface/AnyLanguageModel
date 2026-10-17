@@ -309,10 +309,11 @@ struct OllamaTopLevelChatParametersTests {
         #expect(requestOptions["repeat_penalty"] == .double(1.1))
     }
 
-    @Test func routesTruncateToTheTopLevelOfTheRequest() throws {
+    @Test func routesTruncateAndShiftToTheTopLevelOfTheRequest() throws {
         var options = GenerationOptions()
         options[custom: OllamaLanguageModel.self] = [
             "truncate": .bool(false),
+            "shift": .bool(false),
             "repeat_penalty": .double(1.1),
         ]
 
@@ -327,12 +328,14 @@ struct OllamaTopLevelChatParametersTests {
         )
 
         #expect(params["truncate"] == .bool(false))
+        #expect(params["shift"] == .bool(false))
 
         guard case .object(let requestOptions)? = params["options"] else {
             Issue.record("Expected options to encode as an object")
             return
         }
         #expect(requestOptions["truncate"] == nil)
+        #expect(requestOptions["shift"] == nil)
         #expect(requestOptions["repeat_penalty"] == .double(1.1))
     }
 
