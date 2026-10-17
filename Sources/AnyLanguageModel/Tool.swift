@@ -1,3 +1,9 @@
+import Foundation
+
+#if canImport(UniformTypeIdentifiers)
+    import UniformTypeIdentifiers
+#endif
+
 /// A tool that a model can call to gather information at runtime or perform side effects.
 ///
 /// Tool calling gives the model the ability to call your code to incorporate
@@ -110,7 +116,10 @@ extension Tool where Self.Arguments: Generable {
 // MARK: - Helpers
 
 extension Tool {
-    internal func makeOutputSegments(from arguments: GeneratedContent) async throws -> [Transcript.Segment] {
+    /// Compatibility integration SPI for provider adapters outside this module.
+    /// This is not part of Apple's public Tool contract.
+    @_spi(Compatibility)
+    public func makeOutputSegments(from arguments: GeneratedContent) async throws -> [Transcript.Segment] {
         let parsedArguments = try Arguments(arguments)
         let output = try await call(arguments: parsedArguments)
 
@@ -124,7 +133,38 @@ extension Tool {
             return [Transcript.Segment.text(.init(content: stringOutput))]
         }
 
-        let fallback = output.promptRepresentation.description
-        return [Transcript.Segment.text(.init(content: fallback))]
+        return try output.promptRepresentation.makeTranscriptSegments().map { segment in
+            guard case .image(let image) = segment,
+                case .url(let url) = image.source,
+                url.isFileURL
+            else { return segment }
+
+            let mimeType: String?
+            #if canImport(UniformTypeIdentifiers)
+                mimeType = UTType(filenameExtension: url.pathExtension)?.preferredMIMEType
+            #else
+                mimeType =
+                    switch url.pathExtension.lowercased() {
+                    case "jpg", "jpeg": "image/jpeg"
+                    case "png": "image/png"
+                    case "gif": "image/gif"
+                    case "webp": "image/webp"
+                    default: nil
+                    }
+            #endif
+            guard let mimeType else { throw ToolAttachmentError.unknownImageType(url) }
+            return .image(.init(id: image.id, data: try Data(contentsOf: url), mimeType: mimeType))
+        }
+    }
+}
+
+private enum ToolAttachmentError: LocalizedError {
+    case unknownImageType(URL)
+
+    var errorDescription: String? {
+        switch self {
+        case .unknownImageType(let url):
+            "Cannot determine the MIME type of the Tool output image \(url.lastPathComponent)."
+        }
     }
 }
