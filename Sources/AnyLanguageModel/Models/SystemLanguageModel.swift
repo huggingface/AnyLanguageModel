@@ -605,38 +605,20 @@
         internal init(_ content: AnyLanguageModel.GenerationSchema) {
             let resolvedSchema = content.withResolvedRoot() ?? content
 
-            // Convert the GenerationSchema into a DynamicGenerationSchema, preserving $defs
-            let rawParameters = try? JSONValue(resolvedSchema)
-
-            if case .object(var rootObject) = rawParameters {
-                // Extract dependencies from $defs and remove from the root payload
-                let defs = rootObject.removeValue(forKey: "$defs")?.objectValue ?? [:]
-
-                // Convert root schema
-                if let rootData = try? JSONEncoder().encode(JSONValue.object(rootObject)),
-                    let rootJSONSchema = try? JSONDecoder().decode(JSONSchema.self, from: rootData)
-                {
-                    let rootDynamicSchema = convertToDynamicSchema(rootJSONSchema)
-
-                    // Convert each dependency schema
-                    let dependencies: [FoundationModels.DynamicGenerationSchema] = defs.compactMap { name, value in
-                        guard
-                            let defData = try? JSONEncoder().encode(value),
-                            let defJSONSchema = try? JSONDecoder().decode(JSONSchema.self, from: defData)
-                        else {
-                            return nil
-                        }
-                        return convertToDynamicSchema(defJSONSchema, name: name)
-                    }
-
-                    if let schema = try? FoundationModels.GenerationSchema(
-                        root: rootDynamicSchema,
-                        dependencies: dependencies
-                    ) {
-                        self = schema
-                        return
-                    }
-                }
+            // Convert straight from the schema's nodes, which keep each object's properties in
+            // declaration order: the order the model generates them in.
+            // The root's inline objects and choices are named from a name no definition has.
+            let rootName = sequence(first: "Root") { "\($0)_" }.first { resolvedSchema.defs[$0] == nil }!
+            let rootDynamicSchema = convertToDynamicSchema(resolvedSchema.root, path: rootName)
+            let dependencies = resolvedSchema.defs.sorted { $0.key < $1.key }.map { name, node in
+                convertToDynamicSchema(node, name: name)
+            }
+            if let schema = try? FoundationModels.GenerationSchema(
+                root: rootDynamicSchema,
+                dependencies: dependencies
+            ) {
+                self = schema
+                return
             }
 
             // Fallback to a minimal string schema if conversion fails
@@ -784,6 +766,125 @@
 
         case .allOf, .oneOf, .not, .empty, .any:
             return .init(type: String.self)
+        }
+    }
+
+    /// The Foundation Models schema of `node`, named `name`, or by `path`, where it sits in its
+    /// schema, when it's written in place: Foundation Models refers to every object and choice by
+    /// its name, and one with no name refers to nothing.
+    @available(macOS 26.0, iOS 26.0, watchOS 27.0, tvOS 26.0, visionOS 26.0, *)
+    func convertToDynamicSchema(
+        _ node: AnyLanguageModel.GenerationSchema.Node,
+        name: String? = nil,
+        path: String = ""
+    ) -> FoundationModels.DynamicGenerationSchema {
+        // A definition's inline objects and choices are named from the definition's name, so the
+        // same property in two definitions, or in a definition and the root, names two schemas.
+        let base = path.isEmpty ? (name ?? "") : path
+        func at(_ step: String) -> String { base.isEmpty ? step : "\(base).\(step)" }
+        switch node {
+        case .object(let object):
+            // Declaration order, then any properties the order doesn't name, sorted.
+            let declared = object.propertyOrder.filter { object.properties[$0] != nil }
+            let rest = object.properties.keys.filter { !declared.contains($0) }.sorted()
+            let properties = (declared + rest).compactMap { key -> FoundationModels.DynamicGenerationSchema.Property? in
+                guard let property = object.properties[key] else { return nil }
+                return .init(
+                    name: key,
+                    description: property.description,
+                    schema: convertToDynamicSchema(property, path: at(key)),
+                    isOptional: !object.required.contains(key)
+                )
+            }
+            return .init(name: name ?? path, description: object.description, properties: properties)
+
+        case .string(let string):
+            if let values = string.enumChoices, !values.isEmpty, let name, !string.isConstant {
+                return .init(name: name, description: string.description, anyOf: values)
+            }
+            var guides: [FoundationModels.GenerationGuide<String>] = []
+            if let values = string.enumChoices, !values.isEmpty {
+                guides.append(string.isConstant && values.count == 1 ? .constant(values[0]) : .anyOf(values))
+            }
+            if let pattern = string.pattern, let regex = try? Regex(pattern) {
+                guides.append(.pattern(regex))
+            }
+            return .init(type: String.self, guides: guides)
+
+        case .number(let number) where number.integerOnly:
+            // The whole numbers within the bounds; a bound no `Int` can hold sets no guide.
+            var guides: [FoundationModels.GenerationGuide<Int>] = []
+            if let minimum = number.minimum.flatMap({ Int(exactly: $0.rounded(.up)) }) {
+                guides.append(.minimum(minimum))
+            }
+            if let maximum = number.maximum.flatMap({ Int(exactly: $0.rounded(.down)) }) {
+                guides.append(.maximum(maximum))
+            }
+            return .init(type: Int.self, guides: guides)
+
+        case .number(let number):
+            var guides: [FoundationModels.GenerationGuide<Double>] = []
+            if let minimum = number.minimum { guides.append(.minimum(minimum)) }
+            if let maximum = number.maximum { guides.append(.maximum(maximum)) }
+            return .init(type: Double.self, guides: guides)
+
+        case .boolean:
+            return .init(type: Bool.self)
+
+        case .anyOf(let nodes):
+            // Before OS 26.4, Foundation Models has no null schema.
+            // Leave out null variants there,
+            // so that the model generates another variant instead of an unconstrained string.
+            var choices = nodes
+            if !supportsNullSchema {
+                let nonNull = nodes.filter { if case .null = $0 { false } else { true } }
+                if !nonNull.isEmpty { choices = nonNull }
+            }
+            if choices.count == 1 {
+                return convertToDynamicSchema(choices[0], name: name, path: path)
+            }
+            return .init(
+                name: name ?? path,
+                anyOf: choices.enumerated().map { index, choice in
+                    convertToDynamicSchema(choice, path: at(String(index)))
+                }
+            )
+
+        case .array(let array):
+            return .init(
+                arrayOf: convertToDynamicSchema(array.items, path: path),
+                minimumElements: array.minItems,
+                maximumElements: array.maxItems
+            )
+
+        case .ref(let typeName):
+            // A named definition that is only a reference, such as a one-choice `anyOf`, keeps its
+            // name, or the references to it are undefined.
+            if let name {
+                return .init(name: name, anyOf: [.init(referenceTo: typeName)])
+            }
+            return .init(referenceTo: typeName)
+
+        case .null:
+            #if compiler(>=6.3) && !os(tvOS)
+                if #available(macOS 26.4, iOS 26.4, watchOS 27.0, visionOS 26.4, *) {
+                    return .null
+                }
+            #endif
+            return .init(type: String.self)
+        }
+    }
+
+    extension AnyLanguageModel.GenerationSchema.Node {
+        /// What the node says it is, where it says.
+        fileprivate var description: String? {
+            switch self {
+            case .object(let object): object.description
+            case .array(let array): array.description
+            case .string(let string): string.description
+            case .number(let number): number.description
+            case .boolean, .null, .anyOf, .ref: nil
+            }
         }
     }
 
@@ -1295,7 +1396,7 @@
     }
 
     /// Builds a minimal generated content tree from a schema node.
-    private func placeholderGeneratedContent(
+    func placeholderGeneratedContent(
         from node: GenerationSchema.Node,
         defs: [String: GenerationSchema.Node]
     ) -> GeneratedContent {
@@ -1328,10 +1429,13 @@
             return GeneratedContent("placeholder")
 
         case .number(let num):
+            // The smallest value the minimum allows, as far as the type can hold it.
+            let minimum = num.minimum.flatMap { $0.isFinite ? $0 : nil }
             if num.integerOnly {
-                return GeneratedContent(Int(num.minimum ?? 0))
+                guard let minimum else { return GeneratedContent(0) }
+                return GeneratedContent(Int(exactly: minimum.rounded(.up)) ?? (minimum > 0 ? .max : 0))
             } else {
-                return GeneratedContent(num.minimum ?? 0)
+                return GeneratedContent(minimum ?? 0)
             }
 
         case .boolean:
