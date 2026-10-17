@@ -1195,7 +1195,7 @@ import Foundation
 
                 // If there are tool calls, execute them and continue
                 if !collectedToolCalls.isEmpty {
-                    try toolRounds.record(collectedToolCalls.map(\.roundCall))
+                    try toolRounds.record()
 
                     let resolution = try await resolveToolCalls(
                         collectedToolCalls,
@@ -1436,7 +1436,7 @@ import Foundation
 
                             guard !collectedToolCalls.isEmpty else { break }
 
-                            try toolRounds.record(collectedToolCalls.map(\.roundCall))
+                            try toolRounds.record()
 
                             let resolution = try await resolveToolCalls(
                                 collectedToolCalls,
@@ -2342,13 +2342,6 @@ import Foundation
             case .array(let arr): return arr.map { $0.toSendable() }
             case .object(let obj): return obj.mapValues { $0.toSendable() }
             }
-        }
-    }
-
-    extension MLXLMCommon.ToolCall {
-        var roundCall: ToolRoundLimit.Call {
-            let arguments = try? JSONEncoder().encode(function.arguments)
-            return .init(name: function.name, jsonArguments: arguments.map { String(decoding: $0, as: UTF8.self) })
         }
     }
 #endif  // MLX

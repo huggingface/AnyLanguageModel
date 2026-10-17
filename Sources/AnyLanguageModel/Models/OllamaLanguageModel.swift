@@ -291,7 +291,7 @@ public struct OllamaLanguageModel: LanguageModel {
                         }
                         guard !toolCalls.isEmpty else { break }
                         try Task.checkCancellation()
-                        try toolRounds.record(toolCalls.map(\.roundCall))
+                        try toolRounds.record()
                         switch try await resolveToolCalls(
                             toolCalls,
                             tools: requestContext.tools,
@@ -737,11 +737,5 @@ private struct OllamaToolFunction: Codable, Sendable {
     private enum CodingKeys: String, CodingKey {
         case name
         case arguments
-    }
-}
-
-extension OllamaToolCall {
-    var roundCall: ToolRoundLimit.Call {
-        .init(name: function.name, arguments: function.arguments)
     }
 }
