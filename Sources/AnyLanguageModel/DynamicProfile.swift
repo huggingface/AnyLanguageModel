@@ -61,7 +61,7 @@ extension LanguageModelSession {
 
     public struct ConditionalDynamicProfile<TrueContent, FalseContent>: DynamicProfile
     where TrueContent: DynamicProfile, FalseContent: DynamicProfile {
-        public enum Branch {
+        enum Branch {
             case trueContent(TrueContent)
             case falseContent(FalseContent)
         }
@@ -69,7 +69,7 @@ extension LanguageModelSession {
         public typealias Body = Never
         fileprivate let branch: Branch
 
-        public init(_ branch: Branch) {
+        init(_ branch: Branch) {
             self.branch = branch
         }
 
@@ -200,6 +200,7 @@ extension LanguageModelSession.DynamicProfile {
         BuiltinModifiedDynamicProfile(content: self, modifier: .reasoningLevel(reasoningLevel))
     }
 
+    @_spi(Compatibility)
     public func includeSchemaInPrompt(
         _ includeSchemaInPrompt: Bool?
     ) -> some LanguageModelSession.DynamicProfile {
@@ -528,7 +529,7 @@ actor ProfileLifecycle {
         history: [Transcript.Entry],
         prompt: Transcript.Prompt?,
         callbackState: ProfileCallbackState,
-        historyEdits: Locked<Transcript.HistoryView?>,
+        historyEdits: Locked<[Transcript.Entry]?>,
         protectedEntryIDs: Set<String> = []
     ) async throws {
         let previous = pendingPreparation?.task
@@ -562,7 +563,7 @@ actor ProfileLifecycle {
         history: [Transcript.Entry],
         prompt: Transcript.Prompt?,
         callbackState: ProfileCallbackState,
-        historyEdits: Locked<Transcript.HistoryView?>,
+        historyEdits: Locked<[Transcript.Entry]?>,
         protectedEntryIDs: Set<String>
     ) async throws {
         let history = properties.historyBinding(
