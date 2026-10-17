@@ -547,7 +547,7 @@ public struct OpenResponsesLanguageModel: LanguageModel {
                         }
                         guard !toolCalls.isEmpty else { break }
                         try Task.checkCancellation()
-                        try toolRounds.record(toolCalls.map(\.roundCall))
+                        try toolRounds.record()
                         switch try await resolveToolCalls(
                             toolCalls,
                             tools: requestContext.tools,
@@ -634,7 +634,7 @@ public struct OpenResponsesLanguageModel: LanguageModel {
                         )
                     }
                 }
-                try toolRounds.record(toolCalls.map(\.roundCall))
+                try toolRounds.record()
                 let resolution = try await resolveToolCalls(
                     toolCalls,
                     tools: requestContext.tools,
@@ -1297,11 +1297,5 @@ private extension GenerationSchema {
             value = .object(obj)
         }
         return value
-    }
-}
-
-extension OpenResponsesToolCall {
-    var roundCall: ToolRoundLimit.Call {
-        .init(name: name, jsonArguments: arguments)
     }
 }

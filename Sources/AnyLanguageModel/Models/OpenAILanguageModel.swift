@@ -548,7 +548,7 @@ public struct OpenAILanguageModel: LanguageModel {
                 if let value = try? JSONValue(toolCallMessage) {
                     inFlightMessages.append(OpenAIMessage(role: .raw(rawContent: value), content: .text("")))
                 }
-                try toolRounds.record(toolCalls.map(\.roundCall))
+                try toolRounds.record()
                 let resolution = try await resolveToolCalls(
                     toolCalls,
                     tools: requestContext.tools,
@@ -658,7 +658,7 @@ public struct OpenAILanguageModel: LanguageModel {
                         inFlightMessages.append(OpenAIMessage(role: .raw(rawContent: msg), content: .text("")))
                     }
                 }
-                try toolRounds.record(toolCalls.map(\.roundCall))
+                try toolRounds.record()
                 let resolution = try await resolveToolCalls(
                     toolCalls,
                     tools: requestContext.tools,
@@ -880,7 +880,7 @@ public struct OpenAILanguageModel: LanguageModel {
 
                         guard !toolCalls.isEmpty else { break }
                         try Task.checkCancellation()
-                        try toolRounds.record(toolCalls.map(\.roundCall))
+                        try toolRounds.record()
                         switch try await resolveToolCalls(
                             toolCalls,
                             tools: requestContext.tools,
@@ -2102,11 +2102,5 @@ private struct ChatCompletionsUsage: Decodable, Sendable {
                 reasoningTokenCount: completionTokensDetails?.reasoningTokens
             )
         ).normalized
-    }
-}
-
-extension OpenAIToolCall {
-    var roundCall: ToolRoundLimit.Call {
-        .init(name: function?.name ?? "", jsonArguments: function?.arguments)
     }
 }
