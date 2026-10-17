@@ -64,7 +64,7 @@ public final class SessionPropertyValues: @unchecked Sendable {
                         "Session history is read-only while dynamic instructions or a Tool is active"
                     )
                     history.entries = newValue
-                    history.persist(newValue)
+                    history.persist(history.entries)
                 } else {
                     historySetter(newValue)
                 }
@@ -74,11 +74,14 @@ public final class SessionPropertyValues: @unchecked Sendable {
 
     public subscript<Key>(key: Key.Type) -> Key.Value where Key: SessionPropertyKey {
         get {
-            customValues.withLock { values in
-                if let value = values[ObjectIdentifier(key)] as? Key.Value { return value }
-                let value = Key.defaultValue
-                values[ObjectIdentifier(key)] = value
+            if let value = customValues.withLock({ $0[ObjectIdentifier(key)] as? Key.Value }) {
                 return value
+            }
+            let defaultValue = Key.defaultValue
+            return customValues.withLock { values in
+                if let value = values[ObjectIdentifier(key)] as? Key.Value { return value }
+                values[ObjectIdentifier(key)] = defaultValue
+                return defaultValue
             }
         }
         set {
@@ -91,11 +94,13 @@ public final class SessionPropertyValues: @unchecked Sendable {
     func historyBinding(
         _ entries: Transcript.HistoryView,
         isWritable: Bool,
-        protecting protectedEntryIDs: Set<String> = []
+        protecting protectedEntryIDs: Set<String> = [],
+        onChange: (@Sendable (Transcript.HistoryView) -> Void)? = nil
     ) -> SessionHistoryBinding {
         let persist: (@Sendable (Transcript.HistoryView) -> Void)?
         if isWritable {
             persist = { [historySetter] updated in
+                onChange?(updated)
                 historySetter(
                     updated.filter { !protectedEntryIDs.contains($0.id) }
                 )
