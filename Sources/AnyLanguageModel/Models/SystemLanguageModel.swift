@@ -277,7 +277,7 @@
             // Attach the feedback to the session's conversation, including its latest response.
             let fmSession = FoundationModels.LanguageModelSession(
                 model: systemModel,
-                tools: requestContext.tools.toFoundationModels(),
+                tools: requestContext.tools.toFoundationModels(in: session),
                 transcript: requestContext.transcript.toFoundationModels(
                     instructions: requestContext.instructions,
                     toolDefinitions: requestContext.tools
@@ -319,7 +319,7 @@
             let requestContext = session.resolvedRequestContext()
             return FoundationModels.LanguageModelSession(
                 model: systemModel,
-                tools: requestContext.tools.toFoundationModels(),
+                tools: requestContext.tools.toFoundationModels(in: session),
                 transcript: fmTranscriptDroppingDuplicatePrompt(
                     requestContext.transcript,
                     prompt: prompt
@@ -388,7 +388,7 @@
                 if let instructions = requestContext.instructions {
                     instructions.toFoundationModels()
                 }
-                requestContext.tools.toFoundationModels()
+                requestContext.tools.toFoundationModels(in: session)
             }
         }
 
@@ -420,7 +420,7 @@
             let requestContext = session.resolvedRequestContext()
             return FoundationModels.LanguageModelSession(
                 model: model,
-                tools: requestContext.tools.toFoundationModels(),
+                tools: requestContext.tools.toFoundationModels(in: session),
                 transcript: fmTranscriptDroppingDuplicatePrompt(
                     requestContext.transcript,
                     prompt: prompt
@@ -476,6 +476,39 @@
     }
 
     @available(macOS 26.0, iOS 26.0, watchOS 27.0, tvOS 26.0, visionOS 26.0, *)
+    extension Array where Element == Transcript.Segment {
+        /// The segments as a tool's output for Foundation Models: text and structures as text,
+        /// and images as attachments, as a prompt's images are.
+        ///
+        /// - Throws: ``PromptBridgeError`` for an image Foundation Models can't take,
+        ///   rather than leaving it out.
+        func toFoundationModelsToolOutput() throws -> FoundationModels.Prompt {
+            let prompts: [FoundationModels.Prompt] = try map { segment in
+                switch segment {
+                case .text(let text):
+                    return FoundationModels.Prompt(text.content)
+                case .structure(let structure):
+                    return FoundationModels.Prompt(structure.content.jsonString)
+                case .image(let image):
+                    #if compiler(>=6.4) && !os(tvOS) && !os(watchOS)
+                        if #available(macOS 27, iOS 27, visionOS 27, *) {
+                            return FoundationModels.Prompt(
+                                try FoundationModels.Attachment<FoundationModels.ImageAttachmentContent>(image)
+                            )
+                        }
+                    #endif
+                    throw PromptBridgeError.attachmentsUnavailable
+                }
+            }
+            return FoundationModels.Prompt {
+                for prompt in prompts {
+                    prompt
+                }
+            }
+        }
+    }
+
+    @available(macOS 26.0, iOS 26.0, watchOS 27.0, tvOS 26.0, visionOS 26.0, *)
     extension Instructions {
         func toFoundationModels() -> FoundationModels.Instructions {
             FoundationModels.Instructions(self.description)
@@ -498,6 +531,21 @@
             }
 
             #if compiler(>=6.4) && !os(tvOS)
+                if #available(macOS 27, iOS 27, visionOS 27, watchOS 27, *) {
+                    let toolCallingMode: FoundationModels.GenerationOptions.ToolCallingMode? =
+                        switch self.toolCallingMode?.kind {
+                        case .allowed: .allowed
+                        case .required: .required
+                        case .disallowed: .disallowed
+                        case nil: nil
+                        }
+                    return FoundationModels.GenerationOptions(
+                        samplingMode: sampling,
+                        temperature: temperature,
+                        maximumResponseTokens: maximumResponseTokens,
+                        toolCallingMode: toolCallingMode
+                    )
+                }
                 return FoundationModels.GenerationOptions(
                     samplingMode: sampling,
                     temperature: temperature,
@@ -552,14 +600,18 @@
 
     @available(macOS 26.0, iOS 26.0, watchOS 27.0, tvOS 26.0, visionOS 26.0, *)
     extension Array where Element == (any Tool) {
-        func toFoundationModels() -> [any FoundationModels.Tool] {
-            map { AnyToolWrapper($0) }
+        /// The tools as Foundation Models tools, which Foundation Models calls itself.
+        /// With `session`, each call asks the session's tool execution delegate first,
+        /// as other models do before running a tool.
+        func toFoundationModels(in session: LanguageModelSession? = nil) -> [any FoundationModels.Tool] {
+            map { AnyToolWrapper($0, session: session) }
         }
     }
 
     enum PromptBridgeError: Error, LocalizedError {
         case attachmentsUnavailable
         case nonFileImageURL
+        case unreadableImage
 
         var errorDescription: String? {
             switch self {
@@ -569,15 +621,56 @@
             case .nonFileImageURL:
                 return
                     "Foundation Models accepts image attachment URLs only for local files. Download the image to a file URL, or attach it as a CGImage."
+            case .unreadableImage:
+                return "The image's data couldn't be read as an image."
             }
         }
+    }
+
+    @available(macOS 26.0, iOS 26.0, watchOS 27.0, tvOS 26.0, visionOS 26.0, *)
+    /// A tool call a session's tool execution delegate stopped at,
+    /// thrown from inside Foundation Models to end the request there.
+    struct ToolCallStopped: Error {
+        let call: Transcript.ToolCall
+    }
+
+    @available(macOS 26.0, iOS 26.0, watchOS 27.0, tvOS 26.0, visionOS 26.0, *)
+    /// The tool call the delegate stopped at, when `error` is that stop.
+    /// Foundation Models wraps errors that tools throw in its own `ToolCallError`.
+    func stoppedToolCall(in error: any Error) -> Transcript.ToolCall? {
+        if let stopped = error as? ToolCallStopped { return stopped.call }
+        #if !os(watchOS)
+            if let toolError = error as? FoundationModels.LanguageModelSession.ToolCallError {
+                return stoppedToolCall(in: toolError.underlyingError)
+            }
+        #endif
+        if let toolError = error as? LanguageModelSession.ToolCallError {
+            return stoppedToolCall(in: toolError.underlyingError)
+        }
+        return nil
+    }
+
+    @available(macOS 26.0, iOS 26.0, watchOS 27.0, tvOS 26.0, visionOS 26.0, *)
+    /// The emptiest content of `type`, for a response that stopped at tool calls before any content.
+    ///
+    /// - Throws: ``GeneratedContentError/typeMismatch`` when `type` takes no empty value,
+    ///   as other models do when they stop at tool calls.
+    func stoppedContent<Content: Generable>(of type: Content.Type) throws -> (content: Content, raw: GeneratedContent) {
+        let candidates: [GeneratedContent.Kind] = [
+            .string(""), .structure(properties: [:], orderedKeys: []), .array([]), .null, .number(0), .bool(false),
+        ]
+        for kind in candidates {
+            let raw = GeneratedContent(kind: kind)
+            if let content = try? Content(raw) { return (content, raw) }
+        }
+        throw GeneratedContentError.typeMismatch
     }
 
     /// A type-erased wrapper that bridges any `Tool` to `FoundationModels.Tool`.
     @available(macOS 26.0, iOS 26.0, watchOS 27.0, tvOS 26.0, visionOS 26.0, *)
     private struct AnyToolWrapper: FoundationModels.Tool {
         typealias Arguments = FoundationModels.GeneratedContent
-        typealias Output = String
+        typealias Output = FoundationModels.Prompt
 
         let name: String
         let description: String
@@ -585,9 +678,11 @@
         let includesSchemaInInstructions: Bool
 
         private let wrappedTool: any Tool
+        private let session: LanguageModelSession?
 
-        init(_ tool: any Tool) {
+        init(_ tool: any Tool, session: LanguageModelSession?) {
             self.wrappedTool = tool
+            self.session = session
             self.name = tool.name
             self.description = tool.description
             self.parameters = FoundationModels.GenerationSchema(tool.parameters)
@@ -595,8 +690,85 @@
         }
 
         func call(arguments: FoundationModels.GeneratedContent) async throws -> Output {
-            let output = try await wrappedTool.callFunction(arguments: arguments)
-            return output.promptRepresentation.description
+            try await callTool(wrappedTool, with: GeneratedContent(arguments), in: session)
+        }
+    }
+
+    /// The tool calls Foundation Models ran during one request, each with its output.
+    /// Foundation Models runs tools inside the request, so this is where the response's
+    /// transcript entries for them come from, with the IDs the delegate saw.
+    /// Foundation Models runs parallel calls at the same time, so each call takes its place
+    /// when it starts: the entries keep the order the model made the calls in,
+    /// not the order they finish in.
+    @available(macOS 26.0, iOS 26.0, watchOS 27.0, tvOS 26.0, visionOS 26.0, *)
+    actor ToolCallRecord {
+        @TaskLocal static var current: ToolCallRecord?
+
+        /// A call that started, with its output once it ran.
+        private struct Started {
+            let call: Transcript.ToolCall
+            var output: Transcript.ToolOutput?
+        }
+
+        private var started: [Started] = []
+
+        /// The calls that ran, each followed by its output, in the order they started.
+        var entries: [Transcript.Entry] {
+            started.flatMap { started -> [Transcript.Entry] in
+                guard let output = started.output else { return [] }
+                return [.toolCalls(Transcript.ToolCalls([started.call])), .toolOutput(output)]
+            }
+        }
+
+        func start(_ call: Transcript.ToolCall) {
+            started.append(Started(call: call, output: nil))
+        }
+
+        func ran(_ call: Transcript.ToolCall, output: Transcript.ToolOutput) {
+            guard let index = started.firstIndex(where: { $0.call.id == call.id }) else { return }
+            started[index].output = output
+        }
+    }
+
+    /// Runs `tool` for Foundation Models, which calls tools itself: asks the session's tool
+    /// execution delegate first, if it has one, as other models do before running a tool. A stop
+    /// throws ``ToolCallStopped``, which ends the request with the call. A call that runs, or whose
+    /// output the delegate provides, is recorded for the request's transcript.
+    @available(macOS 26.0, iOS 26.0, watchOS 27.0, tvOS 26.0, visionOS 26.0, *)
+    func callTool(_ tool: any Tool, with arguments: GeneratedContent, in session: LanguageModelSession?) async throws
+        -> FoundationModels.Prompt
+    {
+        let call = Transcript.ToolCall(id: UUID().uuidString, toolName: tool.name, arguments: arguments)
+        await ToolCallRecord.current?.start(call)
+        func output(_ segments: [Transcript.Segment]) -> Transcript.ToolOutput {
+            Transcript.ToolOutput(id: call.id, toolName: tool.name, segments: segments)
+        }
+        guard let session, let delegate = session.toolExecutionDelegate else {
+            let text = try await tool.callFunction(content: arguments).promptRepresentation.description
+            await ToolCallRecord.current?.ran(call, output: output([.text(.init(content: text))]))
+            return FoundationModels.Prompt(text)
+        }
+        await delegate.didGenerateToolCalls([call], in: session)
+        switch await delegate.toolCallDecision(for: call, in: session) {
+        case .stop:
+            throw ToolCallStopped(call: call)
+        case .provideOutput(let segments):
+            // Made before the delegate hears the output was given: an image Foundation Models
+            // can't take fails the call here rather than reaching the model as nothing.
+            let prompt = try segments.toFoundationModelsToolOutput()
+            await delegate.didExecuteToolCall(call, output: output(segments), in: session)
+            await ToolCallRecord.current?.ran(call, output: output(segments))
+            return prompt
+        case .execute:
+            do {
+                let text = try await tool.callFunction(content: arguments).promptRepresentation.description
+                await delegate.didExecuteToolCall(call, output: output([.text(.init(content: text))]), in: session)
+                await ToolCallRecord.current?.ran(call, output: output([.text(.init(content: text))]))
+                return FoundationModels.Prompt(text)
+            } catch {
+                await delegate.didFailToolCall(call, error: error, in: session)
+                throw error
+            }
         }
     }
 
@@ -643,11 +815,8 @@
 
     @available(macOS 26.0, iOS 26.0, watchOS 27.0, tvOS 26.0, visionOS 26.0, *)
     extension Tool {
-        fileprivate func callFunction(arguments: FoundationModels.GeneratedContent) async throws
-            -> any PromptRepresentable
-        {
-            let content = try GeneratedContent(arguments)
-            return try await call(arguments: Self.Arguments(content))
+        fileprivate func callFunction(content: GeneratedContent) async throws -> any PromptRepresentable {
+            try await call(arguments: Self.Arguments(content))
         }
     }
 
@@ -1060,22 +1229,48 @@
                     guard url.isFileURL else { return nil }
                     self.init(imageURL: url)
                 case .data(let data, _):
-                    guard
-                        let imageSource = CGImageSourceCreateWithData(data as CFData, nil),
-                        let cgImage = CGImageSourceCreateImageAtIndex(imageSource, 0, nil)
-                    else {
-                        return nil
-                    }
-                    let properties =
-                        CGImageSourceCopyPropertiesAtIndex(
-                            imageSource,
-                            0,
-                            nil
-                        ) as? [CFString: Any]
-                    let orientation = (properties?[kCGImagePropertyOrientation] as? NSNumber)
-                        .flatMap { CGImagePropertyOrientation(rawValue: $0.uint32Value) }
-                    self.init(cgImage, orientation: orientation)
+                    guard let decoded = DecodedImage(data) else { return nil }
+                    self.init(decoded.image, orientation: decoded.orientation)
                 }
+            }
+        }
+
+        #if !os(watchOS)
+            @available(macOS 27.0, iOS 27.0, visionOS 27.0, *)
+            extension FoundationModels.Attachment where Content == FoundationModels.ImageAttachmentContent {
+                /// The image as an attachment, for a tool's output.
+                ///
+                /// - Throws: ``PromptBridgeError/nonFileImageURL`` for an image on the web,
+                ///   and ``PromptBridgeError/unreadableImage`` for data that isn't an image.
+                fileprivate init(_ imageSegment: Transcript.ImageSegment) throws {
+                    switch imageSegment.source {
+                    case .url(let url):
+                        guard url.isFileURL else { throw PromptBridgeError.nonFileImageURL }
+                        self.init(imageURL: url, orientation: nil)
+                    case .data(let data, _):
+                        guard let decoded = DecodedImage(data) else { throw PromptBridgeError.unreadableImage }
+                        self.init(decoded.image, orientation: decoded.orientation)
+                    }
+                }
+            }
+        #endif
+
+        /// An image read from its data, with the orientation its data gives.
+        private struct DecodedImage {
+            let image: CGImage
+            let orientation: CGImagePropertyOrientation?
+
+            init?(_ data: Data) {
+                guard
+                    let imageSource = CGImageSourceCreateWithData(data as CFData, nil),
+                    let image = CGImageSourceCreateImageAtIndex(imageSource, 0, nil)
+                else {
+                    return nil
+                }
+                let properties = CGImageSourceCopyPropertiesAtIndex(imageSource, 0, nil) as? [CFString: Any]
+                self.image = image
+                self.orientation = (properties?[kCGImagePropertyOrientation] as? NSNumber)
+                    .flatMap { CGImagePropertyOrientation(rawValue: $0.uint32Value) }
             }
         }
     #endif
@@ -1097,6 +1292,47 @@
 
     @available(macOS 26.0, iOS 26.0, watchOS 27.0, tvOS 26.0, visionOS 26.0, *)
     func fmRespond<Content>(
+        makeSession: @Sendable () async throws -> FoundationModels.LanguageModelSession,
+        fmPrompt: FoundationModels.Prompt,
+        fmOptions: FoundationModels.GenerationOptions,
+        type: Content.Type,
+        schema: GenerationSchema,
+        includeSchemaInPrompt: Bool
+    ) async throws -> LanguageModelSession.Response<Content> where Content: Generable {
+        // The tool calls that run during the request come first in its transcript entries.
+        let record = ToolCallRecord()
+        do {
+            let response = try await ToolCallRecord.$current.withValue(record) {
+                try await fmRespondRunningTools(
+                    makeSession: makeSession,
+                    fmPrompt: fmPrompt,
+                    fmOptions: fmOptions,
+                    type: type,
+                    schema: schema,
+                    includeSchemaInPrompt: includeSchemaInPrompt
+                )
+            }
+            return LanguageModelSession.Response(
+                content: response.content,
+                rawContent: response.rawContent,
+                transcriptEntries: ArraySlice(await record.entries) + response.transcriptEntries,
+                usage: response.usage
+            )
+        } catch {
+            // The delegate stopped at a tool call: the response ends there, with the calls that ran
+            // before it and then the call.
+            guard let call = stoppedToolCall(in: error) else { throw error }
+            let stopped = try stoppedContent(of: type)
+            return LanguageModelSession.Response(
+                content: stopped.content,
+                rawContent: stopped.raw,
+                transcriptEntries: ArraySlice(await record.entries + [.toolCalls(Transcript.ToolCalls([call]))])
+            )
+        }
+    }
+
+    @available(macOS 26.0, iOS 26.0, watchOS 27.0, tvOS 26.0, visionOS 26.0, *)
+    private func fmRespondRunningTools<Content>(
         makeSession: @Sendable () async throws -> FoundationModels.LanguageModelSession,
         fmPrompt: FoundationModels.Prompt,
         fmOptions: FoundationModels.GenerationOptions,
@@ -1165,6 +1401,76 @@
 
     @available(macOS 26.0, iOS 26.0, watchOS 27.0, tvOS 26.0, visionOS 26.0, *)
     func fmStreamResponse<Content>(
+        makeSession: @escaping @Sendable () async throws -> FoundationModels.LanguageModelSession,
+        fmPrompt: FoundationModels.Prompt,
+        fmOptions: FoundationModels.GenerationOptions,
+        type: Content.Type,
+        schema: GenerationSchema,
+        includeSchemaInPrompt: Bool
+    ) -> LanguageModelSession.ResponseStream<Content> where Content: Generable {
+        // The tool calls that run during the request come first in its last snapshot's entries.
+        let record = ToolCallRecord()
+        let running = ToolCallRecord.$current.withValue(record) {
+            fmStreamResponseRunningTools(
+                makeSession: makeSession,
+                fmPrompt: fmPrompt,
+                fmOptions: fmOptions,
+                type: type,
+                schema: schema,
+                includeSchemaInPrompt: includeSchemaInPrompt
+            )
+        }
+        let stream: AsyncThrowingStream<LanguageModelSession.ResponseStream<Content>.Snapshot, Error> =
+            AsyncThrowingStream { continuation in
+                let relaying = _Concurrency.Task {
+                    var last: LanguageModelSession.ResponseStream<Content>.Snapshot?
+                    do {
+                        for try await snapshot in running {
+                            last = snapshot
+                            continuation.yield(snapshot)
+                        }
+                        let ran = await record.entries
+                        if !ran.isEmpty, var last {
+                            last.transcriptEntries = ArraySlice(ran) + last.transcriptEntries
+                            continuation.yield(last)
+                        }
+                        continuation.finish()
+                    } catch {
+                        // The delegate stopped at a tool call: the stream ends there, with the call.
+                        guard let call = stoppedToolCall(in: error) else {
+                            continuation.finish(throwing: error)
+                            return
+                        }
+                        let entries: [Transcript.Entry] =
+                            await record.entries + [.toolCalls(Transcript.ToolCalls([call]))]
+                        if var last {
+                            last.transcriptEntries += entries
+                            continuation.yield(last)
+                        } else {
+                            do {
+                                let stopped = try stoppedContent(of: type)
+                                continuation.yield(
+                                    .init(
+                                        content: stopped.content.asPartiallyGenerated(),
+                                        rawContent: stopped.raw,
+                                        transcriptEntries: ArraySlice(entries)
+                                    )
+                                )
+                            } catch {
+                                continuation.finish(throwing: error)
+                                return
+                            }
+                        }
+                        continuation.finish()
+                    }
+                }
+                continuation.onTermination = { _ in relaying.cancel() }
+            }
+        return LanguageModelSession.ResponseStream(stream: stream)
+    }
+
+    @available(macOS 26.0, iOS 26.0, watchOS 27.0, tvOS 26.0, visionOS 26.0, *)
+    private func fmStreamResponseRunningTools<Content>(
         makeSession: @escaping @Sendable () async throws -> FoundationModels.LanguageModelSession,
         fmPrompt: FoundationModels.Prompt,
         fmOptions: FoundationModels.GenerationOptions,
@@ -1314,7 +1620,7 @@
                         }
                         continuation.finish()
                     } catch {
-                        if didYield {
+                        if didYield || stoppedToolCall(in: error) != nil {
                             continuation.finish(throwing: error)
                         } else {
                             await processTextFallback()
