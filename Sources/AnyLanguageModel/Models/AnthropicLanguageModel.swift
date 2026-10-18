@@ -378,6 +378,10 @@ public struct AnthropicLanguageModel: LanguageModel {
     /// The model identifier to use for generation.
     public let model: String
 
+    /// How long to wait for a streamed response to start. With URLSession, it's how long to
+    /// wait for each part of the response, so it applies while the response streams too.
+    public let responseStartTimeout: Duration
+
     private let transport: any HTTPTransport
 
     /// Creates an Anthropic language model.
@@ -388,6 +392,7 @@ public struct AnthropicLanguageModel: LanguageModel {
     ///   - apiVersion: The API version to use for requests. Defaults to `2023-06-01`.
     ///   - betas: Optional beta version(s) of the API to use.
     ///   - model: The model identifier (for example, "claude-3-5-sonnet-20241022").
+    ///   - responseStartTimeout: How long to wait for a streamed response to start. Defaults to 60 seconds.
     ///   - transport: How it sends its requests: by default ``makeDefaultTransport()``.
     public init(
         baseURL: URL = defaultBaseURL,
@@ -395,6 +400,7 @@ public struct AnthropicLanguageModel: LanguageModel {
         apiVersion: String = defaultAPIVersion,
         betas: [String]? = nil,
         model: String,
+        responseStartTimeout: Duration = .seconds(60),
         transport: any HTTPTransport = makeDefaultTransport(),
     ) {
         var baseURL = baseURL
@@ -407,11 +413,12 @@ public struct AnthropicLanguageModel: LanguageModel {
         self.apiVersion = apiVersion
         self.betas = betas
         self.model = model
+        self.responseStartTimeout = responseStartTimeout
         self.transport = transport
     }
 
     /// Creates a model that sends its requests with `session`.
-    @available(*, deprecated, renamed: "init(baseURL:apiKey:apiVersion:betas:model:transport:)")
+    @available(*, deprecated, renamed: "init(baseURL:apiKey:apiVersion:betas:model:responseStartTimeout:transport:)")
     public init(
         baseURL: URL = defaultBaseURL,
         apiKey tokenProvider: @escaping @autoclosure @Sendable () -> String,
@@ -641,7 +648,8 @@ public struct AnthropicLanguageModel: LanguageModel {
                         let events: AsyncThrowingStream<AnthropicStreamEvent, any Error> =
                             transport.fetchEventStream(
                                 HTTPRequest(method: .post, url: url, headerFields: headers),
-                                body: body
+                                body: body,
+                                timeout: responseStartTimeout
                             )
                         var blocks: [Int: AnthropicStreamBlock] = [:]
                         var lastSnapshot: LanguageModelSession.ResponseStream<Content>.Snapshot?

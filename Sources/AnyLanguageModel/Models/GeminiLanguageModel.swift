@@ -149,6 +149,10 @@ public struct GeminiLanguageModel: LanguageModel {
 
     public let model: String
 
+    /// How long to wait for a streamed response to start. With URLSession, it's how long to
+    /// wait for each part of the response, so it applies while the response streams too.
+    public let responseStartTimeout: Duration
+
     private let transport: any HTTPTransport
 
     /// Creates a new Gemini language model.
@@ -158,12 +162,14 @@ public struct GeminiLanguageModel: LanguageModel {
     ///   - tokenProvider: A closure that provides the API key.
     ///   - apiVersion: The API version to use.
     ///   - model: The model identifier.
+    ///   - responseStartTimeout: How long to wait for a streamed response to start. Defaults to 60 seconds.
     ///   - transport: How it sends its requests: by default ``makeDefaultTransport()``.
     public init(
         baseURL: URL = defaultBaseURL,
         apiKey tokenProvider: @escaping @autoclosure @Sendable () -> String,
         apiVersion: String = defaultAPIVersion,
         model: String,
+        responseStartTimeout: Duration = .seconds(60),
         transport: any HTTPTransport = makeDefaultTransport(),
     ) {
         var baseURL = baseURL
@@ -175,11 +181,12 @@ public struct GeminiLanguageModel: LanguageModel {
         self.tokenProvider = tokenProvider
         self.apiVersion = apiVersion
         self.model = model
+        self.responseStartTimeout = responseStartTimeout
         self.transport = transport
     }
 
     /// Creates a model that sends its requests with `session`.
-    @available(*, deprecated, renamed: "init(baseURL:apiKey:apiVersion:model:transport:)")
+    @available(*, deprecated, renamed: "init(baseURL:apiKey:apiVersion:model:responseStartTimeout:transport:)")
     public init(
         baseURL: URL = defaultBaseURL,
         apiKey tokenProvider: @escaping @autoclosure @Sendable () -> String,
@@ -456,7 +463,8 @@ public struct GeminiLanguageModel: LanguageModel {
                         let stream: AsyncThrowingStream<GeminiGenerateContentResponse, any Error> =
                             transport.fetchEventStream(
                                 HTTPRequest(method: .post, url: url, headerFields: headers),
-                                body: body
+                                body: body,
+                                timeout: responseStartTimeout
                             )
                         var parts: [GeminiPart] = []
                         var functionCalls: [GeminiFunctionCall] = []

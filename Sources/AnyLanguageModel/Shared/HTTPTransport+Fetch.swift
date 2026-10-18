@@ -97,13 +97,14 @@ extension HTTPTransport {
     func fetchStream<T: Decodable & Sendable>(
         _ request: HTTPRequest,
         body: Data? = nil,
-        dateDecodingStrategy: JSONDecoder.DateDecodingStrategy = .deferredToDate
+        dateDecodingStrategy: JSONDecoder.DateDecodingStrategy = .deferredToDate,
+        timeout: Duration = .seconds(60)
     ) -> AsyncThrowingStream<T, any Error> {
         let request = Self.request(request, accepting: "application/json", body: body)
         return streaming { continuation in
             let decoder = JSONDecoder()
             decoder.dateDecodingStrategy = dateDecodingStrategy
-            try await send(request: request, body: body, timeout: nil) { response, body in
+            try await send(request: request, body: body, timeout: timeout) { response, body in
                 try await Self.validate(response, body)
                 // Each line is decoded as it arrives.
                 var lines = JSONLines()
@@ -124,11 +125,12 @@ extension HTTPTransport {
 
     func fetchEventStream<T: Decodable & Sendable>(
         _ request: HTTPRequest,
-        body: Data? = nil
+        body: Data? = nil,
+        timeout: Duration = .seconds(60)
     ) -> AsyncThrowingStream<T, any Error> {
         let request = Self.request(request, accepting: "text/event-stream", body: body)
         return streaming { continuation in
-            try await send(request: request, body: body, timeout: nil) { response, body in
+            try await send(request: request, body: body, timeout: timeout) { response, body in
                 try await Self.validate(response, body)
                 let decoder = JSONDecoder()
                 for try await event in body.bytes.events {
