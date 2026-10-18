@@ -82,6 +82,7 @@ public struct AnthropicLanguageModel: LanguageModel {
         /// How the model should use the provided tools.
         ///
         /// Use this to control whether the model can use tools and which tools it prefers.
+        /// When set, it takes precedence over ``GenerationOptions/toolCallingMode``.
         public var toolChoice: ToolChoice?
 
         /// Configuration for extended thinking.

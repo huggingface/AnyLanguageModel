@@ -35,6 +35,8 @@ public struct OpenResponsesLanguageModel: LanguageModel {
     /// reasoning/text options. Use ``extraBody`` for parameters not yet modeled.
     public struct CustomGenerationOptions: AnyLanguageModel.CustomGenerationOptions, Codable, Sendable {
         /// Controls which tool the model should use, if any.
+        ///
+        /// When set, it takes precedence over ``GenerationOptions/toolCallingMode``.
         public var toolChoice: ToolChoice?
 
         /// The list of tools that are permitted for this request.

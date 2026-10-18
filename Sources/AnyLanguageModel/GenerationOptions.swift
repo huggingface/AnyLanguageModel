@@ -132,10 +132,29 @@ public struct GenerationOptions: Sendable, Equatable {
 
     /// The tool calling requirements.
     ///
-    /// ``SystemLanguageModel``, ``PrivateCloudComputeLanguageModel``, and ``FoundationLanguageModel``
-    /// pass it to Foundation Models
-    /// when built with Swift 6.4 or later and run on OS 27 or later, except on tvOS.
-    /// Other models ignore it.
+    /// Leave it `nil` to use the model's default.
+    /// Models handle it as follows:
+    ///
+    /// - ``SystemLanguageModel``, ``PrivateCloudComputeLanguageModel``, and ``FoundationLanguageModel``
+    ///   pass it to Foundation Models
+    ///   when built with Swift 6.4 or later and run on OS 27 or later, except on tvOS.
+    ///   Otherwise, they ignore it.
+    /// - ``OpenAILanguageModel``, ``OpenResponsesLanguageModel``, ``AnthropicLanguageModel``,
+    ///   and ``GeminiLanguageModel`` send it as the API's tool-choice setting
+    ///   with each request that has tools.
+    ///   A tool-choice custom option or `extraBody` overrides it.
+    /// - ``OllamaLanguageModel``, `MLXLanguageModel`, `LlamaLanguageModel`, and `CoreMLLanguageModel`
+    ///   have no tool-choice setting.
+    ///   For ``ToolCallingMode/disallowed``, they offer the model no tools.
+    ///   They can't make the model call a tool,
+    ///   so they offer the tools as usual for ``ToolCallingMode/required``.
+    ///
+    /// As in Foundation Models, the mode applies to every request in a response,
+    /// including each request that continues the response after tool calls.
+    /// With ``ToolCallingMode/required``, the model calls tools until a tool throws,
+    /// a ``ToolExecutionDelegate`` stops the response,
+    /// dynamic instructions remove the tools,
+    /// or a round of tool calls past ``maximumToolRounds`` ends the response.
     ///
     /// - Note: This API is exclusive to AnyLanguageModel on OS 26.
     ///   It follows the Foundation Models 27 `GenerationOptions.toolCallingMode` API,
