@@ -93,6 +93,15 @@ public struct GenerationOptions: Sendable, Equatable {
     ///   a reasonable default on your behalf.
     public var sampling: SamplingMode?
 
+    /// The sampling strategy for generation.
+    ///
+    /// This is the Foundation Models 27 spelling. ``sampling`` remains for
+    /// source compatibility with earlier AnyLanguageModel releases.
+    public var samplingMode: SamplingMode? {
+        get { sampling }
+        set { sampling = newValue }
+    }
+
     /// Temperature influences the confidence of the models response.
     ///
     /// The value of this property must be a number between `0` and `1` inclusive.
@@ -120,6 +129,33 @@ public struct GenerationOptions: Sendable, Equatable {
     /// its context size supports. If the response exceeds that limit without terminating,
     /// an error will be thrown.
     public var maximumResponseTokens: Int?
+
+    /// The tool calling requirements.
+    ///
+    /// ``SystemLanguageModel``, ``PrivateCloudComputeLanguageModel``, and ``FoundationLanguageModel``
+    /// pass it to Foundation Models
+    /// when built with Swift 6.4 or later and run on OS 27 or later, except on tvOS.
+    /// Other models ignore it.
+    ///
+    /// - Note: This API is exclusive to AnyLanguageModel on OS 26.
+    ///   It follows the Foundation Models 27 `GenerationOptions.toolCallingMode` API,
+    ///   so code that uses it ports to Foundation Models on OS 27.
+    public var toolCallingMode: ToolCallingMode?
+
+    /// The most rounds of tool calls one response may take: a round past it ends the response
+    /// with ``LanguageModelSession/ToolRoundLimitExceeded``, which carries the rounds that ran.
+    /// Must be at least `1`.
+    ///
+    /// ``SystemLanguageModel`` ignores it: Foundation Models runs tool calls itself.
+    ///
+    /// - Note: This API is exclusive to AnyLanguageModel
+    ///   and using it means your code is no longer drop-in compatible
+    ///   with the Foundation Models framework.
+    public var maximumToolRounds: Int = 8 {
+        didSet {
+            precondition(maximumToolRounds >= 1, "maximumToolRounds must be at least 1, got \(maximumToolRounds)")
+        }
+    }
 
     /// Storage for model-specific custom options.
     private var customOptionsStorage: CustomOptionsStorage = .init()
@@ -162,13 +198,96 @@ public struct GenerationOptions: Sendable, Equatable {
     ///   - maximumResponseTokens: The maximum number of tokens the model is allowed
     ///     to produce before being artificially halted. Must be positive.
     public init(
-        sampling: SamplingMode? = nil,
+        sampling: SamplingMode?,
         temperature: Double? = nil,
         maximumResponseTokens: Int? = nil
     ) {
         self.sampling = sampling
         self.temperature = temperature
         self.maximumResponseTokens = maximumResponseTokens
+        self.toolCallingMode = nil
+    }
+
+    /// Creates generation options that control token sampling behavior.
+    ///
+    /// - Parameters:
+    ///   - samplingMode: A strategy to use for sampling from a distribution.
+    ///   - temperature: Increasing temperature makes it possible for the model to produce less likely
+    ///     responses. Must be between `0` and `1`, inclusive.
+    ///   - maximumResponseTokens: The maximum number of tokens the model is allowed
+    ///     to produce before being artificially halted. Must be positive.
+    public init(
+        samplingMode: SamplingMode? = nil,
+        temperature: Double? = nil,
+        maximumResponseTokens: Int? = nil
+    ) {
+        self.init(
+            sampling: samplingMode,
+            temperature: temperature,
+            maximumResponseTokens: maximumResponseTokens
+        )
+    }
+
+    /// Creates generation options that control token sampling behavior
+    /// and how the model calls tools.
+    ///
+    /// - Parameters:
+    ///   - samplingMode: A strategy to use for sampling from a distribution.
+    ///   - temperature: Increasing temperature makes it possible for the model to produce less likely
+    ///     responses. Must be between `0` and `1`, inclusive.
+    ///   - maximumResponseTokens: The maximum number of tokens the model is allowed
+    ///     to produce before being artificially halted. Must be positive.
+    ///   - toolCallingMode: The requirements defining how the model should call tools.
+    ///
+    /// - Note: This API is exclusive to AnyLanguageModel on OS 26.
+    ///   It follows the Foundation Models 27
+    ///   `GenerationOptions.init(samplingMode:temperature:maximumResponseTokens:toolCallingMode:)` API,
+    ///   so code that uses it ports to Foundation Models on OS 27.
+    public init(
+        samplingMode: SamplingMode? = nil,
+        temperature: Double? = nil,
+        maximumResponseTokens: Int? = nil,
+        toolCallingMode: ToolCallingMode?
+    ) {
+        self.init(
+            sampling: samplingMode,
+            temperature: temperature,
+            maximumResponseTokens: maximumResponseTokens
+        )
+        self.toolCallingMode = toolCallingMode
+    }
+}
+
+extension GenerationOptions {
+    /// A value that describes how the model uses tools.
+    ///
+    /// - Note: This API is exclusive to AnyLanguageModel on OS 26.
+    ///   It follows the Foundation Models 27 `GenerationOptions.ToolCallingMode` API,
+    ///   so code that uses it ports to Foundation Models on OS 27.
+    public struct ToolCallingMode: Sendable, Equatable {
+        /// The different ways a model can use tools.
+        public enum Kind: Sendable, Equatable, Hashable {
+            /// The model can choose whether to call tools.
+            case allowed
+            /// The model must call one or more tools.
+            case required
+            /// The model can't call any tools.
+            case disallowed
+        }
+
+        /// The tool-calling behavior this mode represents.
+        public var kind: Kind
+
+        private init(kind: Kind) {
+            self.kind = kind
+        }
+
+        /// The model can choose whether to call tools.
+        public static let allowed = Self(kind: .allowed)
+        /// The model must call one or more tools.
+        public static let required = Self(kind: .required)
+        /// The model can't call any tools.
+        public static let disallowed = Self(kind: .disallowed)
     }
 }
 
@@ -181,6 +300,9 @@ extension GenerationOptions {
     /// but ``Transcript/Prompt`` is, so it codes its options through this type.
     /// It codes the sampling mode, temperature, and maximum response tokens
     /// in the same format as earlier releases.
+    /// It codes the tool-calling mode only when it's set
+    /// and maximum tool rounds only when it isn't the default,
+    /// so options without them code as they did before.
     /// Custom options aren't coded,
     /// because decoding them would need a registry of every model's option types.
     struct TranscriptCoding: Codable {
@@ -188,22 +310,73 @@ extension GenerationOptions {
             var mode: SamplingMode.Mode
         }
 
+        enum ToolCallingModeCoding: String, Codable {
+            case allowed
+            case required
+            case disallowed
+        }
+
         var sampling: Sampling?
         var temperature: Double?
         var maximumResponseTokens: Int?
+        var toolCallingMode: ToolCallingModeCoding?
+        var maximumToolRounds: Int?
+
+        private enum CodingKeys: String, CodingKey {
+            case sampling, temperature, maximumResponseTokens, toolCallingMode, maximumToolRounds
+        }
 
         init(_ options: GenerationOptions) {
             self.sampling = options.sampling.map { Sampling(mode: $0.mode) }
             self.temperature = options.temperature
             self.maximumResponseTokens = options.maximumResponseTokens
+            self.toolCallingMode =
+                switch options.toolCallingMode?.kind {
+                case .allowed: .allowed
+                case .required: .required
+                case .disallowed: .disallowed
+                case nil: nil
+                }
+            // The default isn't written, so coded options read as they did before the option existed.
+            self.maximumToolRounds =
+                options.maximumToolRounds == GenerationOptions().maximumToolRounds ? nil : options.maximumToolRounds
+        }
+
+        init(from decoder: any Decoder) throws {
+            let container = try decoder.container(keyedBy: CodingKeys.self)
+            self.sampling = try container.decodeIfPresent(Sampling.self, forKey: .sampling)
+            self.temperature = try container.decodeIfPresent(Double.self, forKey: .temperature)
+            self.maximumResponseTokens = try container.decodeIfPresent(Int.self, forKey: .maximumResponseTokens)
+            self.toolCallingMode = try container.decodeIfPresent(ToolCallingModeCoding.self, forKey: .toolCallingMode)
+            self.maximumToolRounds = try container.decodeIfPresent(Int.self, forKey: .maximumToolRounds)
+            // Coded data can't stop the program: a value the options refuse is a decoding error.
+            if let maximumToolRounds, maximumToolRounds < 1 {
+                throw DecodingError.dataCorruptedError(
+                    forKey: .maximumToolRounds,
+                    in: container,
+                    debugDescription: "maximumToolRounds must be at least 1, got \(maximumToolRounds)"
+                )
+            }
         }
 
         var options: GenerationOptions {
-            GenerationOptions(
-                sampling: sampling.map { SamplingMode(mode: $0.mode) },
+            let toolCallingMode: GenerationOptions.ToolCallingMode? =
+                switch toolCallingMode {
+                case .allowed: .allowed
+                case .required: .required
+                case .disallowed: .disallowed
+                case nil: nil
+                }
+            var options = GenerationOptions(
+                samplingMode: sampling.map { SamplingMode(mode: $0.mode) },
                 temperature: temperature,
-                maximumResponseTokens: maximumResponseTokens
+                maximumResponseTokens: maximumResponseTokens,
+                toolCallingMode: toolCallingMode
             )
+            if let maximumToolRounds {
+                options.maximumToolRounds = maximumToolRounds
+            }
+            return options
         }
     }
 }

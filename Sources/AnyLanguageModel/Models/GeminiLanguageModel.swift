@@ -243,7 +243,7 @@ public struct GeminiLanguageModel: LanguageModel {
         // The text of earlier tool rounds, which string responses include.
         var earlierText = ""
 
-        var toolRounds = ToolRoundLimit(provider: "Gemini")
+        var toolRounds = ToolRoundLimit(provider: "Gemini", options: options)
         // Multi-turn conversation loop for tool calling
         while true {
             let requestContext = session.resolvedRequestContext()
@@ -290,7 +290,7 @@ public struct GeminiLanguageModel: LanguageModel {
 
             if !functionCalls.isEmpty {
                 // Resolve function calls
-                try toolRounds.record()
+                try toolRounds.record(completed: entries)
                 let resolution = try await resolveFunctionCalls(
                     functionCalls,
                     tools: requestContext.tools,
@@ -419,7 +419,7 @@ public struct GeminiLanguageModel: LanguageModel {
                     let headers = buildHeaders()
                     var inFlightEntries: [Transcript.Entry] = []
                     var state = StreamingResponseState<Content>(wrapperProperty: responseSchema.wrapperProperty)
-                    var toolRounds = ToolRoundLimit(provider: "Gemini")
+                    var toolRounds = ToolRoundLimit(provider: "Gemini", options: options)
                     while true {
                         try Task.checkCancellation()
                         let requestContext = session.resolvedRequestContext()
@@ -475,7 +475,7 @@ public struct GeminiLanguageModel: LanguageModel {
                         guard !functionCalls.isEmpty else { break }
                         try Task.checkCancellation()
                         let metadata = try textPartMetadata(parts, includeUnsignedText: true)
-                        try toolRounds.record()
+                        try toolRounds.record(completed: state.entries)
                         switch try await resolveFunctionCalls(
                             functionCalls,
                             tools: requestContext.tools,

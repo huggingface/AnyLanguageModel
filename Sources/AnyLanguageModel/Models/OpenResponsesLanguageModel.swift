@@ -496,7 +496,7 @@ public struct OpenResponsesLanguageModel: LanguageModel {
                 do {
                     var inFlightMessages: [OpenResponsesMessage] = []
                     var state = StreamingResponseState<Content>(wrapperProperty: responseSchema.wrapperProperty)
-                    var toolRounds = ToolRoundLimit(provider: "Open Responses")
+                    var toolRounds = ToolRoundLimit(provider: "Open Responses", options: options)
                     while true {
                         try Task.checkCancellation()
                         let requestContext = session.resolvedRequestContext()
@@ -554,7 +554,7 @@ public struct OpenResponsesLanguageModel: LanguageModel {
                         }
                         guard !toolCalls.isEmpty else { break }
                         try Task.checkCancellation()
-                        try toolRounds.record()
+                        try toolRounds.record(completed: state.entries)
                         switch try await resolveToolCalls(
                             toolCalls,
                             tools: requestContext.tools,
@@ -610,7 +610,7 @@ public struct OpenResponsesLanguageModel: LanguageModel {
         var inFlightMessages: [OpenResponsesMessage] = []
         let url = baseURL.appendingPathComponent("responses")
 
-        var toolRounds = ToolRoundLimit(provider: "Open Responses")
+        var toolRounds = ToolRoundLimit(provider: "Open Responses", options: options)
         while true {
             let requestContext = session.resolvedRequestContext()
             let tools: [OpenResponsesTool]? =
@@ -644,7 +644,7 @@ public struct OpenResponsesLanguageModel: LanguageModel {
                         )
                     }
                 }
-                try toolRounds.record()
+                try toolRounds.record(completed: entries)
                 let resolution = try await resolveToolCalls(
                     toolCalls,
                     tools: requestContext.tools,
