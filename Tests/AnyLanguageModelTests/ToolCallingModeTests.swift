@@ -3,6 +3,20 @@ import Testing
 
 @testable import AnyLanguageModel
 
+@Suite("Tool-calling mode for models without a tool-choice setting")
+struct ToolsOfferedTests {
+    @Test(arguments: [nil, .allowed, .required] as [GenerationOptions.ToolCallingMode?])
+    func toolsAreOffered(mode: GenerationOptions.ToolCallingMode?) {
+        let options = GenerationOptions(toolCallingMode: mode)
+        #expect(options.toolsOffered(from: [WeatherTool()]).map(\.name) == ["getWeather"])
+    }
+
+    @Test func disallowedOffersNoTools() {
+        let options = GenerationOptions(toolCallingMode: .disallowed)
+        #expect(options.toolsOffered(from: [WeatherTool()]).isEmpty)
+    }
+}
+
 #if canImport(Darwin) && !canImport(AsyncHTTPClient)
     @Suite("Tool-calling mode in provider requests", .serialized)
     struct ToolCallingModeRequestTests {
@@ -133,7 +147,9 @@ import Testing
                 #expect(body["tool_choice"] == nil)
                 #expect(body["toolConfig"] == nil)
             }
-            #expect(body["tools"] != nil)
+            // Ollama honors `disallowed` by leaving the tools out.
+            let offersTools = !(provider == .ollama && mode == .disallowed)
+            #expect((body["tools"] != nil) == offersTools)
         }
 
         @Test(arguments: Provider.allCases, modes)

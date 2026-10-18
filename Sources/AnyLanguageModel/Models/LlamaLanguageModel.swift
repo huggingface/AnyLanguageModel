@@ -861,8 +861,10 @@ import Foundation
                     if mmprojPath == nil {
                         try validateNoImageSegments(in: requestContext.transcript)
                     }
+                    // llama.cpp has no tool-choice setting.
+                    let tools = options.toolsOffered(from: requestContext.tools)
                     let toolContext = try makeToolPromptContext(
-                        tools: requestContext.tools,
+                        tools: tools,
                         pendingEntries: pendingEntries
                     )
                     var promptImages: [Data] = []
@@ -932,7 +934,7 @@ import Foundation
 
                     let resolution = try await resolveToolCalls(
                         parsedCalls,
-                        tools: requestContext.tools,
+                        tools: tools,
                         session: session
                     )
                     switch resolution {
@@ -1108,8 +1110,10 @@ import Foundation
                                 if self.mmprojPath == nil {
                                     try self.validateNoImageSegments(in: requestContext.transcript)
                                 }
+                                // llama.cpp has no tool-choice setting.
+                                let tools = options.toolsOffered(from: requestContext.tools)
                                 let toolContext = try self.makeToolPromptContext(
-                                    tools: requestContext.tools,
+                                    tools: tools,
                                     pendingEntries: pendingEntries
                                 )
                                 var promptImages: [Data] = []
@@ -1194,7 +1198,7 @@ import Foundation
 
                                 let resolution = try await self.resolveToolCalls(
                                     parsedCalls,
-                                    tools: requestContext.tools,
+                                    tools: tools,
                                     session: session
                                 )
                                 switch resolution {
