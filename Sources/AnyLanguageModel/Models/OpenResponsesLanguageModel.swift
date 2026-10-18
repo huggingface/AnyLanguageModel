@@ -370,7 +370,7 @@ public struct OpenResponsesLanguageModel: LanguageModel {
     /// Model identifier to use for generation.
     public let model: String
 
-    private let httpSession: any HTTPTransport
+    private let transport: any HTTPTransport
 
     /// Creates an Open Responses language model.
     ///
@@ -378,12 +378,12 @@ public struct OpenResponsesLanguageModel: LanguageModel {
     ///   - baseURL: Base URL for the API (e.g. `https://api.openai.com/v1/` or `https://openrouter.ai/api/v1/`). Must end with `/`.
     ///   - apiKey: API key or closure that returns it.
     ///   - model: Model identifier (e.g. `gpt-4o-mini` or provider-specific id).
-    ///   - session: How it sends its requests: by default AnyLanguageModel's default session.
+    ///   - transport: How it sends its requests: by default ``makeDefaultTransport()``.
     public init(
         baseURL: URL,
         apiKey tokenProvider: @escaping @autoclosure @Sendable () -> String,
         model: String,
-        session: any HTTPTransport = makeDefaultSession(),
+        transport: any HTTPTransport = makeDefaultTransport(),
     ) {
         var baseURL = baseURL
         if !baseURL.path.hasSuffix("/") {
@@ -392,7 +392,18 @@ public struct OpenResponsesLanguageModel: LanguageModel {
         self.baseURL = baseURL
         self.tokenProvider = tokenProvider
         self.model = model
-        self.httpSession = session
+        self.transport = transport
+    }
+
+    /// Creates a model that sends its requests with `session`.
+    @available(*, deprecated, renamed: "init(baseURL:apiKey:model:transport:)")
+    public init(
+        baseURL: URL,
+        apiKey tokenProvider: @escaping @autoclosure @Sendable () -> String,
+        model: String,
+        session: HTTPSession
+    ) {
+        self.init(baseURL: baseURL, apiKey: tokenProvider(), model: model, transport: session)
     }
 
     public func respond<Content>(
@@ -515,7 +526,7 @@ public struct OpenResponsesLanguageModel: LanguageModel {
                         )
                         let body = try JSONEncoder().encode(params)
                         let events: AsyncThrowingStream<OpenResponsesStreamEvent, any Error> =
-                            httpSession.fetchEventStream(
+                            transport.fetchEventStream(
                                 HTTPRequest(
                                     method: .post,
                                     url: url,
@@ -627,7 +638,7 @@ public struct OpenResponsesLanguageModel: LanguageModel {
                 stream: false
             )
             let body = try JSONEncoder().encode(params)
-            let resp: OpenResponsesAPI.Response = try await httpSession.fetch(
+            let resp: OpenResponsesAPI.Response = try await transport.fetch(
                 HTTPRequest(method: .post, url: url, headerFields: [.authorization: "Bearer \(tokenProvider())"]),
                 body: body
             )

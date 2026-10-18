@@ -98,178 +98,152 @@ import HTTPTypesFoundation
 /// A URL session sends a model's requests with its own configuration, reading each response's
 /// body as it arrives.
 extension URLSession: HTTPTransport {
-    public func perform<Return>(
+    public func send<Return>(
         request: HTTPRequest,
         body: Data?,
         timeout: Duration,
         responseHandler: (HTTPResponse, HTTPResponseBody) async throws -> Return
     ) async throws -> Return {
-        guard var urlRequest = URLRequest(httpRequest: request) else { throw HTTPTransportError.invalidRequest }
+        guard var urlRequest = URLRequest(httpRequest: request) else {
+            throw HTTPTransportError(kind: .invalidRequest)
+        }
         urlRequest.httpBody = body
         // With URLSession, it's how long to wait for each part of the response.
         let (seconds, attoseconds) = timeout.components
         urlRequest.timeoutInterval = TimeInterval(seconds) + TimeInterval(attoseconds) / 1e18
 
+        let delegate = ResponseChunks()
+        // The request is over once the handler returns: what's left of the body isn't read.
+        defer { delegate.end() }
         #if canImport(FoundationNetworking)
-            var started: (bytes: AsyncThrowingStream<UInt8, Error>, response: URLResponse)?
+            // Each request has a session of its own, as FoundationNetworking's shared state isn't
+            // safe for requests started at once; see `LinuxURLSessionRequestGate`.
+            var urlResponse: URLResponse?
             try await withLinuxRequestLock {
-                started = try await self.linuxBytes(for: urlRequest)
+                let session = URLSession(configuration: self.configuration, delegate: delegate, delegateQueue: nil)
+                urlResponse = try await delegate.start(session.dataTask(with: urlRequest), ownedSession: session)
             }
-            guard let started, let response = (started.response as? HTTPURLResponse)?.httpResponse else {
-                throw HTTPTransportError.invalidResponse
-            }
-            return try await responseHandler(response, HTTPResponseBody(started.bytes))
         #else
-            let (bytes, urlResponse) = try await self.bytes(for: urlRequest)
-            guard let response = (urlResponse as? HTTPURLResponse)?.httpResponse else {
-                throw HTTPTransportError.invalidResponse
-            }
-            return try await responseHandler(response, HTTPResponseBody(bytes))
+            let task = dataTask(with: urlRequest)
+            task.delegate = delegate
+            let urlResponse: URLResponse? = try await delegate.start(task, ownedSession: nil)
         #endif
+        guard let response = (urlResponse as? HTTPURLResponse)?.httpResponse else {
+            throw HTTPTransportError(kind: .invalidResponse)
+        }
+        return try await responseHandler(response, HTTPResponseBody(delegate.chunks))
     }
 }
 
-#if canImport(FoundationNetworking)
-    private extension URLSession {
-        func linuxBytes(for request: URLRequest) async throws -> (AsyncThrowingStream<UInt8, Error>, URLResponse) {
-            let delegate = LinuxBytesDelegate()
-            let delegateQueue = OperationQueue()
-            delegateQueue.maxConcurrentOperationCount = 1
-
-            let session = URLSession(
-                configuration: self.configuration,
-                delegate: delegate,
-                delegateQueue: delegateQueue
-            )
-
-            let byteStream = AsyncThrowingStream<UInt8, Error> { continuation in
-                delegate.attach(
-                    continuation,
-                    session: session
-                )
-            }
-
-            let response = try await delegate.start(
-                request: request,
-                session: session
-            )
-
-            return (byteStream, response)
-        }
+/// A data task's response and the chunks of its body, as they arrive.
+private final class ResponseChunks: NSObject, URLSessionDataDelegate, @unchecked Sendable {
+    private struct State {
+        var responseContinuation: CheckedContinuation<URLResponse, Error>?
+        var chunksContinuation: AsyncThrowingStream<Data, Error>.Continuation?
+        var task: URLSessionDataTask?
+        /// The session made for this request alone, which ends with it.
+        var ownedSession: URLSession?
+        var isCancelled = false
     }
 
-    private final class LinuxBytesDelegate: NSObject, URLSessionDataDelegate, @unchecked Sendable {
-        private struct State {
-            var responseContinuation: CheckedContinuation<URLResponse, Error>?
-            var isCancelled = false
-        }
+    // Read and written from the caller's task and from the delegate's queue.
+    private let state = Locked(State())
 
-        // Read and written from the caller's task and from the delegate queue.
-        private let state = Locked(State())
-        private var byteContinuation: AsyncThrowingStream<UInt8, Error>.Continuation?
-        private weak var task: URLSessionDataTask?
-        private weak var session: URLSession?
+    /// The body's chunks: ending them early cancels the request.
+    let chunks: AsyncThrowingStream<Data, Error>
 
-        func attach(
-            _ continuation: AsyncThrowingStream<UInt8, Error>.Continuation,
-            session: URLSession
-        ) {
-            byteContinuation = continuation
-            self.session = session
-            continuation.onTermination = { [weak self] _ in
-                guard let self else { return }
-                self.task?.cancel()
-                self.session?.invalidateAndCancel()
-            }
-        }
+    override init() {
+        var continuation: AsyncThrowingStream<Data, Error>.Continuation!
+        chunks = AsyncThrowingStream { continuation = $0 }
+        super.init()
+        state.withLock { $0.chunksContinuation = continuation }
+        continuation.onTermination = { [weak self] _ in self?.end() }
+    }
 
-        /// Starts the request and waits for its response.
-        /// Canceling the calling task cancels the request.
-        func start(
-            request: URLRequest,
-            session: URLSession
-        ) async throws -> URLResponse {
-            try await withTaskCancellationHandler {
-                try await withCheckedThrowingContinuation { continuation in
-                    let task = session.dataTask(with: request)
-                    let isCancelled = state.withLock { state in
-                        guard !state.isCancelled else { return true }
-                        state.responseContinuation = continuation
-                        return false
-                    }
-                    guard !isCancelled else {
-                        session.invalidateAndCancel()
-                        continuation.resume(throwing: CancellationError())
-                        return
-                    }
-                    self.task = task
-                    task.resume()
+    /// Starts `task` and waits for its response. Cancelling the calling task cancels the request.
+    func start(_ task: URLSessionDataTask, ownedSession: URLSession?) async throws -> URLResponse {
+        try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { continuation in
+                let isCancelled = state.withLock { state in
+                    state.task = task
+                    state.ownedSession = ownedSession
+                    guard !state.isCancelled else { return true }
+                    state.responseContinuation = continuation
+                    return false
                 }
-            } onCancel: {
-                cancel(session: session)
+                guard !isCancelled else {
+                    end()
+                    continuation.resume(throwing: CancellationError())
+                    return
+                }
+                task.resume()
             }
-        }
-
-        private func cancel(session: URLSession) {
+        } onCancel: {
             let continuation = state.withLock { state in
                 state.isCancelled = true
-                return takeResponseContinuation(&state)
+                return Self.take(&state.responseContinuation)
             }
-            session.invalidateAndCancel()
+            end()
             continuation?.resume(throwing: CancellationError())
         }
-
-        /// Returns the response continuation at most once,
-        /// so it's resumed exactly once by whichever of the response, completion, or cancellation comes first.
-        private func takeResponseContinuation(_ state: inout State) -> CheckedContinuation<URLResponse, Error>? {
-            defer { state.responseContinuation = nil }
-            return state.responseContinuation
-        }
-
-        func urlSession(
-            _ session: URLSession,
-            dataTask: URLSessionDataTask,
-            didReceive response: URLResponse,
-            completionHandler: @escaping @Sendable (URLSession.ResponseDisposition) -> Void
-        ) {
-            state.withLock { takeResponseContinuation(&$0) }?.resume(returning: response)
-            completionHandler(.allow)
-        }
-
-        func urlSession(
-            _ session: URLSession,
-            dataTask: URLSessionDataTask,
-            didReceive data: Data
-        ) {
-            guard let continuation = byteContinuation else { return }
-            for byte in data {
-                continuation.yield(byte)
-            }
-        }
-
-        func urlSession(
-            _ session: URLSession,
-            task: URLSessionTask,
-            didCompleteWithError error: (any Error)?
-        ) {
-            if let continuation = state.withLock({ takeResponseContinuation(&$0) }) {
-                if let error {
-                    continuation.resume(throwing: error)
-                } else if let response = task.response {
-                    continuation.resume(returning: response)
-                } else {
-                    continuation.resume(throwing: HTTPTransportError.invalidResponse)
-                }
-            }
-
-            if let error {
-                byteContinuation?.finish(throwing: error)
-            } else {
-                byteContinuation?.finish()
-            }
-            byteContinuation = nil
-
-            session.invalidateAndCancel()
-        }
     }
-#endif
+
+    /// Ends the request: cancels it if it's still running, and finishes the body.
+    func end() {
+        let (task, session, chunks) = state.withLock { state in
+            defer {
+                state.task = nil
+                state.ownedSession = nil
+            }
+            return (state.task, state.ownedSession, Self.take(&state.chunksContinuation))
+        }
+        task?.cancel()
+        session?.invalidateAndCancel()
+        chunks?.finish()
+    }
+
+    /// Returns `value` at most once.
+    private static func take<Value>(_ value: inout Value?) -> Value? {
+        defer { value = nil }
+        return value
+    }
+
+    func urlSession(
+        _ session: URLSession,
+        dataTask: URLSessionDataTask,
+        didReceive response: URLResponse,
+        completionHandler: @escaping @Sendable (URLSession.ResponseDisposition) -> Void
+    ) {
+        state.withLock { Self.take(&$0.responseContinuation) }?.resume(returning: response)
+        completionHandler(.allow)
+    }
+
+    func urlSession(_ session: URLSession, dataTask: URLSessionDataTask, didReceive data: Data) {
+        _ = state.withLock { $0.chunksContinuation }?.yield(data)
+    }
+
+    func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: (any Error)?) {
+        let (response, chunks, owned) = state.withLock { state in
+            defer { state.task = nil }
+            return (
+                Self.take(&state.responseContinuation), Self.take(&state.chunksContinuation),
+                Self.take(&state.ownedSession)
+            )
+        }
+        if let response {
+            if let error {
+                response.resume(throwing: error)
+            } else if let urlResponse = task.response {
+                response.resume(returning: urlResponse)
+            } else {
+                response.resume(throwing: HTTPTransportError(kind: .invalidResponse))
+            }
+        }
+        if let error {
+            chunks?.finish(throwing: error)
+        } else {
+            chunks?.finish()
+        }
+        owned?.finishTasksAndInvalidate()
+    }
+}

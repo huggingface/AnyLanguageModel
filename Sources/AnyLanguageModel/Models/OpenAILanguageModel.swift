@@ -399,7 +399,7 @@ public struct OpenAILanguageModel: LanguageModel {
     /// The API variant to use.
     public let apiVariant: APIVariant
 
-    private let httpSession: any HTTPTransport
+    private let transport: any HTTPTransport
 
     /// Creates an OpenAI language model.
     ///
@@ -408,13 +408,13 @@ public struct OpenAILanguageModel: LanguageModel {
     ///   - apiKey: Your OpenAI API key or a closure that returns it.
     ///   - model: The model identifier (for example, "gpt-4" or "gpt-3.5-turbo").
     ///   - apiVariant: The API variant to use. Defaults to `.chatCompletions`.
-    ///   - session: How it sends its requests: by default AnyLanguageModel's default session.
+    ///   - transport: How it sends its requests: by default ``makeDefaultTransport()``.
     public init(
         baseURL: URL = defaultBaseURL,
         apiKey tokenProvider: @escaping @autoclosure @Sendable () -> String,
         model: String,
         apiVariant: APIVariant = .chatCompletions,
-        session: any HTTPTransport = makeDefaultSession(),
+        transport: any HTTPTransport = makeDefaultTransport(),
     ) {
         var baseURL = baseURL
         if !baseURL.path.hasSuffix("/") {
@@ -425,7 +425,19 @@ public struct OpenAILanguageModel: LanguageModel {
         self.tokenProvider = tokenProvider
         self.model = model
         self.apiVariant = apiVariant
-        self.httpSession = session
+        self.transport = transport
+    }
+
+    /// Creates a model that sends its requests with `session`.
+    @available(*, deprecated, renamed: "init(baseURL:apiKey:model:apiVariant:transport:)")
+    public init(
+        baseURL: URL = defaultBaseURL,
+        apiKey tokenProvider: @escaping @autoclosure @Sendable () -> String,
+        model: String,
+        apiVariant: APIVariant = .chatCompletions,
+        session: HTTPSession
+    ) {
+        self.init(baseURL: baseURL, apiKey: tokenProvider(), model: model, apiVariant: apiVariant, transport: session)
     }
 
     public func respond<Content>(
@@ -525,7 +537,7 @@ public struct OpenAILanguageModel: LanguageModel {
 
             let url = baseURL.appendingPathComponent("chat/completions")
             let body = try JSONEncoder().encode(params)
-            let resp: ChatCompletions.Response = try await httpSession.fetch(
+            let resp: ChatCompletions.Response = try await transport.fetch(
                 HTTPRequest(method: .post, url: url, headerFields: [.authorization: "Bearer \(tokenProvider())"]),
                 body: body
             )
@@ -662,7 +674,7 @@ public struct OpenAILanguageModel: LanguageModel {
 
             let encoder = JSONEncoder()
             let body = try encoder.encode(params)
-            let resp: Responses.Response = try await httpSession.fetch(
+            let resp: Responses.Response = try await transport.fetch(
                 HTTPRequest(method: .post, url: url, headerFields: [.authorization: "Bearer \(tokenProvider())"]),
                 body: body
             )
@@ -837,7 +849,7 @@ public struct OpenAILanguageModel: LanguageModel {
                         switch apiVariant {
                         case .responses:
                             let events: AsyncThrowingStream<OpenAIResponsesServerEvent, any Error> =
-                                httpSession.fetchEventStream(
+                                transport.fetchEventStream(
                                     HTTPRequest(method: .post, url: url, headerFields: headers),
                                     body: body
                                 )
@@ -871,7 +883,7 @@ public struct OpenAILanguageModel: LanguageModel {
                             }
                         case .chatCompletions:
                             let events: AsyncThrowingStream<OpenAIChatCompletionsChunk, any Error> =
-                                httpSession.fetchEventStream(
+                                transport.fetchEventStream(
                                     HTTPRequest(method: .post, url: url, headerFields: headers),
                                     body: body
                                 )

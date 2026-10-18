@@ -149,7 +149,7 @@ public struct GeminiLanguageModel: LanguageModel {
 
     public let model: String
 
-    private let httpSession: any HTTPTransport
+    private let transport: any HTTPTransport
 
     /// Creates a new Gemini language model.
     ///
@@ -158,13 +158,13 @@ public struct GeminiLanguageModel: LanguageModel {
     ///   - tokenProvider: A closure that provides the API key.
     ///   - apiVersion: The API version to use.
     ///   - model: The model identifier.
-    ///   - session: How it sends its requests: by default AnyLanguageModel's default session.
+    ///   - transport: How it sends its requests: by default ``makeDefaultTransport()``.
     public init(
         baseURL: URL = defaultBaseURL,
         apiKey tokenProvider: @escaping @autoclosure @Sendable () -> String,
         apiVersion: String = defaultAPIVersion,
         model: String,
-        session: any HTTPTransport = makeDefaultSession(),
+        transport: any HTTPTransport = makeDefaultTransport(),
     ) {
         var baseURL = baseURL
         if !baseURL.path.hasSuffix("/") {
@@ -175,7 +175,19 @@ public struct GeminiLanguageModel: LanguageModel {
         self.tokenProvider = tokenProvider
         self.apiVersion = apiVersion
         self.model = model
-        self.httpSession = session
+        self.transport = transport
+    }
+
+    /// Creates a model that sends its requests with `session`.
+    @available(*, deprecated, renamed: "init(baseURL:apiKey:apiVersion:model:transport:)")
+    public init(
+        baseURL: URL = defaultBaseURL,
+        apiKey tokenProvider: @escaping @autoclosure @Sendable () -> String,
+        apiVersion: String = defaultAPIVersion,
+        model: String,
+        session: HTTPSession
+    ) {
+        self.init(baseURL: baseURL, apiKey: tokenProvider(), apiVersion: apiVersion, model: model, transport: session)
     }
 
     public func respond<Content>(
@@ -267,7 +279,7 @@ public struct GeminiLanguageModel: LanguageModel {
 
             let body = try JSONEncoder().encode(params)
 
-            let response: GeminiGenerateContentResponse = try await httpSession.fetch(
+            let response: GeminiGenerateContentResponse = try await transport.fetch(
                 HTTPRequest(method: .post, url: url, headerFields: headers),
                 body: body
             )
@@ -442,7 +454,7 @@ public struct GeminiLanguageModel: LanguageModel {
                         )
                         let body = try JSONEncoder().encode(params)
                         let stream: AsyncThrowingStream<GeminiGenerateContentResponse, any Error> =
-                            httpSession.fetchEventStream(
+                            transport.fetchEventStream(
                                 HTTPRequest(method: .post, url: url, headerFields: headers),
                                 body: body
                             )

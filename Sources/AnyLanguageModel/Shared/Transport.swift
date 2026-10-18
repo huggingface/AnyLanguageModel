@@ -10,14 +10,14 @@ import HTTPTypes
 
 /// How a model sends its HTTP requests.
 ///
-/// AnyLanguageModel's remote models send every request through one, given as their `session`,
-/// and read its response in ``perform(request:body:timeout:responseHandler:)``:
+/// AnyLanguageModel's remote models send every request through one, given as their `transport`,
+/// and read its response in ``send(request:body:timeout:responseHandler:)``:
 /// a streamed response is read there as it arrives, to its end.
 /// `URLSession` is one, and so is AsyncHTTPClient's `HTTPClient` with the `AsyncHTTPClient` trait.
 ///
 /// Supply your own to decide how requests are sent,
 /// such as one that waits for a free slot of an account that takes few requests at once,
-/// or one that observes them, then passes each on to another session.
+/// or one that observes them, then passes each on to another transport.
 ///
 /// - Note: This API is exclusive to AnyLanguageModel
 ///   and using it means your code is no longer drop-in compatible
@@ -25,15 +25,22 @@ import HTTPTypes
 public protocol HTTPTransport: Sendable {
     /// Sends `request` with `body`, and passes its response to `responseHandler`.
     ///
-    /// The response's body can be read only in `responseHandler`;
-    /// the request is over once it returns.
+    /// A transport keeps to this contract:
+    /// - It calls `responseHandler` at most once, with the response to `request`.
+    /// - Cancelling the calling task cancels the request.
+    /// - The response's body can be read only in `responseHandler`:
+    ///   once it returns, the request is over, and the body can't be read anymore.
+    /// - A transport that retries a request doesn't retry it
+    ///   once it has passed a response to `responseHandler`.
     ///
     /// - Parameters:
     ///   - request: The request to send.
     ///   - body: What the request sends, if anything.
     ///   - timeout: How long to wait for the response to start.
+    ///     The transport decides when that time starts,
+    ///     so a request that waits for a free slot before it's sent doesn't use up its deadline.
     ///   - responseHandler: Reads the response, its body as it arrives.
-    func perform<Return>(
+    func send<Return>(
         request: HTTPRequest,
         body: Data?,
         timeout: Duration,
@@ -41,17 +48,17 @@ public protocol HTTPTransport: Sendable {
     ) async throws -> Return
 }
 
-/// The body of an HTTP response, as its bytes arrive.
+/// The body of an HTTP response, in chunks of data as they arrive.
 ///
 /// It's read once, in the response handler it's given to.
 public struct HTTPResponseBody: AsyncSequence {
-    public typealias Element = UInt8
+    public typealias Element = Data
 
-    private let source: ByteSource
+    private let source: ChunkSource
 
-    /// A body read from `bytes`.
-    public init<Bytes: AsyncSequence>(_ bytes: Bytes) where Bytes.Element == UInt8 {
-        source = Iterating(bytes.makeAsyncIterator())
+    /// A body read from `chunks`.
+    public init<Chunks: AsyncSequence>(_ chunks: Chunks) where Chunks.Element == Data {
+        source = Iterating(chunks.makeAsyncIterator())
     }
 
     public func makeAsyncIterator() -> AsyncIterator {
@@ -59,9 +66,9 @@ public struct HTTPResponseBody: AsyncSequence {
     }
 
     public struct AsyncIterator: AsyncIteratorProtocol {
-        fileprivate let source: ByteSource
+        fileprivate let source: ChunkSource
 
-        public mutating func next() async throws -> UInt8? {
+        public mutating func next() async throws -> Data? {
             try await source.next()
         }
     }
@@ -69,44 +76,89 @@ public struct HTTPResponseBody: AsyncSequence {
     /// The whole body, as data.
     public func collect() async throws -> Data {
         var data = Data()
-        for try await byte in self { data.append(byte) }
+        for try await chunk in self { data.append(chunk) }
         return data
+    }
+
+    /// The body's bytes, one at a time, for a reader that takes bytes:
+    /// it waits only for each chunk.
+    var bytes: Bytes { Bytes(chunks: self) }
+
+    struct Bytes: AsyncSequence {
+        typealias Element = UInt8
+        let chunks: HTTPResponseBody
+
+        func makeAsyncIterator() -> Iterator {
+            Iterator(chunks: chunks.makeAsyncIterator())
+        }
+
+        struct Iterator: AsyncIteratorProtocol {
+            var chunks: HTTPResponseBody.AsyncIterator
+            var current = Data()
+            var index = 0
+
+            mutating func next() async throws -> UInt8? {
+                while index == current.count {
+                    guard let chunk = try await chunks.next() else { return nil }
+                    current = chunk
+                    index = 0
+                }
+                defer { index += 1 }
+                return current[current.startIndex + index]
+            }
+        }
     }
 }
 
-/// Where a body's bytes come from, whatever sequence gives them.
+/// Where a body's chunks come from, whatever sequence gives them.
 ///
 /// A base class with a generic subclass hides the sequence's type, so a body is one type whatever
-/// the session reads it from. `any AsyncIteratorProtocol<UInt8, any Error>` would say the same
+/// the transport reads it from. `any AsyncIteratorProtocol<Data, any Error>` would say the same
 /// directly, but it needs macOS 15 and the package supports macOS 14: once it doesn't, this and
 /// ``Iterating`` become that existential.
-private class ByteSource {
-    func next() async throws -> UInt8? { nil }
+private class ChunkSource {
+    func next() async throws -> Data? { nil }
 }
 
-private final class Iterating<Iterator: AsyncIteratorProtocol>: ByteSource where Iterator.Element == UInt8 {
+private final class Iterating<Iterator: AsyncIteratorProtocol>: ChunkSource where Iterator.Element == Data {
     private var iterator: Iterator
 
     init(_ iterator: Iterator) {
         self.iterator = iterator
     }
 
-    override func next() async throws -> UInt8? {
+    override func next() async throws -> Data? {
         try await iterator.next()
     }
 }
 
 #if canImport(AsyncHTTPClient)
-    /// The client a remote model sends its requests with unless it's given another transport.
+    /// The transport a remote model sends its requests with unless it's given another:
+    /// AsyncHTTPClient's shared client.
+    public func makeDefaultTransport() -> any HTTPTransport {
+        HTTPClient.shared
+    }
+
+    /// The client a remote model sent its requests with.
+    @available(*, deprecated, message: "Use HTTPTransport, and makeDefaultTransport() for the default.")
     public typealias HTTPSession = HTTPClient
 
+    @available(*, deprecated, renamed: "makeDefaultTransport()")
     public func makeDefaultSession() -> HTTPSession {
         return HTTPClient.shared
     }
 #else
-    /// The session a remote model sends its requests with unless it's given another transport.
+    /// The transport a remote model sends its requests with unless it's given another:
+    /// a URL session with the default configuration.
+    public func makeDefaultTransport() -> any HTTPTransport {
+        URLSession(configuration: .default)
+    }
+
+    /// The session a remote model sent its requests with.
+    @available(*, deprecated, message: "Use HTTPTransport, and makeDefaultTransport() for the default.")
     public typealias HTTPSession = URLSession
 
+    @available(*, deprecated, renamed: "makeDefaultTransport()")
     public func makeDefaultSession() -> HTTPSession {
         return URLSession(configuration: .default)
     }

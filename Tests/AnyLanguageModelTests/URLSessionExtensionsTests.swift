@@ -12,17 +12,20 @@ import Testing
 @Suite("URLSession Extensions")
 struct URLSessionExtensionsTests {
     @Test func invalidResponseDescriptionMatchesExpectedText() {
-        let error = HTTPTransportError.invalidResponse
+        let error = HTTPTransportError(kind: .invalidResponse)
         #expect(error.description == "Invalid response")
     }
 
-    @Test func httpErrorDescriptionIncludesStatusCodeAndDetail() {
-        let error = HTTPTransportError.httpError(response: HTTPResponse(status: .tooManyRequests), body: "rate limit")
+    @Test func httpErrorKeepsItsResponseAndBody() {
+        let response = HTTPResponse(status: .tooManyRequests, headerFields: [.retryAfter: "20"])
+        let error = HTTPTransportError(kind: .httpError, response: response, body: Data("rate limit".utf8))
         #expect(error.description == "HTTP error (Status 429): rate limit")
+        #expect(error.response?.headerFields[.retryAfter] == "20")
     }
 
-    @Test func decodingErrorDescriptionIncludesDetail() {
-        let error = HTTPTransportError.decodingError(detail: "keyNotFound")
+    @Test func decodingErrorDescriptionIncludesTheUnderlyingError() {
+        struct KeyNotFound: Error, CustomStringConvertible { var description: String { "keyNotFound" } }
+        let error = HTTPTransportError(kind: .decodingError, underlyingError: KeyNotFound())
         #expect(error.description == "Decoding error: keyNotFound")
     }
 }

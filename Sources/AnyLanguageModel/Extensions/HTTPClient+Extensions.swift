@@ -7,14 +7,14 @@
 
     /// AsyncHTTPClient sends a model's requests, reading each response's body as it arrives.
     extension HTTPClient: HTTPTransport {
-        public func perform<Return>(
+        public func send<Return>(
             request: HTTPRequest,
             body: Data?,
             timeout: Duration,
             responseHandler: (HTTPResponse, HTTPResponseBody) async throws -> Return
         ) async throws -> Return {
             guard let scheme = request.scheme, let authority = request.authority, let path = request.path else {
-                throw HTTPTransportError.invalidRequest
+                throw HTTPTransportError(kind: .invalidRequest)
             }
             var sent = HTTPClientRequest(url: "\(scheme)://\(authority)\(path)")
             sent.method = HTTPMethod(rawValue: request.method.rawValue)
@@ -42,34 +42,10 @@
                 ),
                 headerFields: fields
             )
-            return try await responseHandler(response, HTTPResponseBody(Bytes(received.body)))
-        }
-    }
-
-    /// A response body's bytes, one at a time from each buffer as it arrives.
-    private struct Bytes<Buffers: AsyncSequence>: AsyncSequence where Buffers.Element == ByteBuffer {
-        typealias Element = UInt8
-        let buffers: Buffers
-
-        init(_ buffers: Buffers) {
-            self.buffers = buffers
-        }
-
-        func makeAsyncIterator() -> AsyncIterator {
-            AsyncIterator(buffers: buffers.makeAsyncIterator())
-        }
-
-        struct AsyncIterator: AsyncIteratorProtocol {
-            var buffers: Buffers.AsyncIterator
-            var current = ByteBuffer()
-
-            mutating func next() async throws -> UInt8? {
-                while current.readableBytes == 0 {
-                    guard let buffer = try await buffers.next() else { return nil }
-                    current = buffer
-                }
-                return current.readInteger(as: UInt8.self)
-            }
+            return try await responseHandler(
+                response,
+                HTTPResponseBody(received.body.map { Data($0.readableBytesView) })
+            )
         }
     }
 #endif

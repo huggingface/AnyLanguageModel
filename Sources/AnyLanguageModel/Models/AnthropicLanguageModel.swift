@@ -371,7 +371,7 @@ public struct AnthropicLanguageModel: LanguageModel {
     /// The model identifier to use for generation.
     public let model: String
 
-    private let httpSession: any HTTPTransport
+    private let transport: any HTTPTransport
 
     /// Creates an Anthropic language model.
     ///
@@ -381,14 +381,14 @@ public struct AnthropicLanguageModel: LanguageModel {
     ///   - apiVersion: The API version to use for requests. Defaults to `2023-06-01`.
     ///   - betas: Optional beta version(s) of the API to use.
     ///   - model: The model identifier (for example, "claude-3-5-sonnet-20241022").
-    ///   - session: How it sends its requests: by default AnyLanguageModel's default session.
+    ///   - transport: How it sends its requests: by default ``makeDefaultTransport()``.
     public init(
         baseURL: URL = defaultBaseURL,
         apiKey tokenProvider: @escaping @autoclosure @Sendable () -> String,
         apiVersion: String = defaultAPIVersion,
         betas: [String]? = nil,
         model: String,
-        session: any HTTPTransport = makeDefaultSession(),
+        transport: any HTTPTransport = makeDefaultTransport(),
     ) {
         var baseURL = baseURL
         if !baseURL.path.hasSuffix("/") {
@@ -400,7 +400,27 @@ public struct AnthropicLanguageModel: LanguageModel {
         self.apiVersion = apiVersion
         self.betas = betas
         self.model = model
-        self.httpSession = session
+        self.transport = transport
+    }
+
+    /// Creates a model that sends its requests with `session`.
+    @available(*, deprecated, renamed: "init(baseURL:apiKey:apiVersion:betas:model:transport:)")
+    public init(
+        baseURL: URL = defaultBaseURL,
+        apiKey tokenProvider: @escaping @autoclosure @Sendable () -> String,
+        apiVersion: String = defaultAPIVersion,
+        betas: [String]? = nil,
+        model: String,
+        session: HTTPSession
+    ) {
+        self.init(
+            baseURL: baseURL,
+            apiKey: tokenProvider(),
+            apiVersion: apiVersion,
+            betas: betas,
+            model: model,
+            transport: session
+        )
     }
 
     public func respond<Content>(
@@ -466,7 +486,7 @@ public struct AnthropicLanguageModel: LanguageModel {
 
         let body = try JSONEncoder().encode(params)
 
-        let message: AnthropicMessageResponse = try await httpSession.fetch(
+        let message: AnthropicMessageResponse = try await transport.fetch(
             HTTPRequest(method: .post, url: url, headerFields: headers),
             body: body
         )
@@ -612,7 +632,7 @@ public struct AnthropicLanguageModel: LanguageModel {
                         params["stream"] = .bool(true)
                         let body = try JSONEncoder().encode(params)
                         let events: AsyncThrowingStream<AnthropicStreamEvent, any Error> =
-                            httpSession.fetchEventStream(
+                            transport.fetchEventStream(
                                 HTTPRequest(method: .post, url: url, headerFields: headers),
                                 body: body
                             )
