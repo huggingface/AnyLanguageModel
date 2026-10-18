@@ -237,7 +237,7 @@ public struct GeminiLanguageModel: LanguageModel {
         // The entries this call adds, which is what the response reports. `inFlightEntries`
         // preserves tool rounds while each iteration rebuilds the request from a fresh context.
         var entries: [Transcript.Entry] = []
-        var usage = ReportedUsage()
+        var usage = RequestsUsage()
         // The text of earlier tool rounds, which string responses include.
         var earlierText = ""
 
@@ -306,7 +306,7 @@ public struct GeminiLanguageModel: LanguageModel {
                         content: empty.content,
                         rawContent: empty.rawContent,
                         transcriptEntries: ArraySlice(entries),
-                        usage: usage.value
+                        requests: usage
                     )
                 case .invocations(let invocations):
                     if !invocations.isEmpty {
@@ -337,7 +337,7 @@ public struct GeminiLanguageModel: LanguageModel {
                         content: text as! Content,
                         rawContent: GeneratedContent(text),
                         transcriptEntries: ArraySlice(entries),
-                        usage: usage.value,
+                        requests: usage,
                         providerMetadata: providerMetadata
                     )
                 }
@@ -348,7 +348,7 @@ public struct GeminiLanguageModel: LanguageModel {
                     content: content,
                     rawContent: generatedContent,
                     transcriptEntries: ArraySlice(entries),
-                    usage: usage.value,
+                    requests: usage,
                     providerMetadata: providerMetadata
                 )
             }

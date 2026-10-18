@@ -622,7 +622,7 @@ public struct AnthropicLanguageModel: LanguageModel {
                                 var snapshot: LanguageModelSession.ResponseStream<Content>.Snapshot =
                                     try? partialSnapshot(from: state.text)
                             else { return nil }
-                            snapshot.usage = state.totalUsage
+                            snapshot.requests = state.requests
                             snapshot.transcriptEntries = ArraySlice(state.entries)
                             return snapshot
                         }
@@ -671,7 +671,7 @@ public struct AnthropicLanguageModel: LanguageModel {
                                 state.usage.merge(delta.usage?.reportedUsage)
                                 if delta.usage?.reportedUsage != nil {
                                     if var current = lastSnapshot {
-                                        current.usage = state.totalUsage
+                                        current.requests = state.requests
                                         lastSnapshot = current
                                         continuation.yield(current)
                                     } else if let current = state.snapshot() {
