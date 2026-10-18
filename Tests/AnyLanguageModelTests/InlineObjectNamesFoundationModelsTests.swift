@@ -61,12 +61,14 @@ import Testing
             #expect(encoded.contains("fromA"))
         }
 
-        @available(macOS 26.0, iOS 26.0, watchOS 27.0, tvOS 26.0, visionOS 26.0, *)
-        @Test(.enabled(if: SystemLanguageModel.default.isAvailable))
-        func aToolTakingInlineObjectsStartsASession() async throws {
-            let session = FoundationModels.LanguageModelSession(tools: [PageTool(parameters: try Self.schema())])
-            let response = try await session.respond(to: "hello!")
-            #expect(!response.content.isEmpty)
-        }
+        #if !os(watchOS)
+            @available(macOS 26.0, iOS 26.0, tvOS 26.0, visionOS 26.0, *)
+            @Test(.enabled(if: SystemLanguageModel.default.isAvailable))
+            func aToolTakingInlineObjectsStartsASession() async throws {
+                let session = FoundationModels.LanguageModelSession(tools: [PageTool(parameters: try Self.schema())])
+                let response = try await session.respond(to: "hello!")
+                #expect(!response.content.isEmpty)
+            }
+        #endif
     }
 #endif
