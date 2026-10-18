@@ -808,6 +808,10 @@ private enum OpenResponsesAPI {
 
         if let tools {
             body["tools"] = .array(tools.map { $0.jsonValue })
+            // Sent only with tools. A custom `toolChoice` or `extraBody` overrides it below.
+            if let toolCallingMode = options.toolCallingMode {
+                body["tool_choice"] = .string(toolCallingMode.kind.openAIToolChoice)
+            }
         }
 
         if type != String.self {

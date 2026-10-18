@@ -773,6 +773,16 @@ private func createMessageParams(
     }
     if let tools, !tools.isEmpty {
         params["tools"] = try JSONValue(tools)
+        // Sent only with tools. A custom `toolChoice` or `extraBody` overrides it below.
+        if let toolCallingMode = options.toolCallingMode {
+            let type =
+                switch toolCallingMode.kind {
+                case .allowed: "auto"
+                case .required: "any"
+                case .disallowed: "none"
+                }
+            params["tool_choice"] = .object(["type": .string(type)])
+        }
     }
     if let responseSchema {
         // Structured outputs: https://platform.claude.com/docs/en/build-with-claude/structured-outputs
