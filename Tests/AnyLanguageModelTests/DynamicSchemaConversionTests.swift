@@ -275,9 +275,23 @@ import Foundation
             _ = try FoundationModels.GenerationSchema(root: convertToDynamicSchema(schema.root), dependencies: [])
         }
 
-        /// A bound no `Int` holds, or bounds no integer is within, aren't a schema.
+        /// A bound no `Int` holds is dropped, and the others still guide the integer.
+        @available(macOS 26.0, iOS 26.0, watchOS 27.0, tvOS 26.0, visionOS 26.0, *)
         @Test(arguments: [
-            #"{"type": "integer", "minimum": 1e300}"#,
+            (#"{"type": "integer", "minimum": 1.5, "maximum": 1e300}"#, Bounds<Int>.from(2)),
+            (#"{"type": "integer", "minimum": -1e300, "maximum": 9.5}"#, .through(9)),
+            (#"{"type": "integer", "minimum": 1e300}"#, .unbounded),
+        ])
+        func integerBoundsIntCannotHoldAreDropped(json: String, bounds: Bounds<Int>) throws {
+            let schema = try JSONDecoder().decode(AnyLanguageModel.GenerationSchema.self, from: Data(json.utf8))
+            #expect(schema.root == .number(.integer(description: nil, bounds: bounds)))
+            _ = try FoundationModels.GenerationSchema(root: convertToDynamicSchema(schema.root), dependencies: [])
+        }
+
+        /// Bounds that contradict each other, with no whole number or no number between them,
+        /// aren't a schema.
+        @Test(arguments: [
+            #"{"type": "integer", "minimum": 5, "maximum": 1}"#,
             #"{"type": "integer", "minimum": 2.5, "maximum": 2.7}"#,
             #"{"type": "number", "minimum": 3, "maximum": 1}"#,
         ])

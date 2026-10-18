@@ -244,12 +244,13 @@ public struct GenerationSchema: Equatable, Codable, CustomDebugStringConvertible
                 }
                 if type == "integer" {
                     // An integer at least 1.5 is at least 2: its bounds are the whole numbers within them.
-                    let wholeMinimum = minimum.map { Int(exactly: $0.rounded(.up)) }
-                    let wholeMaximum = maximum.map { Int(exactly: $0.rounded(.down)) }
-                    guard wholeMinimum != .some(nil), wholeMaximum != .some(nil),
-                        let bounds = Bounds(minimum: wholeMinimum ?? nil, maximum: wholeMaximum ?? nil)
-                    else {
-                        throw impossible("No Int is within minimum \(minimum as Any) and maximum \(maximum as Any).")
+                    // A bound no `Int` can hold, such as one of a `UInt64` range, is dropped.
+                    let wholeMinimum = minimum.flatMap { Int(exactly: $0.rounded(.up)) }
+                    let wholeMaximum = maximum.flatMap { Int(exactly: $0.rounded(.down)) }
+                    guard let bounds = Bounds(minimum: wholeMinimum, maximum: wholeMaximum) else {
+                        throw impossible(
+                            "No whole number is within minimum \(minimum as Any) and maximum \(maximum as Any)."
+                        )
                     }
                     self = .number(.integer(description: description, bounds: bounds))
                 } else {
