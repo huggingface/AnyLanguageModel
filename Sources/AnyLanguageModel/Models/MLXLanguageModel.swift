@@ -1125,7 +1125,7 @@ import Foundation
 
             var pendingChat: [MLXLMCommon.Chat.Message] = []
 
-            var usage = RoundsUsage()
+            var usage = LanguageModelSession.Usage.zero
             var allTextChunks: [String] = []
             var allEntries: [Transcript.Entry] = []
             var toolRounds = ToolRoundLimit(provider: "MLX", options: options)
@@ -1165,12 +1165,13 @@ import Foundation
                     case .chunk(let text):
                         chunks.append(text)
                     case .info(let info):
-                        let roundUsage = LocalGenerationUsage(
-                            promptTokenCount: lmInput.text.tokens.size,
-                            cachedTokenCount: resolved.cachedTokenCount,
-                            generatedTokenCount: info.generationTokenCount
-                        ).value
-                        usage.add(roundUsage)
+                        usage.add(
+                            LocalGenerationUsage(
+                                promptTokenCount: lmInput.text.tokens.size,
+                                cachedTokenCount: resolved.cachedTokenCount,
+                                generatedTokenCount: info.generationTokenCount
+                            ).value
+                        )
                     case .toolCall(let call):
                         collectedToolCalls.append(call)
                     case .rejectedToolCall(let rejection):
@@ -1210,8 +1211,7 @@ import Foundation
                             content: "" as! Content,
                             rawContent: GeneratedContent(""),
                             transcriptEntries: ArraySlice(allEntries),
-                            usage: usage.total,
-                            context: usage.context
+                            usage: usage
                         )
                     case .invocations(let invocations):
                         if !invocations.isEmpty {
@@ -1238,8 +1238,7 @@ import Foundation
                 content: text as! Content,
                 rawContent: GeneratedContent(text),
                 transcriptEntries: ArraySlice(allEntries),
-                usage: usage.total,
-                context: usage.context
+                usage: usage
             )
         }
 
@@ -1352,7 +1351,7 @@ import Foundation
 
                         // Accumulators live outside the tool loop so streamed snapshots stay
                         // monotonic across rounds: text never shrinks, entries only grow.
-                        var usage = RoundsUsage()
+                        var usage = LanguageModelSession.Usage.zero
                         var accumulatedText = ""
                         var accumulatedEntries: [Transcript.Entry] = []
                         var toolRounds = ToolRoundLimit(provider: "MLX", options: options)
@@ -1367,8 +1366,7 @@ import Foundation
                                     content: content,
                                     rawContent: raw,
                                     transcriptEntries: ArraySlice(accumulatedEntries),
-                                    usage: usage.total,
-                                    context: usage.context
+                                    usage: usage
                                 )
                             )
                         }
@@ -1413,12 +1411,13 @@ import Foundation
                                 case .rejectedToolCall(let rejection):
                                     rejectedToolCall = rejectedToolCall ?? rejection
                                 case .info(let info):
-                                    let roundUsage = LocalGenerationUsage(
-                                        promptTokenCount: lmInput.text.tokens.size,
-                                        cachedTokenCount: resolved.cachedTokenCount,
-                                        generatedTokenCount: info.generationTokenCount
-                                    ).value
-                                    usage.add(roundUsage)
+                                    usage.add(
+                                        LocalGenerationUsage(
+                                            promptTokenCount: lmInput.text.tokens.size,
+                                            cachedTokenCount: resolved.cachedTokenCount,
+                                            generatedTokenCount: info.generationTokenCount
+                                        ).value
+                                    )
                                     yieldSnapshot()
                                 }
                             }

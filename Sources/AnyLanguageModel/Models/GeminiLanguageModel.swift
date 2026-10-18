@@ -306,8 +306,7 @@ public struct GeminiLanguageModel: LanguageModel {
                         content: empty.content,
                         rawContent: empty.rawContent,
                         transcriptEntries: ArraySlice(entries),
-                        usage: usage.value,
-                        context: usage.context
+                        usage: usage.value
                     )
                 case .invocations(let invocations):
                     if !invocations.isEmpty {
@@ -339,7 +338,6 @@ public struct GeminiLanguageModel: LanguageModel {
                         rawContent: GeneratedContent(text),
                         transcriptEntries: ArraySlice(entries),
                         usage: usage.value,
-                        context: usage.context,
                         providerMetadata: providerMetadata
                     )
                 }
@@ -351,7 +349,6 @@ public struct GeminiLanguageModel: LanguageModel {
                     rawContent: generatedContent,
                     transcriptEntries: ArraySlice(entries),
                     usage: usage.value,
-                    context: usage.context,
                     providerMetadata: providerMetadata
                 )
             }

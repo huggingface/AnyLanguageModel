@@ -853,7 +853,7 @@ import Foundation
                 var toolRounds = ToolRoundLimit(provider: "Llama", options: options)
                 var allEntries: [Transcript.Entry] = []
                 var text = ""
-                var usage = RoundsUsage()
+                var usage = LanguageModelSession.Usage.zero
                 var pendingEntries: [Transcript.Entry] = []
 
                 generationLoop: while true {
@@ -944,8 +944,7 @@ import Foundation
                             content: "" as! Content,
                             rawContent: GeneratedContent(""),
                             transcriptEntries: ArraySlice(allEntries),
-                            usage: usage.total,
-                            context: usage.context
+                            usage: usage
                         )
                     case .invocations(let invocations):
                         guard !invocations.isEmpty else {
@@ -968,8 +967,7 @@ import Foundation
                     content: text as! Content,
                     rawContent: GeneratedContent(text),
                     transcriptEntries: ArraySlice(allEntries),
-                    usage: usage.total,
-                    context: usage.context
+                    usage: usage
                 )
             } else {
                 let requestContext = session.resolvedRequestContext()
@@ -1088,7 +1086,7 @@ import Foundation
                             var toolRounds = ToolRoundLimit(provider: "Llama", options: options)
                             var accumulatedEntries: [Transcript.Entry] = []
                             var emittedBase = ""
-                            var usage = RoundsUsage()
+                            var usage = LanguageModelSession.Usage.zero
                             var lastYieldedText: String?
                             var pendingEntries: [Transcript.Entry] = []
                             let imageMarker =
@@ -1100,8 +1098,7 @@ import Foundation
                                     content: (text as! Content).asPartiallyGenerated(),
                                     rawContent: GeneratedContent(text),
                                     transcriptEntries: ArraySlice(accumulatedEntries),
-                                    usage: usage.total,
-                                    context: usage.context
+                                    usage: usage
                                 )
                                 continuation.yield(snapshot)
                             }

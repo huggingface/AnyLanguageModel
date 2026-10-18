@@ -179,17 +179,4 @@ private struct LocalStructuredUsageModel: LanguageModel {
             options: options
         )
     }
-
-    /// A local model's tool rounds add up into its usage, and its context is only the latest
-    /// round's input, as each round sends the whole conversation so far.
-    @Test func roundsAddUpAndContextIsTheLatestInput() {
-        var usage = RoundsUsage()
-        usage.add(LocalGenerationUsage(promptTokenCount: 10, cachedTokenCount: 0, generatedTokenCount: 3).value)
-        usage.add(LocalGenerationUsage(promptTokenCount: 16, cachedTokenCount: 10, generatedTokenCount: 4).value)
-
-        #expect(usage.total.input.totalTokenCount == 26)
-        #expect(usage.total.output.totalTokenCount == 7)
-        #expect(usage.context.totalTokenCount == 16)
-        #expect(usage.context.cachedTokenCount == 10)
-    }
 }

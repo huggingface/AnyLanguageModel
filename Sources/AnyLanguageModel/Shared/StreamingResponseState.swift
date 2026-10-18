@@ -5,8 +5,6 @@ struct StreamingResponseState<Content: Generable> {
     var entries: [Transcript.Entry] = []
     var usage = ReportedUsage()
     private var completedUsage = LanguageModelSession.Usage.zero
-    /// The input of the latest round that reported one.
-    private var latestInput = LanguageModelSession.Usage.zero.input
 
     /// The property that holds the response, if the provider's response schema wraps it.
     let wrapperProperty: String?
@@ -29,12 +27,6 @@ struct StreamingResponseState<Content: Generable> {
         return total
     }
 
-    /// How much of the context the latest request took: this round's input once it's reported,
-    /// the last round's until then.
-    var context: LanguageModelSession.Usage.Input {
-        usage.value.input.totalTokenCount > 0 ? usage.value.input : latestInput
-    }
-
     /// The response text so far.
     var responseText: String {
         Content.self == String.self ? earlierText + text : text
@@ -45,8 +37,7 @@ struct StreamingResponseState<Content: Generable> {
             var snapshot = LanguageModelSession.ResponseStream<Content>.Snapshot(
                 text: responseText,
                 usage: totalUsage,
-                wrapperProperty: wrapperProperty,
-                context: context
+                wrapperProperty: wrapperProperty
             )
         else { return nil }
         snapshot.transcriptEntries = ArraySlice(entries)
@@ -72,15 +63,13 @@ struct StreamingResponseState<Content: Generable> {
                 content: content.asPartiallyGenerated(),
                 rawContent: raw,
                 transcriptEntries: ArraySlice(entries),
-                usage: totalUsage,
-                context: context
+                usage: totalUsage
             )
         }
         throw GeneratedContentError.typeMismatch
     }
 
     mutating func beginNextRound() {
-        latestInput = context
         completedUsage.add(usage.value)
         usage = ReportedUsage()
         earlierText = responseText
