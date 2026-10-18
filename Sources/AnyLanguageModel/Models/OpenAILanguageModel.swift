@@ -499,6 +499,8 @@ public struct OpenAILanguageModel: LanguageModel {
         var text = ""
         // The text of earlier tool rounds, which string responses include.
         var earlierText = ""
+        // The text of the final round alone.
+        var roundText = ""
         var inFlightMessages: [OpenAIMessage] = []
 
         var toolRounds = ToolRoundLimit(provider: "OpenAI", options: options)
@@ -550,9 +552,6 @@ public struct OpenAILanguageModel: LanguageModel {
 
             let toolCallMessage = choice.message
             if let toolCalls = toolCallMessage.toolCalls, !toolCalls.isEmpty {
-                if let value = try? JSONValue(toolCallMessage) {
-                    inFlightMessages.append(OpenAIMessage(role: .raw(rawContent: value), content: .text("")))
-                }
                 try toolRounds.record(completed: entries)
                 let resolution = try await resolveToolCalls(
                     toolCalls,
@@ -562,7 +561,14 @@ public struct OpenAILanguageModel: LanguageModel {
                 switch resolution {
                 case .stop(let calls):
                     if !calls.isEmpty {
-                        entries.append(.toolCalls(Transcript.ToolCalls(calls)))
+                        entries.append(
+                            .toolCalls(
+                                Transcript.ToolCalls(
+                                    calls,
+                                    providerMetadata: assistantContentMetadata(toolCallMessage.content)
+                                )
+                            )
+                        )
                     }
                     let empty = try emptyResponseContent(for: type)
                     return LanguageModelSession.Response(
@@ -573,7 +579,12 @@ public struct OpenAILanguageModel: LanguageModel {
                     )
                 case .invocations(let invocations):
                     if !invocations.isEmpty {
-                        entries.append(.toolCalls(Transcript.ToolCalls(invocations.map { $0.call })))
+                        let calls = Transcript.ToolCalls(
+                            invocations.map(\.call),
+                            providerMetadata: assistantContentMetadata(toolCallMessage.content)
+                        )
+                        entries.append(.toolCalls(calls))
+                        inFlightMessages.append(toolCallsMessage(calls))
                         for invocation in invocations {
                             let output = invocation.output
                             entries.append(.toolOutput(output))
@@ -590,7 +601,8 @@ public struct OpenAILanguageModel: LanguageModel {
                 }
             }
 
-            text = earlierText + (choice.message.content ?? "")
+            roundText = choice.message.content ?? ""
+            text = earlierText + roundText
             break
         }
 
@@ -599,7 +611,8 @@ public struct OpenAILanguageModel: LanguageModel {
                 content: text as! Content,
                 rawContent: GeneratedContent(text),
                 transcriptEntries: ArraySlice(entries),
-                requests: usage
+                requests: usage,
+                providerMetadata: responseContentMetadata(text, roundText: roundText)
             )
         }
 
@@ -875,19 +888,13 @@ public struct OpenAILanguageModel: LanguageModel {
                                     calls[delta.index] = call
                                 }
                                 if delta?.content?.isEmpty == false || chunk.usage?.reportedUsage != nil {
-                                    if let snapshot = state.snapshot() { continuation.yield(snapshot) }
+                                    let metadata = responseContentMetadata(state.responseText, roundText: state.text)
+                                    if let snapshot = state.snapshot(providerMetadata: metadata) {
+                                        continuation.yield(snapshot)
+                                    }
                                 }
                             }
                             toolCalls = calls.keys.sorted().compactMap { calls[$0]?.toolCall }
-                            if !toolCalls.isEmpty {
-                                let message: JSONValue = .object([
-                                    "role": .string("assistant"), "content": .string(state.text),
-                                    "tool_calls": try JSONValue(toolCalls),
-                                ])
-                                inFlightMessages.append(
-                                    .init(role: .raw(rawContent: message), content: .text(""))
-                                )
-                            }
                         }
 
                         guard !toolCalls.isEmpty else { break }
@@ -899,7 +906,15 @@ public struct OpenAILanguageModel: LanguageModel {
                             session: session
                         ) {
                         case .stop(let calls):
-                            state.entries.append(.toolCalls(Transcript.ToolCalls(calls)))
+                            state.entries.append(
+                                .toolCalls(
+                                    Transcript.ToolCalls(
+                                        calls,
+                                        providerMetadata: apiVariant == .chatCompletions
+                                            ? assistantContentMetadata(state.text) : nil
+                                    )
+                                )
+                            )
                             continuation.yield(try state.stoppedSnapshot())
                             continuation.finish()
                             return
@@ -908,7 +923,15 @@ public struct OpenAILanguageModel: LanguageModel {
                                 continuation.finish()
                                 return
                             }
-                            state.entries.append(.toolCalls(Transcript.ToolCalls(invocations.map(\.call))))
+                            let calls = Transcript.ToolCalls(
+                                invocations.map(\.call),
+                                providerMetadata: apiVariant == .chatCompletions
+                                    ? assistantContentMetadata(state.text) : nil
+                            )
+                            state.entries.append(.toolCalls(calls))
+                            if apiVariant == .chatCompletions {
+                                inFlightMessages.append(toolCallsMessage(calls))
+                            }
                             for invocation in invocations {
                                 state.entries.append(.toolOutput(invocation.output))
                                 inFlightMessages.append(
@@ -919,7 +942,12 @@ public struct OpenAILanguageModel: LanguageModel {
                                 )
                             }
                         }
-                        if let snapshot = state.snapshot() { continuation.yield(snapshot) }
+                        // This round's text now goes with its tool calls, so a response that
+                        // ends here has no text of its own to replay.
+                        let metadata =
+                            apiVariant == .chatCompletions
+                            ? responseContentMetadata(state.responseText, roundText: "") : nil
+                        if let snapshot = state.snapshot(providerMetadata: metadata) { continuation.yield(snapshot) }
                         state.beginNextRound()
                     }
                     continuation.finish()
@@ -1338,6 +1366,67 @@ private enum Responses {
 
 // MARK: - Supporting Types
 
+/// Key under which the assistant's text for a Chat Completions tool-call round is kept in
+/// ``Transcript/ToolCalls/providerMetadata``.
+private let assistantContentMetadataKey = "openai.content"
+
+private func assistantContentMetadata(_ text: String?) -> [String: String]? {
+    guard let text, !text.isEmpty else { return nil }
+    return [assistantContentMetadataKey: text]
+}
+
+/// The text that a Chat Completions string response replays, kept in
+/// ``Transcript/Response/providerMetadata`` when it differs from the response's content.
+///
+/// A string response includes the text of every tool round,
+/// but replay already sends each round's text with that round's calls.
+/// The response keeps only the final round's text,
+/// so replay sends each piece of text once, as the requests in flight did.
+private func responseContentMetadata(_ responseText: String, roundText: String) -> [String: String]? {
+    responseText == roundText ? nil : [assistantContentMetadataKey: roundText]
+}
+
+/// The assistant message that carries a round of tool calls.
+///
+/// Built from the transcript's calls both for the round in flight and when the history is
+/// replayed on the next turn, so the two are byte-for-byte the same and a provider's prompt
+/// cache (Anthropic's is an exact prefix match) keeps matching past the first tool call.
+/// The arguments are their JSON, with sorted keys (`stableJSON`), not `GeneratedContent`'s
+/// `Codable` form (`{"kind":…}`), which models copy into their next calls.
+///
+/// The model's text from this round is stored on the transcript's `ToolCalls`, so replay
+/// sends the same `content` as the in-flight request, including when that text is empty
+/// (both paths send `null`).
+private func toolCallsMessage(_ calls: Transcript.ToolCalls) -> OpenAIMessage {
+    let text = calls.providerMetadata?[assistantContentMetadataKey]
+    let toolCalls: [JSONValue] = calls.map { call in
+        .object([
+            "id": .string(call.id),
+            "type": .string("function"),
+            "function": .object([
+                "name": .string(call.toolName),
+                "arguments": .string(stableJSON(call.arguments)),
+            ]),
+        ])
+    }
+    let message: JSONValue = .object([
+        "role": .string("assistant"),
+        "content": text.map { .string($0) } ?? .null,
+        "tool_calls": .array(toolCalls),
+    ])
+    return OpenAIMessage(role: .raw(rawContent: message), content: .text(""))
+}
+
+/// The content's JSON with its keys sorted, so the same arguments are always the same bytes.
+/// `jsonString` goes through an unordered dictionary, so its key order can change from one
+/// call to the next.
+private func stableJSON(_ content: GeneratedContent) -> String {
+    guard let object = try? JSONSerialization.jsonObject(with: content.jsonData, options: [.fragmentsAllowed]),
+        let data = try? JSONSerialization.data(withJSONObject: object, options: [.sortedKeys, .fragmentsAllowed])
+    else { return content.jsonString }
+    return String(decoding: data, as: UTF8.self)
+}
+
 extension Transcript {
     fileprivate func toOpenAIMessages() -> [OpenAIMessage] {
         var messages = [OpenAIMessage]()
@@ -1361,46 +1450,18 @@ extension Transcript {
                 // Keep display history in the transcript without sending unsupported replay state.
                 continue
             case .response(let response):
+                let segments =
+                    response.providerMetadata?[assistantContentMetadataKey].map {
+                        [Transcript.Segment.text(.init(content: $0))]
+                    } ?? response.segments
                 messages.append(
                     .init(
                         role: .assistant,
-                        content: .blocks(convertSegmentsToOpenAIBlocks(response.segments))
+                        content: .blocks(convertSegmentsToOpenAIBlocks(segments))
                     )
                 )
             case .toolCalls(let toolCalls):
-                // Add assistant message with tool calls
-                let openAIToolCalls: [JSONValue] = toolCalls.map { call in
-                    let argumentsJSON: String
-                    if let data = try? JSONEncoder().encode(call.arguments),
-                        let jsonString = String(data: data, encoding: .utf8)
-                    {
-                        argumentsJSON = jsonString
-                    } else {
-                        argumentsJSON = "{}"
-                    }
-
-                    return .object([
-                        "id": .string(call.id),
-                        "type": .string("function"),
-                        "function": .object([
-                            "name": .string(call.toolName),
-                            "arguments": .string(argumentsJSON),
-                        ]),
-                    ])
-                }
-
-                let rawMessage: JSONValue = .object([
-                    "role": .string("assistant"),
-                    "content": .null,
-                    "tool_calls": .array(openAIToolCalls),
-                ])
-
-                messages.append(
-                    .init(
-                        role: .raw(rawContent: rawMessage),
-                        content: .text("")
-                    )
-                )
+                messages.append(toolCallsMessage(toolCalls))
             case .toolOutput(let toolOutput):
                 messages.append(
                     .init(
