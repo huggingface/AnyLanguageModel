@@ -1128,7 +1128,7 @@ import Foundation
             var usage = RoundsUsage()
             var allTextChunks: [String] = []
             var allEntries: [Transcript.Entry] = []
-            var toolRounds = ToolRoundLimit(provider: "MLX")
+            var toolRounds = ToolRoundLimit(provider: "MLX", options: options)
 
             // Loop until no more tool calls
             while true {
@@ -1194,7 +1194,7 @@ import Foundation
 
                 // If there are tool calls, execute them and continue
                 if !collectedToolCalls.isEmpty {
-                    try toolRounds.record(collectedToolCalls.map(\.roundCall))
+                    try toolRounds.record(completed: allEntries)
 
                     let resolution = try await resolveToolCalls(
                         collectedToolCalls,
@@ -1355,7 +1355,7 @@ import Foundation
                         var usage = RoundsUsage()
                         var accumulatedText = ""
                         var accumulatedEntries: [Transcript.Entry] = []
-                        var toolRounds = ToolRoundLimit(provider: "MLX")
+                        var toolRounds = ToolRoundLimit(provider: "MLX", options: options)
 
                         // Yields a snapshot carrying the cumulative text and tool entries so far.
                         func yieldSnapshot() {
@@ -1437,7 +1437,7 @@ import Foundation
 
                             guard !collectedToolCalls.isEmpty else { break }
 
-                            try toolRounds.record(collectedToolCalls.map(\.roundCall))
+                            try toolRounds.record(completed: accumulatedEntries)
 
                             let resolution = try await resolveToolCalls(
                                 collectedToolCalls,
@@ -2343,13 +2343,6 @@ import Foundation
             case .array(let arr): return arr.map { $0.toSendable() }
             case .object(let obj): return obj.mapValues { $0.toSendable() }
             }
-        }
-    }
-
-    extension MLXLMCommon.ToolCall {
-        var roundCall: ToolRoundLimit.Call {
-            let arguments = try? JSONEncoder().encode(function.arguments)
-            return .init(name: function.name, jsonArguments: arguments.map { String(decoding: $0, as: UTF8.self) })
         }
     }
 #endif  // MLX

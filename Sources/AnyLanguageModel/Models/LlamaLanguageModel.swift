@@ -682,24 +682,6 @@ import Foundation
             case invocations([ToolInvocationResult])
         }
 
-        private static func maxToolIterationsExceededError(limit: Int) -> LanguageModelSession.GenerationError {
-            .decodingFailure(
-                .init(
-                    debugDescription:
-                        "Exceeded maximum tool iterations (\(limit)) while processing Llama tool calls."
-                )
-            )
-        }
-
-        private static func repeatedToolCallLoopError() -> LanguageModelSession.GenerationError {
-            .decodingFailure(
-                .init(
-                    debugDescription:
-                        "Detected repeated Llama tool-call signature and aborted to avoid an infinite tool loop."
-                )
-            )
-        }
-
         private func currentToolCallFormat() -> LlamaToolCallFormat {
             guard let model = self.model else { return .hermesJSON }
             let template = llama_model_chat_template(model, nil).map { String(cString: $0) }
@@ -868,9 +850,7 @@ import Foundation
             if type == String.self {
                 let maxTokens = runtimeOptions.maximumResponseTokens ?? 100
                 let outputFormat = currentToolCallFormat()
-                let maxToolIterations = 8
-                var toolIteration = 0
-                var previousToolCallSignature: String?
+                var toolRounds = ToolRoundLimit(provider: "Llama", options: options)
                 var allEntries: [Transcript.Entry] = []
                 var text = ""
                 var usage = RoundsUsage()
@@ -948,22 +928,7 @@ import Foundation
                         break generationLoop
                     }
 
-                    toolIteration += 1
-                    if toolIteration > maxToolIterations {
-                        let unresolved = try makeTranscriptToolCalls(from: parsedCalls)
-                        allEntries.append(.toolCalls(Transcript.ToolCalls(unresolved)))
-                        throw Self.maxToolIterationsExceededError(limit: maxToolIterations)
-                    }
-                    let signature =
-                        parsedCalls
-                        .map { "\($0.name):\($0.argumentsJSON)" }
-                        .joined(separator: "|")
-                    if signature == previousToolCallSignature {
-                        let unresolved = try makeTranscriptToolCalls(from: parsedCalls)
-                        allEntries.append(.toolCalls(Transcript.ToolCalls(unresolved)))
-                        throw Self.repeatedToolCallLoopError()
-                    }
-                    previousToolCallSignature = signature
+                    try toolRounds.record(completed: allEntries)
 
                     let resolution = try await resolveToolCalls(
                         parsedCalls,
@@ -1120,9 +1085,7 @@ import Foundation
                             let runtimeOptions = resolvedOptions(from: options)
                             let maxTokens = runtimeOptions.maximumResponseTokens ?? 100
                             let outputFormat = self.currentToolCallFormat()
-                            let maxToolIterations = 8
-                            var toolIteration = 0
-                            var previousToolCallSignature: String?
+                            var toolRounds = ToolRoundLimit(provider: "Llama", options: options)
                             var accumulatedEntries: [Transcript.Entry] = []
                             var emittedBase = ""
                             var usage = RoundsUsage()
@@ -1230,22 +1193,7 @@ import Foundation
                                     break generationLoop
                                 }
 
-                                toolIteration += 1
-                                if toolIteration > maxToolIterations {
-                                    let unresolved = try self.makeTranscriptToolCalls(from: parsedCalls)
-                                    accumulatedEntries.append(.toolCalls(Transcript.ToolCalls(unresolved)))
-                                    throw Self.maxToolIterationsExceededError(limit: maxToolIterations)
-                                }
-                                let signature =
-                                    parsedCalls
-                                    .map { "\($0.name):\($0.argumentsJSON)" }
-                                    .joined(separator: "|")
-                                if signature == previousToolCallSignature {
-                                    let unresolved = try self.makeTranscriptToolCalls(from: parsedCalls)
-                                    accumulatedEntries.append(.toolCalls(Transcript.ToolCalls(unresolved)))
-                                    throw Self.repeatedToolCallLoopError()
-                                }
-                                previousToolCallSignature = signature
+                                try toolRounds.record(completed: accumulatedEntries)
 
                                 let resolution = try await self.resolveToolCalls(
                                     parsedCalls,
