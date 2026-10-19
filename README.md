@@ -563,6 +563,22 @@ and `OpenResponsesLanguageModel`,
 and a `tool_choice` key in `extraBody`
 for `OpenAILanguageModel`, `OpenResponsesLanguageModel`, and `AnthropicLanguageModel`.
 
+The `toolChoice` cases that match a tool-calling mode are deprecated;
+set `toolCallingMode` instead:
+
+| `toolCallingMode` | Deprecated `AnthropicLanguageModel` case | Deprecated `OpenResponsesLanguageModel` case |
+| --- | --- | --- |
+| `.allowed` | `.auto` | `.auto` |
+| `.required` | `.any` | `.required` |
+| `.disallowed` | `.disabled` | `.none` |
+
+The deprecated cases still send the same requests.
+To make the model call a specific tool,
+or to restrict it to some of the tools,
+use the cases that remain:
+`.tool(name:)` for `AnthropicLanguageModel`,
+and `.function(name:)` or `.allowedTools(tools:mode:)` for `OpenResponsesLanguageModel`.
+
 Ollama, MLX, llama.cpp, and Core ML have no tool-choice setting.
 They honor `disallowed` by leaving the tools out of the prompt,
 so no tool runs.
@@ -1150,7 +1166,6 @@ such as `tool_choice` (including `allowed_tools`) and `extraBody`:
 ```swift
 var options = GenerationOptions(temperature: 0.8)
 options[custom: OpenResponsesLanguageModel.self] = .init(
-    toolChoice: .auto,
     allowedTools: ["getWeather"],
     reasoningEffort: .high,
     extraBody: ["custom_param": .string("value")]
@@ -1188,12 +1203,11 @@ print(response.content)
 ```
 
 Use custom generation options for Anthropic-specific parameters like
-extended thinking, tool choice control, and effort:
+extended thinking, service tier, and effort:
 
 ```swift
 var options = GenerationOptions(maximumResponseTokens: 8192)
 options[custom: AnthropicLanguageModel.self] = .init(
-    toolChoice: .auto,
     thinking: .enabled(budgetTokens: 4096),
     serviceTier: .priority
 )

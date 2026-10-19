@@ -324,12 +324,66 @@ struct ToolsOfferedTests {
         @Test func openResponsesCustomToolChoiceOverridesMode() async throws {
             ToolCallingModeURLProtocol.reset()
             ToolCallingModeURLProtocol.enqueue(Provider.openResponses.response())
-            var options = GenerationOptions(toolCallingMode: .required)
-            options[custom: OpenResponsesLanguageModel.self] = .init(toolChoice: .auto)
+            var options = GenerationOptions(toolCallingMode: .disallowed)
+            options[custom: OpenResponsesLanguageModel.self] = .init(toolChoice: .function(name: "getWeather"))
             _ = try await Provider.openResponses.makeSession().respond(to: "Weather?", options: options)
 
             let body = try #require(requestBodies().first)
-            #expect(body["tool_choice"] == .string("auto"))
+            #expect(body["tool_choice"] == .object(["type": .string("function"), "name": .string("getWeather")]))
+        }
+
+        /// Sends one request with tools and returns its body.
+        private func requestBody(
+            _ provider: Provider,
+            mode: GenerationOptions.ToolCallingMode?,
+            customize: (inout GenerationOptions) -> Void = { _ in }
+        ) async throws -> [String: JSONValue] {
+            ToolCallingModeURLProtocol.reset()
+            ToolCallingModeURLProtocol.enqueue(provider.response())
+            var options = GenerationOptions(toolCallingMode: mode)
+            customize(&options)
+            _ = try await provider.makeSession().respond(to: "Weather?", options: options)
+            return try #require(requestBodies().first)
+        }
+
+        // A deprecated `toolChoice` case sends the same request as its replacement mode,
+        // and it still takes precedence over any mode.
+        @available(*, deprecated)
+        @Test func deprecatedAnthropicToolChoiceMatchesMode() async throws {
+            typealias ToolChoice = AnthropicLanguageModel.CustomGenerationOptions.ToolChoice
+            let replacements: [(ToolChoice, GenerationOptions.ToolCallingMode)] = [
+                (.auto, .allowed),
+                (.any, .required),
+                (.disabled, .disallowed),
+            ]
+            for (choice, replacement) in replacements {
+                let expected = try await requestBody(.anthropic, mode: replacement)
+                for mode in Self.modes {
+                    let body = try await requestBody(.anthropic, mode: mode) {
+                        $0[custom: AnthropicLanguageModel.self] = .init(toolChoice: choice)
+                    }
+                    #expect(body == expected, "\(choice) with mode \(String(describing: mode?.kind))")
+                }
+            }
+        }
+
+        @available(*, deprecated)
+        @Test func deprecatedOpenResponsesToolChoiceMatchesMode() async throws {
+            typealias ToolChoice = OpenResponsesLanguageModel.CustomGenerationOptions.ToolChoice
+            let replacements: [(ToolChoice, GenerationOptions.ToolCallingMode)] = [
+                (.auto, .allowed),
+                (.required, .required),
+                (.none, .disallowed),
+            ]
+            for (choice, replacement) in replacements {
+                let expected = try await requestBody(.openResponses, mode: replacement)
+                for mode in Self.modes {
+                    let body = try await requestBody(.openResponses, mode: mode) {
+                        $0[custom: OpenResponsesLanguageModel.self] = .init(toolChoice: choice)
+                    }
+                    #expect(body == expected, "\(choice) with mode \(String(describing: mode?.kind))")
+                }
+            }
         }
 
         @Test(arguments: [Provider.chat, .responses, .openResponses, .anthropic])
