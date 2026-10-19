@@ -147,7 +147,6 @@ public final class LanguageModelSession: @unchecked Sendable {
     ///   with the Foundation Models framework.
     ///   It's public so that language models outside this module
     ///   can read the inputs for each request.
-    @_spi(Compatibility)
     public struct RequestContext: Sendable {
         /// The transcript to send with the request.
         public let transcript: Transcript
@@ -245,7 +244,6 @@ public final class LanguageModelSession: @unchecked Sendable {
     ///   with the Foundation Models framework.
     ///   It's public so that language models outside this module
     ///   can read the inputs for each request.
-    @_spi(Compatibility)
     nonisolated public func resolvedRequestContext() -> RequestContext {
         if let prepared = ProfileRequestBinding.prepared,
             prepared.session === self

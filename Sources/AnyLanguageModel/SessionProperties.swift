@@ -261,9 +261,7 @@ extension DynamicInstructions {
 
 extension Tool {
     public typealias SessionProperty = LanguageModelSession.SessionProperty
-}
 
-extension Tool {
     func bindingSessionProperties(_ properties: SessionPropertyValues, history: [Transcript.Entry]) -> any Tool {
         SessionPropertyTool(wrapped: self, properties: properties, history: history)
     }
