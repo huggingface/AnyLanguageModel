@@ -188,6 +188,8 @@ extension DynamicInstructions {
 }
 
 extension Tool {
+    public typealias SessionProperty = LanguageModelSession.SessionProperty
+
     func bindingSessionProperties(_ properties: SessionPropertyValues, history: Transcript.HistoryView) -> any Tool {
         SessionPropertyTool(wrapped: self, properties: properties, history: history)
     }
