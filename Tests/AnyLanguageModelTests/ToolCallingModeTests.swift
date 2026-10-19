@@ -214,6 +214,65 @@ struct ToolsOfferedTests {
             }
         }
 
+        @Test(arguments: modes)
+        func ollamaStreamingRequestOffersToolsUnlessDisallowed(mode: GenerationOptions.ToolCallingMode?) async throws {
+            ToolCallingModeURLProtocol.reset()
+            ToolCallingModeURLProtocol.enqueue(Provider.ollama.response())
+            let options = GenerationOptions(toolCallingMode: mode)
+            let response = try await Provider.ollama.makeSession()
+                .streamResponse(to: "Weather?", options: options)
+                .collect()
+            #expect(response.content == "Hello")
+
+            let body = try #require(requestBodies().first)
+            #expect(body["stream"] == .bool(true))
+            #expect((body["tools"] != nil) == (mode != .disallowed))
+            #expect(body["tool_choice"] == nil)
+        }
+
+        @Test func ollamaStreamingDisallowedModeRunsNoTool() async throws {
+            ToolCallingModeURLProtocol.reset()
+            ToolCallingModeURLProtocol.enqueue(Provider.ollama.response(tool: true))
+            ToolCallingModeURLProtocol.enqueue(Provider.ollama.response())
+            let called = Locked(false)
+            let session = LanguageModelSession(
+                model: Provider.ollama.makeModel(),
+                tools: [OneShotWeatherTool(called: called)]
+            )
+            let options = GenerationOptions(toolCallingMode: .disallowed)
+            let response = try await session.streamResponse(to: "Weather?", options: options).collect()
+            #expect(response.content == "Hello")
+            // A tool call resolves against the offered tools, which are none.
+            #expect(!called.withLock { $0 })
+
+            let bodies = try requestBodies()
+            #expect(bodies.count == 2)
+            for body in bodies {
+                #expect(body["tools"] == nil)
+            }
+        }
+
+        @Test func ollamaStreamingFollowUpRequestKeepsTools() async throws {
+            ToolCallingModeURLProtocol.reset()
+            ToolCallingModeURLProtocol.enqueue(Provider.ollama.response(tool: true))
+            ToolCallingModeURLProtocol.enqueue(Provider.ollama.response())
+            let called = Locked(false)
+            let session = LanguageModelSession(
+                model: Provider.ollama.makeModel(),
+                tools: [OneShotWeatherTool(called: called)]
+            )
+            let options = GenerationOptions(toolCallingMode: .required)
+            let response = try await session.streamResponse(to: "Weather?", options: options).collect()
+            #expect(response.content == "Hello")
+            #expect(called.withLock { $0 })
+
+            let bodies = try requestBodies()
+            #expect(bodies.count == 2)
+            for body in bodies {
+                #expect(body["tools"] != nil)
+            }
+        }
+
         @Test func requiredModeEndsAtToolRoundLimit() async throws {
             ToolCallingModeURLProtocol.reset()
             ToolCallingModeURLProtocol.enqueue(Provider.chat.response(tool: true))
