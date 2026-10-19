@@ -61,6 +61,47 @@ import Testing
             #expect(encoded.contains("fromA"))
         }
 
+        /// A property named `a.b` and a property `b` of a property `a`, whose paths read the same,
+        /// stay two schemas, each with its own properties.
+        @available(macOS 26.0, iOS 26.0, watchOS 27.0, tvOS 26.0, visionOS 26.0, *)
+        @Test func dottedPropertyAndNestedPropertyStayApart() throws {
+            let json = #"""
+                {"type":"object","properties":{
+                  "a.b":{"type":"object","properties":{"fromDotted":{"type":"string"}},"required":["fromDotted"]},
+                  "a":{"type":"object","properties":{
+                    "b":{"type":"object","properties":{"fromNested":{"type":"string"}},"required":["fromNested"]}},
+                    "required":["b"]}},"required":["a.b","a"]}
+                """#
+            let schema = FoundationModels.GenerationSchema(
+                try JSONDecoder().decode(AnyLanguageModel.GenerationSchema.self, from: Data(json.utf8))
+            )
+            let encoded = String(decoding: try JSONEncoder().encode(schema), as: UTF8.self)
+            #expect(encoded.contains("fromDotted"))
+            #expect(encoded.contains("fromNested"))
+        }
+
+        /// A definition's inline object and a definition named for that object's path stay two
+        /// schemas, each with its own properties.
+        @available(macOS 26.0, iOS 26.0, watchOS 27.0, tvOS 26.0, visionOS 26.0, *)
+        @Test func inlineNameMatchingADefinitionStaysApart() throws {
+            let json = #"""
+                {"type":"object","properties":{
+                  "a":{"$ref":"#/$defs/A"},"ax":{"$ref":"#/$defs/A.x"}},"required":["a","ax"],
+                 "$defs":{
+                  "A":{"type":"object","properties":{
+                    "x":{"type":"object","properties":{"fromInline":{"type":"string"}},"required":["fromInline"]}},
+                    "required":["x"]},
+                  "A.x":{"type":"object","properties":{"fromDefinition":{"type":"string"}},
+                    "required":["fromDefinition"]}}}
+                """#
+            let schema = FoundationModels.GenerationSchema(
+                try JSONDecoder().decode(AnyLanguageModel.GenerationSchema.self, from: Data(json.utf8))
+            )
+            let encoded = String(decoding: try JSONEncoder().encode(schema), as: UTF8.self)
+            #expect(encoded.contains("fromInline"))
+            #expect(encoded.contains("fromDefinition"))
+        }
+
         #if !os(watchOS)
             @available(macOS 26.0, iOS 26.0, tvOS 26.0, visionOS 26.0, *)
             @Test(.enabled(if: SystemLanguageModel.default.isAvailable))
