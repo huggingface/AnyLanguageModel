@@ -64,7 +64,7 @@ public struct GenerationSchema: Equatable, Codable, CustomDebugStringConvertible
         private enum CodingKeys: String, CodingKey {
             case type, properties, required, additionalProperties
             case items, minItems, maxItems
-            case pattern, `enum`, const, anyOf
+            case pattern, `enum`, const, anyOf, oneOf
             case ref = "$ref"
             case description
             case minimum, maximum
@@ -162,6 +162,14 @@ public struct GenerationSchema: Equatable, Codable, CustomDebugStringConvertible
 
             if container.contains(.anyOf) {
                 let nodes = try container.decode([GenerationSchema.Node].self, forKey: .anyOf)
+                self = .anyOf(nodes)
+                return
+            }
+
+            // `oneOf` asks for exactly one choice, which generating one value always gives: it
+            // reads as `anyOf`. Values described one by one are listed this way, as constants.
+            if container.contains(.oneOf) {
+                let nodes = try container.decode([GenerationSchema.Node].self, forKey: .oneOf)
                 self = .anyOf(nodes)
                 return
             }

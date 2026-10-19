@@ -523,6 +523,39 @@ but never become part of the session's transcript.
 > Otherwise, it throws `SystemLanguageModel.Error.dynamicInstructionsUnavailable`
 > for a session with dynamic instructions.
 
+### Foundation Models 27 request options
+
+`GenerationOptions` has the Foundation Models 27 names
+`samplingMode` and `init(samplingMode:temperature:maximumResponseTokens:)`,
+which Foundation Models back-deploys to OS 26.
+The older `sampling` and `init(sampling:temperature:maximumResponseTokens:)`
+remain available.
+`GenerationOptions` also has a `toolCallingMode`,
+and `ContextOptions` holds the schema-in-prompt and reasoning-level settings
+from Foundation Models 27:
+
+```swift
+let options = GenerationOptions(
+    samplingMode: .greedy,
+    toolCallingMode: .required
+)
+let context = ContextOptions(
+    includeSchemaInPrompt: true,
+    reasoningLevel: .moderate
+)
+```
+
+Only the models that run through Foundation Models use `toolCallingMode`.
+`SystemLanguageModel`, `PrivateCloudComputeLanguageModel`, and `FoundationLanguageModel`
+pass it to Foundation Models
+in apps built with Swift 6.4 or later that run on OS 27 or later,
+and not on tvOS.
+Other providers ignore it.
+A transcript keeps the tool-calling mode of each prompt.
+
+No AnyLanguageModel API accepts `ContextOptions` yet,
+so creating one has no effect on a request.
+
 ### Reasoning in the transcript
 
 Reasoning is transcript content, separate from the answer in `response.content`.
@@ -665,6 +698,9 @@ say which API they follow.
   which follows the Foundation Models 27 API.
 - `DynamicInstructions`, its builder, and `LanguageModelSession.init(model:dynamicInstructions:history:)`:
   [dynamic instructions](#dynamic-instructions),
+  which follow the Foundation Models 27 API.
+- `ContextOptions`, `GenerationOptions.ToolCallingMode`, and `GenerationOptions.toolCallingMode`:
+  [request options](#foundation-models-27-request-options),
   which follow the Foundation Models 27 API.
 - `Transcript.Entry.reasoning` and `Transcript.Reasoning`:
   [reasoning in the transcript](#reasoning-in-the-transcript),

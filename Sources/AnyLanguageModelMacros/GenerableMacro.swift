@@ -552,59 +552,6 @@ public struct GenerableMacro: MemberMacro, ExtensionMacro {
         return "\(baseType).PartiallyGenerated"
     }
 
-    private static func getDefaultValue(for type: String) -> String {
-        let trimmedType = type.trimmingCharacters(in: .whitespacesAndNewlines)
-
-        if trimmedType.hasSuffix("?") {
-            return "nil"
-        }
-
-        if isDictionaryType(trimmedType) {
-            return "[:]"
-        }
-
-        if trimmedType.hasPrefix("[") && trimmedType.hasSuffix("]") {
-            return "[]"
-        }
-
-        switch trimmedType {
-        case "String":
-            return "\"\""
-        case "Int":
-            return "0"
-        case "Double", "Float":
-            return "0.0"
-        case "Bool":
-            return "false"
-        default:
-            return "nil"
-        }
-    }
-
-    private static func generatePropertyAssignment(for property: PropertyInfo) -> String {
-        let propertyName = property.name
-        let propertyType = property.type.trimmingCharacters(in: .whitespacesAndNewlines)
-        let defaultValue = getDefaultValue(for: propertyType)
-
-        switch propertyType {
-        case "String":
-            return
-                "self.\(propertyName) = (json[\"\(propertyName)\"] as? String) ?? \(defaultValue)"
-        case "Int":
-            return "self.\(propertyName) = (json[\"\(propertyName)\"] as? Int) ?? \(defaultValue)"
-        case "Double":
-            return
-                "self.\(propertyName) = (json[\"\(propertyName)\"] as? Double) ?? \(defaultValue)"
-        case "Float":
-            return
-                "self.\(propertyName) = Float((json[\"\(propertyName)\"] as? Double) ?? Double(\(defaultValue)))"
-        case "Bool":
-            return "self.\(propertyName) = (json[\"\(propertyName)\"] as? Bool) ?? \(defaultValue)"
-        default:
-            return "self.\(propertyName) = \(defaultValue)"
-        }
-    }
-
     private static func generateMemberwiseInit(properties: [PropertyInfo], explicitNil: Bool) -> DeclSyntax {
         if properties.isEmpty {
             return DeclSyntax(
@@ -656,7 +603,7 @@ public struct GenerableMacro: MemberMacro, ExtensionMacro {
             return DeclSyntax(
                 stringLiteral: """
                     nonisolated public init(_ generatedContent: GeneratedContent) throws {
-                        guard case .structure(let properties, _) = generatedContent.kind else {
+                        guard case .structure = generatedContent.kind else {
                             throw DecodingError.typeMismatch(
                                 \(structName).self,
                                 DecodingError.Context(codingPath: [], debugDescription: "Expected structure for \(structName)")
@@ -719,97 +666,20 @@ public struct GenerableMacro: MemberMacro, ExtensionMacro {
         }
     }
 
+    /// Reads a property as Foundation Models does: a required property that's missing throws,
+    /// and an optional one that's missing or `null` is `nil`.
     private static func generatePropertyExtraction(propertyName: String, propertyType: String)
         -> String
     {
-        switch propertyType {
-        case "String":
+        if propertyType.hasSuffix("?") {
+            let baseType = String(propertyType.dropLast())
             return """
-                self.\(propertyName) = try properties["\(propertyName)"]?.value(String.self) ?? ""
+                self.\(propertyName) = try generatedContent.value(\(baseType)?.self, forProperty: "\(propertyName)")
                 """
-        case "Int":
-            return """
-                self.\(propertyName) = try properties["\(propertyName)"]?.value(Int.self) ?? 0
-                """
-        case "Double":
-            return """
-                self.\(propertyName) = try properties["\(propertyName)"]?.value(Double.self) ?? 0.0
-                """
-        case "Float":
-            return """
-                self.\(propertyName) = try properties["\(propertyName)"]?.value(Float.self) ?? 0.0
-                """
-        case "Bool":
-            return """
-                self.\(propertyName) = try properties["\(propertyName)"]?.value(Bool.self) ?? false
-                """
-        default:
-            let isOptional = propertyType.hasSuffix("?")
-            let isDictionary = isDictionaryType(
-                propertyType.replacingOccurrences(of: "?", with: "")
-            )
-            let isArray =
-                !isDictionary && propertyType.hasPrefix("[") && propertyType.hasSuffix("]")
-
-            if isOptional {
-                let baseType = propertyType.replacingOccurrences(of: "?", with: "")
-
-                if baseType == "Int" || baseType == "String" || baseType == "Double"
-                    || baseType == "Float" || baseType == "Bool"
-                {
-                    return """
-                        if let value = properties["\(propertyName)"] {
-                            switch value.kind {
-                            case .null:
-                                self.\(propertyName) = nil
-                            default:
-                                self.\(propertyName) = try value.value(\(baseType).self)
-                            }
-                        } else {
-                            self.\(propertyName) = nil
-                        }
-                        """
-                } else {
-                    return """
-                        if let value = properties["\(propertyName)"] {
-                            switch value.kind {
-                            case .null:
-                                self.\(propertyName) = nil
-                            default:
-                                self.\(propertyName) = try \(baseType)(value)
-                            }
-                        } else {
-                            self.\(propertyName) = nil
-                        }
-                        """
-                }
-
-            } else if isDictionary {
-                return """
-                    if let value = properties["\(propertyName)"] {
-                        self.\(propertyName) = try \(propertyType)(value)
-                    } else {
-                        self.\(propertyName) = [:]
-                    }
-                    """
-            } else if isArray {
-                return """
-                    if let value = properties["\(propertyName)"] {
-                        self.\(propertyName) = try \(propertyType)(value)
-                    } else {
-                        self.\(propertyName) = []
-                    }
-                    """
-            } else {
-                return """
-                    if let value = properties["\(propertyName)"] {
-                        self.\(propertyName) = try \(propertyType)(value)
-                    } else {
-                        self.\(propertyName) = try \(propertyType)(GeneratedContent("{}"))
-                    }
-                    """
-            }
         }
+        return """
+            self.\(propertyName) = try generatedContent.value(\(propertyType).self, forProperty: "\(propertyName)")
+            """
     }
 
     private static func generateGeneratedContentProperty(
