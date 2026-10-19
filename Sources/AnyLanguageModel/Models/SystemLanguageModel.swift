@@ -1047,11 +1047,17 @@
             )
 
         case .array(let array):
-            return .init(
-                arrayOf: convertToDynamicSchema(array.items, name: nil, path: path, names: &names),
+            // The items of a named array, such as a definition, are named from the array's name.
+            let itemsPath = name.map { at($0, "items") } ?? path
+            let schema = FoundationModels.DynamicGenerationSchema(
+                arrayOf: convertToDynamicSchema(array.items, name: nil, path: itemsPath, names: &names),
                 minimumElements: array.minItems,
                 maximumElements: array.maxItems
             )
+            // An array has no name of its own, so a named one is a one-choice `anyOf` that keeps
+            // the name, or the references to it are undefined.
+            if let name { return .init(name: name, anyOf: [schema]) }
+            return schema
 
         case .ref(let typeName):
             // A named definition that is only a reference, such as a one-choice `anyOf`, keeps its

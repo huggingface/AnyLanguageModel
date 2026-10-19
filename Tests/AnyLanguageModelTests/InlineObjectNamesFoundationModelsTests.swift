@@ -102,6 +102,31 @@ import Testing
             #expect(encoded.contains("fromDefinition"))
         }
 
+        /// The items of a definition that is an array, an object and a choice of two objects
+        /// written in place, are named from the definition's name and keep their properties.
+        @available(macOS 26.0, iOS 26.0, watchOS 27.0, tvOS 26.0, visionOS 26.0, *)
+        @Test func arrayDefinitionItemsAreNamed() throws {
+            let json = #"""
+                {"type":"object","properties":{
+                  "list":{"$ref":"#/$defs/List"},"mixed":{"$ref":"#/$defs/Mixed"}},"required":["list","mixed"],
+                 "$defs":{
+                  "List":{"type":"array","items":{"type":"object","properties":{"fromItem":{"type":"string"}},
+                    "required":["fromItem"]}},
+                  "Mixed":{"type":"array","items":{"anyOf":[
+                    {"type":"object","properties":{"fromFirst":{"type":"string"}},"required":["fromFirst"]},
+                    {"type":"object","properties":{"fromSecond":{"type":"string"}},"required":["fromSecond"]}]}}}}
+                """#
+            let schema = FoundationModels.GenerationSchema(
+                try JSONDecoder().decode(AnyLanguageModel.GenerationSchema.self, from: Data(json.utf8))
+            )
+            let encoded = String(decoding: try JSONEncoder().encode(schema), as: UTF8.self)
+            #expect(!encoded.contains(##""$ref":"#""##))
+            #expect(!encoded.contains(##""title":"""##))
+            #expect(encoded.contains("fromItem"))
+            #expect(encoded.contains("fromFirst"))
+            #expect(encoded.contains("fromSecond"))
+        }
+
         #if !os(watchOS)
             @available(macOS 26.0, iOS 26.0, tvOS 26.0, visionOS 26.0, *)
             @Test(.enabled(if: SystemLanguageModel.default.isAvailable))
