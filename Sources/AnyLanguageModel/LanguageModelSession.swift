@@ -158,15 +158,19 @@ public final class LanguageModelSession: @unchecked Sendable {
         public let tools: [any Tool]
 
         /// The model selected for this request.
+        @_spi(Compatibility)
         public let model: any LanguageModel
 
         /// Generation options after profile defaults are combined with call-site options.
+        @_spi(Compatibility)
         public let options: GenerationOptions
 
         /// Context options selected by the active profile.
+        @_spi(Compatibility)
         public let contextOptions: ContextOptions
 
         /// Transcript failure behavior captured for this request.
+        @_spi(Compatibility)
         public let transcriptErrorHandlingPolicy: TranscriptErrorHandlingPolicy?
 
         fileprivate let profile: ResolvedDynamicProfile?
@@ -253,11 +257,11 @@ public final class LanguageModelSession: @unchecked Sendable {
         return resolveRequestContext(additionalEntries: [], options: .init())
     }
 
-    nonisolated func toolRoundLimit(for provider: String) -> ToolRoundLimit {
+    nonisolated func toolRoundLimit(for provider: String, options: GenerationOptions) -> ToolRoundLimit {
         guard let prepared = ProfileRequestBinding.prepared,
             prepared.session === self
         else {
-            return ToolRoundLimit(provider: provider)
+            return ToolRoundLimit(provider: provider, options: options)
         }
         return prepared.toolRoundLimit(for: provider)
     }
@@ -2593,7 +2597,7 @@ private final class PreparedProfileRequest: @unchecked Sendable {
     func toolRoundLimit(for provider: String) -> ToolRoundLimit {
         toolRoundLimitStorage.withLock { limit in
             if let limit { return limit }
-            let created = ToolRoundLimit(provider: provider)
+            let created = ToolRoundLimit(provider: provider, options: callSiteOptions)
             limit = created
             return created
         }

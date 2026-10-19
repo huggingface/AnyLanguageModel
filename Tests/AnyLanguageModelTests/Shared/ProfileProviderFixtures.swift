@@ -84,7 +84,7 @@ import Testing
 
         func providerModelHandoffsShareToolRoundLimit(_ provider: Provider, _ streaming: Bool) async throws {
             UsageURLProtocol.reset()
-            let limit = ToolRoundLimit.maximumRounds
+            let limit = GenerationOptions().maximumToolRounds
             for round in 0 ... limit {
                 if streaming {
                     UsageURLProtocol.enqueue(
@@ -109,7 +109,7 @@ import Testing
                 )
             )
 
-            let description = await Self.decodingFailureDescription {
+            let exceeded = await Self.toolRoundLimitExceeded {
                 if streaming {
                     _ = try await session.streamResponse(to: "Weather?").collect()
                 } else {
@@ -117,7 +117,7 @@ import Testing
                 }
             }
 
-            #expect(description?.contains("Exceeded maximum tool iterations (\(limit))") == true)
+            #expect(exceeded?.limit == limit)
             #expect(state.executions.withLock { $0.count } == limit)
             #expect(UsageURLProtocol.recordedBodies.count == limit + 1)
         }
