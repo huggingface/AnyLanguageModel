@@ -142,7 +142,10 @@ public struct GenerationOptions: Sendable, Equatable {
     /// - ``OpenAILanguageModel``, ``OpenResponsesLanguageModel``, ``AnthropicLanguageModel``,
     ///   and ``GeminiLanguageModel`` send it as the API's tool-choice setting
     ///   with each request that has tools.
-    ///   A tool-choice custom option or `extraBody` overrides it.
+    ///   The `toolChoice` custom option
+    ///   of ``AnthropicLanguageModel`` and ``OpenResponsesLanguageModel`` overrides it,
+    ///   as does a `tool_choice` key in `extraBody`
+    ///   for ``OpenAILanguageModel``, ``OpenResponsesLanguageModel``, and ``AnthropicLanguageModel``.
     /// - ``OllamaLanguageModel``, `MLXLanguageModel`, `LlamaLanguageModel`, and `CoreMLLanguageModel`
     ///   have no tool-choice setting.
     ///   For ``ToolCallingMode/disallowed``, they offer the model no tools.
