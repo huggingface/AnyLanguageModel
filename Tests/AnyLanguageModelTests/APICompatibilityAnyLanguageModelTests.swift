@@ -65,6 +65,23 @@ import Testing
         }
     }
 
+    @Test func anyLanguageModelNonSendableHistoryTransformCompatibility() {
+        let captured = NonSendableHistoryCapture()
+        let transform: ([Transcript.Entry]) -> [Transcript.Entry] = { entries in
+            captured.calls += 1
+            return entries
+        }
+        _ = LanguageModelSession.AnyDynamicProfile(
+            LanguageModelSession.Profile { Instructions("Projection") }
+                .historyTransform(transform)
+        )
+        #expect(captured.calls == 0)
+    }
+
+    private final class NonSendableHistoryCapture {
+        var calls = 0
+    }
+
     @available(macOS 26.0, iOS 26.0, tvOS 26.0, visionOS 26.0, *)
     @Test("AnyLanguageModel Drop-In Compatibility", .enabled(if: isSystemLanguageModelAvailable))
     func anyLanguageModelCompatibility() async throws {

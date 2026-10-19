@@ -67,6 +67,24 @@ import Testing
                     .transcriptErrorHandlingPolicy(nil)
                 }
             }
+
+            @available(macOS 27.0, iOS 27.0, visionOS 27.0, *)
+            @Test func foundationModelsNonSendableHistoryTransformCompatibility() {
+                let captured = NonSendableHistoryCapture()
+                let transform: ([Transcript.Entry]) -> [Transcript.Entry] = { entries in
+                    captured.calls += 1
+                    return entries
+                }
+                _ = LanguageModelSession.AnyDynamicProfile(
+                    LanguageModelSession.Profile { Instructions("Projection") }
+                        .historyTransform(transform)
+                )
+                #expect(captured.calls == 0)
+            }
+
+            private final class NonSendableHistoryCapture {
+                var calls = 0
+            }
         #endif
     #endif
 

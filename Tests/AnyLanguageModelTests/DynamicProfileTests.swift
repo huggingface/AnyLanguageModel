@@ -51,6 +51,20 @@ struct DynamicProfileBuilderTests {
         #expect(profile.maximumResponseTokens == 64)
     }
 
+    @Test func historyTransformCanCaptureNonSendableState() {
+        let recorder = HistoryTransformRecorder()
+        let profile = LanguageModelSession.AnyDynamicProfile(
+            LanguageModelSession.Profile { Instructions("Projection") }
+                .historyTransform { entries in
+                    recorder.entryIDs = entries.map(\.id)
+                    return entries
+                }
+        ).resolveForRequest()
+        let history: [Transcript.Entry] = [.prompt(.init(segments: [.text(.init(content: "Hello"))]))]
+        #expect(profile.historyTransforms[0](history) == history)
+        #expect(recorder.entryIDs == history.map(\.id))
+    }
+
     @Test func historyTransformsAndCallbacksKeepCompositionOrder() async throws {
         let events = Locked<[String]>([])
         let profile = LanguageModelSession.AnyDynamicProfile(
@@ -85,6 +99,10 @@ struct DynamicProfileBuilderTests {
             ]
         )
     }
+}
+
+private final class HistoryTransformRecorder {
+    var entryIDs: [String] = []
 }
 
 private struct ConditionalBuilderProfile: LanguageModelSession.DynamicProfile {

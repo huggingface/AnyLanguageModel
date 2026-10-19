@@ -156,6 +156,7 @@ public struct GenerationOptions: Sendable, Equatable {
             precondition(maximumToolRounds >= 1, "maximumToolRounds must be at least 1, got \(maximumToolRounds)")
         }
     }
+
     /// Storage for model-specific custom options.
     private var customOptionsStorage: CustomOptionsStorage = .init()
 
