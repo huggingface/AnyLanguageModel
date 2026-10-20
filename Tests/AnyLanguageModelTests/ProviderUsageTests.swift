@@ -982,6 +982,88 @@ import Testing
     /// A `URLProtocol` that answers requests from a queue of canned responses
     /// and records every request body it sees,
     /// so request/response round trips can be asserted offline.
+    extension ProviderUsageTests {
+        // MARK: Responses that throw
+
+        /// The usage of every request the provider received, `provider.expected` each.
+        private static func usage(of provider: Provider, requests: Int) -> LanguageModelSession.Usage {
+            var usage = LanguageModelSession.Usage.zero
+            for _ in 0 ..< requests { usage.add(provider.expected) }
+            return usage
+        }
+
+        /// As in Foundation Models, a request is counted as it completes, so a response whose tool
+        /// fails keeps what its request used.
+        @Test(arguments: Provider.allCases)
+        func aFailedToolKeepsItsRequestsUsage(_ provider: Provider) async throws {
+            UsageURLProtocol.reset()
+            UsageURLProtocol.enqueue(json: try Self.json(provider.response(counts: provider.counts, tool: true)))
+            var tool = RecordingWeatherTool()
+            tool.fails = true
+            let session = provider.makeSession(tools: [tool])
+            await #expect(throws: LanguageModelSession.ToolCallError.self) { try await session.respond(to: "Weather?") }
+            #expect(UsageURLProtocol.recordedBodies.count == 1)
+            #expect(session.usage == provider.expected)
+            #expect(!session.isResponding)
+        }
+
+        /// A response past its tool-round limit keeps what each of its requests used.
+        @Test(arguments: Provider.allCases)
+        func aResponsePastItsToolRoundLimitKeepsItsRequestsUsage(_ provider: Provider) async throws {
+            UsageURLProtocol.reset()
+            UsageURLProtocol.enqueue(json: try Self.json(provider.response(counts: provider.counts, tool: true)))
+            UsageURLProtocol.enqueue(json: try Self.json(provider.response(counts: provider.counts, tool: true)))
+            let session = provider.makeSession(tools: [RecordingWeatherTool()])
+            var options = GenerationOptions()
+            options.maximumToolRounds = 1
+            _ = try? await session.respond(to: "Weather?", options: options)
+            let requests = UsageURLProtocol.recordedBodies.count
+            #expect(requests >= 1)
+            #expect(session.usage == Self.usage(of: provider, requests: requests))
+        }
+
+        /// An answer that isn't the content asked for keeps what its request used.
+        @Test(arguments: Provider.allCases)
+        func anAnswerThatDoesntDecodeKeepsItsRequestsUsage(_ provider: Provider) async throws {
+            UsageURLProtocol.reset()
+            UsageURLProtocol.enqueue(json: try Self.json(provider.response(text: "not json", counts: provider.counts)))
+            let session = provider.makeSession()
+            await #expect(throws: (any Error).self) {
+                try await session.respond(to: "Hi", generating: SimpleString.self)
+            }
+            #expect(session.usage == provider.expected)
+        }
+
+        /// The response after one that threw counts its own requests, and reports only its own.
+        @Test(arguments: Provider.allCases)
+        func theResponseAfterAFailureCountsOnlyItsOwn(_ provider: Provider) async throws {
+            UsageURLProtocol.reset()
+            UsageURLProtocol.enqueue(json: try Self.json(provider.response(counts: provider.counts, tool: true)))
+            UsageURLProtocol.enqueue(json: try Self.json(provider.response(counts: provider.counts)))
+            var tool = RecordingWeatherTool()
+            tool.fails = true
+            let session = provider.makeSession(tools: [tool])
+            _ = try? await session.respond(to: "Weather?")
+            let response = try await session.respond(to: "Hi")
+            #expect(response.usage == provider.expected)
+            #expect(session.usage == Self.usage(of: provider, requests: 2))
+        }
+
+        /// A response that completes is counted once: what its requests reported as they completed,
+        /// and nothing more from the response.
+        @Test(arguments: Provider.allCases)
+        func aCompletedToolRoundIsCountedOnce(_ provider: Provider) async throws {
+            UsageURLProtocol.reset()
+            UsageURLProtocol.enqueue(json: try Self.json(provider.response(counts: provider.counts, tool: true)))
+            UsageURLProtocol.enqueue(json: try Self.json(provider.response(counts: provider.counts)))
+            let session = provider.makeSession(tools: [RecordingWeatherTool()])
+            let response = try await session.respond(to: "Weather?")
+            let requests = UsageURLProtocol.recordedBodies.count
+            #expect(response.usage == provider.expected)
+            #expect(session.usage == Self.usage(of: provider, requests: requests))
+        }
+    }
+
     private final class UsageURLProtocol: URLProtocol {
         struct Exchange: Sendable {
             var statusCode: Int = 200

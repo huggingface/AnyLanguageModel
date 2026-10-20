@@ -169,6 +169,7 @@ public struct OllamaLanguageModel: LanguageModel {
 
         var entries: [Transcript.Entry] = []
         let usage = chatResponse.reportedUsage?.value ?? .zero
+        RequestUsageChannel.report(usage)
 
         if let toolCalls = chatResponse.message.toolCalls, !toolCalls.isEmpty {
             let resolution = try await resolveToolCalls(

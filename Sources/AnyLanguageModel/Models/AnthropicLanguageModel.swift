@@ -506,6 +506,7 @@ public struct AnthropicLanguageModel: LanguageModel {
             }
         }
         let usage = message.usage?.reportedUsage?.value ?? .zero
+        RequestUsageChannel.report(usage)
 
         // Handle tool calls, if present
         let toolUses: [AnthropicToolUse] = message.content.compactMap { block in

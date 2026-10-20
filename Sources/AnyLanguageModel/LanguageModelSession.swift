@@ -348,6 +348,19 @@ public final class LanguageModelSession: @unchecked Sendable {
         }
     }
 
+    /// Makes a response that isn't streamed, counting each of its requests' usage as the model
+    /// reports it, so a response that throws keeps what its requests used. Once it returns, what
+    /// it used and didn't report, such as a model's that doesn't report, is counted from it.
+    nonisolated private func countingRequests<Content>(
+        of generate: () async throws -> Response<Content>
+    ) async throws -> Response<Content> {
+        let channel = RequestUsageChannel { [self] in recordUsage($0) }
+        let response = try await RequestUsageChannel.$current.withValue(channel) { try await generate() }
+        var reported = channel.reportedUsage
+        recordUsage(response.requests.total.increment(since: &reported))
+        return response
+    }
+
     nonisolated private func beginResponding() {
         withMutation(keyPath: \.isResponding) {
             state.withLock { $0.beginResponding() }
@@ -742,9 +755,10 @@ public final class LanguageModelSession: @unchecked Sendable {
                 state.withLock { $0.transcript.append(promptEntry) }
             }
 
-            let response = Self.representingNilExplicitly(in: try await generate(), responseFormat: responseFormat)
-
-            recordUsage(response.requests.total)
+            let response = Self.representingNilExplicitly(
+                in: try await countingRequests(of: generate),
+                responseFormat: responseFormat
+            )
 
             // Add response entry to transcript
             let textContent: String
@@ -800,14 +814,18 @@ public final class LanguageModelSession: @unchecked Sendable {
             state.withLock { $0.transcript.append(promptEntry) }
         }
 
+        // A stream counts its usage from its snapshots: its requests aren't counted for a response
+        // it's made within, such as by a tool.
         return wrapStream(
-            model.streamResponse(
-                within: self,
-                to: prompt,
-                generating: type,
-                includeSchemaInPrompt: includeSchemaInPrompt,
-                options: options
-            ),
+            RequestUsageChannel.outside {
+                model.streamResponse(
+                    within: self,
+                    to: prompt,
+                    generating: type,
+                    includeSchemaInPrompt: includeSchemaInPrompt,
+                    options: options
+                )
+            },
             promptEntry: promptEntry
         )
     }
@@ -956,14 +974,18 @@ extension LanguageModelSession {
             state.withLock { $0.transcript.append(promptEntry) }
         }
 
+        // A stream counts its usage from its snapshots: its requests aren't counted for a response
+        // it's made within, such as by a tool.
         return wrapStream(
-            model.streamResponse(
-                within: self,
-                to: prompt,
-                schema: schema,
-                includeSchemaInPrompt: includeSchemaInPrompt,
-                options: options
-            ),
+            RequestUsageChannel.outside {
+                model.streamResponse(
+                    within: self,
+                    to: prompt,
+                    schema: schema,
+                    includeSchemaInPrompt: includeSchemaInPrompt,
+                    options: options
+                )
+            },
             promptEntry: promptEntry
         )
     }
@@ -1159,17 +1181,17 @@ extension LanguageModelSession {
             let textPrompt = Prompt(prompt)
 
             let response = Self.representingNilExplicitly(
-                in: try await model.respond(
-                    within: self,
-                    to: textPrompt,
-                    generating: type,
-                    includeSchemaInPrompt: includeSchemaInPrompt,
-                    options: options
-                ),
+                in: try await countingRequests {
+                    try await model.respond(
+                        within: self,
+                        to: textPrompt,
+                        generating: type,
+                        includeSchemaInPrompt: includeSchemaInPrompt,
+                        options: options
+                    )
+                },
                 responseFormat: type == String.self ? nil : .init(type: type)
             )
-
-            recordUsage(response.requests.total)
 
             // Add response entry to transcript
             let textContent: String
@@ -1290,14 +1312,18 @@ extension LanguageModelSession {
         // Extract text content for the Prompt parameter
         let textPrompt = Prompt(prompt)
 
+        // A stream counts its usage from its snapshots: its requests aren't counted for a response
+        // it's made within, such as by a tool.
         return wrapStream(
-            model.streamResponse(
-                within: self,
-                to: textPrompt,
-                generating: type,
-                includeSchemaInPrompt: includeSchemaInPrompt,
-                options: options
-            ),
+            RequestUsageChannel.outside {
+                model.streamResponse(
+                    within: self,
+                    to: textPrompt,
+                    generating: type,
+                    includeSchemaInPrompt: includeSchemaInPrompt,
+                    options: options
+                )
+            },
             promptEntry: promptEntry
         )
     }
