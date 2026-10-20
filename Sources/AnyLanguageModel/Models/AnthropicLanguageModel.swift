@@ -458,11 +458,11 @@ public struct AnthropicLanguageModel: LanguageModel, ProfileRequestIdentifiedLan
         var usage = LanguageModelSession.Usage.zero
         var earlierText = ""
         var inFlightMessages: [AnthropicMessage] = []
-        let toolRounds = session.toolRoundLimit(for: "Anthropic")
+        let toolRounds = session.toolRoundLimit(for: "Anthropic", options: options)
 
         while true {
             let requestContext = try await session.resolvedRequestContext(
-                including: entries,
+                including: session.usesDynamicProfile ? entries : [],
                 options: options
             )
             if let continuation = try await session.profileContinuationResponse(
@@ -487,7 +487,8 @@ public struct AnthropicLanguageModel: LanguageModel, ProfileRequestIdentifiedLan
                 messages: try anthropicMessages(
                     from: requestContext.transcript,
                     replacing: entries,
-                    with: inFlightMessages
+                    with: inFlightMessages,
+                    hasDynamicProfile: requestContext.hasDynamicProfile
                 ),
                 tools: anthropicTools.isEmpty ? nil : anthropicTools,
                 responseSchema: responseSchema,
@@ -514,7 +515,7 @@ public struct AnthropicLanguageModel: LanguageModel, ProfileRequestIdentifiedLan
                 return nil
             }
             if !toolUses.isEmpty {
-                try toolRounds.record()
+                try session.recordToolRound(toolRounds, completed: entries)
                 try await session.profileDidProduceEntries(
                     reasoningEntries,
                     requestContext: requestContext,
@@ -536,22 +537,21 @@ public struct AnthropicLanguageModel: LanguageModel, ProfileRequestIdentifiedLan
                         usage: usage
                     )
                 case .invocations(let invocations):
-                    inFlightMessages.append(.init(role: .assistant, content: message.content))
                     entries.append(.toolCalls(.init(invocations.map(\.call))))
-                    var results: [AnthropicContent] = []
                     for invocation in invocations {
                         entries.append(.toolOutput(invocation.output))
-                        results.append(
+                    }
+                    if requestContext.hasDynamicProfile {
+                        inFlightMessages.append(.init(role: .assistant, content: message.content))
+                        let results: [AnthropicContent] = try invocations.map { invocation in
                             .toolResult(
                                 .init(
                                     toolUseId: invocation.call.id,
                                     content: try convertSegmentsToAnthropicContent(invocation.output.segments)
                                 )
                             )
-                        )
-                    }
-                    inFlightMessages.append(.init(role: .user, content: results))
-                    if requestContext.hasDynamicProfile {
+                        }
+                        inFlightMessages.append(.init(role: .user, content: results))
                         if type == String.self {
                             earlierText += message.content.compactMap { block -> String? in
                                 if case .text(let text) = block { return text.text }
@@ -644,7 +644,7 @@ public struct AnthropicLanguageModel: LanguageModel, ProfileRequestIdentifiedLan
                     while true {
                         try Task.checkCancellation()
                         let requestContext = try await session.resolvedRequestContext(
-                            including: state.entries,
+                            including: session.usesDynamicProfile ? state.entries : [],
                             options: options
                         )
                         if let handoff = session.profileContinuationStream(
@@ -668,7 +668,8 @@ public struct AnthropicLanguageModel: LanguageModel, ProfileRequestIdentifiedLan
                         let messages = try anthropicMessages(
                             from: requestContext.transcript,
                             replacing: state.entries,
-                            with: inFlightMessages
+                            with: inFlightMessages,
+                            hasDynamicProfile: requestContext.hasDynamicProfile
                         )
                         var params = try createMessageParams(
                             model: model,
@@ -978,26 +979,16 @@ private func createMessageParams(
 private func anthropicMessages(
     from transcript: Transcript,
     replacing currentRoundEntries: [Transcript.Entry],
-    with continuation: [AnthropicMessage]
+    with continuation: [AnthropicMessage],
+    hasDynamicProfile: Bool
 ) throws -> [AnthropicMessage] {
-    guard !continuation.isEmpty, !currentRoundEntries.isEmpty else {
-        return try transcript.toAnthropicMessages()
-    }
-    let projected = Array(transcript)
-    let count = currentRoundEntries.count
-    let ranges = projected.indices.compactMap { start -> Range<Int>? in
-        let end = start + count
-        guard end <= projected.count,
-            Array(projected[start ..< end]) == currentRoundEntries
-        else { return nil }
-        return start ..< end
-    }
-    guard ranges.count == 1, let range = ranges.first else {
-        return try transcript.toAnthropicMessages()
-    }
-    return try Transcript(entries: projected[..<range.lowerBound]).toAnthropicMessages()
-        + continuation
-        + Transcript(entries: projected[range.upperBound...]).toAnthropicMessages()
+    try toolContinuationMessages(
+        from: transcript,
+        replacing: currentRoundEntries,
+        with: continuation,
+        hasDynamicProfile: hasDynamicProfile,
+        convert: { try $0.toAnthropicMessages() }
+    )
 }
 
 private struct ToolInvocationResult {
