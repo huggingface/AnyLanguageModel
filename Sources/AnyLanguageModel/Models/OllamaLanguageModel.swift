@@ -58,7 +58,7 @@ public struct OllamaLanguageModel: LanguageModel {
 
     /// How long to wait for a streamed response to start. With URLSession, it's how long to
     /// wait for each part of the response, so it applies while the response streams too.
-    public let responseStartTimeout: Duration
+    public let responseStartTimeout: Duration?
 
     private let transport: any HTTPTransport
 
@@ -67,12 +67,15 @@ public struct OllamaLanguageModel: LanguageModel {
     /// - Parameters:
     ///   - baseURL: The base URL for the Ollama server. Defaults to `http://localhost:11434`.
     ///   - model: The model identifier (for example, "qwen2.5" or "llama3.3").
-    ///   - responseStartTimeout: How long to wait for a streamed response to start. Defaults to 60 seconds.
+    ///   - responseStartTimeout: How long to wait for a streamed response to start, or `nil`, the
+    ///     default, for the transport to decide: a URL session waits as its configuration says, and
+    ///     AsyncHTTPClient up to 180 seconds. On Linux, a URL session waits whole seconds, so it
+    ///     rounds up to the next one.
     ///   - transport: How it sends its requests: by default ``makeDefaultTransport()``.
     public init(
         baseURL: URL = defaultBaseURL,
         model: String,
-        responseStartTimeout: Duration = .seconds(60),
+        responseStartTimeout: Duration? = nil,
         transport: any HTTPTransport = makeDefaultTransport(),
     ) {
         var baseURL = baseURL
@@ -87,7 +90,7 @@ public struct OllamaLanguageModel: LanguageModel {
     }
 
     /// Creates a model that sends its requests with `session`.
-    @available(*, deprecated, renamed: "init(baseURL:model:responseStartTimeout:transport:)")
+    @available(*, deprecated, renamed: "init(baseURL:model:transport:)")
     public init(
         baseURL: URL = defaultBaseURL,
         model: String,

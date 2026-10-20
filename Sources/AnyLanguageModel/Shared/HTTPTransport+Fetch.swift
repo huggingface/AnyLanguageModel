@@ -98,7 +98,7 @@ extension HTTPTransport {
         _ request: HTTPRequest,
         body: Data? = nil,
         dateDecodingStrategy: JSONDecoder.DateDecodingStrategy = .deferredToDate,
-        timeout: Duration = .seconds(60)
+        timeout: Duration? = nil
     ) -> AsyncThrowingStream<T, any Error> {
         let request = Self.request(request, accepting: "application/json", body: body)
         return streaming { continuation in
@@ -126,7 +126,7 @@ extension HTTPTransport {
     func fetchEventStream<T: Decodable & Sendable>(
         _ request: HTTPRequest,
         body: Data? = nil,
-        timeout: Duration = .seconds(60)
+        timeout: Duration? = nil
     ) -> AsyncThrowingStream<T, any Error> {
         let request = Self.request(request, accepting: "text/event-stream", body: body)
         return streaming { continuation in
