@@ -414,6 +414,10 @@ and retain the image bytes and MIME type in the compatibility transcript.
 Continuations and saved transcript replay therefore do not depend on the original
 file remaining at its URL. Remote image URLs are retained without downloading.
 
+Gemini supports images in Tool function responses only with Gemini 3 and later.
+In Gemini Tool outputs, remote image URLs are sent as text at their original
+position without downloading the image; the transcript retains the image segment.
+
 This compatibility surface covers `CGImage` and `imageURL` attachments in
 prompts and ordinary Tool outputs. Instruction attachments, labels, `CIImage`,
 pixel buffers, and newer data attachments remain outside this change.
