@@ -110,7 +110,7 @@ struct AnthropicCustomOptionsTests {
             topK: 40,
             stopSequences: ["END", "STOP"],
             metadata: .init(userID: "user-123"),
-            toolChoice: .auto,
+            toolChoice: .tool(name: "search"),
             thinking: .enabled(budgetTokens: 1024, display: .summarized),
             serviceTier: .priority,
             extraBody: ["custom_param": .string("value")]
@@ -120,7 +120,7 @@ struct AnthropicCustomOptionsTests {
         #expect(options.topK == 40)
         #expect(options.stopSequences == ["END", "STOP"])
         #expect(options.metadata?.userID == "user-123")
-        #expect(options.toolChoice == .auto)
+        #expect(options.toolChoice == .tool(name: "search"))
         #expect(options.thinking?.budgetTokens == 1024)
         #expect(options.thinking?.type == .enabled)
         #expect(options.thinking?.display == .summarized)
@@ -212,6 +212,7 @@ struct AnthropicCustomOptionsTests {
         #expect(decoded == metadata)
     }
 
+    @available(*, deprecated)
     @Test func toolChoiceVariants() {
         let auto = AnthropicLanguageModel.CustomGenerationOptions(toolChoice: .auto)
         let any = AnthropicLanguageModel.CustomGenerationOptions(toolChoice: .any)
@@ -229,6 +230,7 @@ struct AnthropicCustomOptionsTests {
         #expect(tool != disabled)
     }
 
+    @available(*, deprecated)
     @Test func toolChoiceCodable() throws {
         typealias ToolChoice = AnthropicLanguageModel.CustomGenerationOptions.ToolChoice
 
@@ -244,8 +246,13 @@ struct AnthropicCustomOptionsTests {
             let decoded = try JSONDecoder().decode(ToolChoice.self, from: data)
             #expect(decoded == choice)
         }
+
+        // An unknown type decodes as `auto`.
+        let unknown = try JSONDecoder().decode(ToolChoice.self, from: Data(#"{"type":"sometimes"}"#.utf8))
+        #expect(unknown == .auto)
     }
 
+    @available(*, deprecated)
     @Test func toolChoiceDisabledEncodesToNone() throws {
         let choice = AnthropicLanguageModel.CustomGenerationOptions.ToolChoice.disabled
 
@@ -636,11 +643,11 @@ struct OpenResponsesCustomOptionsTests {
 
     @Test func equality() {
         let options1 = OpenResponsesLanguageModel.CustomGenerationOptions(
-            toolChoice: .auto,
+            toolChoice: .function(name: "getWeather"),
             topP: 0.9
         )
         let options2 = OpenResponsesLanguageModel.CustomGenerationOptions(
-            toolChoice: .auto,
+            toolChoice: .function(name: "getWeather"),
             topP: 0.9
         )
         #expect(options1 == options2)
@@ -648,7 +655,7 @@ struct OpenResponsesCustomOptionsTests {
 
     @Test func codable() throws {
         let options = OpenResponsesLanguageModel.CustomGenerationOptions(
-            toolChoice: .required,
+            toolChoice: .allowedTools(tools: ["getWeather"], mode: .required),
             topP: 0.9,
             truncation: .auto,
             extraBody: ["k": .string("v")]
@@ -662,9 +669,8 @@ struct OpenResponsesCustomOptionsTests {
     }
 
     @Test func codableUsesSnakeCase() throws {
-        typealias ToolChoice = OpenResponsesLanguageModel.CustomGenerationOptions.ToolChoice
         let options = OpenResponsesLanguageModel.CustomGenerationOptions(
-            toolChoice: ToolChoice.none,
+            toolChoice: .function(name: "getWeather"),
             topP: 0.9,
             parallelToolCalls: true
         )
@@ -675,6 +681,7 @@ struct OpenResponsesCustomOptionsTests {
         #expect(json.contains("\"tool_choice\""))
     }
 
+    @available(*, deprecated)
     @Test func toolChoiceVariants() {
         typealias ToolChoice = OpenResponsesLanguageModel.CustomGenerationOptions.ToolChoice
         let none = OpenResponsesLanguageModel.CustomGenerationOptions(toolChoice: ToolChoice.none)
@@ -688,6 +695,20 @@ struct OpenResponsesCustomOptionsTests {
         #expect(auto.toolChoice != required.toolChoice)
         #expect(required.toolChoice != fn.toolChoice)
         #expect(fn.toolChoice != allowed.toolChoice)
+    }
+
+    @available(*, deprecated)
+    @Test func toolChoiceStringValuesCodable() throws {
+        typealias ToolChoice = OpenResponsesLanguageModel.CustomGenerationOptions.ToolChoice
+        let choices: [(ToolChoice, String)] = [(.none, "none"), (.auto, "auto"), (.required, "required")]
+        for (choice, value) in choices {
+            let data = try JSONEncoder().encode(choice)
+            #expect(String(data: data, encoding: .utf8) == "\"\(value)\"")
+            #expect(try JSONDecoder().decode(ToolChoice.self, from: data) == choice)
+        }
+        #expect(throws: DecodingError.self) {
+            try JSONDecoder().decode(ToolChoice.self, from: Data(#""sometimes""#.utf8))
+        }
     }
 
     @Test func toolChoiceAllowedToolsCodable() throws {
@@ -727,12 +748,12 @@ struct OpenResponsesCustomOptionsTests {
     @Test func integrationWithGenerationOptions() {
         var options = GenerationOptions(temperature: 0.8)
         options[custom: OpenResponsesLanguageModel.self] = .init(
-            toolChoice: .auto,
+            toolChoice: .function(name: "getWeather"),
             allowedTools: ["getWeather"],
             topP: 0.9
         )
         let retrieved = options[custom: OpenResponsesLanguageModel.self]
-        #expect(retrieved?.toolChoice == .auto)
+        #expect(retrieved?.toolChoice == .function(name: "getWeather"))
         #expect(retrieved?.topP == 0.9)
         #expect(retrieved?.allowedTools?.count == 1)
     }

@@ -580,6 +580,20 @@ private func createGenerateContentParams<Content: Generable>(
                 break
             }
         }
+
+        // The function-calling mode applies to function declarations, not to server tools,
+        // so it's sent only with the session's tools.
+        if let toolCallingMode = options.toolCallingMode, tools.contains(where: \.isFunctionDeclarations) {
+            let mode =
+                switch toolCallingMode.kind {
+                case .allowed: "AUTO"
+                case .required: "ANY"
+                case .disallowed: "NONE"
+                }
+            var toolConfig = params["toolConfig"]?.objectValue ?? [:]
+            toolConfig["functionCallingConfig"] = .object(["mode": .string(mode)])
+            params["toolConfig"] = .object(toolConfig)
+        }
     }
 
     var generationConfig: [String: JSONValue] = [:]
@@ -936,6 +950,12 @@ private enum GeminiTool: Sendable {
                 return .object(["google_maps": .object([:])])
             }
         }
+    }
+
+    /// Whether this tool holds the session's function declarations, not a server tool.
+    var isFunctionDeclarations: Bool {
+        if case .functionDeclarations = self { return true }
+        return false
     }
 
     var toolConfigValue: JSONValue? {

@@ -81,7 +81,13 @@ public struct AnthropicLanguageModel: LanguageModel {
 
         /// How the model should use the provided tools.
         ///
-        /// Use this to control whether the model can use tools and which tools it prefers.
+        /// Use ``ToolChoice/tool(name:)`` to make the model call a specific tool.
+        /// To let the model choose whether to call tools,
+        /// to require a tool call, or to prevent tool calls,
+        /// set ``GenerationOptions/toolCallingMode`` instead;
+        /// the cases of ``ToolChoice`` for those modes are deprecated.
+        ///
+        /// When set, it takes precedence over ``GenerationOptions/toolCallingMode``.
         public var toolChoice: ToolChoice?
 
         /// Configuration for extended thinking.
@@ -133,17 +139,25 @@ public struct AnthropicLanguageModel: LanguageModel {
         }
 
         /// Controls how the model uses tools.
+        ///
+        /// Use ``tool(name:)`` to make the model call a specific tool.
+        /// The other cases are deprecated
+        /// in favor of ``GenerationOptions/toolCallingMode``,
+        /// which works with every model that supports tool calling.
         public enum ToolChoice: Hashable, Codable, Sendable {
             /// The model automatically decides whether to use tools.
+            @available(*, deprecated, message: "Set `GenerationOptions.toolCallingMode` to `.allowed` instead.")
             case auto
 
             /// The model must use one of the provided tools.
+            @available(*, deprecated, message: "Set `GenerationOptions.toolCallingMode` to `.required` instead.")
             case any
 
             /// The model must use the specified tool.
             case tool(name: String)
 
             /// The model will not be allowed to use tools.
+            @available(*, deprecated, message: "Set `GenerationOptions.toolCallingMode` to `.disallowed` instead.")
             case disabled
 
             enum CodingKeys: String, CodingKey {
@@ -156,18 +170,11 @@ public struct AnthropicLanguageModel: LanguageModel {
                 let container = try decoder.container(keyedBy: CodingKeys.self)
                 let type = try container.decode(String.self, forKey: .type)
 
-                switch type {
-                case "auto":
-                    self = .auto
-                case "any":
-                    self = .any
-                case "tool":
+                if type == "tool" {
                     let name = try container.decode(String.self, forKey: .name)
                     self = .tool(name: name)
-                case "none":
-                    self = .disabled
-                default:
-                    self = .auto
+                } else {
+                    self = Self.decodedDeprecatedCase(type: type)
                 }
             }
 
@@ -752,6 +759,40 @@ public struct AnthropicLanguageModel: LanguageModel {
     }
 }
 
+// MARK: - Deprecated Tool Choices
+
+/// Creates the deprecated cases of the Anthropic tool choice for its decoder.
+///
+/// Swift warns wherever code creates a deprecated enum case,
+/// except in a deprecated declaration.
+/// The decoder must still create these cases,
+/// so it calls a deprecated witness through this protocol's requirement,
+/// which Swift doesn't report.
+private protocol AnthropicDeprecatedToolChoices {
+    /// Returns the deprecated case for a `type` value other than `"tool"`.
+    static func deprecatedCase(type: String) -> Self
+}
+
+extension AnthropicDeprecatedToolChoices {
+    /// Returns the deprecated case for a `type` value other than `"tool"`,
+    /// without a deprecation warning.
+    static func decodedDeprecatedCase(type: String) -> Self {
+        deprecatedCase(type: type)
+    }
+}
+
+extension AnthropicLanguageModel.CustomGenerationOptions.ToolChoice: AnthropicDeprecatedToolChoices {
+    @available(*, deprecated)
+    fileprivate static func deprecatedCase(type: String) -> Self {
+        switch type {
+        case "any": .any
+        case "none": .disabled
+        // An unknown type decodes as `auto`.
+        default: .auto
+        }
+    }
+}
+
 // MARK: - Conversions
 
 private func createMessageParams(
@@ -773,6 +814,16 @@ private func createMessageParams(
     }
     if let tools, !tools.isEmpty {
         params["tools"] = try JSONValue(tools)
+        // Sent only with tools. A custom `toolChoice` or `extraBody` overrides it below.
+        if let toolCallingMode = options.toolCallingMode {
+            let type =
+                switch toolCallingMode.kind {
+                case .allowed: "auto"
+                case .required: "any"
+                case .disallowed: "none"
+                }
+            params["tool_choice"] = .object(["type": .string(type)])
+        }
     }
     if let responseSchema {
         // Structured outputs: https://platform.claude.com/docs/en/build-with-claude/structured-outputs
