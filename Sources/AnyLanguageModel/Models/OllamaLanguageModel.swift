@@ -133,7 +133,7 @@ public struct OllamaLanguageModel: LanguageModel, ProfileRequestIdentifiedLangua
         var usage = LanguageModelSession.Usage.zero
         var earlierText = ""
         var inFlightMessages: [OllamaMessage] = []
-        let toolRounds = session.toolRoundLimit(for: "Ollama")
+        let toolRounds = session.toolRoundLimit(for: "Ollama", options: options)
 
         while true {
             let requestContext = try await session.resolvedRequestContext(
@@ -180,7 +180,7 @@ public struct OllamaLanguageModel: LanguageModel, ProfileRequestIdentifiedLangua
             usage.add(chatResponse.reportedUsage?.value ?? .zero)
 
             if let toolCalls = chatResponse.message.toolCalls, !toolCalls.isEmpty {
-                try toolRounds.record()
+                try session.recordToolRound(toolRounds, completed: entries)
                 switch try await resolveToolCalls(
                     toolCalls,
                     requestContext: requestContext,
@@ -290,7 +290,7 @@ public struct OllamaLanguageModel: LanguageModel, ProfileRequestIdentifiedLangua
                     let format = type == String.self ? nil : try JSONValue(convertSchemaToOllamaFormat(schema))
                     var inFlightMessages: [OllamaMessage] = []
                     var state = StreamingResponseState<Content>()
-                    let toolRounds = session.toolRoundLimit(for: "Ollama")
+                    let toolRounds = session.toolRoundLimit(for: "Ollama", options: options)
                     while true {
                         try Task.checkCancellation()
                         let requestContext = try await session.resolvedRequestContext(
@@ -350,7 +350,7 @@ public struct OllamaLanguageModel: LanguageModel, ProfileRequestIdentifiedLangua
                         }
                         guard !toolCalls.isEmpty else { break }
                         try Task.checkCancellation()
-                        try toolRounds.record(completed: state.entries)
+                        try session.recordToolRound(toolRounds, completed: state.entries)
                         switch try await resolveToolCalls(
                             toolCalls,
                             requestContext: requestContext,
