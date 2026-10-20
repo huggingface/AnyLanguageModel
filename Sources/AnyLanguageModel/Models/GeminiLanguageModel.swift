@@ -298,7 +298,7 @@ public struct GeminiLanguageModel: LanguageModel, ProfileRequestIdentifiedLangua
 
             if !functionCalls.isEmpty {
                 // Resolve function calls
-                try toolRounds.record(completed: entries)
+                try session.recordToolRound(toolRounds, completed: entries)
                 let resolution = try await resolveFunctionCalls(
                     functionCalls,
                     requestContext: requestContext,
@@ -490,7 +490,7 @@ public struct GeminiLanguageModel: LanguageModel, ProfileRequestIdentifiedLangua
                         guard !functionCalls.isEmpty else { break }
                         try Task.checkCancellation()
                         let metadata = try textPartMetadata(parts, includeUnsignedText: true)
-                        try toolRounds.record(completed: state.entries)
+                        try session.recordToolRound(toolRounds, completed: state.entries)
                         switch try await resolveFunctionCalls(
                             functionCalls,
                             requestContext: requestContext,
