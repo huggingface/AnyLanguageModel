@@ -525,25 +525,93 @@ but never become part of the session's transcript.
 
 ### Foundation Models 27 request options
 
-`ContextOptions` mirrors Foundation Models 27's schema-in-prompt and reasoning-level
-settings for compatibility-layer request construction. `GenerationOptions` also
-provides the OS 27 `samplingMode` spelling and `ToolCallingMode` values:
+`GenerationOptions` has the Foundation Models 27 names
+`samplingMode` and `init(samplingMode:temperature:maximumResponseTokens:)`,
+which Foundation Models back-deploys to OS 26.
+The older `sampling` and `init(sampling:temperature:maximumResponseTokens:)`
+remain available.
+`GenerationOptions` also has a `toolCallingMode`,
+and `ContextOptions` holds the schema-in-prompt and reasoning-level settings
+from Foundation Models 27:
 
 ```swift
-let context = ContextOptions(
-    includeSchemaInPrompt: true,
-    reasoningLevel: .moderate
-)
 let options = GenerationOptions(
     samplingMode: .greedy,
     toolCallingMode: .required
 )
+let context = ContextOptions(
+    includeSchemaInPrompt: true,
+    reasoningLevel: .moderate
+)
 ```
 
-The older `sampling` property and initializer remain source-compatible.
-Tool-calling mode is preserved in Codable transcripts and forwarded by the
-Foundation Models bridge on OS 27. Other model providers can read the same
-option from their request's `GenerationOptions`.
+A `nil` tool-calling mode, the default, leaves each model's behavior unchanged.
+Each provider handles the three modes as follows:
+
+| Provider | `allowed` | `disallowed` | `required` |
+| --- | --- | --- | --- |
+| `SystemLanguageModel`, `PrivateCloudComputeLanguageModel`, `FoundationLanguageModel` | Passed to Foundation Models | Passed to Foundation Models | Passed to Foundation Models |
+| `OpenAILanguageModel` (both APIs), `OpenResponsesLanguageModel` | `"tool_choice": "auto"` | `"tool_choice": "none"` | `"tool_choice": "required"` |
+| `AnthropicLanguageModel` | `"tool_choice": {"type": "auto"}` | `"tool_choice": {"type": "none"}` | `"tool_choice": {"type": "any"}` |
+| `GeminiLanguageModel` | `functionCallingConfig` mode `AUTO` | `functionCallingConfig` mode `NONE` | `functionCallingConfig` mode `ANY` |
+| `OllamaLanguageModel`, `MLXLanguageModel`, `LlamaLanguageModel`, `CoreMLLanguageModel` | Tools offered as usual | No tools offered | Not supported: tools offered as usual |
+
+The models that run through Foundation Models pass the mode on
+in apps built with Swift 6.4 or later that run on OS 27 or later,
+and not on tvOS.
+Otherwise, they ignore it.
+
+The remote providers send the mode only with a request that has tools,
+because a tool choice applies to the tools in the request.
+For Gemini, server tools such as Google Search don't count:
+the mode applies to the session's tools.
+A provider's own tool-choice option takes precedence over `toolCallingMode`:
+`toolChoice` in the custom options of `AnthropicLanguageModel`
+and `OpenResponsesLanguageModel`,
+and a `tool_choice` key in `extraBody`
+for `OpenAILanguageModel`, `OpenResponsesLanguageModel`, and `AnthropicLanguageModel`.
+
+The `toolChoice` cases that match a tool-calling mode are deprecated;
+set `toolCallingMode` instead:
+
+| `toolCallingMode` | Deprecated `AnthropicLanguageModel` case | Deprecated `OpenResponsesLanguageModel` case |
+| --- | --- | --- |
+| `.allowed` | `.auto` | `.auto` |
+| `.required` | `.any` | `.required` |
+| `.disallowed` | `.disabled` | `.none` |
+
+The deprecated cases still send the same requests.
+To make the model call a specific tool,
+or to restrict it to some of the tools,
+use the cases that remain:
+`.tool(name:)` for `AnthropicLanguageModel`,
+and `.function(name:)` or `.allowedTools(tools:mode:)` for `OpenResponsesLanguageModel`.
+
+Ollama, MLX, llama.cpp, and Core ML have no tool-choice setting.
+They honor `disallowed` by leaving the tools out of the prompt,
+so no tool runs.
+They can't make a model call a tool,
+so they treat `required` like `allowed`.
+
+As in Foundation Models, the mode applies to every request in a response,
+including each request that continues the response after tool calls.
+With `required`, the model keeps calling tools
+until a tool throws an error,
+a `ToolExecutionDelegate` stops the response,
+dynamic instructions remove the tools,
+or a round of tool calls past `maximumToolRounds`
+ends the response with `LanguageModelSession.ToolRoundLimitExceeded`.
+
+> [!NOTE]
+> Anthropic rejects `{"type": "any"}`
+> with manual extended thinking (`thinking: .enabled(budgetTokens:)`)
+> and on models that don't support forced tool use.
+> See [Forcing tool use](https://platform.claude.com/docs/en/agents-and-tools/tool-use/define-tools#forcing-tool-use).
+
+A transcript keeps the tool-calling mode of each prompt.
+
+No AnyLanguageModel API accepts `ContextOptions` yet,
+so creating one has no effect on a request.
 
 ### Dynamic Profiles
 
@@ -746,11 +814,9 @@ say which API they follow.
 - `DynamicInstructions`, its builder, and `LanguageModelSession.init(model:dynamicInstructions:history:)`:
   [dynamic instructions](#dynamic-instructions),
   which follow the Foundation Models 27 API.
-- `ContextOptions`, `GenerationOptions.samplingMode`, and
-  `GenerationOptions.ToolCallingMode`:
-  [request options](#foundation-models-27-request-options), which follow the
-  Foundation Models 27 API while remaining available on the package's existing
-  deployment targets.
+- `ContextOptions`, `GenerationOptions.ToolCallingMode`, and `GenerationOptions.toolCallingMode`:
+  [request options](#foundation-models-27-request-options),
+  which follow the Foundation Models 27 API.
 - `LanguageModelSession.DynamicProfile`, profile modifiers, lifecycle callbacks,
   session properties, and `LanguageModelSession.init(profile:history:)`:
   [dynamic profiles](#dynamic-profiles), which mirror Foundation Models 27 on
@@ -1176,7 +1242,6 @@ such as `tool_choice` (including `allowed_tools`) and `extraBody`:
 ```swift
 var options = GenerationOptions(temperature: 0.8)
 options[custom: OpenResponsesLanguageModel.self] = .init(
-    toolChoice: .auto,
     allowedTools: ["getWeather"],
     reasoningEffort: .high,
     extraBody: ["custom_param": .string("value")]
@@ -1214,12 +1279,11 @@ print(response.content)
 ```
 
 Use custom generation options for Anthropic-specific parameters like
-extended thinking, tool choice control, and effort:
+extended thinking, service tier, and effort:
 
 ```swift
 var options = GenerationOptions(maximumResponseTokens: 8192)
 options[custom: AnthropicLanguageModel.self] = .init(
-    toolChoice: .auto,
     thinking: .enabled(budgetTokens: 4096),
     serviceTier: .priority
 )

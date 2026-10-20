@@ -133,11 +133,11 @@ public struct OllamaLanguageModel: LanguageModel, ProfileRequestIdentifiedLangua
         var usage = LanguageModelSession.Usage.zero
         var earlierText = ""
         var inFlightMessages: [OllamaMessage] = []
-        let toolRounds = session.toolRoundLimit(for: "Ollama")
+        let toolRounds = session.toolRoundLimit(for: "Ollama", options: options)
 
         while true {
             let requestContext = try await session.resolvedRequestContext(
-                including: entries,
+                including: session.usesDynamicProfile ? entries : [],
                 options: options
             )
             if let continuation = try await session.profileContinuationResponse(
@@ -153,11 +153,14 @@ public struct OllamaLanguageModel: LanguageModel, ProfileRequestIdentifiedLangua
             ) {
                 return continuation
             }
-            let ollamaTools = try requestContext.tools.map(convertToolToOllamaFormat)
+            let ollamaTools = try requestContext.options.toolsOffered(from: requestContext.tools).map(
+                convertToolToOllamaFormat
+            )
             var messages = try ollamaMessages(
                 from: requestContext.transcript,
                 replacing: entries,
-                with: inFlightMessages
+                with: inFlightMessages,
+                hasDynamicProfile: requestContext.hasDynamicProfile
             )
             if messages.isEmpty {
                 messages.append(.init(role: .user, content: prompt.description))
@@ -171,16 +174,17 @@ public struct OllamaLanguageModel: LanguageModel, ProfileRequestIdentifiedLangua
                 format: ollamaFormat,
                 parameters: extractTopLevelChatParameters(requestContext.options)
             )
-            let chatResponse: ChatResponse = try await httpSession.fetch(
+            let reply: ChatReply = try await httpSession.fetch(
                 .post,
                 url: url,
                 body: try encodeChatParams(params),
                 dateDecodingStrategy: .iso8601WithFractionalSeconds
             )
+            let chatResponse = try reply.response()
             usage.add(chatResponse.reportedUsage?.value ?? .zero)
 
             if let toolCalls = chatResponse.message.toolCalls, !toolCalls.isEmpty {
-                try toolRounds.record()
+                try session.recordToolRound(toolRounds, completed: entries)
                 switch try await resolveToolCalls(
                     toolCalls,
                     requestContext: requestContext,
@@ -290,11 +294,11 @@ public struct OllamaLanguageModel: LanguageModel, ProfileRequestIdentifiedLangua
                     let format = type == String.self ? nil : try JSONValue(convertSchemaToOllamaFormat(schema))
                     var inFlightMessages: [OllamaMessage] = []
                     var state = StreamingResponseState<Content>()
-                    let toolRounds = session.toolRoundLimit(for: "Ollama")
+                    let toolRounds = session.toolRoundLimit(for: "Ollama", options: options)
                     while true {
                         try Task.checkCancellation()
                         let requestContext = try await session.resolvedRequestContext(
-                            including: state.entries,
+                            including: session.usesDynamicProfile ? state.entries : [],
                             options: options
                         )
                         if let handoff = session.profileContinuationStream(
@@ -312,11 +316,14 @@ public struct OllamaLanguageModel: LanguageModel, ProfileRequestIdentifiedLangua
                             continuation.finish()
                             return
                         }
-                        let tools = try requestContext.tools.map(convertToolToOllamaFormat)
+                        let tools = try requestContext.options.toolsOffered(from: requestContext.tools).map(
+                            convertToolToOllamaFormat
+                        )
                         var messages = try ollamaMessages(
                             from: requestContext.transcript,
                             replacing: state.entries,
-                            with: inFlightMessages
+                            with: inFlightMessages,
+                            hasDynamicProfile: requestContext.hasDynamicProfile
                         )
                         if messages.isEmpty {
                             messages.append(.init(role: .user, content: prompt.description))
@@ -331,14 +338,15 @@ public struct OllamaLanguageModel: LanguageModel, ProfileRequestIdentifiedLangua
                             parameters: extractTopLevelChatParameters(requestContext.options)
                         )
                         let body = try encodeChatParams(params)
-                        let chunks: AsyncThrowingStream<ChatResponse, any Error> = httpSession.fetchStream(
+                        let chunks: AsyncThrowingStream<ChatReply, any Error> = httpSession.fetchStream(
                             .post,
                             url: url,
                             body: body,
                             dateDecodingStrategy: .iso8601WithFractionalSeconds
                         )
                         var toolCalls: [OllamaToolCall] = []
-                        for try await chunk in chunks {
+                        for try await reply in chunks {
+                            let chunk = try reply.response()
                             state.usage.merge(chunk.reportedUsage)
                             if let piece = chunk.message.content { state.text += piece }
                             toolCalls.append(contentsOf: chunk.message.toolCalls ?? [])
@@ -349,7 +357,7 @@ public struct OllamaLanguageModel: LanguageModel, ProfileRequestIdentifiedLangua
                         }
                         guard !toolCalls.isEmpty else { break }
                         try Task.checkCancellation()
-                        try toolRounds.record()
+                        try session.recordToolRound(toolRounds, completed: state.entries)
                         switch try await resolveToolCalls(
                             toolCalls,
                             requestContext: requestContext,
@@ -402,26 +410,16 @@ public struct OllamaLanguageModel: LanguageModel, ProfileRequestIdentifiedLangua
 private func ollamaMessages(
     from transcript: Transcript,
     replacing currentRoundEntries: [Transcript.Entry],
-    with continuation: [OllamaMessage]
+    with continuation: [OllamaMessage],
+    hasDynamicProfile: Bool
 ) throws -> [OllamaMessage] {
-    guard !continuation.isEmpty, !currentRoundEntries.isEmpty else {
-        return try transcript.toOllamaMessages()
-    }
-    let projected = Array(transcript)
-    let count = currentRoundEntries.count
-    let ranges = projected.indices.compactMap { start -> Range<Int>? in
-        let end = start + count
-        guard end <= projected.count,
-            Array(projected[start ..< end]) == currentRoundEntries
-        else { return nil }
-        return start ..< end
-    }
-    guard ranges.count == 1, let range = ranges.first else {
-        return try transcript.toOllamaMessages()
-    }
-    return try Transcript(entries: projected[..<range.lowerBound]).toOllamaMessages()
-        + continuation
-        + Transcript(entries: projected[range.upperBound...]).toOllamaMessages()
+    try toolContinuationMessages(
+        from: transcript,
+        replacing: currentRoundEntries,
+        with: continuation,
+        hasDynamicProfile: hasDynamicProfile,
+        convert: { try $0.toOllamaMessages() }
+    )
 }
 
 private struct ToolInvocationResult {
@@ -463,7 +461,8 @@ private func resolveToolCalls(
     switch try await session.resolveProfileToolCalls(
         transcriptCalls,
         requestContext: requestContext,
-        currentRoundEntries: entries
+        currentRoundEntries: entries,
+        offeredTools: requestContext.options.toolsOffered(from: requestContext.tools)
     ) {
     case .stop(let calls):
         return .stop(calls: calls)
@@ -524,7 +523,7 @@ func convertOptions(_ options: GenerationOptions) -> [String: JSONValue]? {
 
 /// Custom option keys that Ollama's `/api/chat` endpoint reads from the top level
 /// of the request body rather than from `options`.
-private let topLevelChatParameterKeys: Set<String> = ["think", "keep_alive"]
+private let topLevelChatParameterKeys: Set<String> = ["think", "keep_alive", "truncate", "shift"]
 
 func extractTopLevelChatParameters(_ options: GenerationOptions) -> [String: JSONValue]? {
     guard let customOptions: [String: JSONValue] = options[custom: OllamaLanguageModel.self] else {
@@ -699,6 +698,40 @@ private func convertSegmentsToOllama(_ segments: [Transcript.Segment]) -> (Strin
         }
     }
     return (textParts.joined(separator: "\n"), images)
+}
+
+/// An error Ollama reported in place of a chat response, with its own message.
+struct OllamaError: Error, Sendable, CustomStringConvertible {
+    let message: String
+
+    var description: String { "Ollama: \(message)" }
+}
+
+/// What Ollama's chat endpoint replies with: a response, or an error it reports instead, as a
+/// body or as a line of a stream.
+private enum ChatReply: Decodable, Sendable {
+    case response(ChatResponse)
+    case error(String)
+
+    private enum CodingKeys: String, CodingKey {
+        case error
+    }
+
+    init(from decoder: any Decoder) throws {
+        if let message = try decoder.container(keyedBy: CodingKeys.self).decodeIfPresent(String.self, forKey: .error) {
+            self = .error(message)
+        } else {
+            self = .response(try ChatResponse(from: decoder))
+        }
+    }
+
+    /// The response, or Ollama's error, thrown.
+    func response() throws -> ChatResponse {
+        switch self {
+        case .response(let response): response
+        case .error(let message): throw OllamaError(message: message)
+        }
+    }
 }
 
 private struct ChatResponse: Decodable, Sendable {

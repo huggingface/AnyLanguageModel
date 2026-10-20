@@ -81,7 +81,13 @@ public struct AnthropicLanguageModel: LanguageModel, ProfileRequestIdentifiedLan
 
         /// How the model should use the provided tools.
         ///
-        /// Use this to control whether the model can use tools and which tools it prefers.
+        /// Use ``ToolChoice/tool(name:)`` to make the model call a specific tool.
+        /// To let the model choose whether to call tools,
+        /// to require a tool call, or to prevent tool calls,
+        /// set ``GenerationOptions/toolCallingMode`` instead;
+        /// the cases of ``ToolChoice`` for those modes are deprecated.
+        ///
+        /// When set, it takes precedence over ``GenerationOptions/toolCallingMode``.
         public var toolChoice: ToolChoice?
 
         /// Configuration for extended thinking.
@@ -133,17 +139,25 @@ public struct AnthropicLanguageModel: LanguageModel, ProfileRequestIdentifiedLan
         }
 
         /// Controls how the model uses tools.
+        ///
+        /// Use ``tool(name:)`` to make the model call a specific tool.
+        /// The other cases are deprecated
+        /// in favor of ``GenerationOptions/toolCallingMode``,
+        /// which works with every model that supports tool calling.
         public enum ToolChoice: Hashable, Codable, Sendable {
             /// The model automatically decides whether to use tools.
+            @available(*, deprecated, message: "Set `GenerationOptions.toolCallingMode` to `.allowed` instead.")
             case auto
 
             /// The model must use one of the provided tools.
+            @available(*, deprecated, message: "Set `GenerationOptions.toolCallingMode` to `.required` instead.")
             case any
 
             /// The model must use the specified tool.
             case tool(name: String)
 
             /// The model will not be allowed to use tools.
+            @available(*, deprecated, message: "Set `GenerationOptions.toolCallingMode` to `.disallowed` instead.")
             case disabled
 
             enum CodingKeys: String, CodingKey {
@@ -156,18 +170,11 @@ public struct AnthropicLanguageModel: LanguageModel, ProfileRequestIdentifiedLan
                 let container = try decoder.container(keyedBy: CodingKeys.self)
                 let type = try container.decode(String.self, forKey: .type)
 
-                switch type {
-                case "auto":
-                    self = .auto
-                case "any":
-                    self = .any
-                case "tool":
+                if type == "tool" {
                     let name = try container.decode(String.self, forKey: .name)
                     self = .tool(name: name)
-                case "none":
-                    self = .disabled
-                default:
-                    self = .auto
+                } else {
+                    self = Self.decodedDeprecatedCase(type: type)
                 }
             }
 
@@ -451,11 +458,11 @@ public struct AnthropicLanguageModel: LanguageModel, ProfileRequestIdentifiedLan
         var usage = LanguageModelSession.Usage.zero
         var earlierText = ""
         var inFlightMessages: [AnthropicMessage] = []
-        let toolRounds = session.toolRoundLimit(for: "Anthropic")
+        let toolRounds = session.toolRoundLimit(for: "Anthropic", options: options)
 
         while true {
             let requestContext = try await session.resolvedRequestContext(
-                including: entries,
+                including: session.usesDynamicProfile ? entries : [],
                 options: options
             )
             if let continuation = try await session.profileContinuationResponse(
@@ -480,7 +487,8 @@ public struct AnthropicLanguageModel: LanguageModel, ProfileRequestIdentifiedLan
                 messages: try anthropicMessages(
                     from: requestContext.transcript,
                     replacing: entries,
-                    with: inFlightMessages
+                    with: inFlightMessages,
+                    hasDynamicProfile: requestContext.hasDynamicProfile
                 ),
                 tools: anthropicTools.isEmpty ? nil : anthropicTools,
                 responseSchema: responseSchema,
@@ -507,7 +515,7 @@ public struct AnthropicLanguageModel: LanguageModel, ProfileRequestIdentifiedLan
                 return nil
             }
             if !toolUses.isEmpty {
-                try toolRounds.record()
+                try session.recordToolRound(toolRounds, completed: entries)
                 try await session.profileDidProduceEntries(
                     reasoningEntries,
                     requestContext: requestContext,
@@ -529,22 +537,21 @@ public struct AnthropicLanguageModel: LanguageModel, ProfileRequestIdentifiedLan
                         usage: usage
                     )
                 case .invocations(let invocations):
-                    inFlightMessages.append(.init(role: .assistant, content: message.content))
                     entries.append(.toolCalls(.init(invocations.map(\.call))))
-                    var results: [AnthropicContent] = []
                     for invocation in invocations {
                         entries.append(.toolOutput(invocation.output))
-                        results.append(
+                    }
+                    if requestContext.hasDynamicProfile {
+                        inFlightMessages.append(.init(role: .assistant, content: message.content))
+                        let results: [AnthropicContent] = try invocations.map { invocation in
                             .toolResult(
                                 .init(
                                     toolUseId: invocation.call.id,
                                     content: try convertSegmentsToAnthropicContent(invocation.output.segments)
                                 )
                             )
-                        )
-                    }
-                    inFlightMessages.append(.init(role: .user, content: results))
-                    if requestContext.hasDynamicProfile {
+                        }
+                        inFlightMessages.append(.init(role: .user, content: results))
                         if type == String.self {
                             earlierText += message.content.compactMap { block -> String? in
                                 if case .text(let text) = block { return text.text }
@@ -633,11 +640,11 @@ public struct AnthropicLanguageModel: LanguageModel, ProfileRequestIdentifiedLan
                         type == String.self ? nil : try convertSchemaToAnthropicFormat(schema)
                     var inFlightMessages: [AnthropicMessage] = []
                     var state = StreamingResponseState<Content>()
-                    let toolRounds = session.toolRoundLimit(for: "Anthropic")
+                    let toolRounds = session.toolRoundLimit(for: "Anthropic", options: options)
                     while true {
                         try Task.checkCancellation()
                         let requestContext = try await session.resolvedRequestContext(
-                            including: state.entries,
+                            including: session.usesDynamicProfile ? state.entries : [],
                             options: options
                         )
                         if let handoff = session.profileContinuationStream(
@@ -661,7 +668,8 @@ public struct AnthropicLanguageModel: LanguageModel, ProfileRequestIdentifiedLan
                         let messages = try anthropicMessages(
                             from: requestContext.transcript,
                             replacing: state.entries,
-                            with: inFlightMessages
+                            with: inFlightMessages,
+                            hasDynamicProfile: requestContext.hasDynamicProfile
                         )
                         var params = try createMessageParams(
                             model: model,
@@ -757,7 +765,7 @@ public struct AnthropicLanguageModel: LanguageModel, ProfileRequestIdentifiedLan
                         }
                         guard !toolUses.isEmpty else { break }
                         try Task.checkCancellation()
-                        try toolRounds.record()
+                        try session.recordToolRound(toolRounds, completed: state.entries)
                         try await session.profileDidProduceEntries(
                             state.entries,
                             requestContext: requestContext,
@@ -820,6 +828,40 @@ public struct AnthropicLanguageModel: LanguageModel, ProfileRequestIdentifiedLan
     }
 }
 
+// MARK: - Deprecated Tool Choices
+
+/// Creates the deprecated cases of the Anthropic tool choice for its decoder.
+///
+/// Swift warns wherever code creates a deprecated enum case,
+/// except in a deprecated declaration.
+/// The decoder must still create these cases,
+/// so it calls a deprecated witness through this protocol's requirement,
+/// which Swift doesn't report.
+private protocol AnthropicDeprecatedToolChoices {
+    /// Returns the deprecated case for a `type` value other than `"tool"`.
+    static func deprecatedCase(type: String) -> Self
+}
+
+extension AnthropicDeprecatedToolChoices {
+    /// Returns the deprecated case for a `type` value other than `"tool"`,
+    /// without a deprecation warning.
+    static func decodedDeprecatedCase(type: String) -> Self {
+        deprecatedCase(type: type)
+    }
+}
+
+extension AnthropicLanguageModel.CustomGenerationOptions.ToolChoice: AnthropicDeprecatedToolChoices {
+    @available(*, deprecated)
+    fileprivate static func deprecatedCase(type: String) -> Self {
+        switch type {
+        case "any": .any
+        case "none": .disabled
+        // An unknown type decodes as `auto`.
+        default: .auto
+        }
+    }
+}
+
 // MARK: - Conversions
 
 private func createMessageParams(
@@ -841,6 +883,16 @@ private func createMessageParams(
     }
     if let tools, !tools.isEmpty {
         params["tools"] = try JSONValue(tools)
+        // Sent only with tools. A custom `toolChoice` or `extraBody` overrides it below.
+        if let toolCallingMode = options.toolCallingMode {
+            let type =
+                switch toolCallingMode.kind {
+                case .allowed: "auto"
+                case .required: "any"
+                case .disallowed: "none"
+                }
+            params["tool_choice"] = .object(["type": .string(type)])
+        }
     }
     if let responseSchema {
         // Structured outputs: https://platform.claude.com/docs/en/build-with-claude/structured-outputs
@@ -927,26 +979,16 @@ private func createMessageParams(
 private func anthropicMessages(
     from transcript: Transcript,
     replacing currentRoundEntries: [Transcript.Entry],
-    with continuation: [AnthropicMessage]
+    with continuation: [AnthropicMessage],
+    hasDynamicProfile: Bool
 ) throws -> [AnthropicMessage] {
-    guard !continuation.isEmpty, !currentRoundEntries.isEmpty else {
-        return try transcript.toAnthropicMessages()
-    }
-    let projected = Array(transcript)
-    let count = currentRoundEntries.count
-    let ranges = projected.indices.compactMap { start -> Range<Int>? in
-        let end = start + count
-        guard end <= projected.count,
-            Array(projected[start ..< end]) == currentRoundEntries
-        else { return nil }
-        return start ..< end
-    }
-    guard ranges.count == 1, let range = ranges.first else {
-        return try transcript.toAnthropicMessages()
-    }
-    return try Transcript(entries: projected[..<range.lowerBound]).toAnthropicMessages()
-        + continuation
-        + Transcript(entries: projected[range.upperBound...]).toAnthropicMessages()
+    try toolContinuationMessages(
+        from: transcript,
+        replacing: currentRoundEntries,
+        with: continuation,
+        hasDynamicProfile: hasDynamicProfile,
+        convert: { try $0.toAnthropicMessages() }
+    )
 }
 
 private struct ToolInvocationResult {
