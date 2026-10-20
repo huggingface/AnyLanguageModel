@@ -217,7 +217,7 @@ extension LanguageModelSession.DynamicProfile {
     }
 
     public func historyTransform(
-        _ transform: @Sendable @escaping ([Transcript.Entry]) -> [Transcript.Entry]
+        _ transform: @escaping ([Transcript.Entry]) -> [Transcript.Entry]
     ) -> some LanguageModelSession.DynamicProfile {
         BuiltinModifiedDynamicProfile(content: self, modifier: .historyTransform(transform))
     }
@@ -349,7 +349,7 @@ struct ResolvedDynamicProfile: @unchecked Sendable {
     var hasToolCallingMode = false
     var transcriptErrorHandlingPolicy: TranscriptErrorHandlingPolicy?
     var hasTranscriptErrorHandlingPolicy = false
-    var historyTransforms: [@Sendable ([Transcript.Entry]) -> [Transcript.Entry]] = []
+    var historyTransforms: [([Transcript.Entry]) -> [Transcript.Entry]] = []
     var onPrompt: [(Transcript.Prompt) async throws -> Void] = []
     var onResponse: [(Transcript.Response) async throws -> Void] = []
     var onReasoning: [(Transcript.Reasoning) async throws -> Void] = []
@@ -435,7 +435,7 @@ private enum BuiltinDynamicProfileModifier: @unchecked Sendable {
     case reasoningLevel(ContextOptions.ReasoningLevel?)
     case includeSchemaInPrompt(Bool?)
     case toolCallingMode(GenerationOptions.ToolCallingMode?)
-    case historyTransform(@Sendable ([Transcript.Entry]) -> [Transcript.Entry])
+    case historyTransform(([Transcript.Entry]) -> [Transcript.Entry])
     case transcriptErrorHandlingPolicy(TranscriptErrorHandlingPolicy?)
     case onPrompt((Transcript.Prompt) async throws -> Void)
     case onResponse((Transcript.Response) async throws -> Void)
@@ -530,7 +530,7 @@ actor ProfileLifecycle {
         prompt: Transcript.Prompt?,
         callbackState: ProfileCallbackState,
         historyEdits: Locked<[Transcript.Entry]?>,
-        protectedEntryIDs: Set<String> = []
+        protectedEntryKeys: Set<TranscriptEntryKey> = []
     ) async throws {
         let previous = pendingPreparation?.task
         nextPreparationID += 1
@@ -544,7 +544,7 @@ actor ProfileLifecycle {
                 prompt: prompt,
                 callbackState: callbackState,
                 historyEdits: historyEdits,
-                protectedEntryIDs: protectedEntryIDs
+                protectedEntryKeys: protectedEntryKeys
             )
         }
         pendingPreparation = (id, task)
@@ -564,12 +564,12 @@ actor ProfileLifecycle {
         prompt: Transcript.Prompt?,
         callbackState: ProfileCallbackState,
         historyEdits: Locked<[Transcript.Entry]?>,
-        protectedEntryIDs: Set<String>
+        protectedEntryKeys: Set<TranscriptEntryKey>
     ) async throws {
         let history = properties.historyBinding(
             history,
             isWritable: true,
-            protecting: protectedEntryIDs,
+            protecting: protectedEntryKeys,
             onChange: { updated in historyEdits.withLock { $0 = updated } }
         )
         if activeProfile?.identity != profile.identity {

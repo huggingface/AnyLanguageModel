@@ -244,6 +244,48 @@ import Foundation
             )
         }
 
+        /// A definition that is only a reference, such as a one-choice `anyOf`, keeps its name when
+        /// converted from a `GenerationSchema`'s nodes, so the references to it are defined.
+        @available(macOS 26.0, iOS 26.0, watchOS 27.0, tvOS 26.0, visionOS 26.0, *)
+        @Test func convertNamedOneChoiceReferenceFromGenerationSchema() throws {
+            let schema = try AnyLanguageModel.GenerationSchema(
+                root: .init(
+                    name: "Root",
+                    properties: [.init(name: "action", schema: .init(referenceTo: "Action"))]
+                ),
+                dependencies: [
+                    .init(name: "Action", anyOf: [.init(referenceTo: "ReplyAction")]),
+                    .init(name: "ReplyAction", properties: [.init(name: "value", schema: .init(type: String.self))]),
+                ]
+            )
+            _ = try FoundationModels.GenerationSchema(
+                root: convertToDynamicSchema(schema.root),
+                dependencies: schema.defs.map { name, node in convertToDynamicSchema(node, name: name) }
+            )
+        }
+
+        /// An integer's bounds become the whole numbers within them, and a bound no `Int` holds
+        /// sets no guide, rather than trapping.
+        @available(macOS 26.0, iOS 26.0, watchOS 27.0, tvOS 26.0, visionOS 26.0, *)
+        @Test func convertIntegerBoundsThatIntCannotHold() throws {
+            let schema = try JSONDecoder().decode(
+                AnyLanguageModel.GenerationSchema.self,
+                from: Data(#"{"type": "integer", "minimum": 1.5, "maximum": 1e300}"#.utf8)
+            )
+            _ = try FoundationModels.GenerationSchema(root: convertToDynamicSchema(schema.root), dependencies: [])
+        }
+
+        /// A stand-in integer is the smallest whole number the minimum allows, and the nearest an
+        /// `Int` can hold when it holds none, rather than trapping.
+        @available(macOS 26.0, iOS 26.0, watchOS 27.0, tvOS 26.0, visionOS 26.0, *)
+        @Test(arguments: [(1.5, 2.0), (1e300, Double(Int.max)), (-1e300, 0.0), (-Double.infinity, 0.0)])
+        func standInIntegerFromItsMinimum(minimum: Double, expected: Double) {
+            let node = AnyLanguageModel.GenerationSchema.Node.number(
+                .init(description: nil, minimum: minimum, maximum: nil, integerOnly: true)
+            )
+            #expect(placeholderGeneratedContent(from: node, defs: [:]).kind == .number(expected))
+        }
+
         // MARK: - Fallback Types
 
         @available(macOS 26.0, iOS 26.0, watchOS 27.0, tvOS 26.0, visionOS 26.0, *)
