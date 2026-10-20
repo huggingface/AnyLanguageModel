@@ -682,15 +682,6 @@ import Foundation
             case invocations([ToolInvocationResult])
         }
 
-        private static func maxToolIterationsExceededError(limit: Int) -> LanguageModelSession.GenerationError {
-            .decodingFailure(
-                .init(
-                    debugDescription:
-                        "Exceeded maximum tool iterations (\(limit)) while processing Llama tool calls."
-                )
-            )
-        }
-
         private func currentToolCallFormat() -> LlamaToolCallFormat {
             guard let model = self.model else { return .hermesJSON }
             let template = llama_model_chat_template(model, nil).map { String(cString: $0) }
@@ -859,8 +850,7 @@ import Foundation
             if type == String.self {
                 let maxTokens = runtimeOptions.maximumResponseTokens ?? 100
                 let outputFormat = currentToolCallFormat()
-                let maxToolIterations = 8
-                var toolIteration = 0
+                var toolRounds = ToolRoundLimit(provider: "Llama", options: options)
                 var allEntries: [Transcript.Entry] = []
                 var text = ""
                 var usage = LanguageModelSession.Usage.zero
@@ -871,8 +861,10 @@ import Foundation
                     if mmprojPath == nil {
                         try validateNoImageSegments(in: requestContext.transcript)
                     }
+                    // llama.cpp has no tool-choice setting.
+                    let tools = options.toolsOffered(from: requestContext.tools)
                     let toolContext = try makeToolPromptContext(
-                        tools: requestContext.tools,
+                        tools: tools,
                         pendingEntries: pendingEntries
                     )
                     var promptImages: [Data] = []
@@ -938,16 +930,11 @@ import Foundation
                         break generationLoop
                     }
 
-                    toolIteration += 1
-                    if toolIteration > maxToolIterations {
-                        let unresolved = try makeTranscriptToolCalls(from: parsedCalls)
-                        allEntries.append(.toolCalls(Transcript.ToolCalls(unresolved)))
-                        throw Self.maxToolIterationsExceededError(limit: maxToolIterations)
-                    }
+                    try toolRounds.record(completed: allEntries)
 
                     let resolution = try await resolveToolCalls(
                         parsedCalls,
-                        tools: requestContext.tools,
+                        tools: tools,
                         session: session
                     )
                     switch resolution {
@@ -1098,8 +1085,7 @@ import Foundation
                             let runtimeOptions = resolvedOptions(from: options)
                             let maxTokens = runtimeOptions.maximumResponseTokens ?? 100
                             let outputFormat = self.currentToolCallFormat()
-                            let maxToolIterations = 8
-                            var toolIteration = 0
+                            var toolRounds = ToolRoundLimit(provider: "Llama", options: options)
                             var accumulatedEntries: [Transcript.Entry] = []
                             var emittedBase = ""
                             var usage = LanguageModelSession.Usage.zero
@@ -1124,8 +1110,10 @@ import Foundation
                                 if self.mmprojPath == nil {
                                     try self.validateNoImageSegments(in: requestContext.transcript)
                                 }
+                                // llama.cpp has no tool-choice setting.
+                                let tools = options.toolsOffered(from: requestContext.tools)
                                 let toolContext = try self.makeToolPromptContext(
-                                    tools: requestContext.tools,
+                                    tools: tools,
                                     pendingEntries: pendingEntries
                                 )
                                 var promptImages: [Data] = []
@@ -1206,16 +1194,11 @@ import Foundation
                                     break generationLoop
                                 }
 
-                                toolIteration += 1
-                                if toolIteration > maxToolIterations {
-                                    let unresolved = try self.makeTranscriptToolCalls(from: parsedCalls)
-                                    accumulatedEntries.append(.toolCalls(Transcript.ToolCalls(unresolved)))
-                                    throw Self.maxToolIterationsExceededError(limit: maxToolIterations)
-                                }
+                                try toolRounds.record(completed: accumulatedEntries)
 
                                 let resolution = try await self.resolveToolCalls(
                                     parsedCalls,
-                                    tools: requestContext.tools,
+                                    tools: tools,
                                     session: session
                                 )
                                 switch resolution {

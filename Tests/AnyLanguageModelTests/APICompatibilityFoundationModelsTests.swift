@@ -67,6 +67,24 @@ import Testing
                     .transcriptErrorHandlingPolicy(nil)
                 }
             }
+
+            @available(macOS 27.0, iOS 27.0, visionOS 27.0, *)
+            @Test func foundationModelsNonSendableHistoryTransformCompatibility() {
+                let captured = NonSendableHistoryCapture()
+                let transform: ([Transcript.Entry]) -> [Transcript.Entry] = { entries in
+                    captured.calls += 1
+                    return entries
+                }
+                _ = LanguageModelSession.AnyDynamicProfile(
+                    LanguageModelSession.Profile { Instructions("Projection") }
+                        .historyTransform(transform)
+                )
+                #expect(captured.calls == 0)
+            }
+
+            private final class NonSendableHistoryCapture {
+                var calls = 0
+            }
         #endif
     #endif
 
@@ -113,4 +131,37 @@ import Testing
         }
         #expect(hasSnapshots)
     }
+
+    #if compiler(>=6.4)
+        #if os(macOS) || os(iOS) || os(visionOS)
+            @available(macOS 27.0, iOS 27.0, visionOS 27.0, *)
+            @Test("FoundationModels request options compatibility")
+            func foundationModelsRequestOptionsCompatibility() {
+                var options = GenerationOptions(samplingMode: .greedy)
+                options.samplingMode = .random(top: 40, seed: 1)
+                options.toolCallingMode = .required
+                #expect(options.samplingMode == .random(top: 40, seed: 1))
+                #expect(options.toolCallingMode?.kind == .required)
+                #expect(GenerationOptions(temperature: 0.5).toolCallingMode == nil)
+                let disallowed = GenerationOptions(temperature: 0.5, toolCallingMode: .disallowed)
+                #expect(disallowed.toolCallingMode == .disallowed)
+
+                let kinds: Set<GenerationOptions.ToolCallingMode.Kind> = [
+                    GenerationOptions.ToolCallingMode.allowed.kind,
+                    GenerationOptions.ToolCallingMode.required.kind,
+                    GenerationOptions.ToolCallingMode.disallowed.kind,
+                ]
+                #expect(kinds == [.allowed, .required, .disallowed])
+
+                var context = ContextOptions()
+                #expect(context.includeSchemaInPrompt == nil)
+                #expect(context.reasoningLevel == nil)
+                context.includeSchemaInPrompt = true
+                context.reasoningLevel = .custom("extended")
+                #expect(context == ContextOptions(includeSchemaInPrompt: true, reasoningLevel: .custom("extended")))
+                #expect(ContextOptions(reasoningLevel: .light) != ContextOptions(reasoningLevel: .moderate))
+                #expect(ContextOptions(reasoningLevel: .deep) != ContextOptions())
+            }
+        #endif
+    #endif
 #endif
