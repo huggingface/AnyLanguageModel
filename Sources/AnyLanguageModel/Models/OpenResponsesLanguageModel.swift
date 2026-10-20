@@ -517,7 +517,7 @@ public struct OpenResponsesLanguageModel: LanguageModel, ProfileRequestIdentifie
                     while true {
                         try Task.checkCancellation()
                         let requestContext = try await session.resolvedRequestContext(
-                            including: state.entries,
+                            including: session.usesDynamicProfile ? state.entries : [],
                             options: options
                         )
                         if let handoff = session.profileContinuationStream(
@@ -541,7 +541,8 @@ public struct OpenResponsesLanguageModel: LanguageModel, ProfileRequestIdentifie
                         let messages = openResponsesMessages(
                             from: requestContext.transcript,
                             replacing: state.entries,
-                            with: inFlightMessages
+                            with: inFlightMessages,
+                            hasDynamicProfile: requestContext.hasDynamicProfile
                         )
                         let params = try OpenResponsesAPI.createRequestBody(
                             model: model,
@@ -591,7 +592,7 @@ public struct OpenResponsesLanguageModel: LanguageModel, ProfileRequestIdentifie
                         }
                         guard !toolCalls.isEmpty else { break }
                         try Task.checkCancellation()
-                        try toolRounds.record(completed: state.entries)
+                        try session.recordToolRound(toolRounds, completed: state.entries)
                         switch try await resolveToolCalls(
                             toolCalls,
                             requestContext: requestContext,
@@ -653,7 +654,7 @@ public struct OpenResponsesLanguageModel: LanguageModel, ProfileRequestIdentifie
         let toolRounds = session.toolRoundLimit(for: "Open Responses", options: options)
         while true {
             let requestContext = try await session.resolvedRequestContext(
-                including: entries,
+                including: session.usesDynamicProfile ? entries : [],
                 options: options
             )
             if let continuation = try await session.profileContinuationResponse(
@@ -675,7 +676,8 @@ public struct OpenResponsesLanguageModel: LanguageModel, ProfileRequestIdentifie
             let messages = openResponsesMessages(
                 from: requestContext.transcript,
                 replacing: entries,
-                with: inFlightMessages
+                with: inFlightMessages,
+                hasDynamicProfile: requestContext.hasDynamicProfile
             )
             let params = try OpenResponsesAPI.createRequestBody(
                 model: model,
@@ -706,7 +708,7 @@ public struct OpenResponsesLanguageModel: LanguageModel, ProfileRequestIdentifie
                         )
                     }
                 }
-                try toolRounds.record(completed: entries)
+                try session.recordToolRound(toolRounds, completed: entries)
                 let resolution = try await resolveToolCalls(
                     toolCalls,
                     requestContext: requestContext,
@@ -1278,26 +1280,16 @@ private struct OpenResponsesToolInvocationResult: Sendable {
 private func openResponsesMessages(
     from transcript: Transcript,
     replacing currentRoundEntries: [Transcript.Entry],
-    with continuation: [OpenResponsesMessage]
+    with continuation: [OpenResponsesMessage],
+    hasDynamicProfile: Bool
 ) -> [OpenResponsesMessage] {
-    guard !continuation.isEmpty, !currentRoundEntries.isEmpty else {
-        return transcript.toOpenResponsesMessages()
-    }
-    let projected = Array(transcript)
-    let count = currentRoundEntries.count
-    let ranges = projected.indices.compactMap { start -> Range<Int>? in
-        let end = start + count
-        guard end <= projected.count,
-            Array(projected[start ..< end]) == currentRoundEntries
-        else { return nil }
-        return start ..< end
-    }
-    guard ranges.count == 1, let range = ranges.first else {
-        return transcript.toOpenResponsesMessages()
-    }
-    return Transcript(entries: projected[..<range.lowerBound]).toOpenResponsesMessages()
-        + continuation
-        + Transcript(entries: projected[range.upperBound...]).toOpenResponsesMessages()
+    toolContinuationMessages(
+        from: transcript,
+        replacing: currentRoundEntries,
+        with: continuation,
+        hasDynamicProfile: hasDynamicProfile,
+        convert: { $0.toOpenResponsesMessages() }
+    )
 }
 
 private enum OpenResponsesToolResolutionOutcome: Sendable {
