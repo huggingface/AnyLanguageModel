@@ -141,7 +141,7 @@
             if let chatTemplateHandler = chatTemplateHandler {
                 // Use chat template handler with optional tools
                 let messages = chatTemplateHandler(requestContext.instructions, prompt)
-                let toolSpecs: [ToolSpec]? = toolsHandler?(requestContext.tools)
+                let toolSpecs: [ToolSpec]? = toolsHandler?(options.toolsOffered(from: requestContext.tools))
                 tokens = try tokenizer.applyChatTemplate(messages: messages, tools: toolSpecs)
             } else {
                 // Fall back to direct tokenizer encoding
@@ -242,7 +242,9 @@
                         if let chatTemplateHandler = chatTemplateHandler {
                             // Use chat template handler with optional tools
                             let messages = chatTemplateHandler(requestContext.instructions, prompt)
-                            let toolSpecs: [ToolSpec]? = toolsHandler?(requestContext.tools)
+                            let toolSpecs: [ToolSpec]? = toolsHandler?(
+                                options.toolsOffered(from: requestContext.tools)
+                            )
                             tokens = try tokenizer.applyChatTemplate(messages: messages, tools: toolSpecs)
                         } else {
                             // Fall back to direct tokenizer encoding
@@ -413,6 +415,7 @@
 
             let promptTokens = try structuredPromptTokens(
                 requestContext: requestContext,
+                tools: options.toolsOffered(from: requestContext.tools),
                 prompt: prompt,
                 schema: schema,
                 includeSchemaInPrompt: includeSchemaInPrompt
@@ -450,6 +453,7 @@
 
         private func structuredPromptTokens(
             requestContext: LanguageModelSession.RequestContext,
+            tools: [any Tool],
             prompt: Prompt,
             schema: GenerationSchema,
             includeSchemaInPrompt: Bool
@@ -462,7 +466,7 @@
                         messages.insert(["role": "system", "content": schemaPrompt], at: 0)
                     }
                 }
-                let toolSpecs: [ToolSpec]? = toolsHandler?(requestContext.tools)
+                let toolSpecs: [ToolSpec]? = toolsHandler?(tools)
                 return try tokenizer.applyChatTemplate(messages: messages, tools: toolSpecs)
             }
 

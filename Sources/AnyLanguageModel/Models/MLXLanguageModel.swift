@@ -1128,12 +1128,14 @@ import Foundation
             var usage = LanguageModelSession.Usage.zero
             var allTextChunks: [String] = []
             var allEntries: [Transcript.Entry] = []
-            var toolRounds = ToolRoundLimit(provider: "MLX")
+            var toolRounds = ToolRoundLimit(provider: "MLX", options: options)
 
             // Loop until no more tool calls
             while true {
                 let requestContext = session.resolvedRequestContext()
-                let toolSpecs = mlxToolSpecs(for: requestContext.tools)
+                // MLX has no tool-choice setting.
+                let tools = options.toolsOffered(from: requestContext.tools)
+                let toolSpecs = mlxToolSpecs(for: tools)
                 let chat =
                     convertTranscriptToMLXChat(
                         requestContext: requestContext,
@@ -1195,11 +1197,11 @@ import Foundation
 
                 // If there are tool calls, execute them and continue
                 if !collectedToolCalls.isEmpty {
-                    try toolRounds.record()
+                    try toolRounds.record(completed: allEntries)
 
                     let resolution = try await resolveToolCalls(
                         collectedToolCalls,
-                        tools: requestContext.tools,
+                        tools: tools,
                         session: session
                     )
                     switch resolution {
@@ -1354,7 +1356,7 @@ import Foundation
                         var usage = LanguageModelSession.Usage.zero
                         var accumulatedText = ""
                         var accumulatedEntries: [Transcript.Entry] = []
-                        var toolRounds = ToolRoundLimit(provider: "MLX")
+                        var toolRounds = ToolRoundLimit(provider: "MLX", options: options)
 
                         // Yields a snapshot carrying the cumulative text and tool entries so far.
                         func yieldSnapshot() {
@@ -1374,7 +1376,9 @@ import Foundation
                         // Loop until the model stops without pending tool calls (mirrors `respond()`).
                         toolLoop: while true {
                             let requestContext = session.resolvedRequestContext()
-                            let toolSpecs = mlxToolSpecs(for: requestContext.tools)
+                            // MLX has no tool-choice setting.
+                            let tools = options.toolsOffered(from: requestContext.tools)
+                            let toolSpecs = mlxToolSpecs(for: tools)
                             let chat =
                                 convertTranscriptToMLXChat(
                                     requestContext: requestContext,
@@ -1436,11 +1440,11 @@ import Foundation
 
                             guard !collectedToolCalls.isEmpty else { break }
 
-                            try toolRounds.record()
+                            try toolRounds.record(completed: accumulatedEntries)
 
                             let resolution = try await resolveToolCalls(
                                 collectedToolCalls,
-                                tools: requestContext.tools,
+                                tools: tools,
                                 session: session
                             )
                             switch resolution {
