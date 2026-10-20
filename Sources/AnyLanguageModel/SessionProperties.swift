@@ -137,15 +137,16 @@ public final class SessionPropertyValues: @unchecked Sendable {
     func historyBinding(
         _ entries: [Transcript.Entry],
         isWritable: Bool,
-        protecting protectedEntryIDs: Set<String> = [],
+        protecting protectedEntryKeys: Set<TranscriptEntryKey> = [],
         onChange: (@Sendable ([Transcript.Entry]) -> Void)? = nil
     ) -> SessionHistoryBinding {
+        let protected = keyedTranscriptEntries(entries).filter { protectedEntryKeys.contains($0.key) }.map(\.entry)
         let persist: (@Sendable ([Transcript.Entry]) -> Void)?
         if isWritable {
             persist = { [historySetter] updated in
                 onChange?(updated)
                 historySetter(
-                    updated.filter { !protectedEntryIDs.contains($0.id) }
+                    removingProtectedTranscriptEntries(from: updated, protecting: protected)
                 )
             }
         } else {
@@ -154,7 +155,7 @@ public final class SessionPropertyValues: @unchecked Sendable {
         return SessionHistoryBinding(
             entries,
             isWritable: isWritable,
-            protectedEntryIDs: protectedEntryIDs,
+            protectedEntryKeys: protectedEntryKeys,
             persist: persist
         )
     }
@@ -187,13 +188,13 @@ enum SessionPropertyBinding {
 final class SessionHistoryBinding: @unchecked Sendable {
     private let storage: Locked<[Transcript.Entry]>
     let isWritable: Bool
-    private let protectedEntryIDs: Set<String>
+    private let protectedEntries: [Transcript.Entry]
     private let persistValue: (@Sendable ([Transcript.Entry]) -> Void)?
 
     init(
         _ entries: [Transcript.Entry],
         isWritable: Bool,
-        protectedEntryIDs: Set<String> = [],
+        protectedEntryKeys: Set<TranscriptEntryKey> = [],
         persist: (@Sendable ([Transcript.Entry]) -> Void)? = nil
     ) {
         storage = Locked(
@@ -203,7 +204,9 @@ final class SessionHistoryBinding: @unchecked Sendable {
             }
         )
         self.isWritable = isWritable
-        self.protectedEntryIDs = protectedEntryIDs
+        self.protectedEntries = keyedTranscriptEntries(entries).filter { protectedEntryKeys.contains($0.key) }.map(
+            \.entry
+        )
         self.persistValue = persist
     }
 
@@ -211,8 +214,9 @@ final class SessionHistoryBinding: @unchecked Sendable {
         get { storage.withLock { $0 } }
         set {
             storage.withLock { current in
-                let protected = current.filter { protectedEntryIDs.contains($0.id) }
-                current = newValue.filter { !protectedEntryIDs.contains($0.id) } + protected
+                current =
+                    removingProtectedTranscriptEntries(from: newValue, protecting: protectedEntries)
+                    + protectedEntries
             }
         }
     }

@@ -5,6 +5,82 @@ import Testing
 
 #if canImport(Darwin) && !canImport(AsyncHTTPClient)
     extension ProviderUsageTests {
+        func providerReusedCallIDsPreserveEveryOutput(
+            _ provider: Provider,
+            streaming: Bool,
+            profile: Bool
+        ) async throws {
+            UsageURLProtocol.reset()
+            let legacyAnthropic = provider == .anthropic && !streaming && !profile
+            let roundsPerTurn = legacyAnthropic ? 1 : 2
+            var expectedOutputs: [String] = []
+            var expectedRequests: [[String]] = []
+            for turn in 0 ..< 2 {
+                for round in 0 ..< roundsPerTurn {
+                    expectedRequests.append(expectedOutputs)
+                    let city = "Turn\(turn)Round\(round)"
+                    let response =
+                        try streaming
+                        ? provider.toolStream(city: city, callID: "call_0")
+                        : Self.json(provider.response(text: "", tool: true))
+                            .replacingOccurrences(of: "Paris", with: city)
+                            .replacingOccurrences(of: "call_1", with: "call_0")
+                    UsageURLProtocol.enqueue(json: response)
+                    expectedOutputs.append("OUTPUT:\(city)")
+                }
+                if !legacyAnthropic {
+                    expectedRequests.append(expectedOutputs)
+                    UsageURLProtocol.enqueue(
+                        json: try streaming ? provider.stream() : Self.json(provider.response())
+                    )
+                }
+            }
+            if legacyAnthropic {
+                expectedRequests.append(expectedOutputs)
+                UsageURLProtocol.enqueue(json: try Self.json(provider.response()))
+            }
+            let session: LanguageModelSession
+            if profile {
+                session = LanguageModelSession(
+                    profile: LanguageModelSession.Profile {
+                        Instructions("Repeated call IDs")
+                        ReusedCallIDTool()
+                    }
+                    .model(provider.makeModel())
+                    .historyTransform { entries in
+                        let properties = SessionPropertyBinding.values!
+                        properties.history = properties.history
+                        return entries
+                    }
+                )
+            } else {
+                session = provider.makeSession(tools: [ReusedCallIDTool()])
+            }
+            for _ in 0 ..< (legacyAnthropic ? 3 : 2) {
+                if streaming {
+                    _ = try await session.streamResponse(to: "Weather?").collect()
+                } else {
+                    _ = try await session.respond(to: "Weather?")
+                }
+            }
+            let bodies = UsageURLProtocol.recordedBodies
+            try #require(bodies.count == expectedRequests.count)
+            for (body, outputs) in zip(bodies, expectedRequests) {
+                let json = String(decoding: body, as: UTF8.self)
+                for output in outputs {
+                    #expect(json.components(separatedBy: output).count - 1 == 1)
+                }
+            }
+        }
+
+        struct ReusedCallIDTool: Tool {
+            let name = "getWeather"
+            let description = "A deterministic Tool with distinguishable outputs"
+            @Generable struct Arguments { let city: String }
+
+            func call(arguments: Arguments) async throws -> String { "OUTPUT:\(arguments.city)" }
+        }
+
         func providerProfileReevaluatesBeforeEveryToolContinuation(
             _ provider: Provider,
             _ streaming: Bool
@@ -118,6 +194,12 @@ import Testing
             }
 
             #expect(exceeded?.limit == limit)
+            #expect(
+                exceeded?.transcriptEntries.filter { if case .toolCalls = $0 { true } else { false } }.count == limit
+            )
+            #expect(
+                exceeded?.transcriptEntries.filter { if case .toolOutput = $0 { true } else { false } }.count == limit
+            )
             #expect(state.executions.withLock { $0.count } == limit)
             #expect(UsageURLProtocol.recordedBodies.count == limit + 1)
         }

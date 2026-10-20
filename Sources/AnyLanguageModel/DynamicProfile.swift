@@ -530,7 +530,7 @@ actor ProfileLifecycle {
         prompt: Transcript.Prompt?,
         callbackState: ProfileCallbackState,
         historyEdits: Locked<[Transcript.Entry]?>,
-        protectedEntryIDs: Set<String> = []
+        protectedEntryKeys: Set<TranscriptEntryKey> = []
     ) async throws {
         let previous = pendingPreparation?.task
         nextPreparationID += 1
@@ -544,7 +544,7 @@ actor ProfileLifecycle {
                 prompt: prompt,
                 callbackState: callbackState,
                 historyEdits: historyEdits,
-                protectedEntryIDs: protectedEntryIDs
+                protectedEntryKeys: protectedEntryKeys
             )
         }
         pendingPreparation = (id, task)
@@ -564,12 +564,12 @@ actor ProfileLifecycle {
         prompt: Transcript.Prompt?,
         callbackState: ProfileCallbackState,
         historyEdits: Locked<[Transcript.Entry]?>,
-        protectedEntryIDs: Set<String>
+        protectedEntryKeys: Set<TranscriptEntryKey>
     ) async throws {
         let history = properties.historyBinding(
             history,
             isWritable: true,
-            protecting: protectedEntryIDs,
+            protecting: protectedEntryKeys,
             onChange: { updated in historyEdits.withLock { $0 = updated } }
         )
         if activeProfile?.identity != profile.identity {

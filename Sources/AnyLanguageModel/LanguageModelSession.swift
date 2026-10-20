@@ -175,7 +175,7 @@ public final class LanguageModelSession: @unchecked Sendable {
 
         fileprivate let profile: ResolvedDynamicProfile?
         fileprivate let canonicalTranscript: [Transcript.Entry]
-        fileprivate let pendingEntryIDs: Set<String>
+        fileprivate let pendingEntryKeys: Set<TranscriptEntryKey>
         fileprivate let callbackState: ProfileCallbackState
         fileprivate let callbackHistory = Locked<[Transcript.Entry]?>(nil)
 
@@ -191,7 +191,7 @@ public final class LanguageModelSession: @unchecked Sendable {
             transcriptErrorHandlingPolicy: TranscriptErrorHandlingPolicy? = nil,
             profile: ResolvedDynamicProfile? = nil,
             canonicalTranscript: [Transcript.Entry]? = nil,
-            pendingEntryIDs: Set<String> = [],
+            pendingEntryKeys: Set<TranscriptEntryKey> = [],
             callbackState: ProfileCallbackState = ProfileCallbackState()
         ) {
             self.transcript = transcript
@@ -203,7 +203,7 @@ public final class LanguageModelSession: @unchecked Sendable {
             self.transcriptErrorHandlingPolicy = transcriptErrorHandlingPolicy
             self.profile = profile
             self.canonicalTranscript = canonicalTranscript ?? Array(transcript)
-            self.pendingEntryIDs = pendingEntryIDs
+            self.pendingEntryKeys = pendingEntryKeys
             self.callbackState = callbackState
         }
 
@@ -218,7 +218,7 @@ public final class LanguageModelSession: @unchecked Sendable {
                 transcriptErrorHandlingPolicy: transcriptErrorHandlingPolicy,
                 profile: profile,
                 canonicalTranscript: canonicalTranscript,
-                pendingEntryIDs: pendingEntryIDs,
+                pendingEntryKeys: pendingEntryKeys,
                 callbackState: context.callbackState
             )
         }
@@ -264,6 +264,14 @@ public final class LanguageModelSession: @unchecked Sendable {
             return ToolRoundLimit(provider: provider, options: options)
         }
         return prepared.toolRoundLimit(for: provider)
+    }
+
+    nonisolated func recordToolRound(_ limit: ToolRoundLimit, completed: [Transcript.Entry]) throws {
+        if let prepared = ProfileRequestBinding.prepared, prepared.session === self {
+            try limit.record(completed: prepared.pendingEntries(including: completed))
+        } else {
+            try limit.record(completed: completed)
+        }
     }
 
     nonisolated func profileIncludeSchemaInPrompt(
@@ -332,7 +340,7 @@ public final class LanguageModelSession: @unchecked Sendable {
                     }.first,
                 callbackState: context.callbackState,
                 historyEdits: context.callbackHistory,
-                protectedEntryIDs: context.pendingEntryIDs
+                protectedEntryKeys: context.pendingEntryKeys
             )
         }
         if let prepared, prepared.session === self {
@@ -346,10 +354,11 @@ public final class LanguageModelSession: @unchecked Sendable {
         options: GenerationOptions
     ) -> RequestContext {
         let committed = Array(transcript)
-        var entryIDs = Set(committed.map(\.id))
-        let pending = additionalEntries.filter { entryIDs.insert($0.id).inserted }
-        let protectedEntryIDs = Set(pending.map(\.id))
-        var canonical = committed + pending
+        var entryKeys = Set(keyedTranscriptEntries(committed).map(\.key))
+        let pending = keyedTranscriptEntries(additionalEntries)
+            .filter { entryKeys.insert($0.key).inserted }
+        let protectedEntryKeys = Set(pending.map(\.key))
+        var canonical = committed + pending.map(\.entry)
         let sessionErrorPolicy = transcriptErrorHandlingPolicy
         guard let dynamicProfile else {
             guard let dynamicInstructions else {
@@ -361,7 +370,7 @@ public final class LanguageModelSession: @unchecked Sendable {
                     options: options,
                     transcriptErrorHandlingPolicy: sessionErrorPolicy,
                     canonicalTranscript: canonical,
-                    pendingEntryIDs: protectedEntryIDs
+                    pendingEntryKeys: protectedEntryKeys
                 )
             }
 
@@ -389,14 +398,14 @@ public final class LanguageModelSession: @unchecked Sendable {
                 options: options,
                 transcriptErrorHandlingPolicy: sessionErrorPolicy,
                 canonicalTranscript: canonical,
-                pendingEntryIDs: protectedEntryIDs
+                pendingEntryKeys: protectedEntryKeys
             )
         }
 
         let history = properties.historyBinding(
             canonical,
             isWritable: true,
-            protecting: protectedEntryIDs
+            protecting: protectedEntryKeys
         )
         let resolved = dynamicProfileLock.withLock {
             SessionPropertyBinding.$values.withValue(properties) {
@@ -411,7 +420,7 @@ public final class LanguageModelSession: @unchecked Sendable {
             let transformHistory = properties.historyBinding(
                 canonical,
                 isWritable: true,
-                protecting: protectedEntryIDs
+                protecting: protectedEntryKeys
             )
             projected = SessionPropertyBinding.$values.withValue(properties) {
                 SessionPropertyBinding.$history.withValue(transformHistory) {
@@ -455,7 +464,7 @@ public final class LanguageModelSession: @unchecked Sendable {
                 : sessionErrorPolicy,
             profile: resolved,
             canonicalTranscript: canonical,
-            pendingEntryIDs: protectedEntryIDs
+            pendingEntryKeys: protectedEntryKeys
         )
     }
 
@@ -489,7 +498,7 @@ public final class LanguageModelSession: @unchecked Sendable {
         try await withSessionProperties(
             history: history.entries,
             isHistoryWritable: true,
-            protectedEntryIDs: history.protectedEntryIDs,
+            protectedEntryKeys: history.protectedEntryKeys,
             onHistoryChange: { updated in requestContext.callbackHistory.withLock { $0 = updated } }
         ) {
             for action in profile.onToolCall { try await action(call) }
@@ -512,7 +521,7 @@ public final class LanguageModelSession: @unchecked Sendable {
         try await withSessionProperties(
             history: history.entries,
             isHistoryWritable: true,
-            protectedEntryIDs: history.protectedEntryIDs,
+            protectedEntryKeys: history.protectedEntryKeys,
             onHistoryChange: { updated in requestContext.callbackHistory.withLock { $0 = updated } }
         ) {
             for action in profile.onToolOutput { try await action(call, output) }
@@ -539,7 +548,7 @@ public final class LanguageModelSession: @unchecked Sendable {
         let binding = properties.historyBinding(
             history.entries,
             isWritable: true,
-            protecting: history.protectedEntryIDs,
+            protecting: history.protectedEntryKeys,
             onChange: { updated in requestContext.callbackHistory.withLock { $0 = updated } }
         )
         for entry in entries {
@@ -586,7 +595,7 @@ public final class LanguageModelSession: @unchecked Sendable {
         return try await withSessionProperties(
             history: history.entries,
             isHistoryWritable: false,
-            protectedEntryIDs: history.protectedEntryIDs
+            protectedEntryKeys: history.protectedEntryKeys
         ) {
             try await operation()
         }
@@ -595,43 +604,33 @@ public final class LanguageModelSession: @unchecked Sendable {
     nonisolated private func profileHistory(
         requestContext: RequestContext,
         currentRoundEntries: [Transcript.Entry]
-    ) -> (entries: [Transcript.Entry], protectedEntryIDs: Set<String>) {
-        let canonicalIDs = Set(requestContext.canonicalTranscript.map(\.id))
-        let pending = currentRoundEntries.filter {
-            !canonicalIDs.contains($0.id) || requestContext.pendingEntryIDs.contains($0.id)
+    ) -> (entries: [Transcript.Entry], protectedEntryKeys: Set<TranscriptEntryKey>) {
+        let canonicalKeys = Set(keyedTranscriptEntries(requestContext.canonicalTranscript).map(\.key))
+        let pending = keyedTranscriptEntries(currentRoundEntries).filter {
+            !canonicalKeys.contains($0.key) || requestContext.pendingEntryKeys.contains($0.key)
         }
         let history = requestContext.callbackHistory.withLock { history in
-            var entries = history ?? requestContext.canonicalTranscript
-            var indices: [String: Int] = [:]
-            for (index, entry) in entries.enumerated() { indices[entry.id] = index }
-            for entry in pending {
-                if let index = indices[entry.id] {
-                    entries[index] = entry
-                } else {
-                    indices[entry.id] = entries.count
-                    entries.append(entry)
-                }
-            }
+            let entries = mergingTranscriptEntries(history ?? requestContext.canonicalTranscript, with: pending)
             history = entries
             return entries
         }
         return (
             history,
-            requestContext.pendingEntryIDs.union(pending.map(\.id))
+            requestContext.pendingEntryKeys.union(pending.map(\.key))
         )
     }
 
     nonisolated private func withSessionProperties<Result: Sendable>(
         history: [Transcript.Entry],
         isHistoryWritable: Bool,
-        protectedEntryIDs: Set<String> = [],
+        protectedEntryKeys: Set<TranscriptEntryKey> = [],
         onHistoryChange: (@Sendable ([Transcript.Entry]) -> Void)? = nil,
         operation: @Sendable () async throws -> Result
     ) async rethrows -> Result {
         let history = properties.historyBinding(
             history,
             isWritable: isHistoryWritable,
-            protecting: protectedEntryIDs,
+            protecting: protectedEntryKeys,
             onChange: onHistoryChange
         )
         return try await withSessionProperties(history: history, operation: operation)
@@ -2579,17 +2578,7 @@ private final class PreparedProfileRequest: @unchecked Sendable {
 
     func pendingEntries(including entries: [Transcript.Entry]) -> [Transcript.Entry] {
         state.withLock { state in
-            var indices = Dictionary(
-                uniqueKeysWithValues: state.pendingEntries.enumerated().map { ($0.element.id, $0.offset) }
-            )
-            for entry in entries {
-                if let index = indices[entry.id] {
-                    state.pendingEntries[index] = entry
-                } else {
-                    indices[entry.id] = state.pendingEntries.count
-                    state.pendingEntries.append(entry)
-                }
-            }
+            state.pendingEntries = mergingTranscriptEntries(state.pendingEntries, with: keyedTranscriptEntries(entries))
             return state.pendingEntries
         }
     }
