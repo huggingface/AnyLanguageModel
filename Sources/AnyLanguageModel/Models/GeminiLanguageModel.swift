@@ -241,7 +241,7 @@ public struct GeminiLanguageModel: LanguageModel {
         // The text of earlier tool rounds, which string responses include.
         var earlierText = ""
 
-        var toolRounds = ToolRoundLimit(provider: "Gemini")
+        var toolRounds = ToolRoundLimit(provider: "Gemini", options: options)
         // Multi-turn conversation loop for tool calling
         while true {
             let requestContext = session.resolvedRequestContext()
@@ -290,7 +290,7 @@ public struct GeminiLanguageModel: LanguageModel {
 
             if !functionCalls.isEmpty {
                 // Resolve function calls
-                try toolRounds.record()
+                try toolRounds.record(completed: entries)
                 let resolution = try await resolveFunctionCalls(
                     functionCalls,
                     tools: requestContext.tools,
@@ -419,7 +419,7 @@ public struct GeminiLanguageModel: LanguageModel {
                     let headers = buildHeaders()
                     var inFlightEntries: [Transcript.Entry] = []
                     var state = StreamingResponseState<Content>(wrapperProperty: responseSchema.wrapperProperty)
-                    var toolRounds = ToolRoundLimit(provider: "Gemini")
+                    var toolRounds = ToolRoundLimit(provider: "Gemini", options: options)
                     while true {
                         try Task.checkCancellation()
                         let requestContext = session.resolvedRequestContext()
@@ -472,7 +472,7 @@ public struct GeminiLanguageModel: LanguageModel {
                         guard !functionCalls.isEmpty else { break }
                         try Task.checkCancellation()
                         let metadata = try textPartMetadata(parts, includeUnsignedText: true)
-                        try toolRounds.record()
+                        try toolRounds.record(completed: state.entries)
                         switch try await resolveFunctionCalls(
                             functionCalls,
                             tools: requestContext.tools,
@@ -579,6 +579,20 @@ private func createGenerateContentParams<Content: Generable>(
                 params["toolConfig"] = toolConfig
                 break
             }
+        }
+
+        // The function-calling mode applies to function declarations, not to server tools,
+        // so it's sent only with the session's tools.
+        if let toolCallingMode = options.toolCallingMode, tools.contains(where: \.isFunctionDeclarations) {
+            let mode =
+                switch toolCallingMode.kind {
+                case .allowed: "AUTO"
+                case .required: "ANY"
+                case .disallowed: "NONE"
+                }
+            var toolConfig = params["toolConfig"]?.objectValue ?? [:]
+            toolConfig["functionCallingConfig"] = .object(["mode": .string(mode)])
+            params["toolConfig"] = .object(toolConfig)
         }
     }
 
@@ -887,6 +901,12 @@ private enum GeminiTool: Sendable {
                 return .object(["google_maps": .object([:])])
             }
         }
+    }
+
+    /// Whether this tool holds the session's function declarations, not a server tool.
+    var isFunctionDeclarations: Bool {
+        if case .functionDeclarations = self { return true }
+        return false
     }
 
     var toolConfigValue: JSONValue? {
