@@ -294,6 +294,9 @@ import Foundation
             #"{"type": "integer", "minimum": 5, "maximum": 1}"#,
             #"{"type": "integer", "minimum": 2.5, "maximum": 2.7}"#,
             #"{"type": "number", "minimum": 3, "maximum": 1}"#,
+            // Out of order before an integer's bound no `Int` can hold is dropped.
+            #"{"type": "integer", "minimum": 1e300, "maximum": 5}"#,
+            #"{"type": "integer", "minimum": 1e301, "maximum": 1e300}"#,
         ])
         func impossibleBoundsFromJSONDontDecode(json: String) {
             #expect(throws: DecodingError.self) {

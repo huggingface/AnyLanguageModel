@@ -3,11 +3,6 @@ import Testing
 @testable import AnyLanguageModel
 
 @Generable
-private struct ContradictingGuides {
-    @Guide(description: "A count", .minimum(10), .maximum(5))
-    var count: Int
-}
-
 @Suite("Number bounds")
 struct BoundsTests {
     @Test func boundsAreMadeOnlyInOrder() {
@@ -39,10 +34,27 @@ struct BoundsTests {
 
     #if os(macOS) || os(Linux)
         /// Guides that no value satisfies are a mistake in the code, as an inverted `ClosedRange` is.
-        @Test func contradictingGuidesStop() async {
-            await #expect(processExitsWith: .failure) {
-                _ = ContradictingGuides.generationSchema
+        /// Given apart, they reach the schema's own check, which says so.
+        @Test func contradictingIntegerGuidesStop() async throws {
+            let result = try await #require(processExitsWith: .failure, observing: [\.standardErrorContent]) {
+                _ = GenerationSchema.Property(name: "count", type: Int.self, guides: [.minimum(10), .maximum(5)])
             }
+            #expect(
+                String(decoding: result.standardErrorContent, as: UTF8.self).contains(
+                    "minimum 10 is above its maximum 5"
+                )
+            )
+        }
+
+        @Test func contradictingFloatingPointGuidesStop() async throws {
+            let result = try await #require(processExitsWith: .failure, observing: [\.standardErrorContent]) {
+                _ = GenerationSchema.Property(name: "share", type: Double.self, guides: [.minimum(1), .maximum(0.5)])
+            }
+            #expect(
+                String(decoding: result.standardErrorContent, as: UTF8.self).contains(
+                    "minimum 1.0 is above its maximum 0.5"
+                )
+            )
         }
     #endif
 }

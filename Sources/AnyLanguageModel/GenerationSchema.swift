@@ -242,6 +242,11 @@ public struct GenerationSchema: Equatable, Codable, CustomDebugStringConvertible
                 func impossible(_ reason: String) -> DecodingError {
                     .dataCorruptedError(forKey: .minimum, in: container, debugDescription: reason)
                 }
+                // Bounds out of order contradict each other, whatever kind of number they bound:
+                // checked as given, before an integer's are rounded or dropped.
+                if let minimum, let maximum, minimum > maximum {
+                    throw impossible("The minimum \(minimum) is above the maximum \(maximum).")
+                }
                 if type == "integer" {
                     // An integer at least 1.5 is at least 2: its bounds are the whole numbers within them.
                     // A bound no `Int` can hold, such as one of a `UInt64` range, is dropped.
