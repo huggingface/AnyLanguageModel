@@ -137,7 +137,7 @@ public struct OllamaLanguageModel: LanguageModel, ProfileRequestIdentifiedLangua
 
         while true {
             let requestContext = try await session.resolvedRequestContext(
-                including: entries,
+                including: session.usesDynamicProfile ? entries : [],
                 options: options
             )
             if let continuation = try await session.profileContinuationResponse(
@@ -153,11 +153,14 @@ public struct OllamaLanguageModel: LanguageModel, ProfileRequestIdentifiedLangua
             ) {
                 return continuation
             }
-            let ollamaTools = try requestContext.tools.map(convertToolToOllamaFormat)
+            let ollamaTools = try requestContext.options.toolsOffered(from: requestContext.tools).map(
+                convertToolToOllamaFormat
+            )
             var messages = try ollamaMessages(
                 from: requestContext.transcript,
                 replacing: entries,
-                with: inFlightMessages
+                with: inFlightMessages,
+                hasDynamicProfile: requestContext.hasDynamicProfile
             )
             if messages.isEmpty {
                 messages.append(.init(role: .user, content: prompt.description))
@@ -171,12 +174,13 @@ public struct OllamaLanguageModel: LanguageModel, ProfileRequestIdentifiedLangua
                 format: ollamaFormat,
                 parameters: extractTopLevelChatParameters(requestContext.options)
             )
-            let chatResponse: ChatResponse = try await httpSession.fetch(
+            let reply: ChatReply = try await httpSession.fetch(
                 .post,
                 url: url,
                 body: try encodeChatParams(params),
                 dateDecodingStrategy: .iso8601WithFractionalSeconds
             )
+            let chatResponse = try reply.response()
             usage.add(chatResponse.reportedUsage?.value ?? .zero)
 
             if let toolCalls = chatResponse.message.toolCalls, !toolCalls.isEmpty {
@@ -294,7 +298,7 @@ public struct OllamaLanguageModel: LanguageModel, ProfileRequestIdentifiedLangua
                     while true {
                         try Task.checkCancellation()
                         let requestContext = try await session.resolvedRequestContext(
-                            including: state.entries,
+                            including: session.usesDynamicProfile ? state.entries : [],
                             options: options
                         )
                         if let handoff = session.profileContinuationStream(
@@ -312,11 +316,14 @@ public struct OllamaLanguageModel: LanguageModel, ProfileRequestIdentifiedLangua
                             continuation.finish()
                             return
                         }
-                        let tools = try requestContext.tools.map(convertToolToOllamaFormat)
+                        let tools = try requestContext.options.toolsOffered(from: requestContext.tools).map(
+                            convertToolToOllamaFormat
+                        )
                         var messages = try ollamaMessages(
                             from: requestContext.transcript,
                             replacing: state.entries,
-                            with: inFlightMessages
+                            with: inFlightMessages,
+                            hasDynamicProfile: requestContext.hasDynamicProfile
                         )
                         if messages.isEmpty {
                             messages.append(.init(role: .user, content: prompt.description))
@@ -403,26 +410,16 @@ public struct OllamaLanguageModel: LanguageModel, ProfileRequestIdentifiedLangua
 private func ollamaMessages(
     from transcript: Transcript,
     replacing currentRoundEntries: [Transcript.Entry],
-    with continuation: [OllamaMessage]
+    with continuation: [OllamaMessage],
+    hasDynamicProfile: Bool
 ) throws -> [OllamaMessage] {
-    guard !continuation.isEmpty, !currentRoundEntries.isEmpty else {
-        return try transcript.toOllamaMessages()
-    }
-    let projected = Array(transcript)
-    let count = currentRoundEntries.count
-    let ranges = projected.indices.compactMap { start -> Range<Int>? in
-        let end = start + count
-        guard end <= projected.count,
-            Array(projected[start ..< end]) == currentRoundEntries
-        else { return nil }
-        return start ..< end
-    }
-    guard ranges.count == 1, let range = ranges.first else {
-        return try transcript.toOllamaMessages()
-    }
-    return try Transcript(entries: projected[..<range.lowerBound]).toOllamaMessages()
-        + continuation
-        + Transcript(entries: projected[range.upperBound...]).toOllamaMessages()
+    try toolContinuationMessages(
+        from: transcript,
+        replacing: currentRoundEntries,
+        with: continuation,
+        hasDynamicProfile: hasDynamicProfile,
+        convert: { try $0.toOllamaMessages() }
+    )
 }
 
 private struct ToolInvocationResult {
@@ -464,7 +461,8 @@ private func resolveToolCalls(
     switch try await session.resolveProfileToolCalls(
         transcriptCalls,
         requestContext: requestContext,
-        currentRoundEntries: entries
+        currentRoundEntries: entries,
+        offeredTools: requestContext.options.toolsOffered(from: requestContext.tools)
     ) {
     case .stop(let calls):
         return .stop(calls: calls)

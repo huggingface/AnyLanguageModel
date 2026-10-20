@@ -4,6 +4,13 @@ import Testing
 
 #if canImport(Darwin) && !canImport(AsyncHTTPClient)
     extension ProviderUsageTests {
+        @Test(arguments: [false, true])
+        func ollamaReusedCallIDs(_ streaming: Bool) async throws {
+            for profile in [false, true] {
+                try await providerReusedCallIDsPreserveEveryOutput(.ollama, streaming: streaming, profile: profile)
+            }
+        }
+
         @Test(arguments: [Provider.ollama], [false, true])
         func ollamaProfileReevaluation(_ provider: Provider, _ streaming: Bool) async throws {
             try await providerProfileReevaluatesBeforeEveryToolContinuation(provider, streaming)
