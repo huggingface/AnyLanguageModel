@@ -19,12 +19,18 @@ import Testing
                 for round in 0 ..< roundsPerTurn {
                     expectedRequests.append(expectedOutputs)
                     let city = "Turn\(turn)Round\(round)"
-                    let response =
+                    var response =
                         try streaming
                         ? provider.toolStream(city: city, callID: "call_0")
                         : Self.json(provider.response(text: "", tool: true))
                             .replacingOccurrences(of: "Paris", with: city)
                             .replacingOccurrences(of: "call_1", with: "call_0")
+                    if provider == .ollama {
+                        response = response.replacingOccurrences(
+                            of: "\"function\":",
+                            with: "\"id\":\"call_0\",\"function\":"
+                        )
+                    }
                     UsageURLProtocol.enqueue(json: response)
                     expectedOutputs.append("OUTPUT:\(city)")
                 }
@@ -64,6 +70,11 @@ import Testing
                 }
             }
             let bodies = UsageURLProtocol.recordedBodies
+            let outputIDs = session.transcript.compactMap { entry -> String? in
+                if case .toolOutput(let output) = entry { return output.id }
+                return nil
+            }
+            #expect(outputIDs == Array(repeating: "call_0", count: expectedOutputs.count))
             try #require(bodies.count == expectedRequests.count)
             for (body, outputs) in zip(bodies, expectedRequests) {
                 let json = String(decoding: body, as: UTF8.self)
