@@ -4,6 +4,17 @@ import Testing
 
 #if canImport(Darwin) && !canImport(AsyncHTTPClient)
     extension ProviderUsageTests {
+        @Test(arguments: [false, true])
+        func openResponsesReusedCallIDs(_ streaming: Bool) async throws {
+            for profile in [false, true] {
+                try await providerReusedCallIDsPreserveEveryOutput(
+                    .openResponses,
+                    streaming: streaming,
+                    profile: profile
+                )
+            }
+        }
+
         @Test(arguments: [Provider.openResponses], [false, true])
         func openResponsesProfileReevaluation(_ provider: Provider, _ streaming: Bool) async throws {
             try await providerProfileReevaluatesBeforeEveryToolContinuation(provider, streaming)
