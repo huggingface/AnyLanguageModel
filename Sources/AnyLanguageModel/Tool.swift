@@ -141,7 +141,13 @@ extension Tool {
 
             let mimeType: String?
             #if canImport(UniformTypeIdentifiers)
-                mimeType = UTType(filenameExtension: url.pathExtension)?.preferredMIMEType
+                guard let type = UTType(filenameExtension: url.pathExtension) else {
+                    throw ToolAttachmentError.unknownImageType(url)
+                }
+                guard type.conforms(to: .image) else {
+                    throw ToolAttachmentError.unsupportedImageType(url)
+                }
+                mimeType = type.preferredMIMEType
             #else
                 mimeType =
                     switch url.pathExtension.lowercased() {
@@ -160,11 +166,14 @@ extension Tool {
 
 private enum ToolAttachmentError: LocalizedError {
     case unknownImageType(URL)
+    case unsupportedImageType(URL)
 
     var errorDescription: String? {
         switch self {
         case .unknownImageType(let url):
             "Cannot determine the MIME type of the Tool output image \(url.lastPathComponent)."
+        case .unsupportedImageType(let url):
+            "The Tool output attachment \(url.lastPathComponent) is not an image file."
         }
     }
 }
