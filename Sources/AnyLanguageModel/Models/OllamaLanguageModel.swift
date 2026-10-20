@@ -129,7 +129,9 @@ public struct OllamaLanguageModel: LanguageModel {
         }
 
         let requestContext = session.resolvedRequestContext()
-        let ollamaTools = try requestContext.tools.map(convertToolToOllamaFormat)
+        // Ollama has no tool-choice setting.
+        let tools = options.toolsOffered(from: requestContext.tools)
+        let ollamaTools = try tools.map(convertToolToOllamaFormat)
         var messages = try requestContext.transcript.toOllamaMessages()
         if messages.isEmpty {
             messages.append(.init(role: .user, content: prompt.description))
@@ -146,12 +148,13 @@ public struct OllamaLanguageModel: LanguageModel {
 
         let url = baseURL.appendingPathComponent("api/chat")
         let body = try encodeChatParams(params)
-        let chatResponse: ChatResponse = try await httpSession.fetch(
+        let reply: ChatReply = try await httpSession.fetch(
             .post,
             url: url,
             body: body,
             dateDecodingStrategy: .iso8601WithFractionalSeconds
         )
+        let chatResponse = try reply.response()
 
         var entries: [Transcript.Entry] = []
         let usage = chatResponse.reportedUsage?.value ?? .zero
@@ -159,7 +162,7 @@ public struct OllamaLanguageModel: LanguageModel {
         if let toolCalls = chatResponse.message.toolCalls, !toolCalls.isEmpty {
             let resolution = try await resolveToolCalls(
                 toolCalls,
-                tools: requestContext.tools,
+                tools: tools,
                 session: session
             )
             switch resolution {
@@ -253,11 +256,13 @@ public struct OllamaLanguageModel: LanguageModel {
                     let format = type == String.self ? nil : try JSONValue(convertSchemaToOllamaFormat(schema))
                     var inFlightMessages: [OllamaMessage] = []
                     var state = StreamingResponseState<Content>()
-                    var toolRounds = ToolRoundLimit(provider: "Ollama")
+                    var toolRounds = ToolRoundLimit(provider: "Ollama", options: options)
                     while true {
                         try Task.checkCancellation()
                         let requestContext = session.resolvedRequestContext()
-                        let tools = try requestContext.tools.map(convertToolToOllamaFormat)
+                        // Ollama has no tool-choice setting.
+                        let offeredTools = options.toolsOffered(from: requestContext.tools)
+                        let tools = try offeredTools.map(convertToolToOllamaFormat)
                         var messages = try requestContext.transcript.toOllamaMessages()
                         if messages.isEmpty {
                             messages.append(.init(role: .user, content: prompt.description))
@@ -273,14 +278,15 @@ public struct OllamaLanguageModel: LanguageModel {
                             parameters: extractTopLevelChatParameters(options)
                         )
                         let body = try encodeChatParams(params)
-                        let chunks: AsyncThrowingStream<ChatResponse, any Error> = httpSession.fetchStream(
+                        let chunks: AsyncThrowingStream<ChatReply, any Error> = httpSession.fetchStream(
                             .post,
                             url: url,
                             body: body,
                             dateDecodingStrategy: .iso8601WithFractionalSeconds
                         )
                         var toolCalls: [OllamaToolCall] = []
-                        for try await chunk in chunks {
+                        for try await reply in chunks {
+                            let chunk = try reply.response()
                             state.usage.merge(chunk.reportedUsage)
                             if let piece = chunk.message.content { state.text += piece }
                             toolCalls.append(contentsOf: chunk.message.toolCalls ?? [])
@@ -291,10 +297,10 @@ public struct OllamaLanguageModel: LanguageModel {
                         }
                         guard !toolCalls.isEmpty else { break }
                         try Task.checkCancellation()
-                        try toolRounds.record()
+                        try toolRounds.record(completed: state.entries)
                         switch try await resolveToolCalls(
                             toolCalls,
-                            tools: requestContext.tools,
+                            tools: offeredTools,
                             session: session
                         ) {
                         case .stop(let calls):
@@ -510,7 +516,7 @@ func convertOptions(_ options: GenerationOptions) -> [String: JSONValue]? {
 
 /// Custom option keys that Ollama's `/api/chat` endpoint reads from the top level
 /// of the request body rather than from `options`.
-private let topLevelChatParameterKeys: Set<String> = ["think", "keep_alive"]
+private let topLevelChatParameterKeys: Set<String> = ["think", "keep_alive", "truncate", "shift"]
 
 func extractTopLevelChatParameters(_ options: GenerationOptions) -> [String: JSONValue]? {
     guard let customOptions: [String: JSONValue] = options[custom: OllamaLanguageModel.self] else {
@@ -685,6 +691,40 @@ private func convertSegmentsToOllama(_ segments: [Transcript.Segment]) -> (Strin
         }
     }
     return (textParts.joined(separator: "\n"), images)
+}
+
+/// An error Ollama reported in place of a chat response, with its own message.
+struct OllamaError: Error, Sendable, CustomStringConvertible {
+    let message: String
+
+    var description: String { "Ollama: \(message)" }
+}
+
+/// What Ollama's chat endpoint replies with: a response, or an error it reports instead, as a
+/// body or as a line of a stream.
+private enum ChatReply: Decodable, Sendable {
+    case response(ChatResponse)
+    case error(String)
+
+    private enum CodingKeys: String, CodingKey {
+        case error
+    }
+
+    init(from decoder: any Decoder) throws {
+        if let message = try decoder.container(keyedBy: CodingKeys.self).decodeIfPresent(String.self, forKey: .error) {
+            self = .error(message)
+        } else {
+            self = .response(try ChatResponse(from: decoder))
+        }
+    }
+
+    /// The response, or Ollama's error, thrown.
+    func response() throws -> ChatResponse {
+        switch self {
+        case .response(let response): response
+        case .error(let message): throw OllamaError(message: message)
+        }
+    }
 }
 
 private struct ChatResponse: Decodable, Sendable {
