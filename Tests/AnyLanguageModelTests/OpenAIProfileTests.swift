@@ -5,6 +5,13 @@ import Testing
 #if canImport(Darwin) && !canImport(AsyncHTTPClient)
     extension ProviderUsageTests {
         @Test(arguments: [Provider.chat, Provider.responses], [false, true])
+        func openAIReusedCallIDs(_ provider: Provider, _ streaming: Bool) async throws {
+            for profile in [false, true] {
+                try await providerReusedCallIDsPreserveEveryOutput(provider, streaming: streaming, profile: profile)
+            }
+        }
+
+        @Test(arguments: [Provider.chat, Provider.responses], [false, true])
         func openAIProfileReevaluation(_ provider: Provider, _ streaming: Bool) async throws {
             try await providerProfileReevaluatesBeforeEveryToolContinuation(provider, streaming)
         }

@@ -514,7 +514,7 @@ public struct OpenAILanguageModel: LanguageModel, ProfileRequestIdentifiedLangua
         // Loop until no more tool calls
         while true {
             let requestContext = try await session.resolvedRequestContext(
-                including: entries,
+                including: session.usesDynamicProfile ? entries : [],
                 options: options
             )
             if let continuation = try await session.profileContinuationResponse(
@@ -536,7 +536,8 @@ public struct OpenAILanguageModel: LanguageModel, ProfileRequestIdentifiedLangua
             let messages = openAIMessages(
                 from: requestContext.transcript,
                 replacing: entries,
-                with: inFlightMessages
+                with: inFlightMessages,
+                hasDynamicProfile: requestContext.hasDynamicProfile
             )
             let params = try ChatCompletions.createRequestBody(
                 model: model,
@@ -579,7 +580,7 @@ public struct OpenAILanguageModel: LanguageModel, ProfileRequestIdentifiedLangua
 
             let toolCallMessage = choice.message
             if let toolCalls = toolCallMessage.toolCalls, !toolCalls.isEmpty {
-                try toolRounds.record(completed: entries)
+                try session.recordToolRound(toolRounds, completed: entries)
                 let resolution = try await resolveToolCalls(
                     toolCalls,
                     requestContext: requestContext,
@@ -678,7 +679,7 @@ public struct OpenAILanguageModel: LanguageModel, ProfileRequestIdentifiedLangua
         // Loop until no more tool calls
         while true {
             let requestContext = try await session.resolvedRequestContext(
-                including: entries,
+                including: session.usesDynamicProfile ? entries : [],
                 options: options
             )
             if let continuation = try await session.profileContinuationResponse(
@@ -700,7 +701,8 @@ public struct OpenAILanguageModel: LanguageModel, ProfileRequestIdentifiedLangua
             let messages = openAIMessages(
                 from: requestContext.transcript,
                 replacing: entries,
-                with: inFlightMessages
+                with: inFlightMessages,
+                hasDynamicProfile: requestContext.hasDynamicProfile
             )
             let params = try Responses.createRequestBody(
                 model: model,
@@ -733,7 +735,7 @@ public struct OpenAILanguageModel: LanguageModel, ProfileRequestIdentifiedLangua
                         inFlightMessages.append(OpenAIMessage(role: .raw(rawContent: msg), content: .text("")))
                     }
                 }
-                try toolRounds.record(completed: entries)
+                try session.recordToolRound(toolRounds, completed: entries)
                 let resolution = try await resolveToolCalls(
                     toolCalls,
                     requestContext: requestContext,
@@ -855,7 +857,7 @@ public struct OpenAILanguageModel: LanguageModel, ProfileRequestIdentifiedLangua
                     while true {
                         try Task.checkCancellation()
                         let requestContext = try await session.resolvedRequestContext(
-                            including: state.entries,
+                            including: session.usesDynamicProfile ? state.entries : [],
                             options: options
                         )
                         if let handoff = session.profileContinuationStream(
@@ -879,7 +881,8 @@ public struct OpenAILanguageModel: LanguageModel, ProfileRequestIdentifiedLangua
                         let messages = openAIMessages(
                             from: requestContext.transcript,
                             replacing: state.entries,
-                            with: inFlightMessages
+                            with: inFlightMessages,
+                            hasDynamicProfile: requestContext.hasDynamicProfile
                         )
                         let params: JSONValue
                         let path: String
@@ -972,7 +975,7 @@ public struct OpenAILanguageModel: LanguageModel, ProfileRequestIdentifiedLangua
 
                         guard !toolCalls.isEmpty else { break }
                         try Task.checkCancellation()
-                        try toolRounds.record(completed: state.entries)
+                        try session.recordToolRound(toolRounds, completed: state.entries)
                         switch try await resolveToolCalls(
                             toolCalls,
                             requestContext: requestContext,
@@ -1926,28 +1929,16 @@ private func resolveToolCalls(
 private func openAIMessages(
     from transcript: Transcript,
     replacing currentRoundEntries: [Transcript.Entry],
-    with continuation: [OpenAIMessage]
+    with continuation: [OpenAIMessage],
+    hasDynamicProfile: Bool
 ) -> [OpenAIMessage] {
-    guard !continuation.isEmpty, !currentRoundEntries.isEmpty else {
-        return transcript.toOpenAIMessages()
-    }
-    let projected = Array(transcript)
-    let count = currentRoundEntries.count
-    let ranges = projected.indices.compactMap { start -> Range<Int>? in
-        let end = start + count
-        guard end <= projected.count,
-            Array(projected[start ..< end]) == currentRoundEntries
-        else { return nil }
-        return start ..< end
-    }
-    guard ranges.count == 1, let range = ranges.first else {
-        // A legal request projection may remove or reorder the current Tool round.
-        // In that case its mapped transcript is authoritative and opaque replay is reset.
-        return transcript.toOpenAIMessages()
-    }
-    return Transcript(entries: projected[..<range.lowerBound]).toOpenAIMessages()
-        + continuation
-        + Transcript(entries: projected[range.upperBound...]).toOpenAIMessages()
+    toolContinuationMessages(
+        from: transcript,
+        replacing: currentRoundEntries,
+        with: continuation,
+        hasDynamicProfile: hasDynamicProfile,
+        convert: { $0.toOpenAIMessages() }
+    )
 }
 
 private func convertToolToOpenAIFormat(_ tool: any Tool) -> OpenAITool {
