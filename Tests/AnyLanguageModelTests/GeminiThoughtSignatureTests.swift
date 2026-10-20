@@ -218,27 +218,80 @@ import Testing
             #expect(mediaParts.first?["fileData"] == nil)
         }
 
-        @Test("rejects remote URL-backed images with an actionable error")
-        func rejectsRemoteURLBackedToolOutput() async throws {
+        @Test("sends remote Tool image URLs as ordered text without downloading", arguments: [false, true])
+        func describesRemoteURLBackedToolOutput(streaming: Bool) async throws {
             StubURLProtocol.reset()
-            StubURLProtocol.enqueue(
-                json:
-                    #"{"candidates":[{"content":{"role":"model","parts":[{"functionCall":{"name":"image","args":{"request":"read"}}}]},"finishReason":"STOP"}]}"#
-            )
+            let toolResponse =
+                #"{"candidates":[{"content":{"role":"model","parts":[{"functionCall":{"name":"image","args":{"request":"read"}}}]},"finishReason":"STOP"}]}"#
+            if streaming {
+                StubURLProtocol.enqueue(eventStream: [toolResponse])
+                StubURLProtocol.enqueue(eventStream: [try self.response(parts: [["text": "OK"]])])
+            } else {
+                StubURLProtocol.enqueue(json: toolResponse)
+                StubURLProtocol.enqueue(json: textResponse("OK"))
+            }
 
-            let url = try #require(URL(string: "https://example.com/image.png"))
-            let output = Prompt { Attachment(imageURL: url) }
+            let url = try #require(URL(string: "https://example.invalid/image.png"))
+            let output = Prompt {
+                "before"
+                Attachment(imageURL: url)
+                "after"
+            }
             let session = LanguageModelSession(
                 model: makeModel(),
                 tools: [ImageOutputTool(output: output)]
             )
 
-            do {
-                _ = try await session.respond(to: "read image")
-                Issue.record("Expected a remote Tool output attachment to be rejected")
-            } catch {
-                #expect(error.localizedDescription.contains("local file URL"))
+            let response =
+                if streaming {
+                    try await session.streamResponse(to: "read image").collect()
+                } else {
+                    try await session.respond(to: "read image")
+                }
+            #expect(response.content == "OK")
+            let bodies = StubURLProtocol.recordedBodies
+            try #require(bodies.count == 2)
+
+            func expectURLText(in body: Data) throws {
+                let responses = try contents(in: body).flatMap { content in
+                    (content["parts"] as? [[String: Any]] ?? []).compactMap {
+                        $0["functionResponse"] as? [String: Any]
+                    }
+                }
+                try #require(responses.count == 1)
+                let functionResponse = try #require(responses.first)
+                let result = try #require(functionResponse["response"] as? [String: Any])
+                #expect(result["result"] as? String == "before\n\(url.absoluteString)\nafter")
+                #expect(functionResponse["parts"] == nil)
             }
+            try expectURLText(in: bodies[1])
+
+            let outputs = session.transcript.compactMap { entry -> Transcript.ToolOutput? in
+                if case .toolOutput(let output) = entry { return output }
+                return nil
+            }
+            let segments = try #require(outputs.first).segments
+            try #require(segments.count == 3)
+            guard case .image(let image) = segments[1] else {
+                Issue.record("The transcript must retain the remote image segment")
+                return
+            }
+            #expect(image.source == .url(url))
+
+            let data = try JSONEncoder().encode(session.transcript)
+            let transcript = try JSONDecoder().decode(Transcript.self, from: data)
+            #expect(transcript == session.transcript)
+            let restored = LanguageModelSession(model: makeModel(), transcript: transcript)
+            if streaming {
+                StubURLProtocol.enqueue(eventStream: [try self.response(parts: [["text": "Replayed"]])])
+                #expect(try await restored.streamResponse(to: "continue").collect().content == "Replayed")
+            } else {
+                StubURLProtocol.enqueue(json: textResponse("Replayed"))
+                #expect(try await restored.respond(to: "continue").content == "Replayed")
+            }
+            let replayBodies = StubURLProtocol.recordedBodies
+            try #require(replayBodies.count == 3)
+            try expectURLText(in: replayBodies[2])
         }
 
         @Test("does not replay the conversation history on later turns")

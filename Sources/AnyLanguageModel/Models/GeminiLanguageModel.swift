@@ -761,7 +761,11 @@ private func toGeminiFunctionResponse(
                     )
                 )
             case .url(let url):
-                parts.append(.inlineData(try geminiFunctionResponseData(from: url)))
+                if url.isFileURL {
+                    parts.append(.inlineData(try geminiFunctionResponseData(from: url)))
+                } else {
+                    resultValues.append(url.absoluteString)
+                }
             }
         }
     }
