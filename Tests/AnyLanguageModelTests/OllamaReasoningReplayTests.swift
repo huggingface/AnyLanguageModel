@@ -88,10 +88,43 @@ struct OllamaReasoningReplayTests {
         #expect(answered["thinking"] as? String == "Greet back.")
         #expect(!messages.contains { $0["role"] as? String == "user" && $0["thinking"] != nil })
     }
-}
 
-/// Answers each request with the next of its scripted replies, as lines of a stream, and keeps
-/// what each request sent.
+    /// Reasoning that no assistant message followed, as a turn that failed or was cancelled leaves
+    /// it with `.preserveTranscript`, isn't sent with the next turn's answer: a prompt or
+    /// instructions start anew.
+    @Test(
+        "reasoning a failed turn left goes back with nothing",
+        arguments: [
+            Transcript.Entry.prompt(.init(segments: [.text(.init(content: "Again"))])),
+            .instructions(.init(segments: [.text(.init(content: "Be brief."))], toolDefinitions: [])),
+        ]
+    )
+    func reasoningAFailedTurnLeftIsntSent(startingAnew: Transcript.Entry) async throws {
+        let transport = ollama([
+            [
+                #"{"model":"m","created_at":"2026-10-16T10:00:00.000Z","message":{"role":"assistant","content":"Fine."},"done":true}"#
+            ]
+        ])
+        let model = OllamaLanguageModel(
+            baseURL: URL(string: "http://localhost:11434")!,
+            model: "m",
+            transport: transport
+        )
+        let transcript = Transcript(entries: [
+            .prompt(.init(segments: [.text(.init(content: "Hi"))])),
+            .reasoning(.init(origin: .ollama, segments: [.text(.init(content: "Left over."))])),
+            startingAnew,
+            .response(.init(assetIDs: [], segments: [.text(.init(content: "Hello."))])),
+        ])
+        let session = LanguageModelSession(model: model, transcript: transcript)
+        _ = try await session.respond(to: "How are you?")
+        let body = try #require(transport.bodies.first)
+        let messages = try #require(
+            (try JSONSerialization.jsonObject(with: body) as? [String: Any])?["messages"] as? [[String: Any]]
+        )
+        #expect(!messages.contains { $0["thinking"] != nil }, "\(messages)")
+    }
+}
 
 /// A transport whose replies are rounds of Ollama's JSON lines.
 private func ollama(_ rounds: [[String]]) -> FakeTransport {

@@ -666,8 +666,13 @@ private extension Transcript {
                 return nil
             }
             var thinking: String?
-            if case .response = entry { (thinking, reasoning) = (reasoning, nil) }
-            if case .toolCalls = entry { (thinking, reasoning) = (reasoning, nil) }
+            switch entry {
+            case .response, .toolCalls: (thinking, reasoning) = (reasoning, nil)
+            // Reasoning no assistant message followed, from a turn that failed or was cancelled,
+            // isn't the next turn's: a prompt or instructions start anew.
+            case .prompt, .instructions: reasoning = nil
+            default: break
+            }
             let role: OllamaMessage.Role
             let segments: [Transcript.Segment]
             switch entry {
