@@ -10,7 +10,7 @@
         public func send<Return>(
             request: HTTPRequest,
             body: Data?,
-            timeout: Duration,
+            timeout: Duration?,
             responseHandler: (HTTPResponse, HTTPResponseBody) async throws -> Return
         ) async throws -> Return {
             guard let scheme = request.scheme, let authority = request.authority, let path = request.path else {
@@ -25,10 +25,16 @@
                 sent.body = .bytes(ByteBuffer(bytes: body))
             }
 
-            let (seconds, attoseconds) = timeout.components
+            // Its shared client has no read timeout, so a request waits at most 180 seconds for its
+            // response to start unless it says otherwise. In nanoseconds, as far as they go: a
+            // timeout too long to count in them has no limit.
+            let (seconds, attoseconds) = (timeout ?? .seconds(180)).components
+            let (nanoseconds, overflowed) = seconds.multipliedReportingOverflow(by: 1_000_000_000)
             let received = try await execute(
                 sent,
-                timeout: .nanoseconds(seconds * 1_000_000_000 + attoseconds / 1_000_000_000)
+                timeout: .nanoseconds(
+                    overflowed ? .max : nanoseconds.addingReportingOverflow(attoseconds / 1_000_000_000).partialValue
+                )
             )
             var fields = HTTPFields()
             for (name, value) in received.headers {

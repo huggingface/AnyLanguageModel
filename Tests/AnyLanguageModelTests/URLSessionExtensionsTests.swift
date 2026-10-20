@@ -9,7 +9,9 @@ import Testing
 
 @testable import AnyLanguageModel
 
-@Suite("URLSession Extensions")
+/// On Linux every request waits its turn at one gate, so tests that send requests run one at a
+/// time, the suites nested in this one too: one holding the gate can't make another's wait fail.
+@Suite("URLSession Extensions", .serialized)
 struct URLSessionExtensionsTests {
     @Test func invalidResponseDescriptionMatchesExpectedText() {
         let error = HTTPTransportError(kind: .invalidResponse)

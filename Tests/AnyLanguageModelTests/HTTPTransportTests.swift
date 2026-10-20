@@ -1,6 +1,11 @@
 import Foundation
 import HTTPTypes
+import HTTPTypesFoundation
 import Testing
+
+#if canImport(AsyncHTTPClient)
+    import AsyncHTTPClient
+#endif
 
 @testable import AnyLanguageModel
 
@@ -68,5 +73,59 @@ struct HTTPTransportTests {
         #expect(error.response?.status == .tooManyRequests)
         #expect(error.response?.headerFields[.retryAfter] == "20")
         #expect(error.body == Data(#"{"error":"slow down"}"#.utf8))
+    }
+
+    /// A transport whose body ends quietly when it's cancelled, as an `AsyncStream` does: what
+    /// arrived isn't read as a whole answer.
+    @Test func aBodyCutShortByCancellingIsntDecoded() async throws {
+        let model = OllamaLanguageModel(
+            baseURL: Self.ollama,
+            model: "m",
+            transport: StalledTransport(sent: #"{"model":"#)
+        )
+        let task = Task { try await LanguageModelSession(model: model).respond(to: "Hi") }
+        try await Task.sleep(for: .milliseconds(200))
+        task.cancel()
+        await #expect(throws: CancellationError.self) { try await task.value }
+    }
+
+    @Test func aStreamedLineThatDoesntDecodeIsADecodingError() async throws {
+        let transport = FakeTransport(replies: [.init(chunks: ["not json\n"])])
+        let model = OllamaLanguageModel(baseURL: Self.ollama, model: "m", transport: transport)
+        let error = try await #require(throws: HTTPTransportError.self) {
+            try await LanguageModelSession(model: model).streamResponse(to: "Hi").collect()
+        }
+        #expect(error.kind == .decodingError)
+        #expect(error.underlyingError is DecodingError)
+    }
+
+    #if canImport(AsyncHTTPClient)
+        /// A timeout too long to count in nanoseconds means no limit, rather than a trap.
+        @Test func aHugeTimeoutDoesntTrap() async throws {
+            let server = try LoopbackServer(.partial(contentLength: 2, body: "{}"))
+            defer { server.stop() }
+            let body = try await HTTPClient.shared.send(
+                request: HTTPRequest(url: server.url),
+                body: nil,
+                timeout: .seconds(Int64.max)
+            ) { _, body in try await body.collect() }
+            #expect(body == Data("{}".utf8))
+        }
+    #endif
+}
+
+/// A transport that sends the start of a body and then nothing, until it's cancelled, when its
+/// body ends quietly, as an `AsyncStream`'s does.
+private struct StalledTransport: HTTPTransport {
+    let sent: String
+
+    func send<Return>(
+        request: HTTPRequest,
+        body: Data?,
+        timeout: Duration?,
+        responseHandler: (HTTPResponse, HTTPResponseBody) async throws -> Return
+    ) async throws -> Return {
+        let chunks = AsyncStream<Data> { continuation in continuation.yield(Data(sent.utf8)) }
+        return try await responseHandler(HTTPResponse(status: .ok), HTTPResponseBody(chunks))
     }
 }

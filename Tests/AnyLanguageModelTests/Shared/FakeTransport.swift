@@ -37,7 +37,7 @@ final class FakeTransport: HTTPTransport {
     func send<Return>(
         request: HTTPRequest,
         body: Data?,
-        timeout: Duration,
+        timeout: Duration?,
         responseHandler: (HTTPResponse, HTTPResponseBody) async throws -> Return
     ) async throws -> Return {
         let reply = state.withLock { state in

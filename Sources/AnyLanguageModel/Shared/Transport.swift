@@ -27,7 +27,8 @@ public protocol HTTPTransport: Sendable {
     ///
     /// A transport keeps to this contract:
     /// - It calls `responseHandler` at most once, with the response to `request`.
-    /// - Cancelling the calling task cancels the request.
+    /// - Cancelling the calling task cancels the request, and `send` throws:
+    ///   a body cut short by cancelling throws as it's read, rather than ending as if it were whole.
     /// - The response's body can be read only in `responseHandler`:
     ///   once it returns, the request is over, and the body can't be read anymore.
     /// - A transport that retries a request doesn't retry it
@@ -36,14 +37,18 @@ public protocol HTTPTransport: Sendable {
     /// - Parameters:
     ///   - request: The request to send.
     ///   - body: What the request sends, if anything.
-    ///   - timeout: How long to wait for the response to start.
+    ///   - timeout: How long to wait for the response to start, or `nil` when the caller didn't
+    ///     say, for the transport to decide.
     ///     The transport decides when that time starts,
     ///     so a request that waits for a free slot before it's sent doesn't use up its deadline.
+    ///     AsyncHTTPClient applies it only until the response starts, and waits 180 seconds without
+    ///     one. A URL session applies it to every pause in the response too, and without one waits
+    ///     as long as its own `timeoutIntervalForRequest`.
     ///   - responseHandler: Reads the response, its body as it arrives.
     func send<Return>(
         request: HTTPRequest,
         body: Data?,
-        timeout: Duration,
+        timeout: Duration?,
         responseHandler: (HTTPResponse, HTTPResponseBody) async throws -> Return
     ) async throws -> Return
 }
@@ -143,7 +148,7 @@ private final class Iterating<Iterator: AsyncIteratorProtocol>: ChunkSource wher
     @available(*, deprecated, message: "Use HTTPTransport, and makeDefaultTransport() for the default.")
     public typealias HTTPSession = HTTPClient
 
-    @available(*, deprecated, renamed: "makeDefaultTransport()")
+    @available(*, deprecated, message: "Use makeDefaultTransport(), which returns any HTTPTransport.")
     public func makeDefaultSession() -> HTTPSession {
         return HTTPClient.shared
     }
@@ -158,7 +163,7 @@ private final class Iterating<Iterator: AsyncIteratorProtocol>: ChunkSource wher
     @available(*, deprecated, message: "Use HTTPTransport, and makeDefaultTransport() for the default.")
     public typealias HTTPSession = URLSession
 
-    @available(*, deprecated, renamed: "makeDefaultTransport()")
+    @available(*, deprecated, message: "Use makeDefaultTransport(), which returns any HTTPTransport.")
     public func makeDefaultSession() -> HTTPSession {
         return URLSession(configuration: .default)
     }

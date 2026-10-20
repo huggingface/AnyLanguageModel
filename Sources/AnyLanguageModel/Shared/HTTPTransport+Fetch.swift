@@ -3,10 +3,15 @@ import Foundation
 import HTTPTypes
 import HTTPTypesFoundation
 
-/// Why a request to a model's provider failed in sending it or in its answer.
+/// Why a request to a model's provider failed: it couldn't be made, its answer wasn't an HTTP
+/// response, the provider answered with an error status, or a successful answer couldn't be read.
 ///
 /// A caller can read an error response's status, headers and body,
 /// for example to wait as its `Retry-After` header says.
+///
+/// A request that fails on the way, such as one the network drops, throws the transport's own
+/// error instead: `URLError` from a URL session, or `HTTPClientError` from AsyncHTTPClient.
+/// So does a cancelled request.
 ///
 /// - Note: This API is exclusive to AnyLanguageModel
 ///   and using it means your code is no longer drop-in compatible
@@ -74,10 +79,12 @@ extension HTTPTransport {
         dateDecodingStrategy: JSONDecoder.DateDecodingStrategy = .deferredToDate
     ) async throws -> T {
         let request = Self.request(request, accepting: "application/json", body: body)
-        let data = try await send(request: request, body: body, timeout: .seconds(180)) { response, body in
+        let data = try await send(request: request, body: body, timeout: nil) { response, body in
             try await Self.validate(response, body)
             return try await body.collect()
         }
+        // A body cut short by cancelling isn't read as a whole one, whichever transport sent it.
+        try Task.checkCancellation()
         let decoder = JSONDecoder()
         decoder.dateDecodingStrategy = dateDecodingStrategy
         do {
@@ -96,18 +103,20 @@ extension HTTPTransport {
         return streaming { continuation in
             let decoder = JSONDecoder()
             decoder.dateDecodingStrategy = dateDecodingStrategy
-            try await send(request: request, body: body, timeout: .seconds(60)) { response, body in
+            try await send(request: request, body: body, timeout: nil) { response, body in
                 try await Self.validate(response, body)
                 // Each line is decoded as it arrives.
                 var lines = JSONLines()
                 for try await chunk in body {
                     try Task.checkCancellation()
                     for line in lines.append(contentsOf: chunk) {
-                        continuation.yield(try decoder.decode(T.self, from: Data(line)))
+                        continuation.yield(try Self.decode(T.self, from: line, with: decoder))
                     }
                 }
+                // What's left is a last line only when the body ended, not when it was cut short.
+                try Task.checkCancellation()
                 if let line = lines.finish() {
-                    continuation.yield(try decoder.decode(T.self, from: Data(line)))
+                    continuation.yield(try Self.decode(T.self, from: line, with: decoder))
                 }
             }
         }
@@ -119,7 +128,7 @@ extension HTTPTransport {
     ) -> AsyncThrowingStream<T, any Error> {
         let request = Self.request(request, accepting: "text/event-stream", body: body)
         return streaming { continuation in
-            try await send(request: request, body: body, timeout: .seconds(60)) { response, body in
+            try await send(request: request, body: body, timeout: nil) { response, body in
                 try await Self.validate(response, body)
                 let decoder = JSONDecoder()
                 for try await event in body.bytes.events {
@@ -159,6 +168,19 @@ extension HTTPTransport {
             request.headerFields[.contentType] = "application/json"
         }
         return request
+    }
+
+    /// A line of a stream as `T`; a line that isn't one is a decoding error, as a whole answer is.
+    private static func decode<T: Decodable>(
+        _ type: T.Type,
+        from line: some Collection<UInt8>,
+        with decoder: JSONDecoder
+    ) throws -> T {
+        do {
+            return try decoder.decode(T.self, from: Data(line))
+        } catch {
+            throw HTTPTransportError(kind: .decodingError, underlyingError: error)
+        }
     }
 
     /// A response that isn't a success fails with what its body says.
