@@ -154,6 +154,18 @@ struct PromptAttachmentTests {
         #expect(try JSONDecoder().decode(AnyLanguageModel.Transcript.self, from: encoded) == transcript)
     }
 
+    @Test(arguments: ["pdf", "txt"])
+    func ordinaryToolRejectsNonImageFiles(fileExtension: String) async throws {
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+            .appendingPathExtension(fileExtension)
+        try Data("Not an image".utf8).write(to: url)
+        defer { try? FileManager.default.removeItem(at: url) }
+        await #expect(throws: (any Error).self) {
+            _ = try await ImageTool(output: AnyLanguageModel.Prompt { AnyLanguageModel.Attachment(imageURL: url) })
+                .makeOutputSegments(from: AnyLanguageModel.GeneratedContent("read"))
+        }
+    }
+
     @Test func ordinaryToolRetainsRemoteImageURLs() async throws {
         let url = try #require(URL(string: "https://example.com/image.png"))
         let segments = try await ImageTool(
