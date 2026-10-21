@@ -548,7 +548,10 @@ public struct AnthropicLanguageModel: LanguageModel, ProfileRequestIdentifiedLan
                             .toolResult(
                                 .init(
                                     toolUseId: invocation.call.id,
-                                    content: try convertSegmentsToAnthropicContent(invocation.output.segments)
+                                    content: try convertSegmentsToAnthropicContent(
+                                        invocation.output.segments,
+                                        isToolOutput: true
+                                    )
                                 )
                             )
                         }
