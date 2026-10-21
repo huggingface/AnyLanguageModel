@@ -157,6 +157,12 @@ public final class LanguageModelSession: @unchecked Sendable {
         /// The tools that the model can call in response to the request.
         public let tools: [any Tool]
 
+        func toolsForExecution(in session: LanguageModelSession, offeredTools: [any Tool]? = nil) -> [any Tool] {
+            (offeredTools ?? tools).map {
+                $0.bindingSessionProperties(session.properties, history: canonicalTranscript)
+            }
+        }
+
         /// The model selected for this request.
         @_spi(Compatibility)
         public let model: any LanguageModel
@@ -365,7 +371,7 @@ public final class LanguageModelSession: @unchecked Sendable {
                 return RequestContext(
                     transcript: Transcript(entries: canonical),
                     instructions: instructions,
-                    tools: tools.map { $0.bindingSessionProperties(properties, history: canonical) },
+                    tools: tools,
                     model: model,
                     options: options,
                     transcriptErrorHandlingPolicy: sessionErrorPolicy,
@@ -393,7 +399,7 @@ public final class LanguageModelSession: @unchecked Sendable {
             return RequestContext(
                 transcript: requestTranscript,
                 instructions: resolved.instructions,
-                tools: resolved.tools.map { $0.bindingSessionProperties(properties, history: canonical) },
+                tools: resolved.tools,
                 model: model,
                 options: options,
                 transcriptErrorHandlingPolicy: sessionErrorPolicy,
@@ -452,7 +458,7 @@ public final class LanguageModelSession: @unchecked Sendable {
         return RequestContext(
             transcript: requestTranscript,
             instructions: resolved.instructions,
-            tools: resolved.tools.map { $0.bindingSessionProperties(properties, history: canonical) },
+            tools: resolved.tools,
             model: resolved.model ?? model,
             options: resolvedOptions,
             contextOptions: .init(
