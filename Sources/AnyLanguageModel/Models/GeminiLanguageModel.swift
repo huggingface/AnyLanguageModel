@@ -750,6 +750,10 @@ private func toGeminiFunctionResponse(
         case .image(let image):
             switch image.source {
             case .data(let data, let mimeType):
+                guard ["image/png", "image/jpeg", "image/webp"].contains(mimeType) else {
+                    resultValues.append("<image>")
+                    continue
+                }
                 parts.append(
                     .inlineData(
                         GeminiInlineData(
@@ -760,7 +764,11 @@ private func toGeminiFunctionResponse(
                 )
             case .url(let url):
                 if url.isFileURL {
-                    parts.append(.inlineData(try geminiFunctionResponseData(from: url)))
+                    if let data = try geminiFunctionResponseData(from: url) {
+                        parts.append(.inlineData(data))
+                    } else {
+                        resultValues.append("<image>")
+                    }
                 } else {
                     resultValues.append(url.absoluteString)
                 }
@@ -779,25 +787,14 @@ private func toGeminiFunctionResponse(
     )
 }
 
-private enum GeminiFunctionResponseAttachmentError: LocalizedError {
-    case unsupportedImageType(URL)
-
-    var errorDescription: String? {
-        switch self {
-        case .unsupportedImageType(let url):
-            "Gemini Tool output attachments support PNG, JPEG, and WebP files; cannot determine a supported MIME type for \(url.lastPathComponent)."
-        }
+private func geminiFunctionResponseData(from url: URL) throws -> GeminiInlineData? {
+    let mimeType: String
+    switch url.pathExtension.lowercased() {
+    case "png": mimeType = "image/png"
+    case "jpg", "jpeg": mimeType = "image/jpeg"
+    case "webp": mimeType = "image/webp"
+    default: return nil
     }
-}
-
-private func geminiFunctionResponseData(from url: URL) throws -> GeminiInlineData {
-    let mimeType =
-        switch url.pathExtension.lowercased() {
-        case "png": "image/png"
-        case "jpg", "jpeg": "image/jpeg"
-        case "webp": "image/webp"
-        default: throw GeminiFunctionResponseAttachmentError.unsupportedImageType(url)
-        }
     return try GeminiInlineData(
         mimeType: mimeType,
         data: Data(contentsOf: url).base64EncodedString()

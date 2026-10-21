@@ -723,7 +723,10 @@ public struct AnthropicLanguageModel: LanguageModel {
                                     .toolResult(
                                         .init(
                                             toolUseId: invocation.call.id,
-                                            content: try convertSegmentsToAnthropicContent(invocation.output.segments)
+                                            content: try convertSegmentsToAnthropicContent(
+                                                invocation.output.segments,
+                                                isToolOutput: true
+                                            )
                                         )
                                     )
                                 )
@@ -1142,7 +1145,10 @@ extension Transcript {
                             .toolResult(
                                 AnthropicToolResult(
                                     toolUseId: toolOutput.id,
-                                    content: try convertSegmentsToAnthropicContent(toolOutput.segments)
+                                    content: try convertSegmentsToAnthropicContent(
+                                        toolOutput.segments,
+                                        isToolOutput: true
+                                    )
                                 )
                             )
                         ]
@@ -1295,7 +1301,10 @@ private extension AnthropicThinking {
     }
 }
 
-private func convertSegmentsToAnthropicContent(_ segments: [Transcript.Segment]) throws -> [AnthropicContent] {
+private func convertSegmentsToAnthropicContent(
+    _ segments: [Transcript.Segment],
+    isToolOutput: Bool = false
+) throws -> [AnthropicContent] {
     var blocks: [AnthropicContent] = []
     blocks.reserveCapacity(segments.count)
     for segment in segments {
@@ -1314,7 +1323,12 @@ private func convertSegmentsToAnthropicContent(_ segments: [Transcript.Segment])
                     case "png": mimeType = "image/png"
                     case "gif": mimeType = "image/gif"
                     case "webp": mimeType = "image/webp"
-                    default: throw AnthropicImageAttachmentError.unsupportedImageType(url)
+                    default:
+                        if isToolOutput {
+                            blocks.append(.text(AnthropicText(text: "<image>")))
+                            continue
+                        }
+                        throw AnthropicImageAttachmentError.unsupportedImageType(url)
                     }
                     blocks.append(
                         .image(
@@ -1328,6 +1342,10 @@ private func convertSegmentsToAnthropicContent(_ segments: [Transcript.Segment])
                     blocks.append(.image(AnthropicImage(url: url.absoluteString)))
                 }
             case .data(let data, let mimeType):
+                if isToolOutput && !["image/jpeg", "image/png", "image/gif", "image/webp"].contains(mimeType) {
+                    blocks.append(.text(AnthropicText(text: "<image>")))
+                    continue
+                }
                 blocks.append(.image(AnthropicImage(base64Data: data.base64EncodedString(), mimeType: mimeType)))
             }
         }
