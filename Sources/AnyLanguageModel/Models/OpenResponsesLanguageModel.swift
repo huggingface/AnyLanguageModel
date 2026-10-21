@@ -510,7 +510,7 @@ public struct OpenResponsesLanguageModel: LanguageModel {
                 do {
                     var inFlightMessages: [OpenResponsesMessage] = []
                     var state = StreamingResponseState<Content>(wrapperProperty: responseSchema.wrapperProperty)
-                    var toolRounds = ToolRoundLimit(provider: "Open Responses", options: options)
+                    let toolRounds = ToolRoundLimit(provider: "Open Responses", options: options)
                     while true {
                         try Task.checkCancellation()
                         let requestContext = session.resolvedRequestContext()
@@ -622,7 +622,7 @@ public struct OpenResponsesLanguageModel: LanguageModel {
         var inFlightMessages: [OpenResponsesMessage] = []
         let url = baseURL.appendingPathComponent("responses")
 
-        var toolRounds = ToolRoundLimit(provider: "Open Responses", options: options)
+        let toolRounds = ToolRoundLimit(provider: "Open Responses", options: options)
         while true {
             let requestContext = session.resolvedRequestContext()
             let tools: [OpenResponsesTool]? =

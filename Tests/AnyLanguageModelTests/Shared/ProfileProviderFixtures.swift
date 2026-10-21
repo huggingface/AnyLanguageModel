@@ -13,6 +13,7 @@ import Testing
             UsageURLProtocol.reset()
             let legacyAnthropic = provider == .anthropic && !streaming && !profile
             let roundsPerTurn = legacyAnthropic ? 1 : 2
+            let observedCalls = Locked<[Transcript.Entry]>([])
             var expectedOutputs: [String] = []
             var expectedRequests: [[String]] = []
             for turn in 0 ..< 2 {
@@ -50,7 +51,7 @@ import Testing
                 session = LanguageModelSession(
                     profile: LanguageModelSession.Profile {
                         Instructions("Repeated call IDs")
-                        ReusedCallIDTool()
+                        ReusedCallIDTool(observedCalls: observedCalls)
                     }
                     .model(provider.makeModel())
                     .historyTransform { entries in
@@ -60,7 +61,7 @@ import Testing
                     }
                 )
             } else {
-                session = provider.makeSession(tools: [ReusedCallIDTool()])
+                session = provider.makeSession(tools: [ReusedCallIDTool(observedCalls: observedCalls)])
             }
             for _ in 0 ..< (legacyAnthropic ? 3 : 2) {
                 if streaming {
@@ -76,6 +77,8 @@ import Testing
             }
             #expect(outputIDs == Array(repeating: "call_0", count: expectedOutputs.count))
             try #require(bodies.count == expectedRequests.count)
+            let committedCalls = session.transcript.filter { if case .toolCalls = $0 { true } else { false } }
+            #expect(observedCalls.withLock { $0 } == committedCalls)
             for (body, outputs) in zip(bodies, expectedRequests) {
                 let json = String(decoding: body, as: UTF8.self)
                 for output in outputs {
@@ -85,11 +88,18 @@ import Testing
         }
 
         struct ReusedCallIDTool: Tool {
+            @SessionProperty(\.history) private var history
+            let observedCalls: Locked<[Transcript.Entry]>
             let name = "getWeather"
             let description = "A deterministic Tool with distinguishable outputs"
             @Generable struct Arguments { let city: String }
 
-            func call(arguments: Arguments) async throws -> String { "OUTPUT:\(arguments.city)" }
+            func call(arguments: Arguments) async throws -> String {
+                if let calls = history.last(where: { if case .toolCalls = $0 { true } else { false } }) {
+                    observedCalls.withLock { $0.append(calls) }
+                }
+                return "OUTPUT:\(arguments.city)"
+            }
         }
 
         func providerProfileReevaluatesBeforeEveryToolContinuation(
@@ -124,6 +134,10 @@ import Testing
                 ]
             )
             #expect(UsageURLProtocol.recordedBodies.count == 2)
+            let committedCalls = try #require(
+                session.transcript.first { if case .toolCalls = $0 { true } else { false } }
+            )
+            #expect(state.observedCallEntries.withLock { $0 } == Array(repeating: committedCalls, count: 3))
             let first = String(decoding: UsageURLProtocol.recordedBodies[0], as: UTF8.self)
             let second = String(decoding: UsageURLProtocol.recordedBodies[1], as: UTF8.self)
             #expect(first.contains("Profile A"))
@@ -423,7 +437,14 @@ import Testing
             let executions = Locked<[String]>([])
             let transformSawOutput = Locked<[Bool]>([])
             let events = Locked<[String]>([])
+            let observedCallEntries = Locked<[Transcript.Entry]>([])
             let selectedRequests = Locked<[SelectedRequest]>([])
+
+            func recordCalls(in history: Transcript.HistoryView) {
+                if let calls = history.last(where: { if case .toolCalls = $0 { true } else { false } }) {
+                    observedCallEntries.withLock { $0.append(calls) }
+                }
+            }
         }
 
         private struct ProviderProfile: LanguageModelSession.DynamicProfile, @unchecked Sendable {
@@ -452,8 +473,14 @@ import Testing
                     .includeSchemaInPrompt(initialSchemaOverride)
                     .temperature(0.2)
                     .historyTransform(transform)
-                    .onToolCall { _ in state.events.withLock { $0.append("call:A") } }
-                    .onToolOutput { _, _ in state.events.withLock { $0.append("output:A") } }
+                    .onToolCall { _ in
+                        state.events.withLock { $0.append("call:A") }
+                        state.recordCalls(in: try #require(SessionPropertyBinding.values).history)
+                    }
+                    .onToolOutput { _, _ in
+                        state.events.withLock { $0.append("output:A") }
+                        state.recordCalls(in: try #require(SessionPropertyBinding.values).history)
+                    }
                 }
             }
 
@@ -578,11 +605,13 @@ import Testing
         }
 
         private struct ProviderProfileWeatherTool: Tool {
+            @SessionProperty(\.history) private var history
             let name = "getWeather"
             let description = "Get weather"
             let state: ProviderProfileState
 
             func call(arguments: WeatherTool.Arguments) async throws -> String {
+                state.recordCalls(in: history)
                 state.executions.withLock { $0.append(arguments.city) }
                 state.events.withLock { $0.append("execute:A") }
                 state.useSecond.withLock { $0 = true }
