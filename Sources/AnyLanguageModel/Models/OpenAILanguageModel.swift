@@ -503,7 +503,7 @@ public struct OpenAILanguageModel: LanguageModel {
         var roundText = ""
         var inFlightMessages: [OpenAIMessage] = []
 
-        var toolRounds = ToolRoundLimit(provider: "OpenAI", options: options)
+        let toolRounds = ToolRoundLimit(provider: "OpenAI", options: options)
         // Loop until no more tool calls
         while true {
             let requestContext = session.resolvedRequestContext()
@@ -555,7 +555,7 @@ public struct OpenAILanguageModel: LanguageModel {
                 try toolRounds.record(completed: entries)
                 let resolution = try await resolveToolCalls(
                     toolCalls,
-                    tools: requestContext.tools,
+                    tools: requestContext.toolsForExecution(in: session),
                     session: session
                 )
                 switch resolution {
@@ -644,7 +644,7 @@ public struct OpenAILanguageModel: LanguageModel {
 
         let url = baseURL.appendingPathComponent("responses")
 
-        var toolRounds = ToolRoundLimit(provider: "OpenAI", options: options)
+        let toolRounds = ToolRoundLimit(provider: "OpenAI", options: options)
         // Loop until no more tool calls
         while true {
             let requestContext = session.resolvedRequestContext()
@@ -686,7 +686,7 @@ public struct OpenAILanguageModel: LanguageModel {
                 try toolRounds.record(completed: entries)
                 let resolution = try await resolveToolCalls(
                     toolCalls,
-                    tools: requestContext.tools,
+                    tools: requestContext.toolsForExecution(in: session),
                     session: session
                 )
                 switch resolution {
@@ -800,7 +800,7 @@ public struct OpenAILanguageModel: LanguageModel {
                 do {
                     var inFlightMessages: [OpenAIMessage] = []
                     var state = StreamingResponseState<Content>(wrapperProperty: responseSchema.wrapperProperty)
-                    var toolRounds = ToolRoundLimit(provider: "OpenAI", options: options)
+                    let toolRounds = ToolRoundLimit(provider: "OpenAI", options: options)
                     while true {
                         try Task.checkCancellation()
                         let requestContext = session.resolvedRequestContext()
@@ -902,7 +902,7 @@ public struct OpenAILanguageModel: LanguageModel {
                         try toolRounds.record(completed: state.entries)
                         switch try await resolveToolCalls(
                             toolCalls,
-                            tools: requestContext.tools,
+                            tools: requestContext.toolsForExecution(in: session),
                             session: session
                         ) {
                         case .stop(let calls):

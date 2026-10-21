@@ -593,19 +593,20 @@ public struct OpenResponsesLanguageModel: LanguageModel, ProfileRequestIdentifie
                         guard !toolCalls.isEmpty else { break }
                         try Task.checkCancellation()
                         try session.recordToolRound(toolRounds, completed: state.entries)
-                        switch try await resolveToolCalls(
+                        let (callsEntry, resolution) = try await resolveToolCalls(
                             toolCalls,
                             requestContext: requestContext,
                             currentRoundEntries: state.entries,
                             session: session
-                        ) {
-                        case .stop(let calls):
-                            state.entries.append(.toolCalls(Transcript.ToolCalls(calls)))
+                        )
+                        switch resolution {
+                        case .stop:
+                            state.entries.append(.toolCalls(callsEntry))
                             continuation.yield(try state.stoppedSnapshot())
                             continuation.finish()
                             return
                         case .invocations(let invocations):
-                            state.entries.append(.toolCalls(Transcript.ToolCalls(invocations.map(\.call))))
+                            state.entries.append(.toolCalls(callsEntry))
                             for invocation in invocations {
                                 state.entries.append(.toolOutput(invocation.output))
                                 inFlightMessages.append(
@@ -709,7 +710,7 @@ public struct OpenResponsesLanguageModel: LanguageModel, ProfileRequestIdentifie
                     }
                 }
                 try session.recordToolRound(toolRounds, completed: entries)
-                let resolution = try await resolveToolCalls(
+                let (callsEntry, resolution) = try await resolveToolCalls(
                     toolCalls,
                     requestContext: requestContext,
                     currentRoundEntries: entries,
@@ -718,7 +719,7 @@ public struct OpenResponsesLanguageModel: LanguageModel, ProfileRequestIdentifie
                 switch resolution {
                 case .stop(let calls):
                     if !calls.isEmpty {
-                        entries.append(.toolCalls(Transcript.ToolCalls(calls)))
+                        entries.append(.toolCalls(callsEntry))
                     }
                     let empty = try emptyResponseContent(for: type)
                     return LanguageModelSession.Response(
@@ -729,7 +730,7 @@ public struct OpenResponsesLanguageModel: LanguageModel, ProfileRequestIdentifie
                     )
                 case .invocations(let invocations):
                     if !invocations.isEmpty {
-                        entries.append(.toolCalls(Transcript.ToolCalls(invocations.map { $0.call })))
+                        entries.append(.toolCalls(callsEntry))
                         for inv in invocations {
                             entries.append(.toolOutput(inv.output))
                             inFlightMessages.append(
@@ -1302,25 +1303,25 @@ private func resolveToolCalls(
     requestContext: LanguageModelSession.RequestContext,
     currentRoundEntries: [Transcript.Entry],
     session: LanguageModelSession
-) async throws -> OpenResponsesToolResolutionOutcome {
-    if toolCalls.isEmpty { return .invocations([]) }
+) async throws -> (calls: Transcript.ToolCalls, outcome: OpenResponsesToolResolutionOutcome) {
     var transcriptCalls: [Transcript.ToolCall] = []
     for c in toolCalls {
         let args = (c.arguments.flatMap { try? GeneratedContent(json: $0) } ?? GeneratedContent(properties: [:]))
         transcriptCalls.append(Transcript.ToolCall(id: c.id, toolName: c.name, arguments: args))
     }
-    guard !transcriptCalls.isEmpty else { return .invocations([]) }
-    let entries = currentRoundEntries + [.toolCalls(.init(transcriptCalls))]
+    let callsEntry = Transcript.ToolCalls(transcriptCalls)
+    let entries = currentRoundEntries + [.toolCalls(callsEntry)]
     switch try await session.resolveProfileToolCalls(
         transcriptCalls,
         requestContext: requestContext,
         currentRoundEntries: entries
     ) {
     case .stop(let calls):
-        return .stop(calls: calls)
+        return (callsEntry, .stop(calls: calls))
     case .invocations(let invocations):
-        return .invocations(
-            invocations.map { .init(call: $0.call, output: $0.output) }
+        return (
+            callsEntry,
+            .invocations(invocations.map { .init(call: $0.call, output: $0.output) })
         )
     }
 }
