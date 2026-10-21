@@ -35,6 +35,16 @@ public struct OpenResponsesLanguageModel: LanguageModel {
     /// reasoning/text options. Use ``extraBody`` for parameters not yet modeled.
     public struct CustomGenerationOptions: AnyLanguageModel.CustomGenerationOptions, Codable, Sendable {
         /// Controls which tool the model should use, if any.
+        ///
+        /// Use ``ToolChoice/function(name:)`` to make the model call a specific function,
+        /// or ``ToolChoice/allowedTools(tools:mode:)``
+        /// to restrict the model to some of the tools.
+        /// To let the model choose whether to call tools,
+        /// to require a tool call, or to prevent tool calls,
+        /// set ``GenerationOptions/toolCallingMode`` instead;
+        /// the cases of ``ToolChoice`` for those modes are deprecated.
+        ///
+        /// When set, it takes precedence over ``GenerationOptions/toolCallingMode``.
         public var toolChoice: ToolChoice?
 
         /// The list of tools that are permitted for this request.
@@ -88,12 +98,21 @@ public struct OpenResponsesLanguageModel: LanguageModel {
 
         /// Controls which tool the model should use, if any.
         /// See [tool_choice](https://www.openresponses.org/reference#tool_choice) in the Open Responses reference.
+        ///
+        /// Use ``function(name:)`` to make the model call a specific function,
+        /// or ``allowedTools(tools:mode:)`` to restrict the model to some of the tools.
+        /// The other cases are deprecated
+        /// in favor of ``GenerationOptions/toolCallingMode``,
+        /// which works with every model that supports tool calling.
         public enum ToolChoice: Hashable, Codable, Sendable {
             /// Restrict the model from calling any tools.
+            @available(*, deprecated, message: "Set `GenerationOptions.toolCallingMode` to `.disallowed` instead.")
             case none
             /// Let the model choose the tools from among the provided set.
+            @available(*, deprecated, message: "Set `GenerationOptions.toolCallingMode` to `.allowed` instead.")
             case auto
             /// Require the model to call a tool.
+            @available(*, deprecated, message: "Set `GenerationOptions.toolCallingMode` to `.required` instead.")
             case required
             /// Require the model to call the named function.
             case function(name: String)
@@ -156,16 +175,13 @@ public struct OpenResponsesLanguageModel: LanguageModel {
                 if let singleValueContainer = try? decoder.singleValueContainer(),
                     let stringValue = try? singleValueContainer.decode(String.self)
                 {
-                    switch stringValue {
-                    case "none": self = .none
-                    case "auto": self = .auto
-                    case "required": self = .required
-                    default:
+                    guard let choice = Self.decodedDeprecatedCase(stringValue) else {
                         throw DecodingError.dataCorruptedError(
                             in: singleValueContainer,
                             debugDescription: "Invalid tool_choice string value: \(stringValue)"
                         )
                     }
+                    self = choice
                     return
                 }
                 let container = try decoder.container(keyedBy: CodingKeys.self)
@@ -553,7 +569,7 @@ public struct OpenResponsesLanguageModel: LanguageModel {
                         try toolRounds.record(completed: state.entries)
                         switch try await resolveToolCalls(
                             toolCalls,
-                            tools: requestContext.tools,
+                            tools: requestContext.toolsForExecution(in: session),
                             session: session
                         ) {
                         case .stop(let calls):
@@ -645,7 +661,7 @@ public struct OpenResponsesLanguageModel: LanguageModel {
                 try toolRounds.record(completed: entries)
                 let resolution = try await resolveToolCalls(
                     toolCalls,
-                    tools: requestContext.tools,
+                    tools: requestContext.toolsForExecution(in: session),
                     session: session
                 )
                 switch resolution {
@@ -808,6 +824,10 @@ private enum OpenResponsesAPI {
 
         if let tools {
             body["tools"] = .array(tools.map { $0.jsonValue })
+            // Sent only with tools. A custom `toolChoice` or `extraBody` overrides it below.
+            if let toolCallingMode = options.toolCallingMode {
+                body["tool_choice"] = .string(toolCallingMode.kind.openAIToolChoice)
+            }
         }
 
         if type != String.self {
@@ -880,6 +900,41 @@ private enum OpenResponsesAPI {
         let message: String?
         let type: String?
         let code: String?
+    }
+}
+
+// MARK: - Deprecated Tool Choices
+
+/// Creates the deprecated cases of the Open Responses tool choice for its decoder.
+///
+/// Swift warns wherever code creates a deprecated enum case,
+/// except in a deprecated declaration.
+/// The decoder must still create these cases,
+/// so it calls a deprecated witness through this protocol's requirement,
+/// which Swift doesn't report.
+private protocol OpenResponsesDeprecatedToolChoices {
+    /// Returns the deprecated case for a string value, if there is one.
+    static func deprecatedCase(_ value: String) -> Self?
+}
+
+extension OpenResponsesDeprecatedToolChoices {
+    /// Returns the deprecated case for a string value, if there is one,
+    /// without a deprecation warning.
+    static func decodedDeprecatedCase(_ value: String) -> Self? {
+        deprecatedCase(value)
+    }
+}
+
+extension OpenResponsesLanguageModel.CustomGenerationOptions.ToolChoice: OpenResponsesDeprecatedToolChoices {
+    @available(*, deprecated)
+    fileprivate static func deprecatedCase(_ value: String) -> Self? {
+        switch value {
+        // `Self.none`, because `.none` here would mean `Optional.none`.
+        case "none": Self.none
+        case "auto": .auto
+        case "required": .required
+        default: nil
+        }
     }
 }
 

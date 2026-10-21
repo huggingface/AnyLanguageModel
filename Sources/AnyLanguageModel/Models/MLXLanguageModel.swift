@@ -1133,7 +1133,9 @@ import Foundation
             // Loop until no more tool calls
             while true {
                 let requestContext = session.resolvedRequestContext()
-                let toolSpecs = mlxToolSpecs(for: requestContext.tools)
+                // MLX has no tool-choice setting.
+                let tools = options.toolsOffered(from: requestContext.tools)
+                let toolSpecs = mlxToolSpecs(for: tools)
                 let chat =
                     convertTranscriptToMLXChat(
                         requestContext: requestContext,
@@ -1199,7 +1201,7 @@ import Foundation
 
                     let resolution = try await resolveToolCalls(
                         collectedToolCalls,
-                        tools: requestContext.tools,
+                        tools: requestContext.toolsForExecution(in: session, offeredTools: tools),
                         session: session
                     )
                     switch resolution {
@@ -1374,7 +1376,9 @@ import Foundation
                         // Loop until the model stops without pending tool calls (mirrors `respond()`).
                         toolLoop: while true {
                             let requestContext = session.resolvedRequestContext()
-                            let toolSpecs = mlxToolSpecs(for: requestContext.tools)
+                            // MLX has no tool-choice setting.
+                            let tools = options.toolsOffered(from: requestContext.tools)
+                            let toolSpecs = mlxToolSpecs(for: tools)
                             let chat =
                                 convertTranscriptToMLXChat(
                                     requestContext: requestContext,
@@ -1440,7 +1444,7 @@ import Foundation
 
                             let resolution = try await resolveToolCalls(
                                 collectedToolCalls,
-                                tools: requestContext.tools,
+                                tools: requestContext.toolsForExecution(in: session, offeredTools: tools),
                                 session: session
                             )
                             switch resolution {

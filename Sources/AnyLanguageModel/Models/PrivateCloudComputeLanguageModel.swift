@@ -130,7 +130,7 @@
             // Attach the feedback to the session's conversation, including its latest response.
             let fmSession = FoundationModels.LanguageModelSession(
                 model: pccModel,
-                tools: requestContext.tools.toFoundationModels(),
+                tools: requestContext.toolsForExecution(in: session).toFoundationModels(),
                 transcript: requestContext.transcript.toFoundationModels(
                     instructions: requestContext.instructions,
                     toolDefinitions: requestContext.tools
