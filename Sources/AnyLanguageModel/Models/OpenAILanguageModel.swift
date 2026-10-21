@@ -581,23 +581,17 @@ public struct OpenAILanguageModel: LanguageModel, ProfileRequestIdentifiedLangua
             let toolCallMessage = choice.message
             if let toolCalls = toolCallMessage.toolCalls, !toolCalls.isEmpty {
                 try session.recordToolRound(toolRounds, completed: entries)
-                let resolution = try await resolveToolCalls(
+                let (callsEntry, resolution) = try await resolveToolCalls(
                     toolCalls,
                     requestContext: requestContext,
                     currentRoundEntries: entries,
+                    providerMetadata: assistantContentMetadata(toolCallMessage.content),
                     session: session
                 )
                 switch resolution {
                 case .stop(let calls):
                     if !calls.isEmpty {
-                        entries.append(
-                            .toolCalls(
-                                Transcript.ToolCalls(
-                                    calls,
-                                    providerMetadata: assistantContentMetadata(toolCallMessage.content)
-                                )
-                            )
-                        )
+                        entries.append(.toolCalls(callsEntry))
                     }
                     let empty = try emptyResponseContent(for: type)
                     return LanguageModelSession.Response(
@@ -608,10 +602,7 @@ public struct OpenAILanguageModel: LanguageModel, ProfileRequestIdentifiedLangua
                     )
                 case .invocations(let invocations):
                     if !invocations.isEmpty {
-                        let calls = Transcript.ToolCalls(
-                            invocations.map(\.call),
-                            providerMetadata: assistantContentMetadata(toolCallMessage.content)
-                        )
+                        let calls = callsEntry
                         entries.append(.toolCalls(calls))
                         inFlightMessages.append(toolCallsMessage(calls))
                         for invocation in invocations {
@@ -736,7 +727,7 @@ public struct OpenAILanguageModel: LanguageModel, ProfileRequestIdentifiedLangua
                     }
                 }
                 try session.recordToolRound(toolRounds, completed: entries)
-                let resolution = try await resolveToolCalls(
+                let (callsEntry, resolution) = try await resolveToolCalls(
                     toolCalls,
                     requestContext: requestContext,
                     currentRoundEntries: entries,
@@ -745,7 +736,7 @@ public struct OpenAILanguageModel: LanguageModel, ProfileRequestIdentifiedLangua
                 switch resolution {
                 case .stop(let calls):
                     if !calls.isEmpty {
-                        entries.append(.toolCalls(Transcript.ToolCalls(calls)))
+                        entries.append(.toolCalls(callsEntry))
                     }
                     let empty = try emptyResponseContent(for: type)
                     return LanguageModelSession.Response(
@@ -756,7 +747,7 @@ public struct OpenAILanguageModel: LanguageModel, ProfileRequestIdentifiedLangua
                     )
                 case .invocations(let invocations):
                     if !invocations.isEmpty {
-                        entries.append(.toolCalls(Transcript.ToolCalls(invocations.map { $0.call })))
+                        entries.append(.toolCalls(callsEntry))
 
                         for invocation in invocations {
                             let output = invocation.output
@@ -976,22 +967,17 @@ public struct OpenAILanguageModel: LanguageModel, ProfileRequestIdentifiedLangua
                         guard !toolCalls.isEmpty else { break }
                         try Task.checkCancellation()
                         try session.recordToolRound(toolRounds, completed: state.entries)
-                        switch try await resolveToolCalls(
+                        let (callsEntry, resolution) = try await resolveToolCalls(
                             toolCalls,
                             requestContext: requestContext,
                             currentRoundEntries: state.entries,
+                            providerMetadata: apiVariant == .chatCompletions
+                                ? assistantContentMetadata(state.text) : nil,
                             session: session
-                        ) {
-                        case .stop(let calls):
-                            state.entries.append(
-                                .toolCalls(
-                                    Transcript.ToolCalls(
-                                        calls,
-                                        providerMetadata: apiVariant == .chatCompletions
-                                            ? assistantContentMetadata(state.text) : nil
-                                    )
-                                )
-                            )
+                        )
+                        switch resolution {
+                        case .stop:
+                            state.entries.append(.toolCalls(callsEntry))
                             continuation.yield(try state.stoppedSnapshot())
                             continuation.finish()
                             return
@@ -1000,11 +986,7 @@ public struct OpenAILanguageModel: LanguageModel, ProfileRequestIdentifiedLangua
                                 continuation.finish()
                                 return
                             }
-                            let calls = Transcript.ToolCalls(
-                                invocations.map(\.call),
-                                providerMetadata: apiVariant == .chatCompletions
-                                    ? assistantContentMetadata(state.text) : nil
-                            )
+                            let calls = callsEntry
                             state.entries.append(.toolCalls(calls))
                             if apiVariant == .chatCompletions {
                                 inFlightMessages.append(toolCallsMessage(calls))
@@ -1889,10 +1871,9 @@ private func resolveToolCalls(
     _ toolCalls: [OpenAIToolCall],
     requestContext: LanguageModelSession.RequestContext,
     currentRoundEntries: [Transcript.Entry],
+    providerMetadata: [String: String]? = nil,
     session: LanguageModelSession
-) async throws -> OpenAIToolResolutionOutcome {
-    if toolCalls.isEmpty { return .invocations([]) }
-
+) async throws -> (calls: Transcript.ToolCalls, outcome: OpenAIToolResolutionOutcome) {
     var transcriptCalls: [Transcript.ToolCall] = []
     transcriptCalls.reserveCapacity(toolCalls.count)
     for call in toolCalls {
@@ -1908,18 +1889,19 @@ private func resolveToolCalls(
         )
     }
 
-    guard !transcriptCalls.isEmpty else { return .invocations([]) }
-    let entries = currentRoundEntries + [.toolCalls(.init(transcriptCalls))]
+    let callsEntry = Transcript.ToolCalls(transcriptCalls, providerMetadata: providerMetadata)
+    let entries = currentRoundEntries + [.toolCalls(callsEntry)]
     switch try await session.resolveProfileToolCalls(
         transcriptCalls,
         requestContext: requestContext,
         currentRoundEntries: entries
     ) {
     case .stop(let calls):
-        return .stop(calls: calls)
+        return (callsEntry, .stop(calls: calls))
     case .invocations(let invocations):
-        return .invocations(
-            invocations.map { .init(call: $0.call, output: $0.output) }
+        return (
+            callsEntry,
+            .invocations(invocations.map { .init(call: $0.call, output: $0.output) })
         )
     }
 }
