@@ -185,14 +185,15 @@ public struct OllamaLanguageModel: LanguageModel, ProfileRequestIdentifiedLangua
 
             if let toolCalls = chatResponse.message.toolCalls, !toolCalls.isEmpty {
                 try session.recordToolRound(toolRounds, completed: entries)
-                switch try await resolveToolCalls(
+                let (callsEntry, resolution) = try await resolveToolCalls(
                     toolCalls,
                     requestContext: requestContext,
                     currentRoundEntries: entries,
                     session: session
-                ) {
-                case .stop(let calls):
-                    entries.append(.toolCalls(.init(calls)))
+                )
+                switch resolution {
+                case .stop:
+                    entries.append(.toolCalls(callsEntry))
                     return .init(
                         content: "" as! Content,
                         rawContent: GeneratedContent(""),
@@ -207,7 +208,7 @@ public struct OllamaLanguageModel: LanguageModel, ProfileRequestIdentifiedLangua
                             toolCalls: try toolCalls.map { try JSONValue($0) }
                         )
                     )
-                    entries.append(.toolCalls(.init(invocations.map(\.call))))
+                    entries.append(.toolCalls(callsEntry))
                     for invocation in invocations {
                         entries.append(.toolOutput(invocation.output))
                         let (text, images) = convertSegmentsToOllama(invocation.output.segments)
@@ -358,14 +359,15 @@ public struct OllamaLanguageModel: LanguageModel, ProfileRequestIdentifiedLangua
                         guard !toolCalls.isEmpty else { break }
                         try Task.checkCancellation()
                         try session.recordToolRound(toolRounds, completed: state.entries)
-                        switch try await resolveToolCalls(
+                        let (callsEntry, resolution) = try await resolveToolCalls(
                             toolCalls,
                             requestContext: requestContext,
                             currentRoundEntries: state.entries,
                             session: session
-                        ) {
-                        case .stop(let calls):
-                            state.entries.append(.toolCalls(Transcript.ToolCalls(calls)))
+                        )
+                        switch resolution {
+                        case .stop:
+                            state.entries.append(.toolCalls(callsEntry))
                             continuation.yield(try state.stoppedSnapshot())
                             continuation.finish()
                             return
@@ -377,7 +379,7 @@ public struct OllamaLanguageModel: LanguageModel, ProfileRequestIdentifiedLangua
                                     toolCalls: try toolCalls.map { try JSONValue($0) }
                                 )
                             )
-                            state.entries.append(.toolCalls(Transcript.ToolCalls(invocations.map(\.call))))
+                            state.entries.append(.toolCalls(callsEntry))
                             for invocation in invocations {
                                 state.entries.append(.toolOutput(invocation.output))
                                 let (text, images) = convertSegmentsToOllama(invocation.output.segments)
@@ -437,11 +439,7 @@ private func resolveToolCalls(
     requestContext: LanguageModelSession.RequestContext,
     currentRoundEntries: [Transcript.Entry],
     session: LanguageModelSession
-) async throws -> ToolResolutionOutcome {
-    if toolCalls.isEmpty {
-        return .invocations([])
-    }
-
+) async throws -> (calls: Transcript.ToolCalls, outcome: ToolResolutionOutcome) {
     var transcriptCalls: [Transcript.ToolCall] = []
     transcriptCalls.reserveCapacity(toolCalls.count)
     for call in toolCalls {
@@ -456,8 +454,8 @@ private func resolveToolCalls(
         )
     }
 
-    guard !transcriptCalls.isEmpty else { return .invocations([]) }
-    let entries = currentRoundEntries + [.toolCalls(.init(transcriptCalls))]
+    let callsEntry = Transcript.ToolCalls(transcriptCalls)
+    let entries = currentRoundEntries + [.toolCalls(callsEntry)]
     switch try await session.resolveProfileToolCalls(
         transcriptCalls,
         requestContext: requestContext,
@@ -465,9 +463,9 @@ private func resolveToolCalls(
         offeredTools: requestContext.options.toolsOffered(from: requestContext.tools)
     ) {
     case .stop(let calls):
-        return .stop(calls: calls)
+        return (callsEntry, .stop(calls: calls))
     case .invocations(let invocations):
-        return .invocations(invocations.map { .init(call: $0.call, output: $0.output) })
+        return (callsEntry, .invocations(invocations.map { .init(call: $0.call, output: $0.output) }))
     }
 }
 

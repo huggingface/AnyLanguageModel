@@ -19,7 +19,7 @@ enum SessionPropertyMode {
 @Suite("Session properties")
 struct SessionPropertyTests {
     @Test(arguments: [false, true])
-    func contextToolsCarryPropertiesIntoDetachedExecution(dynamic: Bool) async throws {
+    func executionToolsCarryPropertiesIntoDetachedExecution(dynamic: Bool) async throws {
         let session =
             dynamic
             ? LanguageModelSession(
@@ -35,7 +35,8 @@ struct SessionPropertyTests {
         session.properties.history = [earlier]
         session.properties.revision = 7
         let context = session.resolvedRequestContext()
-        let tool = try #require(context.tools.first)
+        #expect(context.tools.first is PropertyBoundTool)
+        let tool = try #require(context.toolsForExecution(in: session).first)
         let output = try await Task.detached {
             #expect(SessionPropertyBinding.values == nil)
             return try await tool.makeOutputSegments(from: GeneratedContent("read"))
