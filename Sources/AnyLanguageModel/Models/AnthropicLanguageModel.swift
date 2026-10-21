@@ -489,7 +489,7 @@ public struct AnthropicLanguageModel: LanguageModel {
         if !toolUses.isEmpty {
             let resolution = try await resolveToolUses(
                 toolUses,
-                tools: requestContext.tools,
+                tools: requestContext.toolsForExecution(in: session),
                 session: session
             )
             switch resolution {
@@ -698,7 +698,7 @@ public struct AnthropicLanguageModel: LanguageModel {
                         try toolRounds.record(completed: state.entries)
                         switch try await resolveToolUses(
                             toolUses,
-                            tools: requestContext.tools,
+                            tools: requestContext.toolsForExecution(in: session),
                             session: session
                         ) {
                         case .stop(let calls):

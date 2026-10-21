@@ -151,6 +151,16 @@ public final class LanguageModelSession: @unchecked Sendable {
         /// The tools that the model can call in response to the request.
         public let tools: [any Tool]
 
+        func toolsForExecution(in session: LanguageModelSession) -> [any Tool] {
+            let history = Transcript.HistoryView(
+                transcript.filter {
+                    if case .instructions = $0 { return false }
+                    return true
+                }
+            )
+            return tools.map { $0.bindingSessionProperties(session.properties, history: history) }
+        }
+
         fileprivate init(transcript: Transcript, instructions: Instructions?, tools: [any Tool]) {
             self.transcript = transcript
             self.instructions = instructions
@@ -172,16 +182,10 @@ public final class LanguageModelSession: @unchecked Sendable {
     nonisolated public func resolvedRequestContext() -> RequestContext {
         guard let dynamicInstructions else {
             let transcript = transcript
-            let history = Transcript.HistoryView(
-                transcript.filter {
-                    if case .instructions = $0 { return false }
-                    return true
-                }
-            )
             return RequestContext(
                 transcript: transcript,
                 instructions: instructions,
-                tools: tools.map { $0.bindingSessionProperties(properties, history: history) }
+                tools: tools
             )
         }
 
@@ -211,7 +215,7 @@ public final class LanguageModelSession: @unchecked Sendable {
         return RequestContext(
             transcript: requestTranscript,
             instructions: resolved.instructions,
-            tools: resolved.tools.map { $0.bindingSessionProperties(properties, history: canonicalHistory) }
+            tools: resolved.tools
         )
     }
 

@@ -932,7 +932,7 @@ import Foundation
 
                     let resolution = try await resolveToolCalls(
                         parsedCalls,
-                        tools: requestContext.tools,
+                        tools: requestContext.toolsForExecution(in: session),
                         session: session
                     )
                     switch resolution {
@@ -1194,7 +1194,7 @@ import Foundation
 
                                 let resolution = try await self.resolveToolCalls(
                                     parsedCalls,
-                                    tools: requestContext.tools,
+                                    tools: requestContext.toolsForExecution(in: session),
                                     session: session
                                 )
                                 switch resolution {
