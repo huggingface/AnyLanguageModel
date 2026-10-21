@@ -15,8 +15,12 @@ import Testing
             )
             first.properties.revision = 1
             second.properties.revision = 20
-            let firstTool = try #require(first.resolvedRequestContext().tools.toFoundationModels().first)
-            let secondTool = try #require(second.resolvedRequestContext().tools.toFoundationModels().first)
+            let firstTool = try #require(
+                first.resolvedRequestContext().toolsForExecution(in: first).toFoundationModels().first
+            )
+            let secondTool = try #require(
+                second.resolvedRequestContext().toolsForExecution(in: second).toFoundationModels().first
+            )
 
             let firstCall = Task.detached { try await callNativeTool(firstTool) }
             let secondCall = Task.detached { try await callNativeTool(secondTool) }

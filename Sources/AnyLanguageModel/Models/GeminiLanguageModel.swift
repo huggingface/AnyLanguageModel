@@ -293,7 +293,7 @@ public struct GeminiLanguageModel: LanguageModel {
                 try toolRounds.record(completed: entries)
                 let resolution = try await resolveFunctionCalls(
                     functionCalls,
-                    tools: requestContext.tools,
+                    tools: requestContext.toolsForExecution(in: session),
                     session: session
                 )
                 switch resolution {
@@ -475,7 +475,7 @@ public struct GeminiLanguageModel: LanguageModel {
                         try toolRounds.record(completed: state.entries)
                         switch try await resolveFunctionCalls(
                             functionCalls,
-                            tools: requestContext.tools,
+                            tools: requestContext.toolsForExecution(in: session),
                             session: session
                         ) {
                         case .stop(let calls):

@@ -569,7 +569,7 @@ public struct OpenResponsesLanguageModel: LanguageModel {
                         try toolRounds.record(completed: state.entries)
                         switch try await resolveToolCalls(
                             toolCalls,
-                            tools: requestContext.tools,
+                            tools: requestContext.toolsForExecution(in: session),
                             session: session
                         ) {
                         case .stop(let calls):
@@ -661,7 +661,7 @@ public struct OpenResponsesLanguageModel: LanguageModel {
                 try toolRounds.record(completed: entries)
                 let resolution = try await resolveToolCalls(
                     toolCalls,
-                    tools: requestContext.tools,
+                    tools: requestContext.toolsForExecution(in: session),
                     session: session
                 )
                 switch resolution {

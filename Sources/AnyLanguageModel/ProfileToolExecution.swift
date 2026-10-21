@@ -188,7 +188,8 @@ extension LanguageModelSession {
         }
 
         var toolsByName: [String: any Tool] = [:]
-        for tool in offeredTools ?? requestContext.tools where toolsByName[tool.name] == nil {
+        for tool in requestContext.toolsForExecution(in: self, offeredTools: offeredTools)
+        where toolsByName[tool.name] == nil {
             toolsByName[tool.name] = tool
         }
 
