@@ -377,14 +377,24 @@
     }
 
     #if compiler(>=6.4) && !os(tvOS)
-        /// Dynamic instructions that resolve an AnyLanguageModel session
-        /// each time Foundation Models evaluates them.
+        /// Dynamic instructions that reuse the initial request context and
+        /// resolve the session again for native continuations.
         @available(macOS 27.0, iOS 27.0, visionOS 27.0, watchOS 27.0, *)
-        struct FoundationModelsDynamicInstructionsAdapter: FoundationModels.DynamicInstructions {
+        struct FoundationModelsDynamicInstructionsAdapter: FoundationModels.DynamicInstructions, Sendable {
             let session: LanguageModelSession
+            private let initialContext: Locked<LanguageModelSession.RequestContext?>
+
+            init(session: LanguageModelSession, initialContext: LanguageModelSession.RequestContext? = nil) {
+                self.session = session
+                self.initialContext = Locked(initialContext)
+            }
 
             var body: some FoundationModels.DynamicInstructions {
-                let requestContext = session.resolvedRequestContext()
+                let requestContext =
+                    initialContext.withLock { context in
+                        defer { context = nil }
+                        return context
+                    } ?? session.resolvedRequestContext()
                 if let instructions = requestContext.instructions {
                     instructions.toFoundationModels()
                 }
@@ -399,22 +409,24 @@
             prompt: Prompt
         ) -> FoundationModels.LanguageModelSession {
             if session.usesDynamicInstructions {
+                let initialContext = session.usesDynamicProfile ? session.resolvedRequestContext() : nil
                 // Foundation Models evaluates the dynamic instructions itself,
                 // so the history leaves out the instructions entry.
                 let history = fmTranscriptDroppingDuplicatePrompt(
                     Transcript(
-                        entries: (session.usesDynamicProfile
-                            ? session.resolvedRequestContext().transcript
-                            : session.transcript).filter { entry in
-                                if case .instructions = entry { return false }
-                                return true
-                            }
+                        entries: (initialContext?.transcript ?? session.transcript).filter { entry in
+                            if case .instructions = entry { return false }
+                            return true
+                        }
                     ),
                     prompt: prompt
                 ).toFoundationModels(instructions: nil, toolDefinitions: [])
                 return FoundationModels.LanguageModelSession(
                     model: model,
-                    dynamicInstructions: FoundationModelsDynamicInstructionsAdapter(session: session),
+                    dynamicInstructions: FoundationModelsDynamicInstructionsAdapter(
+                        session: session,
+                        initialContext: initialContext
+                    ),
                     history: history
                 )
             }

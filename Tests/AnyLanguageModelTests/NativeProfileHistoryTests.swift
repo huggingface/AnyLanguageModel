@@ -48,6 +48,44 @@ import Testing
             _ = FoundationModelsDynamicInstructionsAdapter(session: session).body
             #expect(evaluations.withLock { $0 } == 2)
         }
+
+        @Test func nativeProfileConstructionUsesOneContextForHistoryAndInstructions() {
+            guard #available(macOS 27.0, iOS 27.0, visionOS 27.0, *) else { return }
+            let evaluations = Locked(0)
+            let session = AnyLanguageModel.LanguageModelSession(
+                profile: AnyLanguageModel.LanguageModelSession.Profile {
+                    CountingProjectionInstructions(evaluations: evaluations)
+                }
+                .model(MockLanguageModel())
+            )
+            _ = makeFoundationModelsSession(
+                model: FoundationModels.SystemLanguageModel.default,
+                session: session,
+                prompt: AnyLanguageModel.Prompt("Current")
+            )
+            #expect(evaluations.withLock { $0 } == 1)
+        }
+
+        @Test func nativeProfileInitialContextSurvivesDetachedEvaluationWithoutFreezingLaterRequests() async {
+            guard #available(macOS 27.0, iOS 27.0, visionOS 27.0, *) else { return }
+            let evaluations = Locked(0)
+            let session = AnyLanguageModel.LanguageModelSession(
+                profile: AnyLanguageModel.LanguageModelSession.Profile {
+                    CountingProjectionInstructions(evaluations: evaluations)
+                }
+                .model(MockLanguageModel())
+            )
+            let initialContext = session.resolvedRequestContext()
+            let adapter = FoundationModelsDynamicInstructionsAdapter(session: session, initialContext: initialContext)
+            await Task.detached {
+                #expect(AnyLanguageModel.SessionPropertyBinding.values == nil)
+                _ = adapter.body
+            }.value
+            #expect(evaluations.withLock { $0 } == 1)
+
+            await Task.detached { _ = adapter.body }.value
+            #expect(evaluations.withLock { $0 } == 2)
+        }
     }
 
     private struct CountingProjectionInstructions: AnyLanguageModel.DynamicInstructions {
