@@ -277,7 +277,7 @@
             // Attach the feedback to the session's conversation, including its latest response.
             let fmSession = FoundationModels.LanguageModelSession(
                 model: systemModel,
-                tools: requestContext.tools.toFoundationModels(in: session),
+                tools: requestContext.toolsForExecution(in: session).toFoundationModels(in: session),
                 transcript: requestContext.transcript.toFoundationModels(
                     instructions: requestContext.instructions,
                     toolDefinitions: requestContext.tools
@@ -319,7 +319,7 @@
             let requestContext = session.resolvedRequestContext()
             return FoundationModels.LanguageModelSession(
                 model: systemModel,
-                tools: requestContext.tools.toFoundationModels(in: session),
+                tools: requestContext.toolsForExecution(in: session).toFoundationModels(in: session),
                 transcript: fmTranscriptDroppingDuplicatePrompt(
                     requestContext.transcript,
                     prompt: prompt
@@ -388,7 +388,7 @@
                 if let instructions = requestContext.instructions {
                     instructions.toFoundationModels()
                 }
-                requestContext.tools.toFoundationModels(in: session)
+                requestContext.toolsForExecution(in: session).toFoundationModels(in: session)
             }
         }
 
@@ -422,7 +422,7 @@
             let requestContext = session.resolvedRequestContext()
             return FoundationModels.LanguageModelSession(
                 model: model,
-                tools: requestContext.tools.toFoundationModels(in: session),
+                tools: requestContext.toolsForExecution(in: session).toFoundationModels(in: session),
                 transcript: fmTranscriptDroppingDuplicatePrompt(
                     requestContext.transcript,
                     prompt: prompt
