@@ -241,7 +241,7 @@ public struct GeminiLanguageModel: LanguageModel {
         // The text of earlier tool rounds, which string responses include.
         var earlierText = ""
 
-        var toolRounds = ToolRoundLimit(provider: "Gemini", options: options)
+        let toolRounds = ToolRoundLimit(provider: "Gemini", options: options)
         // Multi-turn conversation loop for tool calling
         while true {
             let requestContext = session.resolvedRequestContext()
@@ -293,7 +293,7 @@ public struct GeminiLanguageModel: LanguageModel {
                 try toolRounds.record(completed: entries)
                 let resolution = try await resolveFunctionCalls(
                     functionCalls,
-                    tools: requestContext.tools,
+                    tools: requestContext.toolsForExecution(in: session),
                     session: session
                 )
                 switch resolution {
@@ -419,7 +419,7 @@ public struct GeminiLanguageModel: LanguageModel {
                     let headers = buildHeaders()
                     var inFlightEntries: [Transcript.Entry] = []
                     var state = StreamingResponseState<Content>(wrapperProperty: responseSchema.wrapperProperty)
-                    var toolRounds = ToolRoundLimit(provider: "Gemini", options: options)
+                    let toolRounds = ToolRoundLimit(provider: "Gemini", options: options)
                     while true {
                         try Task.checkCancellation()
                         let requestContext = session.resolvedRequestContext()
@@ -475,7 +475,7 @@ public struct GeminiLanguageModel: LanguageModel {
                         try toolRounds.record(completed: state.entries)
                         switch try await resolveFunctionCalls(
                             functionCalls,
-                            tools: requestContext.tools,
+                            tools: requestContext.toolsForExecution(in: session),
                             session: session
                         ) {
                         case .stop(let calls):

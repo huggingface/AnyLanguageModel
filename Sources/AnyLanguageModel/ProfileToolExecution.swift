@@ -160,6 +160,7 @@ extension LanguageModelSession {
         _ calls: [Transcript.ToolCall],
         requestContext: RequestContext,
         currentRoundEntries: [Transcript.Entry],
+        offeredTools: [any Tool]? = nil,
         missingToolOutput: @Sendable (Transcript.ToolCall) -> [Transcript.Segment] = { call in
             [.text(.init(content: "Tool not found: \(call.toolName)"))]
         }
@@ -187,7 +188,8 @@ extension LanguageModelSession {
         }
 
         var toolsByName: [String: any Tool] = [:]
-        for tool in requestContext.tools where toolsByName[tool.name] == nil {
+        for tool in requestContext.toolsForExecution(in: self, offeredTools: offeredTools)
+        where toolsByName[tool.name] == nil {
             toolsByName[tool.name] = tool
         }
 
