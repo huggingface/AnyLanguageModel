@@ -4,6 +4,25 @@ import Testing
 
 @Suite("Tool continuation history")
 struct ToolContinuationTests {
+    @Test func explicitEmptyOfferedToolsDoesNotExecuteASessionTool() async throws {
+        let calls = Locked(0)
+        let tool = OfferedToolProbe(calls: calls)
+        let session = LanguageModelSession(model: MockLanguageModel(), tools: [tool])
+        let call = Transcript.ToolCall(id: "call_0", toolName: tool.name, arguments: .init("input"))
+        let result = try await session.resolveProfileToolCalls(
+            [call],
+            requestContext: session.resolvedRequestContext(),
+            currentRoundEntries: [.toolCalls(.init([call]))],
+            offeredTools: []
+        )
+        guard case .invocations(let invocations) = result else {
+            Issue.record("Expected the existing missing-tool outcome")
+            return
+        }
+        #expect(calls.withLock { $0 } == 0)
+        #expect(invocations.count == 1)
+    }
+
     @Test func removingDurableParentDoesNotCommitItsPendingOutput() async throws {
         let round = Self.round("pending")
         let session = LanguageModelSession(
@@ -94,5 +113,16 @@ struct ToolContinuationTests {
             if case .toolOutput(let output) = entry { return output }
             return nil
         }
+    }
+}
+
+private struct OfferedToolProbe: Tool {
+    let name = "offeredProbe"
+    let description = "Record unexpected executions"
+    let calls: Locked<Int>
+
+    func call(arguments: String) async throws -> String {
+        calls.withLock { $0 += 1 }
+        return "executed"
     }
 }
