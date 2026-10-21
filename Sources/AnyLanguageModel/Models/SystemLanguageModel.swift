@@ -779,9 +779,17 @@
 
             // Convert straight from the schema's nodes, which keep each object's properties in
             // declaration order: the order the model generates them in.
-            let rootDynamicSchema = convertToDynamicSchema(resolvedSchema.root)
+            // The root's inline objects and choices are named from a name no definition has.
+            let rootName = sequence(first: "Root") { "\($0)_" }.first { resolvedSchema.defs[$0] == nil }!
+            var names = Set(resolvedSchema.defs.keys)
+            let rootDynamicSchema = convertToDynamicSchema(
+                resolvedSchema.root,
+                name: nil,
+                path: rootName,
+                names: &names
+            )
             let dependencies = resolvedSchema.defs.sorted { $0.key < $1.key }.map { name, node in
-                convertToDynamicSchema(node, name: name)
+                convertToDynamicSchema(node, name: name, path: "", names: &names)
             }
             if let schema = try? FoundationModels.GenerationSchema(
                 root: rootDynamicSchema,
@@ -936,13 +944,41 @@
         }
     }
 
+    /// The Foundation Models schema of `node`, named `name`.
     @available(macOS 26.0, iOS 26.0, watchOS 27.0, tvOS 26.0, visionOS 26.0, *)
     func convertToDynamicSchema(
         _ node: AnyLanguageModel.GenerationSchema.Node,
         name: String? = nil
     ) -> FoundationModels.DynamicGenerationSchema {
+        var names: Set<String> = []
+        return convertToDynamicSchema(node, name: name, path: "", names: &names)
+    }
+
+    /// The Foundation Models schema of `node`, named `name`, or by `path`, where it sits in its
+    /// schema, when it's written in place: Foundation Models refers to every object and choice by
+    /// its name, and one with no name refers to nothing.
+    ///
+    /// `names` holds the names already taken. Foundation Models keeps only the first schema with a
+    /// name, so an inline object or choice whose path is taken appends "_" until it's free.
+    @available(macOS 26.0, iOS 26.0, watchOS 27.0, tvOS 26.0, visionOS 26.0, *)
+    private func convertToDynamicSchema(
+        _ node: AnyLanguageModel.GenerationSchema.Node,
+        name: String?,
+        path: String,
+        names: inout Set<String>
+    ) -> FoundationModels.DynamicGenerationSchema {
+        // A definition's inline objects and choices are named from the definition's name, so the
+        // same property in two definitions, or in a definition and the root, names two schemas.
+        func claimName() -> String {
+            guard name == nil, !path.isEmpty else { return name ?? path }
+            let unique = sequence(first: path) { "\($0)_" }.first { !names.contains($0) }!
+            names.insert(unique)
+            return unique
+        }
+        func at(_ base: String, _ step: String) -> String { base.isEmpty ? step : "\(base).\(step)" }
         switch node {
         case .object(let object):
+            let objectName = claimName()
             // Declaration order, then any properties the order doesn't name, sorted.
             let declared = object.propertyOrder.filter { object.properties[$0] != nil }
             let rest = object.properties.keys.filter { !declared.contains($0) }.sorted()
@@ -951,11 +987,11 @@
                 return .init(
                     name: key,
                     description: property.description,
-                    schema: convertToDynamicSchema(property),
+                    schema: convertToDynamicSchema(property, name: nil, path: at(objectName, key), names: &names),
                     isOptional: !object.required.contains(key)
                 )
             }
-            return .init(name: name ?? "", description: object.description, properties: properties)
+            return .init(name: objectName, description: object.description, properties: properties)
 
         case .string(let string):
             if let values = string.enumChoices, !values.isEmpty, let name, !string.isConstant {
@@ -1000,16 +1036,28 @@
                 if !nonNull.isEmpty { choices = nonNull }
             }
             if choices.count == 1 {
-                return convertToDynamicSchema(choices[0], name: name)
+                return convertToDynamicSchema(choices[0], name: name, path: path, names: &names)
             }
-            return .init(name: name ?? "", anyOf: choices.map { convertToDynamicSchema($0) })
+            let choiceName = claimName()
+            return .init(
+                name: choiceName,
+                anyOf: choices.enumerated().map { index, choice in
+                    convertToDynamicSchema(choice, name: nil, path: at(choiceName, String(index)), names: &names)
+                }
+            )
 
         case .array(let array):
-            return .init(
-                arrayOf: convertToDynamicSchema(array.items),
+            // The items of a named array, such as a definition, are named from the array's name.
+            let itemsPath = name.map { at($0, "items") } ?? path
+            let schema = FoundationModels.DynamicGenerationSchema(
+                arrayOf: convertToDynamicSchema(array.items, name: nil, path: itemsPath, names: &names),
                 minimumElements: array.minItems,
                 maximumElements: array.maxItems
             )
+            // An array has no name of its own, so a named one is a one-choice `anyOf` that keeps
+            // the name, or the references to it are undefined.
+            if let name { return .init(name: name, anyOf: [schema]) }
+            return schema
 
         case .ref(let typeName):
             // A named definition that is only a reference, such as a one-choice `anyOf`, keeps its

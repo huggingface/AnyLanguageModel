@@ -129,7 +129,9 @@ public struct OllamaLanguageModel: LanguageModel {
         }
 
         let requestContext = session.resolvedRequestContext()
-        let ollamaTools = try requestContext.tools.map(convertToolToOllamaFormat)
+        // Ollama has no tool-choice setting.
+        let tools = options.toolsOffered(from: requestContext.tools)
+        let ollamaTools = try tools.map(convertToolToOllamaFormat)
         var messages = try requestContext.transcript.toOllamaMessages()
         if messages.isEmpty {
             messages.append(.init(role: .user, content: prompt.description))
@@ -160,7 +162,7 @@ public struct OllamaLanguageModel: LanguageModel {
         if let toolCalls = chatResponse.message.toolCalls, !toolCalls.isEmpty {
             let resolution = try await resolveToolCalls(
                 toolCalls,
-                tools: requestContext.toolsForExecution(in: session),
+                tools: requestContext.toolsForExecution(in: session, offeredTools: tools),
                 session: session
             )
             switch resolution {
@@ -258,7 +260,9 @@ public struct OllamaLanguageModel: LanguageModel {
                     while true {
                         try Task.checkCancellation()
                         let requestContext = session.resolvedRequestContext()
-                        let tools = try requestContext.tools.map(convertToolToOllamaFormat)
+                        // Ollama has no tool-choice setting.
+                        let offeredTools = options.toolsOffered(from: requestContext.tools)
+                        let tools = try offeredTools.map(convertToolToOllamaFormat)
                         var messages = try requestContext.transcript.toOllamaMessages()
                         if messages.isEmpty {
                             messages.append(.init(role: .user, content: prompt.description))
@@ -296,7 +300,7 @@ public struct OllamaLanguageModel: LanguageModel {
                         try toolRounds.record(completed: state.entries)
                         switch try await resolveToolCalls(
                             toolCalls,
-                            tools: requestContext.toolsForExecution(in: session),
+                            tools: requestContext.toolsForExecution(in: session, offeredTools: offeredTools),
                             session: session
                         ) {
                         case .stop(let calls):

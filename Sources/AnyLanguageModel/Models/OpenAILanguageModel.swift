@@ -986,6 +986,10 @@ private enum ChatCompletions {
 
         if let tools {
             body["tools"] = .array(tools.map { $0.jsonValue(for: .chatCompletions) })
+            // Sent only with tools. `extraBody` can override it.
+            if let toolCallingMode = options.toolCallingMode {
+                body["tool_choice"] = .string(toolCallingMode.kind.openAIToolChoice)
+            }
         }
 
         if type != String.self {
@@ -1246,6 +1250,10 @@ private enum Responses {
 
         if let tools {
             body["tools"] = .array(tools.map { $0.jsonValue(for: .responses) })
+            // Sent only with tools. `extraBody` can override it.
+            if let toolCallingMode = options.toolCallingMode {
+                body["tool_choice"] = .string(toolCallingMode.kind.openAIToolChoice)
+            }
         }
 
         if type != String.self {

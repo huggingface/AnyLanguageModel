@@ -151,14 +151,14 @@ public final class LanguageModelSession: @unchecked Sendable {
         /// The tools that the model can call in response to the request.
         public let tools: [any Tool]
 
-        func toolsForExecution(in session: LanguageModelSession) -> [any Tool] {
+        func toolsForExecution(in session: LanguageModelSession, offeredTools: [any Tool]? = nil) -> [any Tool] {
             let history = Transcript.HistoryView(
                 transcript.filter {
                     if case .instructions = $0 { return false }
                     return true
                 }
             )
-            return tools.map { $0.bindingSessionProperties(session.properties, history: history) }
+            return (offeredTools ?? tools).map { $0.bindingSessionProperties(session.properties, history: history) }
         }
 
         fileprivate init(transcript: Transcript, instructions: Instructions?, tools: [any Tool]) {
