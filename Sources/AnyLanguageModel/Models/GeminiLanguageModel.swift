@@ -782,13 +782,10 @@ private func toGeminiFunctionResponse(
 }
 
 private enum GeminiFunctionResponseAttachmentError: LocalizedError {
-    case unsupportedURL(URL)
     case unsupportedImageType(URL)
 
     var errorDescription: String? {
         switch self {
-        case .unsupportedURL(let url):
-            "Gemini Tool output attachments require a local file URL; cannot inline \(url.absoluteString)."
         case .unsupportedImageType(let url):
             "Gemini Tool output attachments support PNG, JPEG, and WebP files; cannot determine a supported MIME type for \(url.lastPathComponent)."
         }
@@ -796,10 +793,6 @@ private enum GeminiFunctionResponseAttachmentError: LocalizedError {
 }
 
 private func geminiFunctionResponseData(from url: URL) throws -> GeminiInlineData {
-    guard url.isFileURL else {
-        throw GeminiFunctionResponseAttachmentError.unsupportedURL(url)
-    }
-
     let mimeType =
         switch url.pathExtension.lowercased() {
         case "png": "image/png"
