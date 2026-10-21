@@ -100,6 +100,20 @@ extension URLSessionExtensionsTests {
             #expect(waited < .milliseconds(Int(expected * 1000) + 1500), "\(waited)")
         }
 
+        /// A streamed response's start timeout too long to wait for at all is no limit to speak of
+        /// through a URL session, rather than a trap on Linux.
+        @Test func aHugeResponseStartTimeoutDoesntTrap() async throws {
+            let server = try LoopbackServer(.partial(contentLength: 2, body: "{}"))
+            defer { server.stop() }
+            let model = OllamaLanguageModel(
+                baseURL: server.url, model: "test", responseStartTimeout: .seconds(Int64.max),
+                transport: URLSession(configuration: .ephemeral))
+            // The body isn't an answer, so it fails, but as a decoding error, not a crash.
+            await #expect(throws: (any Error).self) {
+                try await LanguageModelSession(model: model).streamResponse(to: "Hi").collect()
+            }
+        }
+
         /// A transport the timeout test sends with.
         struct Transport: Sendable, CustomTestStringConvertible {
             let name: String
