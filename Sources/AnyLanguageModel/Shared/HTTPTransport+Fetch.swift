@@ -137,6 +137,8 @@ extension HTTPTransport {
                         continuation.yield(decoded)
                     }
                 }
+                // A body that ended because the request was cancelled isn't the end of the stream.
+                try Task.checkCancellation()
             }
         }
     }

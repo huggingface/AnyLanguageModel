@@ -14,15 +14,9 @@ import HTTPTypesFoundation
     /// `_MultiHandle`, which has a known thread-safety bug that can crash under
     /// concurrent access (`URLSession._MultiHandle.endOperation(for:)`).
     ///
-    /// This gate intentionally allows only one in-flight request setup path at a time on Linux.
-    /// For non-streaming requests, callers typically hold this lock for the entire
-    /// request/response cycle, effectively serializing those operations and reducing
-    /// request-level parallelism (which can lower throughput for heavily concurrent
-    /// workloads).
-    ///
-    /// For streaming requests, callers usually acquire the gate only during initial
-    /// request setup and then release it once the stream has been established; stream
-    /// consumption itself is not serialized by this gate.
+    /// This gate intentionally allows only one request to start at a time on Linux. Every
+    /// request, streamed or not, holds it only until its response head arrives; reading the
+    /// body isn't serialized by it.
     /// Keep this scoped to Linux-only code paths until the upstream issue is resolved.
     ///
     /// See: https://github.com/swiftlang/swift-corelibs-foundation/issues/4791
@@ -118,8 +112,12 @@ extension URLSession: HTTPTransport {
         urlRequest.httpBody = body
         // With URLSession, it's how long to wait for each part of the response. A request's own
         // timeout takes the place of the session's, so it's set only when the caller gave one.
+        // FoundationNetworking schedules it with Dispatch, which counts it in nanoseconds from now
+        // in an `Int` and traps past that, so it's at most about 68 years: no limit to speak of, as
+        // with AsyncHTTPClient.
         if let (seconds, attoseconds) = timeout?.components {
-            urlRequest.timeoutInterval = TimeInterval(seconds) + TimeInterval(attoseconds) / 1e18
+            let interval = TimeInterval(seconds) + TimeInterval(attoseconds) / 1e18
+            urlRequest.timeoutInterval = min(interval, TimeInterval(Int32.max))
         }
 
         let delegate = ResponseChunks()

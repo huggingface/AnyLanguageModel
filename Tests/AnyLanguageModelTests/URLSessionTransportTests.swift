@@ -77,6 +77,19 @@ extension URLSessionExtensionsTests {
             #expect(error?.code == .cancelled)
         }
 
+        /// A timeout too long for FoundationNetworking to count in milliseconds is no limit to
+        /// speak of, rather than a trap.
+        @Test func aHugeTimeoutDoesntTrap() async throws {
+            let server = try LoopbackServer(.partial(contentLength: 2, body: "{}"))
+            defer { server.stop() }
+            let body = try await URLSession(configuration: .ephemeral).send(
+                request: HTTPRequest(url: server.url),
+                body: nil,
+                timeout: .seconds(Int64.max)
+            ) { _, body in try await body.collect() }
+            #expect(body == Data("{}".utf8))
+        }
+
         @Test func aWholeBodyIsRead() async throws {
             let server = try LoopbackServer(.partial(contentLength: 2, body: "{}"))
             defer { server.stop() }
