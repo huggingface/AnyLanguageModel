@@ -125,6 +125,10 @@ struct RequestsUsage: Sendable, Equatable {
 ///
 /// The session sets one around each such response. What a tool or a stream asks of a model runs
 /// with none, so it's never counted for the response that called the tool or made the stream.
+///
+/// It's a task-local, so a model reaches it wherever it runs in the response's task, as when a
+/// model of another library wraps a built-in one and calls it. A `Task {}` made within the response
+/// inherits it, so what it asks of a model counts for the response; `Task.detached` doesn't.
 final class RequestUsageChannel: Sendable {
     @TaskLocal static var current: RequestUsageChannel?
 

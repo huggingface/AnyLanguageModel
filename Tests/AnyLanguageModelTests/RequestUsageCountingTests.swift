@@ -60,6 +60,19 @@ struct RequestUsageCountingTests {
         #expect(session.usage == Self.request)
     }
 
+    /// A model of another library that wraps a built-in one and calls it through `respond`: what
+    /// the built-in model's requests used is counted for the response, once, and kept when the
+    /// wrapper then throws.
+    @Test func aWrappedModelsRequestsAreCountedForTheResponse() async throws {
+        let answered = LanguageModelSession(model: Wrapping(inner: Self.reporting(), thenThrows: false))
+        _ = try await answered.respond(to: "Hi")
+        #expect(answered.usage == Self.request)
+
+        let failed = LanguageModelSession(model: Wrapping(inner: Self.reporting(), thenThrows: true))
+        await #expect(throws: Wrapping.Failure.self) { try await failed.respond(to: "Hi") }
+        #expect(failed.usage == Self.request)
+    }
+
     /// What a tool asks of a model is its own, even when it reaches a provider directly.
     @Test func whatAToolUsesIsntCountedForTheResponseThatCalledIt() async throws {
         let session = LanguageModelSession(
@@ -99,5 +112,40 @@ private struct Lookup: Tool {
             )
         )
         return "Found"
+    }
+}
+
+/// A model as another library would write one: it wraps a built-in model and calls it through
+/// `respond`, then, when `thenThrows`, fails after it.
+private struct Wrapping: LanguageModel {
+    enum Failure: Error { case afterTheWrappedModel }
+
+    let inner: MockLanguageModel
+    let thenThrows: Bool
+
+    var availability: Availability<MockLanguageModel.UnavailableReason> { inner.availability }
+
+    func respond<Content>(
+        within session: LanguageModelSession,
+        to prompt: Prompt,
+        generating type: Content.Type,
+        includeSchemaInPrompt: Bool,
+        options: GenerationOptions
+    ) async throws -> LanguageModelSession.Response<Content> where Content: Generable {
+        let response = try await inner.respond(
+            within: session, to: prompt, generating: type, includeSchemaInPrompt: includeSchemaInPrompt, options: options)
+        if thenThrows { throw Failure.afterTheWrappedModel }
+        return response
+    }
+
+    func streamResponse<Content>(
+        within session: LanguageModelSession,
+        to prompt: Prompt,
+        generating type: Content.Type,
+        includeSchemaInPrompt: Bool,
+        options: GenerationOptions
+    ) -> sending LanguageModelSession.ResponseStream<Content> where Content: Generable {
+        inner.streamResponse(
+            within: session, to: prompt, generating: type, includeSchemaInPrompt: includeSchemaInPrompt, options: options)
     }
 }
