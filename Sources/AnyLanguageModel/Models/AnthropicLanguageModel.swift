@@ -521,14 +521,15 @@ public struct AnthropicLanguageModel: LanguageModel, ProfileRequestIdentifiedLan
                     requestContext: requestContext,
                     currentRoundEntries: entries
                 )
-                switch try await resolveToolUses(
+                let (callsEntry, resolution) = try await resolveToolUses(
                     toolUses,
                     requestContext: requestContext,
                     currentRoundEntries: entries,
                     session: session
-                ) {
-                case .stop(let calls):
-                    entries.append(.toolCalls(.init(calls)))
+                )
+                switch resolution {
+                case .stop:
+                    entries.append(.toolCalls(callsEntry))
                     let empty = try emptyResponseContent(for: type)
                     return .init(
                         content: empty.content,
@@ -537,7 +538,7 @@ public struct AnthropicLanguageModel: LanguageModel, ProfileRequestIdentifiedLan
                         usage: usage
                     )
                 case .invocations(let invocations):
-                    entries.append(.toolCalls(.init(invocations.map(\.call))))
+                    entries.append(.toolCalls(callsEntry))
                     for invocation in invocations {
                         entries.append(.toolOutput(invocation.output))
                     }
@@ -771,20 +772,21 @@ public struct AnthropicLanguageModel: LanguageModel, ProfileRequestIdentifiedLan
                             requestContext: requestContext,
                             currentRoundEntries: state.entries
                         )
-                        switch try await resolveToolUses(
+                        let (callsEntry, resolution) = try await resolveToolUses(
                             toolUses,
                             requestContext: requestContext,
                             currentRoundEntries: state.entries,
                             session: session
-                        ) {
-                        case .stop(let calls):
-                            state.entries.append(.toolCalls(Transcript.ToolCalls(calls)))
+                        )
+                        switch resolution {
+                        case .stop:
+                            state.entries.append(.toolCalls(callsEntry))
                             continuation.yield(try state.stoppedSnapshot())
                             continuation.finish()
                             return
                         case .invocations(let invocations):
                             inFlightMessages.append(.init(role: .assistant, content: content))
-                            state.entries.append(.toolCalls(Transcript.ToolCalls(invocations.map(\.call))))
+                            state.entries.append(.toolCalls(callsEntry))
                             var results: [AnthropicContent] = []
                             for invocation in invocations {
                                 state.entries.append(.toolOutput(invocation.output))
@@ -1039,9 +1041,7 @@ private func resolveToolUses(
     requestContext: LanguageModelSession.RequestContext,
     currentRoundEntries: [Transcript.Entry],
     session: LanguageModelSession
-) async throws -> ToolResolutionOutcome {
-    if toolUses.isEmpty { return .invocations([]) }
-
+) async throws -> (calls: Transcript.ToolCalls, outcome: ToolResolutionOutcome) {
     var transcriptCalls: [Transcript.ToolCall] = []
     transcriptCalls.reserveCapacity(toolUses.count)
     for use in toolUses {
@@ -1056,17 +1056,17 @@ private func resolveToolUses(
         )
     }
 
-    guard !transcriptCalls.isEmpty else { return .invocations([]) }
-    let entries = currentRoundEntries + [.toolCalls(.init(transcriptCalls))]
+    let callsEntry = Transcript.ToolCalls(transcriptCalls)
+    let entries = currentRoundEntries + [.toolCalls(callsEntry)]
     switch try await session.resolveProfileToolCalls(
         transcriptCalls,
         requestContext: requestContext,
         currentRoundEntries: entries
     ) {
     case .stop(let calls):
-        return .stop(calls: calls)
+        return (callsEntry, .stop(calls: calls))
     case .invocations(let invocations):
-        return .invocations(invocations.map { .init(call: $0.call, output: $0.output) })
+        return (callsEntry, .invocations(invocations.map { .init(call: $0.call, output: $0.output) }))
     }
 }
 
