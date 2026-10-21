@@ -299,16 +299,17 @@ public struct GeminiLanguageModel: LanguageModel, ProfileRequestIdentifiedLangua
             if !functionCalls.isEmpty {
                 // Resolve function calls
                 try session.recordToolRound(toolRounds, completed: entries)
-                let resolution = try await resolveFunctionCalls(
+                let (callsEntry, resolution) = try await resolveFunctionCalls(
                     functionCalls,
                     requestContext: requestContext,
                     currentRoundEntries: entries,
+                    providerMetadata: providerMetadata,
                     session: session
                 )
                 switch resolution {
                 case .stop(let calls):
                     if !calls.isEmpty {
-                        entries.append(.toolCalls(Transcript.ToolCalls(calls, providerMetadata: providerMetadata)))
+                        entries.append(.toolCalls(callsEntry))
                     }
                     let empty = try emptyResponseContent(for: type)
                     return LanguageModelSession.Response(
@@ -319,9 +320,7 @@ public struct GeminiLanguageModel: LanguageModel, ProfileRequestIdentifiedLangua
                     )
                 case .invocations(let invocations):
                     if !invocations.isEmpty {
-                        let calls = Transcript.Entry.toolCalls(
-                            Transcript.ToolCalls(invocations.map(\.call), providerMetadata: providerMetadata)
-                        )
+                        let calls = Transcript.Entry.toolCalls(callsEntry)
                         entries.append(calls)
 
                         for invocation in invocations {
@@ -491,21 +490,21 @@ public struct GeminiLanguageModel: LanguageModel, ProfileRequestIdentifiedLangua
                         try Task.checkCancellation()
                         let metadata = try textPartMetadata(parts, includeUnsignedText: true)
                         try session.recordToolRound(toolRounds, completed: state.entries)
-                        switch try await resolveFunctionCalls(
+                        let (callsEntry, resolution) = try await resolveFunctionCalls(
                             functionCalls,
                             requestContext: requestContext,
                             currentRoundEntries: state.entries,
+                            providerMetadata: metadata,
                             session: session
-                        ) {
-                        case .stop(let calls):
-                            state.entries.append(.toolCalls(Transcript.ToolCalls(calls, providerMetadata: metadata)))
+                        )
+                        switch resolution {
+                        case .stop:
+                            state.entries.append(.toolCalls(callsEntry))
                             continuation.yield(try state.stoppedSnapshot())
                             continuation.finish()
                             return
                         case .invocations(let invocations):
-                            let calls = Transcript.Entry.toolCalls(
-                                Transcript.ToolCalls(invocations.map(\.call), providerMetadata: metadata)
-                            )
+                            let calls = Transcript.Entry.toolCalls(callsEntry)
                             state.entries.append(calls)
                             for invocation in invocations {
                                 let output = Transcript.Entry.toolOutput(invocation.output)
@@ -672,10 +671,9 @@ private func resolveFunctionCalls(
     _ functionCalls: [GeminiFunctionCall],
     requestContext: LanguageModelSession.RequestContext,
     currentRoundEntries: [Transcript.Entry],
+    providerMetadata: [String: String]? = nil,
     session: LanguageModelSession
-) async throws -> ToolResolutionOutcome {
-    if functionCalls.isEmpty { return .invocations([]) }
-
+) async throws -> (calls: Transcript.ToolCalls, outcome: ToolResolutionOutcome) {
     var transcriptCalls: [Transcript.ToolCall] = []
     transcriptCalls.reserveCapacity(functionCalls.count)
     for call in functionCalls {
@@ -691,17 +689,17 @@ private func resolveFunctionCalls(
         )
     }
 
-    guard !transcriptCalls.isEmpty else { return .invocations([]) }
-    let entries = currentRoundEntries + [.toolCalls(.init(transcriptCalls))]
+    let callsEntry = Transcript.ToolCalls(transcriptCalls, providerMetadata: providerMetadata)
+    let entries = currentRoundEntries + [.toolCalls(callsEntry)]
     switch try await session.resolveProfileToolCalls(
         transcriptCalls,
         requestContext: requestContext,
         currentRoundEntries: entries
     ) {
     case .stop(let calls):
-        return .stop(calls: calls)
+        return (callsEntry, .stop(calls: calls))
     case .invocations(let invocations):
-        return .invocations(invocations.map { .init(call: $0.call, output: $0.output) })
+        return (callsEntry, .invocations(invocations.map { .init(call: $0.call, output: $0.output) }))
     }
 }
 
