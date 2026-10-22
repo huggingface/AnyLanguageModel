@@ -4,6 +4,22 @@ import Testing
 
 @Suite("Local generation token usage")
 struct LocalGenerationUsageTests {
+    /// A response's rounds, as MLX and llama.cpp count them: the final request is the latest one
+    /// added, and the total adds every request up.
+    @Test func requestsUsageKeepsTheFinalRequestAndTheTotal() {
+        func usage(_ input: Int, _ output: Int) -> LanguageModelSession.Usage {
+            .init(
+                input: .init(totalTokenCount: input, cachedTokenCount: 0),
+                output: .init(totalTokenCount: output, reasoningTokenCount: 0)
+            )
+        }
+        var requests = RequestsUsage()
+        requests.add(usage(10, 2))
+        requests.add(usage(15, 3))
+        #expect(requests.final == usage(15, 3))
+        #expect(requests.total == usage(25, 5))
+    }
+
     @Test(arguments: [0, 4])
     func completePromptIncludesReusedPrefix(cachedTokens: Int) {
         let usage = LocalGenerationUsage(
