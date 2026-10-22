@@ -151,7 +151,12 @@ final class RequestUsageChannel: Sendable {
     }
 
     /// Runs `operation` where no response's requests are counted.
-    static func outside<T>(_ operation: () async throws -> T) async rethrows -> T {
+    ///
+    /// It runs on the caller's executor. Swift 6.4 adds the `nonisolated(nonsending)` overload
+    /// of `withValue` that this calls; earlier versions call the one that takes an isolation.
+    nonisolated(nonsending) static func outside<T>(
+        _ operation: nonisolated(nonsending) () async throws -> T
+    ) async rethrows -> T {
         try await $current.withValue(nil, operation: operation)
     }
 
