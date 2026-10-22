@@ -1,4 +1,6 @@
 import Foundation
+import HTTPTypes
+import HTTPTypesFoundation
 import JSONSchema
 
 #if canImport(FoundationNetworking)
@@ -384,7 +386,7 @@ public struct OpenResponsesLanguageModel: LanguageModel {
     /// Model identifier to use for generation.
     public let model: String
 
-    private let httpSession: HTTPSession
+    private let transport: any HTTPTransport
 
     /// Creates an Open Responses language model.
     ///
@@ -392,12 +394,12 @@ public struct OpenResponsesLanguageModel: LanguageModel {
     ///   - baseURL: Base URL for the API (e.g. `https://api.openai.com/v1/` or `https://openrouter.ai/api/v1/`). Must end with `/`.
     ///   - apiKey: API key or closure that returns it.
     ///   - model: Model identifier (e.g. `gpt-4o-mini` or provider-specific id).
-    ///   - session: The HTTP session or client used for network requests.
+    ///   - transport: How it sends its requests: by default ``makeDefaultTransport()``.
     public init(
         baseURL: URL,
         apiKey tokenProvider: @escaping @autoclosure @Sendable () -> String,
         model: String,
-        session: HTTPSession = makeDefaultSession(),
+        transport: any HTTPTransport = makeDefaultTransport(),
     ) {
         var baseURL = baseURL
         if !baseURL.path.hasSuffix("/") {
@@ -406,7 +408,18 @@ public struct OpenResponsesLanguageModel: LanguageModel {
         self.baseURL = baseURL
         self.tokenProvider = tokenProvider
         self.model = model
-        self.httpSession = session
+        self.transport = transport
+    }
+
+    /// Creates a model that sends its requests with `session`.
+    @available(*, deprecated, renamed: "init(baseURL:apiKey:model:transport:)")
+    public init(
+        baseURL: URL,
+        apiKey tokenProvider: @escaping @autoclosure @Sendable () -> String,
+        model: String,
+        session: HTTPSession
+    ) {
+        self.init(baseURL: baseURL, apiKey: tokenProvider(), model: model, transport: session)
     }
 
     public func respond<Content>(
@@ -529,10 +542,12 @@ public struct OpenResponsesLanguageModel: LanguageModel {
                         )
                         let body = try JSONEncoder().encode(params)
                         let events: AsyncThrowingStream<OpenResponsesStreamEvent, any Error> =
-                            httpSession.fetchEventStream(
-                                .post,
-                                url: url,
-                                headers: ["Authorization": "Bearer \(tokenProvider())"],
+                            transport.fetchEventStream(
+                                HTTPRequest(
+                                    method: .post,
+                                    url: url,
+                                    headerFields: [.authorization: "Bearer \(tokenProvider())"]
+                                ),
                                 body: body
                             )
                         var toolCalls: [OpenResponsesToolCall] = []
@@ -614,7 +629,7 @@ public struct OpenResponsesLanguageModel: LanguageModel {
         // Open Responses follows OpenAI's structured outputs, which need an object root.
         let responseSchema = ProviderResponseSchema(schema, generating: type, wrapping: .nonObjectRoots)
         var entries: [Transcript.Entry] = []
-        var usage = ReportedUsage()
+        var usage = RequestsUsage()
         var text = ""
         // The text of earlier tool rounds, which string responses include.
         var earlierText = ""
@@ -639,10 +654,8 @@ public struct OpenResponsesLanguageModel: LanguageModel {
                 stream: false
             )
             let body = try JSONEncoder().encode(params)
-            let resp: OpenResponsesAPI.Response = try await httpSession.fetch(
-                .post,
-                url: url,
-                headers: ["Authorization": "Bearer \(tokenProvider())"],
+            let resp: OpenResponsesAPI.Response = try await transport.fetch(
+                HTTPRequest(method: .post, url: url, headerFields: [.authorization: "Bearer \(tokenProvider())"]),
                 body: body
             )
 
@@ -674,7 +687,7 @@ public struct OpenResponsesLanguageModel: LanguageModel {
                         content: empty.content,
                         rawContent: empty.rawContent,
                         transcriptEntries: ArraySlice(entries),
-                        usage: usage.value
+                        requests: usage
                     )
                 case .invocations(let invocations):
                     if !invocations.isEmpty {
@@ -705,7 +718,7 @@ public struct OpenResponsesLanguageModel: LanguageModel {
                 content: text as! Content,
                 rawContent: GeneratedContent(text),
                 transcriptEntries: ArraySlice(entries),
-                usage: usage.value
+                requests: usage
             )
         }
         if let jsonString = extractJSONFromOutput(lastOutput) {
@@ -715,7 +728,7 @@ public struct OpenResponsesLanguageModel: LanguageModel {
                 content: content,
                 rawContent: generatedContent,
                 transcriptEntries: ArraySlice(entries),
-                usage: usage.value
+                requests: usage
             )
         }
         throw OpenResponsesLanguageModelError.noResponseGenerated

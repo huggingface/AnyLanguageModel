@@ -311,23 +311,21 @@ struct ConstrainedJSONGenerator<Backend: TokenBackend> {
 
     private func maxNumberTokens(for node: GenerationSchema.NumberNode) -> Int {
         var limit =
-            node.integerOnly
+            node.isInteger
             ? Self.maxIntegerTokenLimit
             : Self.maxDecimalTokenLimit
 
-        if node.integerOnly, let minimum = node.minimum, let maximum = node.maximum {
-            let maxAbs = max(abs(minimum), abs(maximum))
-            if maxAbs.isFinite, maxAbs <= Double(Int64.max) {
-                let digits = max(1, String(Int64(maxAbs.rounded(.down))).count)
-                limit = max(limit, digits + 1)
-            }
+        // Room for the longest integer the bounds allow, its sign included.
+        if case .integer(_, .closed(let range)) = node {
+            let digits = max(String(range.lowerBound.magnitude).count, String(range.upperBound.magnitude).count)
+            limit = max(limit, digits + 1)
         }
 
         return min(backend.remainingTokens, limit)
     }
 
     private mutating func generateNumber(_ node: GenerationSchema.NumberNode) async throws -> String {
-        let allowedTokens = node.integerOnly ? integerTerminators : doubleTerminators
+        let allowedTokens = node.isInteger ? integerTerminators : doubleTerminators
         let numericTokens = allowedTokens.subtracting(basicTerminators)
         var result = ""
         let maxTokens = maxNumberTokens(for: node)
@@ -358,25 +356,26 @@ struct ConstrainedJSONGenerator<Backend: TokenBackend> {
     }
 
     private func validateNumberString(_ text: String, node: GenerationSchema.NumberNode) throws -> String {
-        if node.integerOnly {
+        switch node {
+        case .integer(_, let bounds):
             guard let value = Int(text) else {
                 throw ConstrainedGenerationError.numberOutOfRange("Invalid integer: \(text)")
             }
-            if let minimum = node.minimum, Double(value) < minimum {
+            if let minimum = bounds.minimum, value < minimum {
                 throw ConstrainedGenerationError.numberOutOfRange("Integer \(value) is below minimum \(minimum)")
             }
-            if let maximum = node.maximum, Double(value) > maximum {
+            if let maximum = bounds.maximum, value > maximum {
                 throw ConstrainedGenerationError.numberOutOfRange("Integer \(value) exceeds maximum \(maximum)")
             }
             return text
-        } else {
+        case .floatingPoint(_, let bounds):
             guard let value = Double(text), !value.isNaN, value.isFinite else {
                 throw ConstrainedGenerationError.numberOutOfRange("Invalid number: \(text)")
             }
-            if let minimum = node.minimum, value < minimum {
+            if let minimum = bounds.minimum, value < minimum {
                 throw ConstrainedGenerationError.numberOutOfRange("Number \(value) is below minimum \(minimum)")
             }
-            if let maximum = node.maximum, value > maximum {
+            if let maximum = bounds.maximum, value > maximum {
                 throw ConstrainedGenerationError.numberOutOfRange("Number \(value) exceeds maximum \(maximum)")
             }
             return text
@@ -911,7 +910,7 @@ struct ConstrainedJSONGenerator<Backend: TokenBackend> {
             return tokensPrefixing(anyOf: ["null"])
         case .number(let numberNode):
             let numeric =
-                numberNode.integerOnly
+                numberNode.isInteger
                 ? integerTerminators.subtracting(basicTerminators)
                 : doubleTerminators.subtracting(basicTerminators)
             // Only tokens that can start a number (digit or minus — not a bare `.`).
