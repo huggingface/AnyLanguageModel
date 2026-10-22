@@ -616,8 +616,20 @@ A provider can emit `Transcript.Entry.reasoning` through the existing cumulative
 contains a stable `id`, display `segments`, opaque `signature: Data?`, and metadata.
 Treat successive snapshots as updates to the same entries, not new history rows.
 
-The built-in Anthropic provider populates these entries for thinking and redacted
-thinking, in streaming and nonstreaming responses, including tool rounds:
+Three built-in providers populate these entries
+in streaming and nonstreaming responses,
+and send them back to the model in later tool rounds
+and when a session replays its transcript:
+
+- `AnthropicLanguageModel`, for thinking and redacted thinking.
+- `OllamaLanguageModel`, for a model's `thinking`.
+- `OpenAILanguageModel` with the Chat Completions API,
+  for `reasoning_content` (DeepSeek)
+  or `reasoning` and `reasoning_details` (OpenRouter and Vercel AI Gateway).
+  Hosts that serve Chat Completions don't agree on these fields,
+  so an entry goes back only in requests to the host that wrote it.
+
+For example, with Anthropic:
 
 ```swift
 let model = AnthropicLanguageModel(apiKey: apiKey, model: modelID)
@@ -642,9 +654,10 @@ let savedTranscript = try JSONEncoder().encode(session.transcript)
 Choose an Anthropic model and thinking budget that support this configuration.
 Redacted thinking has no display segments. Signatures and metadata are opaque
 replay state; preserve them with the transcript, and do not display them as text.
-The Anthropic adapter can replay its own reasoning entries after Codable restoration.
-When switching providers, adapters that cannot replay reasoning omit those entries
-from their requests; Anthropic likewise skips reasoning from other providers.
+Each of these providers replays only its own reasoning entries,
+including after Codable restoration,
+and skips reasoning from other providers.
+Providers that can't replay reasoning omit those entries from their requests.
 The original reasoning remains in the transcript for display and persistence.
 Anthropic still validates its own replay signatures. CoreML keeps its existing
 prompt-only behavior and does not send transcript history. For structured scalar outputs that
@@ -901,6 +914,11 @@ say which API they follow.
 - `Transcript.Entry.reasoning` and `Transcript.Reasoning`:
   [reasoning in the transcript](#reasoning-in-the-transcript),
   which follows the Foundation Models 27 API.
+- `GenerationOptions.maximumToolRounds` and `LanguageModelSession.ToolRoundLimitExceeded`:
+  the most rounds of tool calls one response may take,
+  and the error that ends a response past it.
+- `responseStartTimeout` on remote models:
+  how long a [streamed request](#http-transport) waits for its response to start.
 - Public initializers for `Response`, `ResponseStream`, `ResponseStream.Snapshot`,
   `GenerationGuide`, and `LanguageModelFeedback`,
   for language models defined outside AnyLanguageModel.
