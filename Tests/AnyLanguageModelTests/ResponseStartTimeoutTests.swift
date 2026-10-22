@@ -106,12 +106,17 @@ extension URLSessionExtensionsTests {
             let server = try LoopbackServer(.partial(contentLength: 2, body: "{}"))
             defer { server.stop() }
             let model = OllamaLanguageModel(
-                baseURL: server.url, model: "test", responseStartTimeout: .seconds(Int64.max),
-                transport: URLSession(configuration: .ephemeral))
-            // The body isn't an answer, so it fails, but as a decoding error, not a crash.
-            await #expect(throws: (any Error).self) {
+                baseURL: server.url,
+                model: "test",
+                responseStartTimeout: .seconds(Int64.max),
+                transport: URLSession(configuration: .ephemeral)
+            )
+            // The body isn't an answer, so it fails, but as a decoding error: the request was sent
+            // and its response read, with no trap and no timeout.
+            let error = await #expect(throws: HTTPTransportError.self) {
                 try await LanguageModelSession(model: model).streamResponse(to: "Hi").collect()
             }
+            #expect(error?.kind == .decodingError)
         }
 
         /// A transport the timeout test sends with.
