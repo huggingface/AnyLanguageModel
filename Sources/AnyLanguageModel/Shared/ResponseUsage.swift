@@ -222,8 +222,8 @@ extension LanguageModelSession.ResponseStream.Snapshot {
                 (try? GeneratedContent(json: text)) ?? GeneratedContent(text),
                 fromProperty: wrapperProperty
             )
-            guard let content = try? Content(raw) else { return nil }
-            self.init(content: content.asPartiallyGenerated(), rawContent: raw, requests: requests)
+            guard let content = try? Content.PartiallyGenerated(raw) else { return nil }
+            self.init(content: content, rawContent: raw, requests: requests)
         }
     }
 }

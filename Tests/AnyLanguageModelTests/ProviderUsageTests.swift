@@ -262,22 +262,24 @@ import Testing
             }
 
             func stream(text: String = "Hello", includeUsage: Bool = true) throws -> String {
+                try stream(chunks: [text], includeUsage: includeUsage)
+            }
+
+            /// A stream that sends the response text in `chunks`, one event each.
+            func stream(chunks: [String], includeUsage: Bool = true) throws -> String {
+                let text = chunks.joined()
                 var events: [[String: Any]]
                 switch self {
                 case .chat:
-                    events = [
-                        ["id": "test", "choices": [["delta": ["content": text]]]],
-                        ["id": "test", "choices": [["delta": [:], "finish_reason": "stop"]]],
-                    ]
+                    events = chunks.map { ["id": "test", "choices": [["delta": ["content": $0]]]] }
+                    events.append(["id": "test", "choices": [["delta": [:], "finish_reason": "stop"]]])
                     if includeUsage { events.append(["id": "test", "choices": [], "usage": counts]) }
                 case .responses, .openResponses:
-                    events = [
-                        ["type": "response.output_text.delta", "delta": text],
-                        [
-                            "type": "response.completed",
-                            "response": response(text: text, counts: includeUsage ? counts : nil),
-                        ],
-                    ]
+                    events = chunks.map { ["type": "response.output_text.delta", "delta": $0] }
+                    events.append([
+                        "type": "response.completed",
+                        "response": response(text: text, counts: includeUsage ? counts : nil),
+                    ])
                 case .anthropic:
                     var startCounts = counts
                     startCounts["output_tokens"] = 0
@@ -285,9 +287,13 @@ import Testing
                         [
                             "type": "message_start",
                             "message": response(text: "", counts: includeUsage ? startCounts : nil),
-                        ],
-                        ["type": "content_block_delta", "index": 0, "delta": ["type": "text_delta", "text": text]],
+                        ]
                     ]
+                    for chunk in chunks {
+                        events.append([
+                            "type": "content_block_delta", "index": 0, "delta": ["type": "text_delta", "text": chunk],
+                        ])
+                    }
                     for output in [7, 20] {
                         var delta: [String: Any] = ["type": "message_delta", "delta": ["stop_reason": "end_turn"]]
                         if includeUsage { delta["usage"] = ["output_tokens": output] }
@@ -298,14 +304,17 @@ import Testing
                     var early = counts
                     early["candidatesTokenCount"] = 7
                     early["totalTokenCount"] = 122
-                    events = [response(text: text, counts: includeUsage ? early : nil)]
+                    events = chunks.map { response(text: $0, counts: includeUsage ? early : nil) }
                     if includeUsage { events.append(["usageMetadata": counts]) }
                 case .ollama:
-                    var first = response(text: text)
-                    first["done"] = false
+                    events = chunks.map {
+                        var event = response(text: $0)
+                        event["done"] = false
+                        return event
+                    }
                     var last = response(counts: includeUsage ? counts : nil)
                     last["message"] = ["role": "assistant"]
-                    events = [first, last]
+                    events.append(last)
                 }
                 let json = try events.map { try ProviderUsageTests.json($0) }
                 if self == .ollama { return json.joined(separator: "\n") + "\n" }
@@ -562,16 +571,18 @@ import Testing
             UsageURLProtocol.enqueue(json: try provider.toolStream())
             let session = provider.makeSession(tools: [RecordingWeatherTool()])
             session.toolExecutionDelegate = StopDelegate()
-            var snapshotCount = 0
+            var skies: [Sky?] = []
             var thrownError: (any Error)?
             do {
-                for try await _ in session.streamResponse(to: "Weather?", generating: Forecast.self) {
-                    snapshotCount += 1
+                for try await snapshot in session.streamResponse(to: "Weather?", generating: Forecast.self) {
+                    skies.append(snapshot.content.sky)
                 }
             } catch {
                 thrownError = error
             }
-            #expect(snapshotCount == 0)
+            // The round's usage arrives in snapshots without content before the stream throws.
+            #expect(!skies.isEmpty)
+            #expect(skies.allSatisfy { $0 == nil })
             #expect(thrownError as? GeneratedContentError == .typeMismatch)
         }
 
@@ -784,6 +795,46 @@ import Testing
             let collected = try await provider.makeSession().streamResponse(to: "Hi", generating: Answer.self).collect()
             #expect(collected.content.answer == "Hello")
             #expect(collected.usage == provider.expected)
+        }
+
+        @Generable
+        struct Article {
+            var title: String
+            var body: String
+        }
+
+        /// A structured stream sends a snapshot for each chunk,
+        /// before every required property has arrived.
+        @Test(arguments: Provider.allCases)
+        func structuredStreamsSendPartialSnapshots(_ provider: Provider) async throws {
+            UsageURLProtocol.reset()
+            let chunks = ["{\"title\":\"Hel", "lo\",", "\"body\":\"Wo", "rld\"}"]
+            UsageURLProtocol.enqueue(json: try provider.stream(chunks: chunks))
+            var progression: [String] = []
+            var lastUsage: LanguageModelSession.Usage?
+            for try await snapshot in provider.makeSession().streamResponse(to: "Hi", generating: Article.self) {
+                let content: Article.PartiallyGenerated = snapshot.content
+                lastUsage = snapshot.usage
+                guard content.title != nil || content.body != nil else { continue }
+                let step = "\(content.title ?? "-")/\(content.body ?? "-")"
+                if progression.last != step { progression.append(step) }
+            }
+            #expect(progression == ["Hel/-", "Hello/-", "Hello/Wo", "Hello/World"])
+            #expect(lastUsage == provider.expected)
+        }
+
+        /// A usage update that arrives before any structured content still sends a snapshot.
+        @Test(arguments: Provider.allCases)
+        func structuredStreamsSendUsageOnlySnapshots(_ provider: Provider) async throws {
+            UsageURLProtocol.reset()
+            UsageURLProtocol.enqueue(json: try provider.stream(text: ""))
+            var usages: [LanguageModelSession.Usage] = []
+            do {
+                for try await snapshot in provider.makeSession().streamResponse(to: "Hi", generating: Article.self) {
+                    usages.append(snapshot.usage)
+                }
+            } catch {}
+            #expect(usages.last == provider.expected)
         }
 
         @Test(arguments: [Provider.chat, .responses, .openResponses, .gemini])
