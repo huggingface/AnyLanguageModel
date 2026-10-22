@@ -133,7 +133,12 @@ private struct Wrapping: LanguageModel {
         options: GenerationOptions
     ) async throws -> LanguageModelSession.Response<Content> where Content: Generable {
         let response = try await inner.respond(
-            within: session, to: prompt, generating: type, includeSchemaInPrompt: includeSchemaInPrompt, options: options)
+            within: session,
+            to: prompt,
+            generating: type,
+            includeSchemaInPrompt: includeSchemaInPrompt,
+            options: options
+        )
         if thenThrows { throw Failure.afterTheWrappedModel }
         return response
     }
@@ -146,6 +151,11 @@ private struct Wrapping: LanguageModel {
         options: GenerationOptions
     ) -> sending LanguageModelSession.ResponseStream<Content> where Content: Generable {
         inner.streamResponse(
-            within: session, to: prompt, generating: type, includeSchemaInPrompt: includeSchemaInPrompt, options: options)
+            within: session,
+            to: prompt,
+            generating: type,
+            includeSchemaInPrompt: includeSchemaInPrompt,
+            options: options
+        )
     }
 }
