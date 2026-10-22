@@ -53,4 +53,38 @@ struct BoundsTests {
         let share = GenerationSchema.Property(name: "share", type: Double.self, guides: [.minimum(1), .maximum(0.5)])
         #expect(bounds(of: share) == .floatingPoint(description: nil, bounds: .through(0.5)))
     }
+
+    @Generable
+    struct ContradictingGuides {
+        @Guide(.minimum(10), .maximum(5))
+        var count: Int
+
+        @Guide(.maximum(5), .minimum(10))
+        var level: Int
+
+        @Guide(.minimum(1), .maximum(0.5))
+        var share: Double
+
+        @Guide(.minimum(1), .maximum(9))
+        var rating: Int
+    }
+
+    /// `@Generable` gives contradicting guides the bounds that building the schema directly gives them,
+    /// instead of making a range out of order, which traps.
+    @Test func contradictingGuidesThroughTheMacroKeepTheLaterBound() throws {
+        let schema = ContradictingGuides.generationSchema
+        var root = schema.root
+        if case .ref(let name) = root, let definition = schema.defs[name] { root = definition }
+        guard case .object(let object) = root else {
+            Issue.record("Expected an object schema")
+            return
+        }
+        func bounds(of name: String) -> GenerationSchema.NumberNode? {
+            if case .number(let node)? = object.properties[name] { node } else { nil }
+        }
+        #expect(bounds(of: "count") == .integer(description: nil, bounds: .through(5)))
+        #expect(bounds(of: "level") == .integer(description: nil, bounds: .from(10)))
+        #expect(bounds(of: "share") == .floatingPoint(description: nil, bounds: .through(0.5)))
+        #expect(bounds(of: "rating") == .integer(description: nil, bounds: .closed(1 ... 9)))
+    }
 }
