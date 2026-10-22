@@ -264,25 +264,53 @@ import Foundation
             )
         }
 
-        /// An integer's bounds become the whole numbers within them, and a bound no `Int` holds
-        /// sets no guide, rather than trapping.
+        /// An integer's bounds from JSON become the whole numbers within them.
         @available(macOS 26.0, iOS 26.0, watchOS 27.0, tvOS 26.0, visionOS 26.0, *)
-        @Test func convertIntegerBoundsThatIntCannotHold() throws {
+        @Test func integerBoundsFromJSONAreWholeNumbers() throws {
             let schema = try JSONDecoder().decode(
                 AnyLanguageModel.GenerationSchema.self,
-                from: Data(#"{"type": "integer", "minimum": 1.5, "maximum": 1e300}"#.utf8)
+                from: Data(#"{"type": "integer", "minimum": 1.5, "maximum": 9.5}"#.utf8)
             )
+            #expect(schema.root == .number(.integer(description: nil, bounds: .closed(2 ... 9))))
             _ = try FoundationModels.GenerationSchema(root: convertToDynamicSchema(schema.root), dependencies: [])
         }
 
-        /// A stand-in integer is the smallest whole number the minimum allows, and the nearest an
-        /// `Int` can hold when it holds none, rather than trapping.
+        /// A bound no `Int` holds is dropped, and the others still guide the integer.
         @available(macOS 26.0, iOS 26.0, watchOS 27.0, tvOS 26.0, visionOS 26.0, *)
-        @Test(arguments: [(1.5, 2.0), (1e300, Double(Int.max)), (-1e300, 0.0), (-Double.infinity, 0.0)])
-        func standInIntegerFromItsMinimum(minimum: Double, expected: Double) {
-            let node = AnyLanguageModel.GenerationSchema.Node.number(
-                .init(description: nil, minimum: minimum, maximum: nil, integerOnly: true)
-            )
+        @Test(arguments: [
+            (#"{"type": "integer", "minimum": 1.5, "maximum": 1e300}"#, Bounds<Int>.from(2)),
+            (#"{"type": "integer", "minimum": -1e300, "maximum": 9.5}"#, .through(9)),
+            (#"{"type": "integer", "minimum": 1e300}"#, .unbounded),
+        ])
+        func integerBoundsIntCannotHoldAreDropped(json: String, bounds: Bounds<Int>) throws {
+            let schema = try JSONDecoder().decode(AnyLanguageModel.GenerationSchema.self, from: Data(json.utf8))
+            #expect(schema.root == .number(.integer(description: nil, bounds: bounds)))
+            _ = try FoundationModels.GenerationSchema(root: convertToDynamicSchema(schema.root), dependencies: [])
+        }
+
+        /// Bounds that contradict each other, with no whole number or no number between them,
+        /// aren't a schema.
+        @Test(arguments: [
+            #"{"type": "integer", "minimum": 5, "maximum": 1}"#,
+            #"{"type": "integer", "minimum": 2.5, "maximum": 2.7}"#,
+            #"{"type": "number", "minimum": 3, "maximum": 1}"#,
+            // Out of order before an integer's bound no `Int` can hold is dropped.
+            #"{"type": "integer", "minimum": 1e300, "maximum": 5}"#,
+            #"{"type": "integer", "minimum": 1e301, "maximum": 1e300}"#,
+        ])
+        func impossibleBoundsFromJSONDontDecode(json: String) {
+            #expect(throws: DecodingError.self) {
+                try JSONDecoder().decode(AnyLanguageModel.GenerationSchema.self, from: Data(json.utf8))
+            }
+        }
+
+        /// A stand-in number is the value within its bounds closest to zero.
+        @available(macOS 26.0, iOS 26.0, watchOS 27.0, tvOS 26.0, visionOS 26.0, *)
+        @Test(arguments: [
+            (Bounds<Int>.unbounded, 0.0), (.from(5), 5.0), (.through(-3), -3.0), (.closed(2 ... 4), 2.0),
+        ])
+        func standInIntegerIsWithinItsBounds(bounds: Bounds<Int>, expected: Double) {
+            let node = AnyLanguageModel.GenerationSchema.Node.number(.integer(description: nil, bounds: bounds))
             #expect(placeholderGeneratedContent(from: node, defs: [:]).kind == .number(expected))
         }
 

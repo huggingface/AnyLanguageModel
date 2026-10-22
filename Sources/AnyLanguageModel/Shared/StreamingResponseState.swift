@@ -3,8 +3,10 @@ struct StreamingResponseState<Content: Generable> {
     /// The text of the current round, which providers replay as that round's assistant message.
     var text = ""
     var entries: [Transcript.Entry] = []
+    /// The current round's usage.
     var usage = ReportedUsage()
-    private var completedUsage = LanguageModelSession.Usage.zero
+    /// The usage of the rounds before the current one.
+    private var earlierRequests = RequestsUsage()
 
     /// The property that holds the response, if the provider's response schema wraps it.
     let wrapperProperty: String?
@@ -21,10 +23,11 @@ struct StreamingResponseState<Content: Generable> {
     /// because text from separate rounds doesn't form one JSON value.
     private var earlierText = ""
 
-    var totalUsage: LanguageModelSession.Usage {
-        var total = completedUsage
-        total.add(usage.value)
-        return total
+    /// The usage of each round's request so far, the current one's last.
+    var requests: RequestsUsage {
+        var requests = earlierRequests
+        requests.add(usage.value)
+        return requests
     }
 
     /// The response text so far.
@@ -36,7 +39,7 @@ struct StreamingResponseState<Content: Generable> {
         guard
             var snapshot = LanguageModelSession.ResponseStream<Content>.Snapshot(
                 text: responseText,
-                usage: totalUsage,
+                requests: requests,
                 wrapperProperty: wrapperProperty
             )
         else { return nil }
@@ -63,14 +66,14 @@ struct StreamingResponseState<Content: Generable> {
                 content: content.asPartiallyGenerated(),
                 rawContent: raw,
                 transcriptEntries: ArraySlice(entries),
-                usage: totalUsage
+                requests: requests
             )
         }
         throw GeneratedContentError.typeMismatch
     }
 
     mutating func beginNextRound() {
-        completedUsage.add(usage.value)
+        earlierRequests.add(usage.value)
         usage = ReportedUsage()
         earlierText = responseText
         text = ""
