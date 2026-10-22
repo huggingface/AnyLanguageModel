@@ -156,7 +156,9 @@ import Testing
             if streaming {
                 UsageURLProtocol.enqueue(json: try provider.toolStream())
             } else {
-                UsageURLProtocol.enqueue(json: try Self.json(provider.response(text: "", tool: true)))
+                UsageURLProtocol.enqueue(
+                    json: try Self.json(provider.response(text: "", counts: provider.counts, tool: true))
+                )
             }
             let state = ProviderProfileState()
             let session = LanguageModelSession(
@@ -173,6 +175,8 @@ import Testing
                 : session.respond(to: "Weather?")
 
             #expect(response.content == "Switched")
+            #expect(response.usage == .zero)
+            #expect(session.usage == provider.expected)
             #expect(UsageURLProtocol.recordedBodies.count == 1)
             #expect(response.transcriptEntries.contains { if case .toolCalls = $0 { true } else { false } })
             #expect(response.transcriptEntries.contains { if case .toolOutput = $0 { true } else { false } })

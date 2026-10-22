@@ -5,8 +5,8 @@ import class Foundation.NSDecimalNumber
 public struct GenerationGuide<Value>: Sendable {
     var minimumCount: Int?
     var maximumCount: Int?
-    var minimum: Double?
-    var maximum: Double?
+    var minimum: Bound?
+    var maximum: Bound?
     var stringChoices: [String]?
     var isConstant = false
 
@@ -22,9 +22,20 @@ public struct GenerationGuide<Value>: Sendable {
         self.maximumCount = maximumCount
     }
 
+    /// A number guide's bound, kept as the type it was given in: an `Int` guide's bounds are integers.
+    enum Bound: Sendable, Equatable {
+        case integer(Int)
+        case floatingPoint(Double)
+    }
+
+    init(minimum: Int?, maximum: Int?) {
+        self.minimum = minimum.map(Bound.integer)
+        self.maximum = maximum.map(Bound.integer)
+    }
+
     init(minimum: Double?, maximum: Double?) {
-        self.minimum = minimum
-        self.maximum = maximum
+        self.minimum = minimum.map(Bound.floatingPoint)
+        self.maximum = maximum.map(Bound.floatingPoint)
     }
 
     init(stringChoices: [String], isConstant: Bool) {
@@ -95,7 +106,7 @@ extension GenerationGuide where Value == Int {
     /// }
     /// ```
     public static func minimum(_ value: Int) -> GenerationGuide<Int> {
-        GenerationGuide<Int>(minimum: Double(value), maximum: nil)
+        GenerationGuide<Int>(minimum: value, maximum: nil)
     }
 
     /// Enforces a maximum value.
@@ -115,7 +126,7 @@ extension GenerationGuide where Value == Int {
     /// }
     /// ```
     public static func maximum(_ value: Int) -> GenerationGuide<Int> {
-        GenerationGuide<Int>(minimum: nil, maximum: Double(value))
+        GenerationGuide<Int>(minimum: nil, maximum: value)
     }
 
     /// Enforces values fall within a range.
@@ -135,7 +146,7 @@ extension GenerationGuide where Value == Int {
     /// }
     /// ```
     public static func range(_ range: ClosedRange<Int>) -> GenerationGuide<Int> {
-        GenerationGuide<Int>(minimum: Double(range.lowerBound), maximum: Double(range.upperBound))
+        GenerationGuide<Int>(minimum: range.lowerBound, maximum: range.upperBound)
     }
 }
 

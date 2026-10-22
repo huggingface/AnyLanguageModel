@@ -64,11 +64,9 @@ struct StructuredGenerationTests {
 
     @Test func numberOutOfRangeThrows() async throws {
         let maps = baseTokenMaps()
-        let numberNode = GenerationSchema.NumberNode(
+        let numberNode = GenerationSchema.NumberNode.integer(
             description: nil,
-            minimum: 0,
-            maximum: 10,
-            integerOnly: true
+            bounds: Bounds<Int>(minimum: 0, maximum: 10)!
         )
         let schema = GenerationSchema.primitive(Int.self, node: .number(numberNode))
         let eosToken = 50
@@ -284,11 +282,9 @@ struct StructuredGenerationTests {
 
     @Test func negativeIntegerWithinRange() async throws {
         let maps = baseTokenMaps()
-        let numberNode = GenerationSchema.NumberNode(
+        let numberNode = GenerationSchema.NumberNode.integer(
             description: nil,
-            minimum: -10,
-            maximum: 0,
-            integerOnly: true
+            bounds: Bounds<Int>(minimum: -10, maximum: 0)!
         )
         let schema = GenerationSchema.primitive(Int.self, node: .number(numberNode))
         let eosToken = 50
@@ -310,11 +306,9 @@ struct StructuredGenerationTests {
 
     @Test func decimalOutOfRangeThrows() async throws {
         let maps = baseTokenMaps()
-        let numberNode = GenerationSchema.NumberNode(
+        let numberNode = GenerationSchema.NumberNode.floatingPoint(
             description: nil,
-            minimum: nil,
-            maximum: 1,
-            integerOnly: false
+            bounds: Bounds<Double>(minimum: nil, maximum: 1)!
         )
         let schema = GenerationSchema.primitive(Double.self, node: .number(numberNode))
         let eosToken = 50
@@ -965,12 +959,10 @@ struct StructuredGenerationTests {
 
     @Test(arguments: ["0", "1", "2", "3", "4", "5", "6", "7", "8", "9", ".", "-"])
     func numericTokenCachesDistinguishTokenMappings(numericText: String) async throws {
-        let numberNode = GenerationSchema.NumberNode(
-            description: nil,
-            minimum: nil,
-            maximum: nil,
-            integerOnly: numericText != "."
-        )
+        let numberNode: GenerationSchema.NumberNode =
+            numericText != "."
+            ? .integer(description: nil, bounds: .unbounded)
+            : .floatingPoint(description: nil, bounds: .unbounded)
         let schema = GenerationSchema.primitive(Double.self, node: .number(numberNode))
         let output = numericText == "." ? "1.0" : numericText == "-" ? "-1" : numericText
 
@@ -1006,12 +998,7 @@ struct StructuredGenerationTests {
     @Test func numericTokenCachesDistinguishSpecialTokens() async throws {
         var maps = numberTokenMaps()
         maps.tokenToText[300] = "<numeric-special-eos>"
-        let numberNode = GenerationSchema.NumberNode(
-            description: nil,
-            minimum: nil,
-            maximum: nil,
-            integerOnly: true
-        )
+        let numberNode = GenerationSchema.NumberNode.integer(description: nil, bounds: .unbounded)
         let schema = GenerationSchema.primitive(Int.self, node: .number(numberNode))
         var backend = MockTokenBackend(
             tokenToText: maps.tokenToText,
@@ -1044,12 +1031,7 @@ struct StructuredGenerationTests {
         maps.textToTokens["4"] = [30]
         maps.textToTokens["7"] = [31]
         maps.textToTokens["3"] = [32]
-        let numberNode = GenerationSchema.NumberNode(
-            description: nil,
-            minimum: nil,
-            maximum: nil,
-            integerOnly: false
-        )
+        let numberNode = GenerationSchema.NumberNode.floatingPoint(description: nil, bounds: .unbounded)
         let schema = GenerationSchema.primitive(Double.self, node: .number(numberNode))
         let eosToken = 50
         let fourToken = 30
@@ -1080,11 +1062,9 @@ struct StructuredGenerationTests {
     @Test func standaloneMinusIsAllowedInIntegerMask() async throws {
         // Standalone `-` then digit, as BPE tokenizers encode negatives.
         let maps = baseTokenMaps()
-        let numberNode = GenerationSchema.NumberNode(
+        let numberNode = GenerationSchema.NumberNode.integer(
             description: nil,
-            minimum: -10,
-            maximum: 0,
-            integerOnly: true
+            bounds: Bounds<Int>(minimum: -10, maximum: 0)!
         )
         let schema = GenerationSchema.primitive(Int.self, node: .number(numberNode))
         let eosToken = 50
