@@ -1,17 +1,10 @@
-import EventSource
 import Foundation
-import JSONSchema
+import HTTPTypes
+import HTTPTypesFoundation
 
 #if canImport(FoundationNetworking)
     import FoundationNetworking
 #endif
-
-enum HTTP {
-    enum Method: String {
-        case get = "GET"
-        case post = "POST"
-    }
-}
 
 #if canImport(FoundationNetworking)
     /// Serializes Linux URLSession operations to mitigate a FoundationNetworking race.
@@ -21,15 +14,9 @@ enum HTTP {
     /// `_MultiHandle`, which has a known thread-safety bug that can crash under
     /// concurrent access (`URLSession._MultiHandle.endOperation(for:)`).
     ///
-    /// This gate intentionally allows only one in-flight request setup path at a time on Linux.
-    /// For non-streaming requests, callers typically hold this lock for the entire
-    /// request/response cycle, effectively serializing those operations and reducing
-    /// request-level parallelism (which can lower throughput for heavily concurrent
-    /// workloads).
-    ///
-    /// For streaming requests, callers usually acquire the gate only during initial
-    /// request setup and then release it once the stream has been established; stream
-    /// consumption itself is not serialized by this gate.
+    /// This gate intentionally allows only one request to start at a time on Linux. Every
+    /// request, streamed or not, holds it only until its response head arrives; reading the
+    /// body isn't serialized by it.
     /// Keep this scoped to Linux-only code paths until the upstream issue is resolved.
     ///
     /// See: https://github.com/swiftlang/swift-corelibs-foundation/issues/4791
@@ -102,380 +89,211 @@ enum HTTP {
     }
 #endif
 
-extension URLSession {
-    func fetch<T: Decodable>(
-        _ method: HTTP.Method,
-        url: URL,
-        headers: [String: String] = [:],
-        body: Data? = nil,
-        dateDecodingStrategy: JSONDecoder.DateDecodingStrategy = .deferredToDate
-    ) async throws -> T {
-        var request = URLRequest(url: url)
-        request.httpMethod = method.rawValue
-        request.addValue("application/json", forHTTPHeaderField: "Accept")
-
-        for (key, value) in headers {
-            request.addValue(value, forHTTPHeaderField: key)
+/// A URL session sends a model's requests with its own configuration, reading each response's
+/// body as it arrives.
+///
+/// It waits for each part of a response, not only for its start, as long as `timeout`, or as the
+/// session's own `timeoutIntervalForRequest` says when it isn't given. Cancelling the calling task cancels the request, which then throws
+/// `URLError.cancelled`, as a cancelled URL session task does.
+///
+/// On Linux, each request is sent by a session of its own, made with this session's
+/// configuration, as FoundationNetworking can't send requests at once through one session:
+/// this session's delegate isn't used there.
+extension URLSession: HTTPTransport {
+    public func send<Return>(
+        request: HTTPRequest,
+        body: Data?,
+        timeout: Duration?,
+        responseHandler: (HTTPResponse, HTTPResponseBody) async throws -> Return
+    ) async throws -> Return {
+        guard var urlRequest = URLRequest(httpRequest: request) else {
+            throw HTTPTransportError(kind: .invalidRequest)
+        }
+        urlRequest.httpBody = body
+        // With URLSession, it's how long to wait for each part of the response. A request's own
+        // timeout takes the place of the session's, so it's set only when the caller gave one.
+        // FoundationNetworking schedules it with Dispatch, which counts it in nanoseconds from now
+        // in an `Int` and traps past that, so it's at most about 68 years: no limit to speak of, as
+        // with AsyncHTTPClient.
+        if let (seconds, attoseconds) = timeout?.components {
+            let interval = TimeInterval(seconds) + TimeInterval(attoseconds) / 1e18
+            urlRequest.timeoutInterval = min(interval, TimeInterval(Int32.max))
         }
 
-        if let body {
-            request.httpBody = body
-            request.addValue("application/json", forHTTPHeaderField: "Content-Type")
-        }
-
+        let delegate = ResponseChunks()
+        // The request is over once the handler returns: what's left of the body isn't read.
+        defer { delegate.end() }
         #if canImport(FoundationNetworking)
-            var lockedData: Data?
-            var lockedResponse: URLResponse?
+            // Each request has a session of its own, as FoundationNetworking's shared state isn't
+            // safe for requests started at once; see `LinuxURLSessionRequestGate`.
+            var urlResponse: URLResponse?
             try await withLinuxRequestLock {
-                let (data, response) = try await data(for: request)
-                lockedData = data
-                lockedResponse = response
-            }
-            guard let data = lockedData, let response = lockedResponse else {
-                throw URLSessionError.invalidResponse
+                let session = URLSession(configuration: self.configuration, delegate: delegate, delegateQueue: nil)
+                urlResponse = try await delegate.start(session.dataTask(with: urlRequest), ownedSession: session)
             }
         #else
-            let (data, response) = try await data(for: request)
+            let task = dataTask(with: urlRequest)
+            task.delegate = delegate
+            let urlResponse: URLResponse? = try await delegate.start(task, ownedSession: nil)
         #endif
-
-        guard let httpResponse = response as? HTTPURLResponse else {
-            throw URLSessionError.invalidResponse
+        guard let response = (urlResponse as? HTTPURLResponse)?.httpResponse else {
+            throw HTTPTransportError(kind: .invalidResponse)
         }
-
-        let decoder = JSONDecoder()
-        decoder.dateDecodingStrategy = dateDecodingStrategy
-
-        guard (200 ..< 300).contains(httpResponse.statusCode) else {
-            if let errorString = String(data: data, encoding: .utf8) {
-                throw URLSessionError.httpError(statusCode: httpResponse.statusCode, detail: errorString)
-            }
-            throw URLSessionError.httpError(statusCode: httpResponse.statusCode, detail: "Invalid response")
-        }
-
-        do {
-            return try decoder.decode(T.self, from: data)
-        } catch {
-            throw URLSessionError.decodingError(detail: error.localizedDescription)
-        }
-    }
-
-    func fetchStream<T: Decodable & Sendable>(
-        _ method: HTTP.Method,
-        url: URL,
-        headers: [String: String] = [:],
-        body: Data? = nil,
-        dateDecodingStrategy: JSONDecoder.DateDecodingStrategy = .deferredToDate
-    ) -> AsyncThrowingStream<T, any Error> {
-        AsyncThrowingStream { continuation in
-            let task = Task { @Sendable in
-                let decoder = JSONDecoder()
-                decoder.dateDecodingStrategy = dateDecodingStrategy
-
-                do {
-                    var request = URLRequest(url: url)
-                    request.httpMethod = method.rawValue
-                    request.addValue("application/json", forHTTPHeaderField: "Accept")
-
-                    for (key, value) in headers {
-                        request.addValue(value, forHTTPHeaderField: key)
-                    }
-
-                    if let body {
-                        request.httpBody = body
-                        request.addValue("application/json", forHTTPHeaderField: "Content-Type")
-                    }
-
-                    #if canImport(FoundationNetworking)
-                        var lockedAsyncBytes: AsyncThrowingStream<UInt8, Error>?
-                        var lockedResponse: URLResponse?
-                        try await withLinuxRequestLock {
-                            let (bytes, response) = try await self.linuxBytes(for: request)
-                            lockedAsyncBytes = bytes
-                            lockedResponse = response
-                        }
-                        guard let asyncBytes = lockedAsyncBytes, let response = lockedResponse else {
-                            throw URLSessionError.invalidResponse
-                        }
-                        try await self.validateStreamingResponse(response, asyncBytes: asyncBytes)
-                        try await decodeAndYieldJSONLines(asyncBytes, using: decoder, to: continuation)
-                    #else
-                        let (asyncBytes, response) = try await self.bytes(for: request)
-                        try await validateStreamingResponse(response, asyncBytes: asyncBytes)
-                        try await decodeAndYieldJSONLines(asyncBytes, using: decoder, to: continuation)
-                    #endif
-                    continuation.finish()
-                } catch {
-                    continuation.finish(throwing: error)
-                }
-            }
-
-            continuation.onTermination = { _ in
-                task.cancel()
-            }
-        }
-    }
-
-    func fetchEventStream<T: Decodable & Sendable>(
-        _ method: HTTP.Method,
-        url: URL,
-        headers: [String: String] = [:],
-        body: Data? = nil
-    ) -> AsyncThrowingStream<T, any Error> {
-        AsyncThrowingStream { continuation in
-            let task = Task { @Sendable in
-                do {
-                    var request = URLRequest(url: url)
-                    request.httpMethod = method.rawValue
-                    request.addValue("text/event-stream", forHTTPHeaderField: "Accept")
-
-                    for (key, value) in headers {
-                        request.addValue(value, forHTTPHeaderField: key)
-                    }
-
-                    if let body {
-                        request.httpBody = body
-                        request.addValue("application/json", forHTTPHeaderField: "Content-Type")
-                    }
-
-                    #if canImport(FoundationNetworking)
-                        var lockedAsyncBytes: AsyncThrowingStream<UInt8, Error>?
-                        var lockedResponse: URLResponse?
-                        try await withLinuxRequestLock {
-                            let (bytes, response) = try await self.linuxBytes(for: request)
-                            lockedAsyncBytes = bytes
-                            lockedResponse = response
-                        }
-                        guard let asyncBytes = lockedAsyncBytes, let response = lockedResponse else {
-                            throw URLSessionError.invalidResponse
-                        }
-                        try await self.validateStreamingResponse(response, asyncBytes: asyncBytes)
-                        try await decodeAndYieldEventStream(asyncBytes, to: continuation)
-                    #else
-                        let (asyncBytes, response) = try await self.bytes(for: request)
-                        try await validateStreamingResponse(response, asyncBytes: asyncBytes)
-                        try await decodeAndYieldEventStream(asyncBytes, to: continuation)
-                    #endif
-                    continuation.finish()
-                } catch {
-                    continuation.finish(throwing: error)
-                }
-            }
-
-            continuation.onTermination = { _ in
-                task.cancel()
-            }
-        }
-    }
-
-    private func validateStreamingResponse<Bytes>(
-        _ response: URLResponse,
-        asyncBytes: Bytes
-    ) async throws where Bytes: AsyncSequence, Bytes.Element == UInt8 {
-        guard let httpResponse = response as? HTTPURLResponse else {
-            throw URLSessionError.invalidResponse
-        }
-
-        guard (200 ..< 300).contains(httpResponse.statusCode) else {
-            var errorData = Data()
-            for try await byte in asyncBytes {
-                errorData.append(byte)
-            }
-            if let errorString = String(data: errorData, encoding: .utf8) {
-                throw URLSessionError.httpError(statusCode: httpResponse.statusCode, detail: errorString)
-            }
-            throw URLSessionError.httpError(statusCode: httpResponse.statusCode, detail: "Invalid response")
-        }
-    }
-
-    /// Decodes each line as it arrives, the way the AsyncHTTPClient transport does.
-    private func decodeAndYieldJSONLines<T: Decodable & Sendable, Bytes>(
-        _ asyncBytes: Bytes,
-        using decoder: JSONDecoder,
-        to continuation: AsyncThrowingStream<T, any Error>.Continuation
-    ) async throws where Bytes: AsyncSequence, Bytes.Element == UInt8 {
-        var lines = JSONLines()
-        for try await byte in asyncBytes {
-            guard let line = lines.append(byte) else { continue }
-            try Task.checkCancellation()
-            continuation.yield(try decoder.decode(T.self, from: Data(line)))
-        }
-        if let line = lines.finish() {
-            continuation.yield(try decoder.decode(T.self, from: Data(line)))
-        }
-    }
-
-    private func decodeAndYieldEventStream<T: Decodable & Sendable, Bytes>(
-        _ asyncBytes: Bytes,
-        to continuation: AsyncThrowingStream<T, any Error>.Continuation
-    ) async throws where Bytes: AsyncSequence, Bytes.Element == UInt8 {
-        let decoder = JSONDecoder()
-        for try await event in asyncBytes.events {
-            guard let data = event.data.data(using: .utf8) else { continue }
-            if let decoded = try? decoder.decode(T.self, from: data) {
-                continuation.yield(decoded)
-            }
-        }
+        return try await responseHandler(response, HTTPResponseBody(delegate))
     }
 }
 
-#if canImport(FoundationNetworking)
-    private extension URLSession {
-        func linuxBytes(for request: URLRequest) async throws -> (AsyncThrowingStream<UInt8, Error>, URLResponse) {
-            let delegate = LinuxBytesDelegate()
-            let delegateQueue = OperationQueue()
-            delegateQueue.maxConcurrentOperationCount = 1
+/// A data task's response and the chunks of its body, as they arrive.
+///
+/// Cancelling the task that waits for either cancels the request, and the wait ends with
+/// `URLError.cancelled`.
+private final class ResponseChunks: NSObject, URLSessionDataDelegate, AsyncSequence, @unchecked Sendable {
+    typealias Element = Data
 
-            let session = URLSession(
-                configuration: self.configuration,
-                delegate: delegate,
-                delegateQueue: delegateQueue
-            )
+    private struct State {
+        var responseContinuation: CheckedContinuation<URLResponse, Error>?
+        /// The chunks that arrived and haven't been read yet.
+        var chunks: [Data] = []
+        /// How the body ended, once it has: `nil` for its end, or the error it ended with.
+        var ended: Result<Void, Error>?
+        var chunkContinuation: CheckedContinuation<Data?, Error>?
+        var task: URLSessionDataTask?
+        /// The session made for this request alone, which ends with it.
+        var ownedSession: URLSession?
+        var isCancelled = false
+    }
 
-            let byteStream = AsyncThrowingStream<UInt8, Error> { continuation in
-                delegate.attach(
-                    continuation,
-                    session: session
-                )
+    // Read and written from the caller's task and from the delegate's queue.
+    private let state = Locked(State())
+
+    /// Starts `task` and waits for its response. Cancelling the calling task cancels the request.
+    func start(_ task: URLSessionDataTask, ownedSession: URLSession?) async throws -> URLResponse {
+        try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { continuation in
+                let isCancelled = state.withLock { state in
+                    state.task = task
+                    state.ownedSession = ownedSession
+                    guard !state.isCancelled else { return true }
+                    state.responseContinuation = continuation
+                    return false
+                }
+                guard !isCancelled else {
+                    end()
+                    continuation.resume(throwing: URLError(.cancelled))
+                    return
+                }
+                task.resume()
             }
-
-            let response = try await delegate.start(
-                request: request,
-                session: session
-            )
-
-            return (byteStream, response)
+        } onCancel: {
+            cancel()
         }
     }
 
-    private final class LinuxBytesDelegate: NSObject, URLSessionDataDelegate, @unchecked Sendable {
-        private struct State {
-            var responseContinuation: CheckedContinuation<URLResponse, Error>?
-            var isCancelled = false
-        }
-
-        // Read and written from the caller's task and from the delegate queue.
-        private let state = Locked(State())
-        private var byteContinuation: AsyncThrowingStream<UInt8, Error>.Continuation?
-        private weak var task: URLSessionDataTask?
-        private weak var session: URLSession?
-
-        func attach(
-            _ continuation: AsyncThrowingStream<UInt8, Error>.Continuation,
-            session: URLSession
-        ) {
-            byteContinuation = continuation
-            self.session = session
-            continuation.onTermination = { [weak self] _ in
-                guard let self else { return }
-                self.task?.cancel()
-                self.session?.invalidateAndCancel()
-            }
-        }
-
-        /// Starts the request and waits for its response.
-        /// Canceling the calling task cancels the request.
-        func start(
-            request: URLRequest,
-            session: URLSession
-        ) async throws -> URLResponse {
-            try await withTaskCancellationHandler {
-                try await withCheckedThrowingContinuation { continuation in
-                    let task = session.dataTask(with: request)
-                    let isCancelled = state.withLock { state in
-                        guard !state.isCancelled else { return true }
-                        state.responseContinuation = continuation
-                        return false
+    /// The next chunk of the body, or `nil` at its end.
+    func next() async throws -> Data? {
+        try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Data?, Error>) in
+                let ready: Result<Data?, Error>? = state.withLock { state in
+                    if !state.chunks.isEmpty { return .success(state.chunks.removeFirst()) }
+                    switch state.ended {
+                    case .success?: return .success(nil)
+                    case .failure(let error)?: return .failure(error)
+                    case nil:
+                        state.chunkContinuation = continuation
+                        return nil
                     }
-                    guard !isCancelled else {
-                        session.invalidateAndCancel()
-                        continuation.resume(throwing: CancellationError())
-                        return
-                    }
-                    self.task = task
-                    task.resume()
                 }
-            } onCancel: {
-                cancel(session: session)
+                if let ready { continuation.resume(with: ready) }
             }
+        } onCancel: {
+            cancel()
         }
+    }
 
-        private func cancel(session: URLSession) {
-            let continuation = state.withLock { state in
-                state.isCancelled = true
-                return takeResponseContinuation(&state)
+    func makeAsyncIterator() -> Iterator { Iterator(chunks: self) }
+
+    struct Iterator: AsyncIteratorProtocol {
+        let chunks: ResponseChunks
+        func next() async throws -> Data? { try await chunks.next() }
+    }
+
+    /// Cancels the request, and ends what waits for it with `URLError.cancelled`, as a URL
+    /// session's own async calls do: FoundationNetworking doesn't always tell the delegate a
+    /// cancelled task completed, so the wait isn't left to it.
+    private func cancel() {
+        let (task, response, waiting) = state.withLock { state in
+            state.isCancelled = true
+            if state.ended == nil { state.ended = .failure(URLError(.cancelled)) }
+            return (state.task, Self.take(&state.responseContinuation), Self.take(&state.chunkContinuation))
+        }
+        response?.resume(throwing: URLError(.cancelled))
+        waiting?.resume(throwing: URLError(.cancelled))
+        task?.cancel()
+    }
+
+    /// Ends the request once it's been read: cancels it if it's still running.
+    func end() {
+        let (task, session) = state.withLock { state in
+            defer {
+                state.task = nil
+                state.ownedSession = nil
+                if state.ended == nil { state.ended = .success(()) }
             }
-            session.invalidateAndCancel()
-            continuation?.resume(throwing: CancellationError())
+            return (state.task, state.ownedSession)
         }
+        task?.cancel()
+        session?.invalidateAndCancel()
+    }
 
-        /// Returns the response continuation at most once,
-        /// so it's resumed exactly once by whichever of the response, completion, or cancellation comes first.
-        private func takeResponseContinuation(_ state: inout State) -> CheckedContinuation<URLResponse, Error>? {
-            defer { state.responseContinuation = nil }
-            return state.responseContinuation
+    /// Returns `value` at most once.
+    private static func take<Value>(_ value: inout Value?) -> Value? {
+        defer { value = nil }
+        return value
+    }
+
+    func urlSession(
+        _ session: URLSession,
+        dataTask: URLSessionDataTask,
+        didReceive response: URLResponse,
+        completionHandler: @escaping @Sendable (URLSession.ResponseDisposition) -> Void
+    ) {
+        state.withLock { Self.take(&$0.responseContinuation) }?.resume(returning: response)
+        completionHandler(.allow)
+    }
+
+    func urlSession(_ session: URLSession, dataTask: URLSessionDataTask, didReceive data: Data) {
+        let waiting = state.withLock { state -> CheckedContinuation<Data?, Error>? in
+            guard state.ended == nil else { return nil }
+            if let waiting = Self.take(&state.chunkContinuation) { return waiting }
+            state.chunks.append(data)
+            return nil
         }
+        waiting?.resume(returning: data)
+    }
 
-        func urlSession(
-            _ session: URLSession,
-            dataTask: URLSessionDataTask,
-            didReceive response: URLResponse,
-            completionHandler: @escaping @Sendable (URLSession.ResponseDisposition) -> Void
-        ) {
-            state.withLock { takeResponseContinuation(&$0) }?.resume(returning: response)
-            completionHandler(.allow)
+    func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: (any Error)?) {
+        let (response, waiting, owned) = state.withLock { state in
+            defer { state.task = nil }
+            if state.ended == nil { state.ended = error.map { .failure($0) } ?? .success(()) }
+            return (
+                Self.take(&state.responseContinuation), Self.take(&state.chunkContinuation),
+                Self.take(&state.ownedSession)
+            )
         }
-
-        func urlSession(
-            _ session: URLSession,
-            dataTask: URLSessionDataTask,
-            didReceive data: Data
-        ) {
-            guard let continuation = byteContinuation else { return }
-            for byte in data {
-                continuation.yield(byte)
-            }
-        }
-
-        func urlSession(
-            _ session: URLSession,
-            task: URLSessionTask,
-            didCompleteWithError error: (any Error)?
-        ) {
-            if let continuation = state.withLock({ takeResponseContinuation(&$0) }) {
-                if let error {
-                    continuation.resume(throwing: error)
-                } else if let response = task.response {
-                    continuation.resume(returning: response)
-                } else {
-                    continuation.resume(throwing: URLSessionError.invalidResponse)
-                }
-            }
-
+        if let response {
             if let error {
-                byteContinuation?.finish(throwing: error)
+                response.resume(throwing: error)
+            } else if let urlResponse = task.response {
+                response.resume(returning: urlResponse)
             } else {
-                byteContinuation?.finish()
+                response.resume(throwing: HTTPTransportError(kind: .invalidResponse))
             }
-            byteContinuation = nil
-
-            session.invalidateAndCancel()
         }
-    }
-#endif
-
-enum URLSessionError: Error, CustomStringConvertible {
-    case invalidResponse
-    case httpError(statusCode: Int, detail: String)
-    case decodingError(detail: String)
-
-    var description: String {
-        switch self {
-        case .invalidResponse:
-            return "Invalid response"
-        case .httpError(let statusCode, let detail):
-            return "HTTP error (Status \(statusCode)): \(detail)"
-        case .decodingError(let detail):
-            return "Decoding error: \(detail)"
+        if let error {
+            waiting?.resume(throwing: error)
+        } else {
+            waiting?.resume(returning: nil)
         }
+        owned?.finishTasksAndInvalidate()
     }
 }
