@@ -16,12 +16,12 @@ struct GenerationGuideTests {
         let maximum = GenerationGuide<Int>.maximum(10)
         let range = GenerationGuide<Int>.range(2 ... 8)
 
-        #expect(minimum.minimum == 1)
+        #expect(minimum.minimum == .integer(1))
         #expect(minimum.maximum == nil)
         #expect(maximum.minimum == nil)
-        #expect(maximum.maximum == 10)
-        #expect(range.minimum == 2)
-        #expect(range.maximum == 8)
+        #expect(maximum.maximum == .integer(10))
+        #expect(range.minimum == .integer(2))
+        #expect(range.maximum == .integer(8))
     }
 
     @Test func floatFactoriesSetBounds() {
@@ -29,10 +29,10 @@ struct GenerationGuideTests {
         let maximum = GenerationGuide<Float>.maximum(9.75)
         let range = GenerationGuide<Float>.range(2.5 ... 8.5)
 
-        #expect(minimum.minimum == 1.25)
-        #expect(maximum.maximum == 9.75)
-        #expect(range.minimum == 2.5)
-        #expect(range.maximum == 8.5)
+        #expect(minimum.minimum == .floatingPoint(1.25))
+        #expect(maximum.maximum == .floatingPoint(9.75))
+        #expect(range.minimum == .floatingPoint(2.5))
+        #expect(range.maximum == .floatingPoint(8.5))
     }
 
     @Test func doubleFactoriesSetBounds() {
@@ -40,10 +40,10 @@ struct GenerationGuideTests {
         let maximum = GenerationGuide<Double>.maximum(0.9)
         let range = GenerationGuide<Double>.range(0.2 ... 0.8)
 
-        #expect(minimum.minimum == 0.1)
-        #expect(maximum.maximum == 0.9)
-        #expect(range.minimum == 0.2)
-        #expect(range.maximum == 0.8)
+        #expect(minimum.minimum == .floatingPoint(0.1))
+        #expect(maximum.maximum == .floatingPoint(0.9))
+        #expect(range.minimum == .floatingPoint(0.2))
+        #expect(range.maximum == .floatingPoint(0.8))
     }
 
     @Test func decimalFactoriesSetBounds() {
@@ -51,10 +51,10 @@ struct GenerationGuideTests {
         let maximum = GenerationGuide<Decimal>.maximum(Decimal(string: "9.5")!)
         let range = GenerationGuide<Decimal>.range(Decimal(string: "2.5")! ... Decimal(string: "8.5")!)
 
-        #expect(minimum.minimum == 1.5)
-        #expect(maximum.maximum == 9.5)
-        #expect(range.minimum == 2.5)
-        #expect(range.maximum == 8.5)
+        #expect(minimum.minimum == .floatingPoint(1.5))
+        #expect(maximum.maximum == .floatingPoint(9.5))
+        #expect(range.minimum == .floatingPoint(2.5))
+        #expect(range.maximum == .floatingPoint(8.5))
     }
 
     @Test func arrayFactoriesSetCountBounds() {

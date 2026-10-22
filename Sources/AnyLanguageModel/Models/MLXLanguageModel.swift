@@ -1125,7 +1125,7 @@ import Foundation
 
             var pendingChat: [MLXLMCommon.Chat.Message] = []
 
-            var usage = LanguageModelSession.Usage.zero
+            var usage = RequestsUsage()
             var allTextChunks: [String] = []
             var allEntries: [Transcript.Entry] = []
             let toolRounds = session.toolRoundLimit(for: "MLX", options: options)
@@ -1213,7 +1213,7 @@ import Foundation
                             content: "" as! Content,
                             rawContent: GeneratedContent(""),
                             transcriptEntries: ArraySlice(allEntries),
-                            usage: usage
+                            requests: usage
                         )
                     case .invocations(let invocations):
                         if !invocations.isEmpty {
@@ -1240,7 +1240,7 @@ import Foundation
                 content: text as! Content,
                 rawContent: GeneratedContent(text),
                 transcriptEntries: ArraySlice(allEntries),
-                usage: usage
+                requests: usage
             )
         }
 
@@ -1353,7 +1353,7 @@ import Foundation
 
                         // Accumulators live outside the tool loop so streamed snapshots stay
                         // monotonic across rounds: text never shrinks, entries only grow.
-                        var usage = LanguageModelSession.Usage.zero
+                        var usage = RequestsUsage()
                         var accumulatedText = ""
                         var accumulatedEntries: [Transcript.Entry] = []
                         let toolRounds = session.toolRoundLimit(for: "MLX", options: options)
@@ -1368,7 +1368,7 @@ import Foundation
                                     content: content,
                                     rawContent: raw,
                                     transcriptEntries: ArraySlice(accumulatedEntries),
-                                    usage: usage
+                                    requests: usage
                                 )
                             )
                         }
