@@ -1,4 +1,6 @@
 import Foundation
+import HTTPTypes
+import HTTPTypesFoundation
 import JSONSchema
 import OrderedCollections
 
@@ -54,7 +56,7 @@ public struct OllamaLanguageModel: LanguageModel, ProfileRequestIdentifiedLangua
     /// The model identifier to use for generation.
     public let model: String
 
-    private let httpSession: HTTPSession
+    private let transport: any HTTPTransport
     let profileRequestIdentity = UUID()
 
     /// Creates an Ollama language model.
@@ -62,11 +64,11 @@ public struct OllamaLanguageModel: LanguageModel, ProfileRequestIdentifiedLangua
     /// - Parameters:
     ///   - baseURL: The base URL for the Ollama server. Defaults to `http://localhost:11434`.
     ///   - model: The model identifier (for example, "qwen2.5" or "llama3.3").
-    ///   - session: The HTTP session or client used for network requests.
+    ///   - transport: How it sends its requests: by default ``makeDefaultTransport()``.
     public init(
         baseURL: URL = defaultBaseURL,
         model: String,
-        session: HTTPSession = makeDefaultSession(),
+        transport: any HTTPTransport = makeDefaultTransport(),
     ) {
         var baseURL = baseURL
         if !baseURL.path.hasSuffix("/") {
@@ -75,7 +77,17 @@ public struct OllamaLanguageModel: LanguageModel, ProfileRequestIdentifiedLangua
 
         self.baseURL = baseURL
         self.model = model
-        self.httpSession = session
+        self.transport = transport
+    }
+
+    /// Creates a model that sends its requests with `session`.
+    @available(*, deprecated, renamed: "init(baseURL:model:transport:)")
+    public init(
+        baseURL: URL = defaultBaseURL,
+        model: String,
+        session: HTTPSession
+    ) {
+        self.init(baseURL: baseURL, model: model, transport: session)
     }
 
     public func respond<Content>(
@@ -130,7 +142,7 @@ public struct OllamaLanguageModel: LanguageModel, ProfileRequestIdentifiedLangua
 
         let url = baseURL.appendingPathComponent("api/chat")
         var entries: [Transcript.Entry] = []
-        var usage = LanguageModelSession.Usage.zero
+        var usage = RequestsUsage()
         var earlierText = ""
         var inFlightMessages: [OllamaMessage] = []
         let toolRounds = session.toolRoundLimit(for: "Ollama", options: options)
@@ -148,7 +160,7 @@ public struct OllamaLanguageModel: LanguageModel, ProfileRequestIdentifiedLangua
                 schema: schema,
                 includeSchemaInPrompt: includeSchemaInPrompt,
                 prefixEntries: entries,
-                prefixUsage: usage,
+                prefixUsage: usage.total,
                 prefixText: earlierText
             ) {
                 return continuation
@@ -174,14 +186,13 @@ public struct OllamaLanguageModel: LanguageModel, ProfileRequestIdentifiedLangua
                 format: ollamaFormat,
                 parameters: extractTopLevelChatParameters(requestContext.options)
             )
-            let reply: ChatReply = try await httpSession.fetch(
-                .post,
-                url: url,
+            let reply: ChatReply = try await transport.fetch(
+                HTTPRequest(method: .post, url: url),
                 body: try encodeChatParams(params),
                 dateDecodingStrategy: .iso8601WithFractionalSeconds
             )
             let chatResponse = try reply.response()
-            usage.add(chatResponse.reportedUsage?.value ?? .zero)
+            usage.add(chatResponse.reportedUsage)
 
             if let toolCalls = chatResponse.message.toolCalls, !toolCalls.isEmpty {
                 try session.recordToolRound(toolRounds, completed: entries)
@@ -198,7 +209,7 @@ public struct OllamaLanguageModel: LanguageModel, ProfileRequestIdentifiedLangua
                         content: "" as! Content,
                         rawContent: GeneratedContent(""),
                         transcriptEntries: ArraySlice(entries),
-                        usage: usage
+                        requests: usage
                     )
                 case .invocations(let invocations):
                     inFlightMessages.append(
@@ -232,7 +243,7 @@ public struct OllamaLanguageModel: LanguageModel, ProfileRequestIdentifiedLangua
                     content: text as! Content,
                     rawContent: GeneratedContent(text),
                     transcriptEntries: ArraySlice(entries),
-                    usage: usage
+                    requests: usage
                 )
             }
             let generatedContent = try GeneratedContent(json: text)
@@ -240,7 +251,7 @@ public struct OllamaLanguageModel: LanguageModel, ProfileRequestIdentifiedLangua
                 content: try type.init(generatedContent),
                 rawContent: generatedContent,
                 transcriptEntries: ArraySlice(entries),
-                usage: usage
+                requests: usage
             )
         }
     }
@@ -310,7 +321,7 @@ public struct OllamaLanguageModel: LanguageModel, ProfileRequestIdentifiedLangua
                             schema: schema,
                             includeSchemaInPrompt: includeSchemaInPrompt,
                             prefixEntries: state.entries,
-                            prefixUsage: state.totalUsage,
+                            prefixUsage: state.requests.total,
                             prefixText: state.responseText
                         ) {
                             for try await snapshot in handoff { continuation.yield(snapshot) }
@@ -339,9 +350,8 @@ public struct OllamaLanguageModel: LanguageModel, ProfileRequestIdentifiedLangua
                             parameters: extractTopLevelChatParameters(requestContext.options)
                         )
                         let body = try encodeChatParams(params)
-                        let chunks: AsyncThrowingStream<ChatReply, any Error> = httpSession.fetchStream(
-                            .post,
-                            url: url,
+                        let chunks: AsyncThrowingStream<ChatReply, any Error> = transport.fetchStream(
+                            HTTPRequest(method: .post, url: url),
                             body: body,
                             dateDecodingStrategy: .iso8601WithFractionalSeconds
                         )

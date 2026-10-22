@@ -60,8 +60,8 @@ extension LanguageModelSession {
             )
         }
 
-        var usage = prefixUsage
-        usage.add(response.usage)
+        var earlierUsage = prefixUsage
+        earlierUsage.add(response.requests.earlier)
         var content = response.content
         var rawContent = response.rawContent
         if type == String.self, case .string(let suffix) = response.rawContent.kind {
@@ -73,7 +73,7 @@ extension LanguageModelSession {
             content: content,
             rawContent: rawContent,
             transcriptEntries: ArraySlice(prefixEntries + response.transcriptEntries),
-            usage: usage,
+            requests: RequestsUsage(earlier: earlierUsage, final: response.requests.final),
             providerMetadata: response.providerMetadata
         )
     }
@@ -127,8 +127,8 @@ extension LanguageModelSession {
             let task = Task {
                 do {
                     for try await snapshot in upstream {
-                        var usage = prefixUsage
-                        usage.add(snapshot.usage)
+                        var earlierUsage = prefixUsage
+                        earlierUsage.add(snapshot.requests.earlier)
                         var content = snapshot.content
                         var rawContent = snapshot.rawContent
                         if type == String.self, case .string(let suffix) = snapshot.rawContent.kind {
@@ -141,7 +141,7 @@ extension LanguageModelSession {
                                 content: content,
                                 rawContent: rawContent,
                                 transcriptEntries: ArraySlice(prefixEntries + snapshot.transcriptEntries),
-                                usage: usage,
+                                requests: RequestsUsage(earlier: earlierUsage, final: snapshot.requests.final),
                                 providerMetadata: snapshot.providerMetadata
                             )
                         )

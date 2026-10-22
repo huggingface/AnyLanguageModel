@@ -1,4 +1,6 @@
 import Foundation
+import HTTPTypes
+import HTTPTypesFoundation
 import JSONSchema
 
 #if canImport(FoundationNetworking)
@@ -397,7 +399,7 @@ public struct OpenAILanguageModel: LanguageModel, ProfileRequestIdentifiedLangua
     /// The API variant to use.
     public let apiVariant: APIVariant
 
-    private let httpSession: HTTPSession
+    private let transport: any HTTPTransport
     let profileRequestIdentity = UUID()
 
     /// Creates an OpenAI language model.
@@ -407,13 +409,13 @@ public struct OpenAILanguageModel: LanguageModel, ProfileRequestIdentifiedLangua
     ///   - apiKey: Your OpenAI API key or a closure that returns it.
     ///   - model: The model identifier (for example, "gpt-4" or "gpt-3.5-turbo").
     ///   - apiVariant: The API variant to use. Defaults to `.chatCompletions`.
-    ///   - session: The HTTP session or client used for network requests.
+    ///   - transport: How it sends its requests: by default ``makeDefaultTransport()``.
     public init(
         baseURL: URL = defaultBaseURL,
         apiKey tokenProvider: @escaping @autoclosure @Sendable () -> String,
         model: String,
         apiVariant: APIVariant = .chatCompletions,
-        session: HTTPSession = makeDefaultSession(),
+        transport: any HTTPTransport = makeDefaultTransport(),
     ) {
         var baseURL = baseURL
         if !baseURL.path.hasSuffix("/") {
@@ -424,7 +426,19 @@ public struct OpenAILanguageModel: LanguageModel, ProfileRequestIdentifiedLangua
         self.tokenProvider = tokenProvider
         self.model = model
         self.apiVariant = apiVariant
-        self.httpSession = session
+        self.transport = transport
+    }
+
+    /// Creates a model that sends its requests with `session`.
+    @available(*, deprecated, renamed: "init(baseURL:apiKey:model:apiVariant:transport:)")
+    public init(
+        baseURL: URL = defaultBaseURL,
+        apiKey tokenProvider: @escaping @autoclosure @Sendable () -> String,
+        model: String,
+        apiVariant: APIVariant = .chatCompletions,
+        session: HTTPSession
+    ) {
+        self.init(baseURL: baseURL, apiKey: tokenProvider(), model: model, apiVariant: apiVariant, transport: session)
     }
 
     public func respond<Content>(
@@ -502,7 +516,7 @@ public struct OpenAILanguageModel: LanguageModel, ProfileRequestIdentifiedLangua
         // Structured outputs need an object root.
         let responseSchema = ProviderResponseSchema(schema, generating: type, wrapping: .nonObjectRoots)
         var entries: [Transcript.Entry] = []
-        var usage = ReportedUsage()
+        var usage = RequestsUsage()
         var text = ""
         // The text of earlier tool rounds, which string responses include.
         var earlierText = ""
@@ -525,7 +539,7 @@ public struct OpenAILanguageModel: LanguageModel, ProfileRequestIdentifiedLangua
                 schema: schema,
                 includeSchemaInPrompt: includeSchemaInPrompt,
                 prefixEntries: entries,
-                prefixUsage: usage.value,
+                prefixUsage: usage.total,
                 prefixText: earlierText
             ) {
                 return continuation
@@ -551,12 +565,8 @@ public struct OpenAILanguageModel: LanguageModel, ProfileRequestIdentifiedLangua
 
             let url = baseURL.appendingPathComponent("chat/completions")
             let body = try JSONEncoder().encode(params)
-            let resp: ChatCompletions.Response = try await httpSession.fetch(
-                .post,
-                url: url,
-                headers: [
-                    "Authorization": "Bearer \(tokenProvider())"
-                ],
+            let resp: ChatCompletions.Response = try await transport.fetch(
+                HTTPRequest(method: .post, url: url, headerFields: [.authorization: "Bearer \(tokenProvider())"]),
                 body: body
             )
 
@@ -598,7 +608,7 @@ public struct OpenAILanguageModel: LanguageModel, ProfileRequestIdentifiedLangua
                         content: empty.content,
                         rawContent: empty.rawContent,
                         transcriptEntries: ArraySlice(entries),
-                        usage: usage.value
+                        requests: usage
                     )
                 case .invocations(let invocations):
                     if !invocations.isEmpty {
@@ -631,7 +641,7 @@ public struct OpenAILanguageModel: LanguageModel, ProfileRequestIdentifiedLangua
                 content: text as! Content,
                 rawContent: GeneratedContent(text),
                 transcriptEntries: ArraySlice(entries),
-                usage: usage.value,
+                requests: usage,
                 providerMetadata: responseContentMetadata(text, roundText: roundText)
             )
         }
@@ -642,7 +652,7 @@ public struct OpenAILanguageModel: LanguageModel, ProfileRequestIdentifiedLangua
             content: content,
             rawContent: generatedContent,
             transcriptEntries: ArraySlice(entries),
-            usage: usage.value
+            requests: usage
         )
     }
 
@@ -657,7 +667,7 @@ public struct OpenAILanguageModel: LanguageModel, ProfileRequestIdentifiedLangua
         // Structured outputs need an object root.
         let responseSchema = ProviderResponseSchema(schema, generating: type, wrapping: .nonObjectRoots)
         var entries: [Transcript.Entry] = []
-        var usage = ReportedUsage()
+        var usage = RequestsUsage()
         var text = ""
         // The text of earlier tool rounds, which string responses include.
         var earlierText = ""
@@ -681,7 +691,7 @@ public struct OpenAILanguageModel: LanguageModel, ProfileRequestIdentifiedLangua
                 schema: schema,
                 includeSchemaInPrompt: includeSchemaInPrompt,
                 prefixEntries: entries,
-                prefixUsage: usage.value,
+                prefixUsage: usage.total,
                 prefixText: earlierText
             ) {
                 return continuation
@@ -707,12 +717,8 @@ public struct OpenAILanguageModel: LanguageModel, ProfileRequestIdentifiedLangua
 
             let encoder = JSONEncoder()
             let body = try encoder.encode(params)
-            let resp: Responses.Response = try await httpSession.fetch(
-                .post,
-                url: url,
-                headers: [
-                    "Authorization": "Bearer \(tokenProvider())"
-                ],
+            let resp: Responses.Response = try await transport.fetch(
+                HTTPRequest(method: .post, url: url, headerFields: [.authorization: "Bearer \(tokenProvider())"]),
                 body: body
             )
 
@@ -743,7 +749,7 @@ public struct OpenAILanguageModel: LanguageModel, ProfileRequestIdentifiedLangua
                         content: empty.content,
                         rawContent: empty.rawContent,
                         transcriptEntries: ArraySlice(entries),
-                        usage: usage.value
+                        requests: usage
                     )
                 case .invocations(let invocations):
                     if !invocations.isEmpty {
@@ -777,7 +783,7 @@ public struct OpenAILanguageModel: LanguageModel, ProfileRequestIdentifiedLangua
                 content: text as! Content,
                 rawContent: GeneratedContent(text),
                 transcriptEntries: ArraySlice(entries),
-                usage: usage.value
+                requests: usage
             )
         }
 
@@ -788,7 +794,7 @@ public struct OpenAILanguageModel: LanguageModel, ProfileRequestIdentifiedLangua
                 content: content,
                 rawContent: generatedContent,
                 transcriptEntries: ArraySlice(entries),
-                usage: usage.value
+                requests: usage
             )
         }
         throw OpenAILanguageModelError.noResponseGenerated
@@ -859,7 +865,7 @@ public struct OpenAILanguageModel: LanguageModel, ProfileRequestIdentifiedLangua
                             schema: schema,
                             includeSchemaInPrompt: includeSchemaInPrompt,
                             prefixEntries: state.entries,
-                            prefixUsage: state.totalUsage,
+                            prefixUsage: state.requests.total,
                             prefixText: state.responseText
                         ) {
                             for try await snapshot in handoff { continuation.yield(snapshot) }
@@ -904,13 +910,16 @@ public struct OpenAILanguageModel: LanguageModel, ProfileRequestIdentifiedLangua
                         }
                         let body = try JSONEncoder().encode(params)
                         let url = baseURL.appendingPathComponent(path)
-                        let headers = ["Authorization": "Bearer \(tokenProvider())"]
+                        let headers: HTTPFields = [.authorization: "Bearer \(tokenProvider())"]
                         var toolCalls: [OpenAIToolCall] = []
 
                         switch apiVariant {
                         case .responses:
                             let events: AsyncThrowingStream<OpenAIResponsesServerEvent, any Error> =
-                                httpSession.fetchEventStream(.post, url: url, headers: headers, body: body)
+                                transport.fetchEventStream(
+                                    HTTPRequest(method: .post, url: url, headerFields: headers),
+                                    body: body
+                                )
                             responseEvents: for try await event in events {
                                 switch event {
                                 case .outputTextDelta(let delta):
@@ -941,7 +950,10 @@ public struct OpenAILanguageModel: LanguageModel, ProfileRequestIdentifiedLangua
                             }
                         case .chatCompletions:
                             let events: AsyncThrowingStream<OpenAIChatCompletionsChunk, any Error> =
-                                httpSession.fetchEventStream(.post, url: url, headers: headers, body: body)
+                                transport.fetchEventStream(
+                                    HTTPRequest(method: .post, url: url, headerFields: headers),
+                                    body: body
+                                )
                             var calls: [Int: OpenAIStreamedToolCall] = [:]
                             for try await chunk in events {
                                 state.usage.merge(chunk.usage?.reportedUsage)
