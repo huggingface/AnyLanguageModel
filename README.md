@@ -116,6 +116,9 @@ This results in smaller binary sizes and faster build times.
   (depends on `ml-explore/mlx-swift-lm`)
 - `Llama`: Enables llama.cpp support
   (requires `mattt/llama.swift`)
+- `AsyncHTTPClient`: Sends remote models' requests with AsyncHTTPClient
+  instead of `URLSession`
+  (depends on `swift-server/async-http-client`)
 
 By default, no traits are enabled.
 To enable specific traits, specify them in your package's dependencies:
@@ -709,6 +712,153 @@ the latest value is kept for each metadata key.
 > [Foundation Models 27 usage API](https://developer.apple.com/documentation/foundationmodels/languagemodelsession/usage-swift.struct).
 > `Codable` and `Equatable` support are AnyLanguageModel extensions.
 
+### HTTP Transport
+
+The remote models
+(OpenAI, Open Responses, Anthropic, Google Gemini, and Ollama)
+send each HTTP request through a transport.
+Pass your own transport as `transport:` when you create a model
+to change how its requests are sent:
+for example, to use custom network settings or a proxy,
+to log or limit requests,
+or to answer requests in tests without a network connection.
+
+By default, a model uses `makeDefaultTransport()`,
+which returns a `URLSession` with the default configuration.
+With the `AsyncHTTPClient` [trait](#package-traits),
+it returns AsyncHTTPClient's shared `HTTPClient` instead.
+`URLSession` and `HTTPClient` are both transports,
+so you can pass one that you configured:
+
+```swift
+let configuration = URLSessionConfiguration.default
+configuration.timeoutIntervalForRequest = 600 // Give a large model time to load
+
+let model = OllamaLanguageModel(
+    model: "qwen3.5",
+    transport: URLSession(configuration: configuration)
+)
+```
+
+To write your own transport,
+conform a type to `HTTPTransport`
+and implement `send(request:body:timeout:responseHandler:)`.
+The transport sends the request
+and gives the response to `responseHandler`,
+which reads the body as it arrives.
+The request ends when the handler returns.
+This transport prints each request and its response status,
+then passes the request to another transport:
+
+```swift
+import AnyLanguageModel
+import Foundation
+import HTTPTypes
+
+struct LoggingTransport: HTTPTransport {
+    var base: any HTTPTransport = makeDefaultTransport()
+
+    func send<Return>(
+        request: HTTPRequest,
+        body: Data?,
+        timeout: Duration?,
+        responseHandler: (HTTPResponse, HTTPResponseBody) async throws -> Return
+    ) async throws -> Return {
+        print(request.method, request.path ?? "/")
+        return try await base.send(request: request, body: body, timeout: timeout) { response, body in
+            print(response.status)
+            return try await responseHandler(response, body)
+        }
+    }
+}
+
+let model = OpenAILanguageModel(
+    apiKey: ProcessInfo.processInfo.environment["OPENAI_API_KEY"]!,
+    model: "gpt-5.6-luna",
+    transport: LoggingTransport()
+)
+```
+
+`HTTPRequest` and `HTTPResponse` come from Apple's
+[swift-http-types](https://github.com/apple/swift-http-types) package.
+To import `HTTPTypes`,
+add that package's `HTTPTypes` product to your target's dependencies.
+
+A transport gets each HTTP request, not each call to `respond`.
+A response that calls tools makes a request for each round,
+so a transport that limits concurrent requests counts each round separately.
+The documentation comment for `send(request:body:timeout:responseHandler:)`
+gives the rules that every transport must obey,
+such as how to handle cancellation and when not to retry a request.
+
+In tests, a fake transport can answer each request with a fixed response:
+
+```swift
+struct FixedResponseTransport: HTTPTransport {
+    var json: String
+
+    func send<Return>(
+        request: HTTPRequest,
+        body: Data?,
+        timeout: Duration?,
+        responseHandler: (HTTPResponse, HTTPResponseBody) async throws -> Return
+    ) async throws -> Return {
+        let chunks = AsyncStream<Data> { continuation in
+            continuation.yield(Data(json.utf8))
+            continuation.finish()
+        }
+        return try await responseHandler(HTTPResponse(status: .ok), HTTPResponseBody(chunks))
+    }
+}
+
+let model = OllamaLanguageModel(
+    model: "qwen3.5",
+    transport: FixedResponseTransport(json: """
+        {"model": "qwen3.5", "created_at": "2026-01-01T00:00:00Z",
+         "message": {"role": "assistant", "content": "Hello"}, "done": true}
+        """)
+)
+let response = try await LanguageModelSession(model: model).respond(to: "Hi")
+print(response.content) // Hello
+```
+
+When the provider answers with an error status,
+the model throws an `HTTPTransportError`
+with the response's status, headers, and body,
+so you can read a header such as `Retry-After`.
+Network failures throw the transport's own error,
+such as `URLError` or AsyncHTTPClient's `HTTPClientError`.
+
+Streamed requests give the model's `responseStartTimeout` to the transport
+as the `timeout` of `send(request:body:timeout:responseHandler:)`.
+Set it to give a model more time to start its response,
+such as a local model that loads before its first token,
+or to fail sooner:
+
+```swift
+let model = OllamaLanguageModel(
+    model: "qwen3.5",
+    responseStartTimeout: .seconds(300)
+)
+```
+
+The default is `nil`, and requests that don't stream always pass `nil`.
+With `nil`, the transport decides:
+a `URLSession` uses its configuration's `timeoutIntervalForRequest`,
+and AsyncHTTPClient waits up to 180 seconds for the response to start.
+The two transports apply a timeout differently.
+AsyncHTTPClient applies it only until the response starts.
+A `URLSession` applies it to each pause in the response,
+so it also limits the wait between parts of a stream.
+On Linux, a `URLSession` counts only whole seconds,
+so it rounds a timeout up to the next second.
+Both transports reduce a very large timeout to a value that they can hold,
+so a value such as `.seconds(Int64.max)` sets no practical limit
+and doesn't cause a crash.
+A custom transport decides when its timeout starts,
+so a request that waits for a free slot before it's sent
+doesn't use its time while it waits.
+
 ## Differences from Foundation Models
 
 Code that uses an extension doesn't compile with Foundation Models on OS 26.
@@ -756,6 +906,8 @@ say which API they follow.
   for language models defined outside AnyLanguageModel.
 - `Codable` conformance for `GeneratedContent`, `GenerationID`, `Usage`,
   and the types nested in `Transcript`.
+- `HTTPTransport`, `HTTPResponseBody`, `HTTPTransportError`, and `makeDefaultTransport()`:
+  [HTTP transports](#http-transport) for remote models.
 - `GeneratedContentError`, `Transcript.ReasoningReplayError`, `SystemLanguageModel.Error`,
   and each provider's error type.
 - `JSONValue`:
