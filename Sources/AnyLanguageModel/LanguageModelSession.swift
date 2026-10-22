@@ -1639,8 +1639,8 @@ extension LanguageModelSession.ResponseStream: AsyncSequence {
             for try await snapshot in streaming {
                 last = snapshot
             }
-            // AsyncThrowingStream may end normally when its task is cancelled: what came so far
-            // isn't the whole response.
+            // AsyncThrowingStream may end normally when its task is cancelled:
+            // what came so far isn't the whole response.
             try Task.checkCancellation()
             if let last {
                 // Attempt to materialize a concrete Content from the last snapshot
