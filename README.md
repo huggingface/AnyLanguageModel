@@ -1193,7 +1193,7 @@ let model = OllamaLanguageModel(model: "qwen3.5") // `ollama pull qwen3.5:9b`
 
 // Custom endpoint
 let model = OllamaLanguageModel(
-    endpoint: URL(string: "http://remote-server:11434")!,
+    baseURL: URL(string: "http://remote-server:11434")!,
     model: "gemma4"
 )
 
