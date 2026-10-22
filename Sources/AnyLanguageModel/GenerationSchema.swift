@@ -249,9 +249,14 @@ public struct GenerationSchema: Equatable, Codable, CustomDebugStringConvertible
                 }
                 if type == "integer" {
                     // An integer at least 1.5 is at least 2: its bounds are the whole numbers within them.
+                    // A whole-number bound is decoded as an `Int`, which a `Double` may not hold exactly.
                     // A bound no `Int` can hold, such as one of a `UInt64` range, is dropped.
-                    let wholeMinimum = minimum.flatMap { Int(exactly: $0.rounded(.up)) }
-                    let wholeMaximum = maximum.flatMap { Int(exactly: $0.rounded(.down)) }
+                    let wholeMinimum =
+                        (try? container.decodeIfPresent(Int.self, forKey: .minimum))
+                        ?? minimum.flatMap { Int(exactly: $0.rounded(.up)) }
+                    let wholeMaximum =
+                        (try? container.decodeIfPresent(Int.self, forKey: .maximum))
+                        ?? maximum.flatMap { Int(exactly: $0.rounded(.down)) }
                     guard let bounds = Bounds(minimum: wholeMinimum, maximum: wholeMaximum) else {
                         throw impossible(
                             "No whole number is within minimum \(minimum as Any) and maximum \(maximum as Any)."

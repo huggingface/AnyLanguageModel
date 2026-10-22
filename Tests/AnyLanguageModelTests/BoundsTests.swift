@@ -1,3 +1,4 @@
+import Foundation
 import Testing
 
 @testable import AnyLanguageModel
@@ -30,6 +31,36 @@ struct BoundsTests {
         let guide = GenerationGuide<Int>.range(Int.max - 1 ... Int.max)
         #expect(guide.minimum == .integer(Int.max - 1))
         #expect(guide.maximum == .integer(Int.max))
+    }
+
+    /// Integer bounds survive encoding and decoding exactly, including those beyond what a `Double` holds exactly.
+    @Test(arguments: [
+        Bounds.closed(Int.max - 1 ... Int.max),
+        .closed(Int.min ... Int.min + 1),
+        .closed(-9_007_199_254_740_993 ... -9_007_199_254_740_991),
+        .from(9_007_199_254_740_993),
+        .through(-42),
+        .closed(-5 ... 5),
+    ])
+    func integerBoundsRoundTrip(bounds: Bounds<Int>) throws {
+        let schema = GenerationSchema(root: .number(.integer(description: nil, bounds: bounds)), defs: [:])
+        let decoded = try JSONDecoder().decode(GenerationSchema.self, from: JSONEncoder().encode(schema))
+        guard case .number(let node) = decoded.root else {
+            Issue.record("Expected a number schema")
+            return
+        }
+        #expect(node == .integer(description: nil, bounds: bounds))
+    }
+
+    /// A fractional integer bound still rounds to the whole numbers within it.
+    @Test func fractionalIntegerBoundsRound() throws {
+        let json = #"{"type": "integer", "minimum": -2.5, "maximum": 7.5}"#
+        let decoded = try JSONDecoder().decode(GenerationSchema.self, from: Data(json.utf8))
+        guard case .number(let node) = decoded.root else {
+            Issue.record("Expected a number schema")
+            return
+        }
+        #expect(node == .integer(description: nil, bounds: .closed(-2 ... 7)))
     }
 
     @Test func replacingABoundDropsTheOneItContradicts() {
