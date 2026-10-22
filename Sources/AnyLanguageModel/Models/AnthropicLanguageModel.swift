@@ -634,6 +634,8 @@ public struct AnthropicLanguageModel: LanguageModel {
                     var toolRounds = ToolRoundLimit(provider: "Anthropic", options: options)
                     while true {
                         try Task.checkCancellation()
+                        // The entries of the rounds that ran, before this round adds its reasoning.
+                        let completedEntries = state.entries
                         let requestContext = session.resolvedRequestContext()
                         let anthropicTools: [AnthropicTool] = try requestContext.tools.map {
                             try convertToolToAnthropicFormat($0)
@@ -737,7 +739,7 @@ public struct AnthropicLanguageModel: LanguageModel {
                         }
                         guard !toolUses.isEmpty else { break }
                         try Task.checkCancellation()
-                        try toolRounds.record(completed: state.entries)
+                        try toolRounds.record(completed: completedEntries)
                         switch try await resolveToolUses(
                             toolUses,
                             tools: requestContext.tools,

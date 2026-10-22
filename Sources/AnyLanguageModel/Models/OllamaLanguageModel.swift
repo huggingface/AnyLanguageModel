@@ -322,17 +322,20 @@ public struct OllamaLanguageModel: LanguageModel {
                             }
                             if chunk.done { break }
                         }
-                        // The round's reasoning, kept in the transcript before what it led to.
-                        if !thinking.isEmpty {
-                            state.entries.append(.reasoning(.ollama(thinking)))
-                        }
                         guard !toolCalls.isEmpty else {
                             // The final round's reasoning reaches the last snapshot.
-                            if !thinking.isEmpty, let snapshot = state.snapshot() { continuation.yield(snapshot) }
+                            if !thinking.isEmpty {
+                                state.entries.append(.reasoning(.ollama(thinking)))
+                                if let snapshot = state.snapshot() { continuation.yield(snapshot) }
+                            }
                             break
                         }
                         try Task.checkCancellation()
                         try toolRounds.record(completed: state.entries)
+                        // The round's reasoning, kept in the transcript before what it led to.
+                        if !thinking.isEmpty {
+                            state.entries.append(.reasoning(.ollama(thinking)))
+                        }
                         switch try await resolveToolCalls(
                             toolCalls,
                             tools: offeredTools,

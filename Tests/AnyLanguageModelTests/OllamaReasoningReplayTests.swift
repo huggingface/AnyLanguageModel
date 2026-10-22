@@ -39,6 +39,37 @@ struct OllamaReasoningReplayTests {
         #expect(session.transcript.contains { if case .reasoning = $0 { true } else { false } })
     }
 
+    @Test("the round past the tool-round limit leaves its thinking out of the rounds that ran")
+    func toolRoundLimitOmitsTheThinkingOfTheRoundPastIt() async throws {
+        let round = [
+            #"{"model":"m","created_at":"2026-10-16T10:00:00.000Z","message":{"role":"assistant","content":"","thinking":"I should check the weather."},"done":false}"#,
+            #"{"model":"m","created_at":"2026-10-16T10:00:00.000Z","message":{"role":"assistant","content":"","tool_calls":[{"function":{"name":"getWeather","arguments":{"city":"Munich"}}}]},"done":false}"#,
+            #"{"model":"m","created_at":"2026-10-16T10:00:00.000Z","message":{"role":"assistant","content":""},"done":true}"#,
+        ]
+        let model = OllamaLanguageModel(
+            baseURL: URL(string: "http://localhost:11434")!,
+            model: "m",
+            transport: ollama([round, round])
+        )
+        var options = GenerationOptions()
+        options.maximumToolRounds = 1
+        let session = LanguageModelSession(model: model, tools: [WeatherTool()])
+        do {
+            _ = try await session.streamResponse(to: "Weather in Munich?", options: options).collect()
+            Issue.record("Expected the tool-round limit")
+        } catch let error as LanguageModelSession.ToolRoundLimitExceeded {
+            let kinds = error.transcriptEntries.map { entry in
+                switch entry {
+                case .reasoning: "reasoning"
+                case .toolCalls: "toolCalls"
+                case .toolOutput: "toolOutput"
+                default: "other"
+                }
+            }
+            #expect(kinds == ["reasoning", "toolCalls", "toolOutput"])
+        }
+    }
+
     @Test("a streamed answer's own reasoning is in its last snapshot")
     func finalRoundReasoningIsInTheLastSnapshot() async throws {
         let transport = ollama([
