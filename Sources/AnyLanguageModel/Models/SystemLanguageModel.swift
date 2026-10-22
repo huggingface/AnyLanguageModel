@@ -1008,21 +1008,16 @@
             }
             return .init(type: String.self, guides: guides)
 
-        case .number(let number) where number.integerOnly:
-            // The whole numbers within the bounds; a bound no `Int` can hold sets no guide.
+        case .number(.integer(_, let bounds)):
             var guides: [FoundationModels.GenerationGuide<Int>] = []
-            if let minimum = number.minimum.flatMap({ Int(exactly: $0.rounded(.up)) }) {
-                guides.append(.minimum(minimum))
-            }
-            if let maximum = number.maximum.flatMap({ Int(exactly: $0.rounded(.down)) }) {
-                guides.append(.maximum(maximum))
-            }
+            if let minimum = bounds.minimum { guides.append(.minimum(minimum)) }
+            if let maximum = bounds.maximum { guides.append(.maximum(maximum)) }
             return .init(type: Int.self, guides: guides)
 
-        case .number(let number):
+        case .number(.floatingPoint(_, let bounds)):
             var guides: [FoundationModels.GenerationGuide<Double>] = []
-            if let minimum = number.minimum { guides.append(.minimum(minimum)) }
-            if let maximum = number.maximum { guides.append(.maximum(maximum)) }
+            if let minimum = bounds.minimum { guides.append(.minimum(minimum)) }
+            if let maximum = bounds.maximum { guides.append(.maximum(maximum)) }
             return .init(type: Double.self, guides: guides)
 
         case .boolean:
@@ -1769,15 +1764,11 @@
             }
             return GeneratedContent("placeholder")
 
-        case .number(let num):
-            // The smallest value the minimum allows, as far as the type can hold it.
-            let minimum = num.minimum.flatMap { $0.isFinite ? $0 : nil }
-            if num.integerOnly {
-                guard let minimum else { return GeneratedContent(0) }
-                return GeneratedContent(Int(exactly: minimum.rounded(.up)) ?? (minimum > 0 ? .max : 0))
-            } else {
-                return GeneratedContent(minimum ?? 0)
-            }
+        case .number(.integer(_, let bounds)):
+            return GeneratedContent(bounds.clamped(0))
+
+        case .number(.floatingPoint(_, let bounds)):
+            return GeneratedContent(bounds.clamped(0))
 
         case .boolean:
             return GeneratedContent(true)

@@ -682,12 +682,13 @@ OpenAI (Chat Completions and Responses),
 Open Responses, Anthropic, Google Gemini, Ollama,
 MLX, llama.cpp, and Core ML report token usage.
 Counts follow each provider's definitions.
-For providers that support multi-round tool execution,
-response usage includes all tool rounds performed within that response.
+A response that calls tools makes a request for each round.
+As in Foundation Models, `response.usage` reports the final request,
+and `session.usage` counts every request.
 Usage and individual counts are non-optional;
 counts that a provider doesn't report default to zero.
 
-Streaming snapshots carry the latest reported counts,
+Streaming snapshots carry the latest reported counts for the current request,
 which may arrive after the last text update.
 MLX and llama.cpp report totals after each generation round;
 Core ML updates counts as token sequences arrive

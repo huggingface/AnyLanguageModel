@@ -393,8 +393,10 @@ import Testing
             { .provideOutput([.text(.init(content: "Cached weather"))]) }
         }
 
+        /// As in Foundation Models, a streamed response reports its final request's usage,
+        /// and the session counts every request.
         @Test(arguments: Provider.allCases)
-        func streamedToolRoundsAccumulateUsage(_ provider: Provider) async throws {
+        func streamedToolRoundsReportTheFinalRequest(_ provider: Provider) async throws {
             UsageURLProtocol.reset()
             UsageURLProtocol.enqueue(json: try provider.toolStream())
             UsageURLProtocol.enqueue(json: try provider.toolStream(city: "London", callID: "call_2"))
@@ -405,17 +407,17 @@ import Testing
             for try await snapshot in session.streamResponse(to: "Weather?") { snapshots.append(snapshot) }
             let last = try #require(snapshots.last)
             #expect(last.content == "Hello")
-            var expected = provider.expected
-            expected.add(provider.expected)
-            expected.add(provider.expected)
-            #expect(last.usage == expected)
-            #expect(session.usage == expected)
+            var everyRequest = provider.expected
+            everyRequest.add(provider.expected)
+            everyRequest.add(provider.expected)
+            #expect(last.usage == provider.expected)
+            #expect(session.usage == everyRequest)
             #expect(last.transcriptEntries.count == 4)
             #expect(session.transcript.count == 6)
             #expect(tool.cities.withLock { $0 } == ["Paris", "London"])
             #expect(UsageURLProtocol.recordedBodies.count == 3)
             for (previous, next) in zip(snapshots, snapshots.dropFirst()) {
-                #expect(next.usage.totalTokenCount >= previous.usage.totalTokenCount)
+                #expect(next.requests.total.totalTokenCount >= previous.requests.total.totalTokenCount)
                 #expect(next.transcriptEntries.count >= previous.transcriptEntries.count)
             }
         }
@@ -1254,8 +1256,10 @@ import Testing
             #expect(response.content == "Hello")
         }
 
+        /// As in Foundation Models, a response reports its final request's usage,
+        /// and the session counts every request.
         @Test(arguments: [Provider.chat, .responses, .openResponses, .gemini])
-        func toolRoundsAccumulateUsage(_ provider: Provider) async throws {
+        func toolRoundsReportTheFinalRequest(_ provider: Provider) async throws {
             UsageURLProtocol.reset()
             UsageURLProtocol.enqueue(
                 json: try Self.json(provider.response(text: "", counts: provider.counts, tool: true))
@@ -1263,14 +1267,27 @@ import Testing
             UsageURLProtocol.enqueue(json: try Self.json(provider.response(counts: provider.counts)))
             let session = provider.makeSession(tools: [WeatherTool()])
             let response = try await session.respond(to: "Weather?")
-            #expect(session.usage == response.usage)
+            var everyRequest = provider.expected
+            everyRequest.add(provider.expected)
             #expect(response.content == "Hello")
-            #expect(response.usage.input.totalTokenCount == (provider == .gemini ? 220 : 200))
-            #expect(response.usage.output.totalTokenCount == (provider == .gemini ? 50 : 40))
-            #expect(response.usage.output.reasoningTokenCount == 10)
-            #expect(response.usage.input.cachedTokenCount == 50)
+            #expect(response.usage == provider.expected)
+            #expect(session.usage == everyRequest)
             #expect(response.transcriptEntries.count == 2)
             #expect(UsageURLProtocol.recordedBodies.count == 2)
+        }
+
+        /// The final request's usage is its own, even when it reports none and an earlier one did.
+        @Test(arguments: [Provider.chat, .responses, .openResponses, .gemini])
+        func finalRequestWithoutUsageReportsNone(_ provider: Provider) async throws {
+            UsageURLProtocol.reset()
+            UsageURLProtocol.enqueue(
+                json: try Self.json(provider.response(text: "", counts: provider.counts, tool: true))
+            )
+            UsageURLProtocol.enqueue(json: try Self.json(provider.response()))
+            let session = provider.makeSession(tools: [WeatherTool()])
+            let response = try await session.respond(to: "Weather?")
+            #expect(response.usage == .zero)
+            #expect(session.usage == provider.expected)
         }
 
         private struct StopDelegate: ToolExecutionDelegate {
