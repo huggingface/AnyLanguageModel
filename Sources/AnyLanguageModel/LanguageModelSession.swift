@@ -1687,6 +1687,8 @@ extension LanguageModelSession.ResponseStream: AsyncSequence {
         }
 
         if let fallbackSnapshot {
+            // A response made whole isn't returned to a task that was cancelled for it either.
+            try Task.checkCancellation()
             let finalContent: Content
             if let concrete = fallbackSnapshot.content as? Content {
                 finalContent = concrete

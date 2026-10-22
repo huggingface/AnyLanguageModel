@@ -34,4 +34,17 @@ struct CollectCancellationTests {
         await #expect(throws: CancellationError.self) { try await collecting.value }
         continuation.finish()
     }
+
+    /// A response made whole, as a model that doesn't stream makes it, isn't returned to a cancelled task either.
+    @Test func cancelledWithASingleSnapshot() async throws {
+        let collecting = Task {
+            withUnsafeCurrentTask { $0?.cancel() }
+            return try await LanguageModelSession.ResponseStream<String>(
+                content: "Done",
+                rawContent: GeneratedContent("Done")
+            )
+            .collect()
+        }
+        await #expect(throws: CancellationError.self) { try await collecting.value }
+    }
 }
