@@ -1,4 +1,6 @@
 import Foundation
+import HTTPTypes
+import HTTPTypesFoundation
 import JSONSchema
 import OrderedCollections
 
@@ -54,18 +56,18 @@ public struct OllamaLanguageModel: LanguageModel {
     /// The model identifier to use for generation.
     public let model: String
 
-    private let httpSession: HTTPSession
+    private let transport: any HTTPTransport
 
     /// Creates an Ollama language model.
     ///
     /// - Parameters:
     ///   - baseURL: The base URL for the Ollama server. Defaults to `http://localhost:11434`.
     ///   - model: The model identifier (for example, "qwen2.5" or "llama3.3").
-    ///   - session: The HTTP session or client used for network requests.
+    ///   - transport: How it sends its requests: by default ``makeDefaultTransport()``.
     public init(
         baseURL: URL = defaultBaseURL,
         model: String,
-        session: HTTPSession = makeDefaultSession(),
+        transport: any HTTPTransport = makeDefaultTransport(),
     ) {
         var baseURL = baseURL
         if !baseURL.path.hasSuffix("/") {
@@ -74,7 +76,17 @@ public struct OllamaLanguageModel: LanguageModel {
 
         self.baseURL = baseURL
         self.model = model
-        self.httpSession = session
+        self.transport = transport
+    }
+
+    /// Creates a model that sends its requests with `session`.
+    @available(*, deprecated, renamed: "init(baseURL:model:transport:)")
+    public init(
+        baseURL: URL = defaultBaseURL,
+        model: String,
+        session: HTTPSession
+    ) {
+        self.init(baseURL: baseURL, model: model, transport: session)
     }
 
     public func respond<Content>(
@@ -148,9 +160,8 @@ public struct OllamaLanguageModel: LanguageModel {
 
         let url = baseURL.appendingPathComponent("api/chat")
         let body = try encodeChatParams(params)
-        let reply: ChatReply = try await httpSession.fetch(
-            .post,
-            url: url,
+        let reply: ChatReply = try await transport.fetch(
+            HTTPRequest(method: .post, url: url),
             body: body,
             dateDecodingStrategy: .iso8601WithFractionalSeconds
         )
@@ -278,9 +289,8 @@ public struct OllamaLanguageModel: LanguageModel {
                             parameters: extractTopLevelChatParameters(options)
                         )
                         let body = try encodeChatParams(params)
-                        let chunks: AsyncThrowingStream<ChatReply, any Error> = httpSession.fetchStream(
-                            .post,
-                            url: url,
+                        let chunks: AsyncThrowingStream<ChatReply, any Error> = transport.fetchStream(
+                            HTTPRequest(method: .post, url: url),
                             body: body,
                             dateDecodingStrategy: .iso8601WithFractionalSeconds
                         )

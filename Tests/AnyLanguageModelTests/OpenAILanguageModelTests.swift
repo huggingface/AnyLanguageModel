@@ -568,9 +568,9 @@ private func withOpenAIRateLimitRetry<T>(
     while true {
         do {
             return try await operation()
-        } catch let error as URLSessionError {
-            if case .httpError(_, let detail) = error,
-                detail.contains("rate_limit_exceeded"),
+        } catch let error as HTTPTransportError {
+            if error.kind == .httpError, let body = error.body,
+                String(decoding: body, as: UTF8.self).contains("rate_limit_exceeded"),
                 attempt < maxAttempts
             {
                 let delaySeconds = UInt64(attempt)

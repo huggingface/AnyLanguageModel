@@ -1,4 +1,6 @@
 import Foundation
+import HTTPTypes
+import HTTPTypesFoundation
 import Testing
 
 #if canImport(FoundationNetworking)
@@ -7,20 +9,25 @@ import Testing
 
 @testable import AnyLanguageModel
 
-@Suite("URLSession Extensions")
+/// On Linux every request waits its turn at one gate, so tests that send requests run one at a
+/// time, the suites nested in this one too: one holding the gate can't make another's wait fail.
+@Suite("URLSession Extensions", .serialized)
 struct URLSessionExtensionsTests {
     @Test func invalidResponseDescriptionMatchesExpectedText() {
-        let error = URLSessionError.invalidResponse
+        let error = HTTPTransportError(kind: .invalidResponse)
         #expect(error.description == "Invalid response")
     }
 
-    @Test func httpErrorDescriptionIncludesStatusCodeAndDetail() {
-        let error = URLSessionError.httpError(statusCode: 429, detail: "rate limit")
+    @Test func httpErrorKeepsItsResponseAndBody() {
+        let response = HTTPResponse(status: .tooManyRequests, headerFields: [.retryAfter: "20"])
+        let error = HTTPTransportError(kind: .httpError, response: response, body: Data("rate limit".utf8))
         #expect(error.description == "HTTP error (Status 429): rate limit")
+        #expect(error.response?.headerFields[.retryAfter] == "20")
     }
 
-    @Test func decodingErrorDescriptionIncludesDetail() {
-        let error = URLSessionError.decodingError(detail: "keyNotFound")
+    @Test func decodingErrorDescriptionIncludesTheUnderlyingError() {
+        struct KeyNotFound: Error, CustomStringConvertible { var description: String { "keyNotFound" } }
+        let error = HTTPTransportError(kind: .decodingError, underlyingError: KeyNotFound())
         #expect(error.description == "Decoding error: keyNotFound")
     }
 }
@@ -154,8 +161,8 @@ struct URLSessionExtensionsTests {
                 let streaming = Task {
                     let stream: AsyncThrowingStream<Line, any Error> =
                         eventStream
-                        ? session.fetchEventStream(HTTP.Method.post, url: url)
-                        : session.fetchStream(HTTP.Method.post, url: url)
+                        ? session.fetchEventStream(HTTPRequest(method: .post, url: url))
+                        : session.fetchStream(HTTPRequest(method: .post, url: url))
                     for try await _ in stream {}
                 }
 
@@ -249,8 +256,7 @@ struct URLSessionExtensionsTests {
             let session = ChunkedURLProtocol.makeSession()
             var received: [Line] = []
             let stream: AsyncThrowingStream<Line, any Error> = session.fetchStream(
-                .post,
-                url: URL(string: "https://example.com")!
+                HTTPRequest(method: .post, url: URL(string: "https://example.com")!)
             )
             for try await line in stream {
                 received.append(line)

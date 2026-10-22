@@ -133,9 +133,9 @@ struct AnyOfGenerationTests {
         let schema = GenerationSchema.primitive(
             String.self,
             node: .anyOf([
-                object(["x": .number(.init(description: "first", integerOnly: true))]),
+                object(["x": .number(.integer(description: "first", bounds: .unbounded))]),
                 object([
-                    "x": .number(.init(description: "second", integerOnly: true)),
+                    "x": .number(.integer(description: "second", bounds: .unbounded)),
                     "y": letter(["a"]),
                 ]),
             ])
