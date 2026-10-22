@@ -32,29 +32,25 @@ struct BoundsTests {
         #expect(guide.maximum == .integer(Int.max))
     }
 
-    #if os(macOS) || os(Linux)
-        /// Guides that no value satisfies are a mistake in the code, as an inverted `ClosedRange` is.
-        /// Given apart, they reach the schema's own check, which says so.
-        @Test func contradictingIntegerGuidesStop() async throws {
-            let result = try await #require(processExitsWith: .failure, observing: [\.standardErrorContent]) {
-                _ = GenerationSchema.Property(name: "count", type: Int.self, guides: [.minimum(10), .maximum(5)])
-            }
-            #expect(
-                String(decoding: result.standardErrorContent, as: UTF8.self).contains(
-                    "minimum 10 is above its maximum 5"
-                )
-            )
-        }
+    @Test func replacingABoundDropsTheOneItContradicts() {
+        #expect(Bounds.closed(1 ... 9).replacing(minimum: 5) == .closed(5 ... 9))
+        #expect(Bounds.closed(1 ... 9).replacing(minimum: 10) == .from(10))
+        #expect(Bounds.closed(1 ... 9).replacing(maximum: 5) == .closed(1 ... 5))
+        #expect(Bounds.closed(1 ... 9).replacing(maximum: 0) == .through(0))
+        #expect(Bounds<Int>.unbounded.replacing(minimum: 3) == .from(3))
+    }
 
-        @Test func contradictingFloatingPointGuidesStop() async throws {
-            let result = try await #require(processExitsWith: .failure, observing: [\.standardErrorContent]) {
-                _ = GenerationSchema.Property(name: "share", type: Double.self, guides: [.minimum(1), .maximum(0.5)])
-            }
-            #expect(
-                String(decoding: result.standardErrorContent, as: UTF8.self).contains(
-                    "minimum 1.0 is above its maximum 0.5"
-                )
-            )
+    /// Guides that no value satisfies together still make a schema:
+    /// the later guide's bound replaces the earlier one it contradicts.
+    @Test func contradictingGuidesKeepTheLaterBound() throws {
+        func bounds(of property: GenerationSchema.Property) -> GenerationSchema.NumberNode? {
+            if case .number(let node) = property.node { node } else { nil }
         }
-    #endif
+        let count = GenerationSchema.Property(name: "count", type: Int.self, guides: [.minimum(10), .maximum(5)])
+        #expect(bounds(of: count) == .integer(description: nil, bounds: .through(5)))
+        let level = GenerationSchema.Property(name: "level", type: Int.self, guides: [.maximum(5), .minimum(10)])
+        #expect(bounds(of: level) == .integer(description: nil, bounds: .from(10)))
+        let share = GenerationSchema.Property(name: "share", type: Double.self, guides: [.minimum(1), .maximum(0.5)])
+        #expect(bounds(of: share) == .floatingPoint(description: nil, bounds: .through(0.5)))
+    }
 }

@@ -963,26 +963,20 @@ extension GenerationSchema {
                 }
                 return (.string(node), [:])
             } else if type == Int.self {
-                var minimum: Int?
-                var maximum: Int?
+                // A later guide's bound replaces an earlier one of the same kind,
+                // and an earlier one of the other kind that it contradicts,
+                // so guides that no value satisfies together still make a schema.
+                var bounds = Bounds<Int>.unbounded
                 for guide in guides {
-                    if case .integer(let min)? = guide.minimum { minimum = min }
-                    if case .integer(let max)? = guide.maximum { maximum = max }
-                }
-                // Guides that no value satisfies are a mistake in the code, as an inverted ClosedRange is.
-                guard let bounds = Bounds(minimum: minimum, maximum: maximum) else {
-                    preconditionFailure("A guide's minimum \(minimum!) is above its maximum \(maximum!).")
+                    if case .integer(let min)? = guide.minimum { bounds = bounds.replacing(minimum: min) }
+                    if case .integer(let max)? = guide.maximum { bounds = bounds.replacing(maximum: max) }
                 }
                 return (.number(.integer(description: description, bounds: bounds)), [:])
             } else if type == Float.self || type == Double.self || type == Decimal.self {
-                var minimum: Double?
-                var maximum: Double?
+                var bounds = Bounds<Double>.unbounded
                 for guide in guides {
-                    if case .floatingPoint(let min)? = guide.minimum { minimum = min }
-                    if case .floatingPoint(let max)? = guide.maximum { maximum = max }
-                }
-                guard let bounds = Bounds(minimum: minimum, maximum: maximum) else {
-                    preconditionFailure("A guide's minimum \(minimum!) is above its maximum \(maximum!).")
+                    if case .floatingPoint(let min)? = guide.minimum { bounds = bounds.replacing(minimum: min) }
+                    if case .floatingPoint(let max)? = guide.maximum { bounds = bounds.replacing(maximum: max) }
                 }
                 return (.number(.floatingPoint(description: description, bounds: bounds)), [:])
             } else {
