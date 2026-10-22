@@ -82,6 +82,41 @@ struct ReportedUsage: Sendable {
     }
 }
 
+/// The usage of a response's requests, one for each tool round, each with the conversation so far.
+///
+/// As in Foundation Models, a response reports its final request's usage,
+/// and the session counts every request.
+struct RequestsUsage: Sendable, Equatable {
+    /// Every request's usage before the final one, added up.
+    private(set) var earlier: LanguageModelSession.Usage
+
+    /// The final request's usage.
+    var final: LanguageModelSession.Usage
+
+    /// Every request's usage, added up.
+    var total: LanguageModelSession.Usage {
+        var total = earlier
+        total.add(final)
+        return total
+    }
+
+    init(earlier: LanguageModelSession.Usage = .zero, final: LanguageModelSession.Usage = .zero) {
+        self.earlier = earlier
+        self.final = final
+    }
+
+    /// Adds the usage of a request sent after the others.
+    mutating func add(_ request: LanguageModelSession.Usage) {
+        earlier.add(final)
+        final = request
+    }
+
+    /// Adds the usage a request sent after the others reported, if any.
+    mutating func add(_ request: ReportedUsage?) {
+        add(request?.value ?? .zero)
+    }
+}
+
 /// Usage fields shared by OpenAI's Responses API and Open Responses.
 struct ResponsesUsage: Decodable, Sendable {
     let inputTokens: Int?
@@ -120,12 +155,12 @@ extension LanguageModelSession.ResponseStream.Snapshot {
     ///
     /// - Parameter wrapperProperty: The property that holds the response,
     ///   if the provider's response schema wraps it.
-    init?(text: String, usage: LanguageModelSession.Usage, wrapperProperty: String? = nil) {
+    init?(text: String, requests: RequestsUsage, wrapperProperty: String? = nil) {
         if Content.self == String.self {
             self.init(
                 content: (text as! Content).asPartiallyGenerated(),
                 rawContent: GeneratedContent(text),
-                usage: usage
+                requests: requests
             )
         } else {
             let raw = ProviderResponseSchema.unwrapping(
@@ -133,7 +168,7 @@ extension LanguageModelSession.ResponseStream.Snapshot {
                 fromProperty: wrapperProperty
             )
             guard let content = try? Content(raw) else { return nil }
-            self.init(content: content.asPartiallyGenerated(), rawContent: raw, usage: usage)
+            self.init(content: content.asPartiallyGenerated(), rawContent: raw, requests: requests)
         }
     }
 }

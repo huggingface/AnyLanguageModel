@@ -681,6 +681,72 @@ struct DynamicProfileTests {
         #expect(session.transcript == durableBefore)
     }
 
+    @Test(arguments: [false, true], [false, true])
+    func modelHandoffPreservesFinalAndEarlierRequestUsage(streaming: Bool, finalReportsUsage: Bool) async throws {
+        let prefix = LanguageModelSession.Usage(
+            input: .init(totalTokenCount: 11, cachedTokenCount: 0),
+            output: .init(totalTokenCount: 3, reasoningTokenCount: 0)
+        )
+        let earlier = LanguageModelSession.Usage(
+            input: .init(totalTokenCount: 7, cachedTokenCount: 0),
+            output: .init(totalTokenCount: 2, reasoningTokenCount: 0)
+        )
+        let final =
+            finalReportsUsage
+            ? LanguageModelSession.Usage(
+                input: .init(totalTokenCount: 5, cachedTokenCount: 0),
+                output: .init(totalTokenCount: 1, reasoningTokenCount: 0)
+            ) : .zero
+        let model = HandoffUsageModel(requests: .init(earlier: earlier, final: final))
+        let session = LanguageModelSession(
+            profile: LanguageModelSession.Profile { Instructions("Usage handoff") }.model(model)
+        )
+        let context = session.resolvedRequestContext()
+        let call = Transcript.ToolCall(id: "earlier-call", toolName: "fixture", arguments: .init(properties: [:]))
+        let entries: [Transcript.Entry] = [
+            .toolCalls(.init([call])),
+            .toolOutput(.init(id: call.id, toolName: call.toolName, segments: [.text(.init(content: "Earlier"))])),
+        ]
+        let response: LanguageModelSession.Response<String>
+        if streaming {
+            let stream: LanguageModelSession.ResponseStream<String> = try #require(
+                session.profileContinuationStream(
+                    ifSelectedModelDiffersFrom: UUID(),
+                    requestContext: context,
+                    prompt: Prompt("Continue"),
+                    generating: String.self,
+                    schema: String.generationSchema,
+                    includeSchemaInPrompt: true,
+                    prefixEntries: entries,
+                    prefixUsage: prefix,
+                    prefixText: ""
+                )
+            )
+            response = try await stream.collect()
+        } else {
+            response = try #require(
+                try await session.profileContinuationResponse(
+                    ifSelectedModelDiffersFrom: UUID(),
+                    requestContext: context,
+                    prompt: Prompt("Continue"),
+                    generating: String.self,
+                    schema: String.generationSchema,
+                    includeSchemaInPrompt: true,
+                    prefixEntries: entries,
+                    prefixUsage: prefix,
+                    prefixText: ""
+                )
+            )
+        }
+        var total = prefix
+        total.add(earlier)
+        let expectedEarlier = total
+        total.add(final)
+        #expect(response.usage == final)
+        #expect(response.requests.earlier == expectedEarlier)
+        #expect(response.requests.total == total)
+    }
+
     @Test func modelHandoffIsSkippedForTheInitialRequest() async throws {
         let session = LanguageModelSession(
             profile: LifecycleFixtureProfile(
@@ -803,6 +869,44 @@ private struct FixtureProfileTool: Tool {
     struct Arguments {}
 
     func call(arguments: Arguments) async throws -> String { "done" }
+}
+
+private struct HandoffUsageModel: LanguageModel {
+    typealias UnavailableReason = Never
+    let requests: RequestsUsage
+
+    func respond<Content: Generable>(
+        within session: LanguageModelSession,
+        to prompt: Prompt,
+        generating type: Content.Type,
+        includeSchemaInPrompt: Bool,
+        options: GenerationOptions
+    ) async throws -> LanguageModelSession.Response<Content> {
+        let raw = GeneratedContent("Final")
+        return .init(content: try Content(raw), rawContent: raw, transcriptEntries: [], requests: requests)
+    }
+
+    func streamResponse<Content: Generable>(
+        within session: LanguageModelSession,
+        to prompt: Prompt,
+        generating type: Content.Type,
+        includeSchemaInPrompt: Bool,
+        options: GenerationOptions
+    ) -> sending LanguageModelSession.ResponseStream<Content> {
+        .init(
+            stream: AsyncThrowingStream { continuation in
+                do {
+                    let raw = GeneratedContent("Final")
+                    continuation.yield(
+                        .init(content: try Content(raw).asPartiallyGenerated(), rawContent: raw, requests: requests)
+                    )
+                    continuation.finish()
+                } catch {
+                    continuation.finish(throwing: error)
+                }
+            }
+        )
+    }
 }
 
 private struct ProfileFixtureModel: LanguageModel {
