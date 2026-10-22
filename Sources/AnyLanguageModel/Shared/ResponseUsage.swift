@@ -222,8 +222,19 @@ extension LanguageModelSession.ResponseStream.Snapshot {
                 (try? GeneratedContent(json: text)) ?? GeneratedContent(text),
                 fromProperty: wrapperProperty
             )
-            guard let content = try? Content.PartiallyGenerated(raw) else { return nil }
+            guard let content = partiallyGenerated(Content.self, from: raw) else { return nil }
             self.init(content: content, rawContent: raw, requests: requests)
         }
     }
+}
+
+/// Decodes partially generated content, or returns `nil`.
+///
+/// A generic function, because Swift 6.3 can't type-check
+/// this initializer inside the snapshot's extension.
+private func partiallyGenerated<Value: Generable>(
+    _: Value.Type,
+    from raw: GeneratedContent
+) -> Value.PartiallyGenerated? {
+    try? Value.PartiallyGenerated(raw)
 }
