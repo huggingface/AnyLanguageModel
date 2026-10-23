@@ -527,7 +527,7 @@ public struct AnthropicLanguageModel: LanguageModel {
         if !toolUses.isEmpty {
             let resolution = try await resolveToolUses(
                 toolUses,
-                tools: requestContext.tools,
+                tools: requestContext.toolsForExecution(in: session),
                 session: session
             )
             switch resolution {
@@ -631,7 +631,7 @@ public struct AnthropicLanguageModel: LanguageModel {
                         type == String.self ? nil : try convertSchemaToAnthropicFormat(schema)
                     var inFlightMessages: [AnthropicMessage] = []
                     var state = StreamingResponseState<Content>()
-                    var toolRounds = ToolRoundLimit(provider: "Anthropic", options: options)
+                    let toolRounds = ToolRoundLimit(provider: "Anthropic", options: options)
                     while true {
                         try Task.checkCancellation()
                         // The entries of the rounds that ran, before this round adds its reasoning.
@@ -742,7 +742,7 @@ public struct AnthropicLanguageModel: LanguageModel {
                         try toolRounds.record(completed: completedEntries)
                         switch try await resolveToolUses(
                             toolUses,
-                            tools: requestContext.tools,
+                            tools: requestContext.toolsForExecution(in: session),
                             session: session
                         ) {
                         case .stop(let calls):
