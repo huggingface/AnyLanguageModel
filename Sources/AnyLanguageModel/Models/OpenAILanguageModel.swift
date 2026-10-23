@@ -603,7 +603,14 @@ public struct OpenAILanguageModel: LanguageModel, ProfileRequestIdentifiedLangua
             let reasoning = toolCallMessage.reasoningEntry(host: baseURL.host)
             if let toolCalls = toolCallMessage.toolCalls, !toolCalls.isEmpty {
                 try session.recordToolRound(toolRounds, completed: entries)
-                if let reasoning { entries.append(.reasoning(reasoning)) }
+                if let reasoning {
+                    entries.append(.reasoning(reasoning))
+                    try await session.profileDidProduceEntries(
+                        [.reasoning(reasoning)],
+                        requestContext: requestContext,
+                        currentRoundEntries: entries
+                    )
+                }
                 let (callsEntry, resolution) = try await resolveToolCalls(
                     toolCalls,
                     requestContext: requestContext,
@@ -1011,7 +1018,14 @@ public struct OpenAILanguageModel: LanguageModel, ProfileRequestIdentifiedLangua
                         }
                         try Task.checkCancellation()
                         try session.recordToolRound(toolRounds, completed: state.entries)
-                        if let reasoning { state.entries.append(.reasoning(reasoning)) }
+                        if let reasoning {
+                            state.entries.append(.reasoning(reasoning))
+                            try await session.profileDidProduceEntries(
+                                [.reasoning(reasoning)],
+                                requestContext: requestContext,
+                                currentRoundEntries: state.entries
+                            )
+                        }
                         let (callsEntry, resolution) = try await resolveToolCalls(
                             toolCalls,
                             requestContext: requestContext,
