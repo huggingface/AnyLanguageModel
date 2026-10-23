@@ -93,7 +93,8 @@ import HTTPTypesFoundation
 /// body as it arrives.
 ///
 /// It waits for each part of a response, not only for its start, as long as `timeout`, or as the
-/// session's own `timeoutIntervalForRequest` says when it isn't given. Cancelling the calling task cancels the request, which then throws
+/// session's own `timeoutIntervalForRequest` says when it isn't given. On Linux it waits whole
+/// seconds, so a `timeout` is rounded up to the next one. Cancelling the calling task cancels the request, which then throws
 /// `URLError.cancelled`, as a cancelled URL session task does.
 ///
 /// On Linux, each request is sent by a session of its own, made with this session's
@@ -116,7 +117,12 @@ extension URLSession: HTTPTransport {
         // in an `Int` and traps past that, so it's at most about 68 years: no limit to speak of, as
         // with AsyncHTTPClient.
         if let (seconds, attoseconds) = timeout?.components {
-            let interval = TimeInterval(seconds) + TimeInterval(attoseconds) / 1e18
+            var interval = TimeInterval(seconds) + TimeInterval(attoseconds) / 1e18
+            #if canImport(FoundationNetworking)
+                // FoundationNetworking keeps only whole seconds of `timeoutInterval`, so half a
+                // second would be none: it's rounded up.
+                interval = max(1, interval.rounded(.up))
+            #endif
             urlRequest.timeoutInterval = min(interval, TimeInterval(Int32.max))
         }
 
