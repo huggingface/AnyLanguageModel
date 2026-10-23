@@ -57,7 +57,9 @@ import Testing
                 responseStartTimeout: Duration = .seconds(60)
             ) -> LanguageModelSession {
                 LanguageModelSession(
-                    model: makeModel(responseStartTimeout: responseStartTimeout), tools: tools, transcript: transcript
+                    model: makeModel(responseStartTimeout: responseStartTimeout),
+                    tools: tools,
+                    transcript: transcript
                 )
             }
 

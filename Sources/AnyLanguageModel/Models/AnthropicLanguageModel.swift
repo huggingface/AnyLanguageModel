@@ -493,6 +493,7 @@ public struct AnthropicLanguageModel: LanguageModel, ProfileRequestIdentifiedLan
         let toolRounds = session.toolRoundLimit(for: "Anthropic", options: options)
 
         while true {
+            let completedEntries = entries
             let requestContext = try await session.resolvedRequestContext(
                 including: session.usesDynamicProfile ? entries : [],
                 options: options
@@ -545,7 +546,7 @@ public struct AnthropicLanguageModel: LanguageModel, ProfileRequestIdentifiedLan
                 return nil
             }
             if !toolUses.isEmpty {
-                try session.recordToolRound(toolRounds, completed: entries)
+                try session.recordToolRound(toolRounds, completed: completedEntries)
                 try await session.profileDidProduceEntries(
                     reasoningEntries,
                     requestContext: requestContext,
@@ -677,6 +678,7 @@ public struct AnthropicLanguageModel: LanguageModel, ProfileRequestIdentifiedLan
                     let toolRounds = session.toolRoundLimit(for: "Anthropic", options: options)
                     while true {
                         try Task.checkCancellation()
+                        let completedEntries = state.entries
                         let requestContext = try await session.resolvedRequestContext(
                             including: session.usesDynamicProfile ? state.entries : [],
                             options: options
@@ -803,7 +805,7 @@ public struct AnthropicLanguageModel: LanguageModel, ProfileRequestIdentifiedLan
                         }
                         guard !toolUses.isEmpty else { break }
                         try Task.checkCancellation()
-                        try session.recordToolRound(toolRounds, completed: state.entries)
+                        try session.recordToolRound(toolRounds, completed: completedEntries)
                         try await session.profileDidProduceEntries(
                             state.entries,
                             requestContext: requestContext,
