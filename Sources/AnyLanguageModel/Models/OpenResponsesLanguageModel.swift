@@ -22,7 +22,7 @@ import JSONSchema
 ///     model: "openai/gpt-4o-mini"
 /// )
 /// ```
-public struct OpenResponsesLanguageModel: LanguageModel {
+public struct OpenResponsesLanguageModel: LanguageModel, ProfileRequestIdentifiedLanguageModel {
     /// The reason the model is unavailable.
     /// This model is always available.
     public typealias UnavailableReason = Never
@@ -391,6 +391,7 @@ public struct OpenResponsesLanguageModel: LanguageModel {
     public let responseStartTimeout: Duration?
 
     private let transport: any HTTPTransport
+    let profileRequestIdentity = UUID()
 
     /// Creates an Open Responses language model.
     ///
@@ -475,8 +476,10 @@ public struct OpenResponsesLanguageModel: LanguageModel {
         options: GenerationOptions
     ) async throws -> LanguageModelSession.Response<Content> where Content: Generable {
         return try await respondWithOpenResponses(
+            prompt: prompt,
             generating: type,
             schema: schema,
+            includeSchemaInPrompt: includeSchemaInPrompt,
             options: options,
             session: session
         )
@@ -533,21 +536,44 @@ public struct OpenResponsesLanguageModel: LanguageModel {
                 do {
                     var inFlightMessages: [OpenResponsesMessage] = []
                     var state = StreamingResponseState<Content>(wrapperProperty: responseSchema.wrapperProperty)
-                    var toolRounds = ToolRoundLimit(provider: "Open Responses", options: options)
+                    let toolRounds = session.toolRoundLimit(for: "Open Responses", options: options)
                     while true {
                         try Task.checkCancellation()
-                        let requestContext = session.resolvedRequestContext()
+                        let requestContext = try await session.resolvedRequestContext(
+                            including: session.usesDynamicProfile ? state.entries : [],
+                            options: options
+                        )
+                        if let handoff = session.profileContinuationStream(
+                            ifSelectedModelDiffersFrom: profileRequestIdentity,
+                            requestContext: requestContext,
+                            prompt: prompt,
+                            generating: type,
+                            schema: schema,
+                            includeSchemaInPrompt: includeSchemaInPrompt,
+                            prefixEntries: state.entries,
+                            prefixUsage: state.requests.total,
+                            prefixText: state.responseText
+                        ) {
+                            for try await snapshot in handoff { continuation.yield(snapshot) }
+                            continuation.finish()
+                            return
+                        }
                         let tools: [OpenResponsesTool]? =
                             requestContext.tools.isEmpty
                             ? nil : requestContext.tools.map(convertToolToOpenResponsesFormat)
-                        let messages = requestContext.transcript.toOpenResponsesMessages() + inFlightMessages
+                        let messages = openResponsesMessages(
+                            from: requestContext.transcript,
+                            replacing: state.entries,
+                            with: inFlightMessages,
+                            hasDynamicProfile: requestContext.hasDynamicProfile
+                        )
                         let params = try OpenResponsesAPI.createRequestBody(
                             model: model,
                             messages: messages,
                             tools: tools,
                             generating: type,
                             schema: responseSchema.schema,
-                            options: options,
+                            options: requestContext.options,
                             stream: true
                         )
                         let body = try JSONEncoder().encode(params)
@@ -592,19 +618,21 @@ public struct OpenResponsesLanguageModel: LanguageModel {
                         }
                         guard !toolCalls.isEmpty else { break }
                         try Task.checkCancellation()
-                        try toolRounds.record(completed: state.entries)
-                        switch try await resolveToolCalls(
+                        try session.recordToolRound(toolRounds, completed: state.entries)
+                        let (callsEntry, resolution) = try await resolveToolCalls(
                             toolCalls,
-                            tools: requestContext.tools,
+                            requestContext: requestContext,
+                            currentRoundEntries: state.entries,
                             session: session
-                        ) {
-                        case .stop(let calls):
-                            state.entries.append(.toolCalls(Transcript.ToolCalls(calls)))
+                        )
+                        switch resolution {
+                        case .stop:
+                            state.entries.append(.toolCalls(callsEntry))
                             continuation.yield(try state.stoppedSnapshot())
                             continuation.finish()
                             return
                         case .invocations(let invocations):
-                            state.entries.append(.toolCalls(Transcript.ToolCalls(invocations.map(\.call))))
+                            state.entries.append(.toolCalls(callsEntry))
                             for invocation in invocations {
                                 state.entries.append(.toolOutput(invocation.output))
                                 inFlightMessages.append(
@@ -632,8 +660,10 @@ public struct OpenResponsesLanguageModel: LanguageModel {
 
     /// Sends a non-streaming request to the Open Responses API and returns the parsed response.
     private func respondWithOpenResponses<Content>(
+        prompt: Prompt,
         generating type: Content.Type,
         schema: GenerationSchema,
+        includeSchemaInPrompt: Bool,
         options: GenerationOptions,
         session: LanguageModelSession
     ) async throws -> LanguageModelSession.Response<Content> where Content: Generable {
@@ -648,20 +678,41 @@ public struct OpenResponsesLanguageModel: LanguageModel {
         var inFlightMessages: [OpenResponsesMessage] = []
         let url = baseURL.appendingPathComponent("responses")
 
-        var toolRounds = ToolRoundLimit(provider: "Open Responses", options: options)
+        let toolRounds = session.toolRoundLimit(for: "Open Responses", options: options)
         while true {
-            let requestContext = session.resolvedRequestContext()
+            let requestContext = try await session.resolvedRequestContext(
+                including: session.usesDynamicProfile ? entries : [],
+                options: options
+            )
+            if let continuation = try await session.profileContinuationResponse(
+                ifSelectedModelDiffersFrom: profileRequestIdentity,
+                requestContext: requestContext,
+                prompt: prompt,
+                generating: type,
+                schema: schema,
+                includeSchemaInPrompt: includeSchemaInPrompt,
+                prefixEntries: entries,
+                prefixUsage: usage.total,
+                prefixText: earlierText
+            ) {
+                return continuation
+            }
             let tools: [OpenResponsesTool]? =
                 requestContext.tools.isEmpty
                 ? nil : requestContext.tools.map(convertToolToOpenResponsesFormat)
-            let messages = requestContext.transcript.toOpenResponsesMessages() + inFlightMessages
+            let messages = openResponsesMessages(
+                from: requestContext.transcript,
+                replacing: entries,
+                with: inFlightMessages,
+                hasDynamicProfile: requestContext.hasDynamicProfile
+            )
             let params = try OpenResponsesAPI.createRequestBody(
                 model: model,
                 messages: messages,
                 tools: tools,
                 generating: type,
                 schema: responseSchema.schema,
-                options: options,
+                options: requestContext.options,
                 stream: false
             )
             let body = try JSONEncoder().encode(params)
@@ -682,16 +733,17 @@ public struct OpenResponsesLanguageModel: LanguageModel {
                         )
                     }
                 }
-                try toolRounds.record(completed: entries)
-                let resolution = try await resolveToolCalls(
+                try session.recordToolRound(toolRounds, completed: entries)
+                let (callsEntry, resolution) = try await resolveToolCalls(
                     toolCalls,
-                    tools: requestContext.tools,
+                    requestContext: requestContext,
+                    currentRoundEntries: entries,
                     session: session
                 )
                 switch resolution {
                 case .stop(let calls):
                     if !calls.isEmpty {
-                        entries.append(.toolCalls(Transcript.ToolCalls(calls)))
+                        entries.append(.toolCalls(callsEntry))
                     }
                     let empty = try emptyResponseContent(for: type)
                     return LanguageModelSession.Response(
@@ -702,7 +754,7 @@ public struct OpenResponsesLanguageModel: LanguageModel {
                     )
                 case .invocations(let invocations):
                     if !invocations.isEmpty {
-                        entries.append(.toolCalls(Transcript.ToolCalls(invocations.map { $0.call })))
+                        entries.append(.toolCalls(callsEntry))
                         for inv in invocations {
                             entries.append(.toolOutput(inv.output))
                             inFlightMessages.append(
@@ -1250,6 +1302,21 @@ private struct OpenResponsesToolInvocationResult: Sendable {
     let output: Transcript.ToolOutput
 }
 
+private func openResponsesMessages(
+    from transcript: Transcript,
+    replacing currentRoundEntries: [Transcript.Entry],
+    with continuation: [OpenResponsesMessage],
+    hasDynamicProfile: Bool
+) -> [OpenResponsesMessage] {
+    toolContinuationMessages(
+        from: transcript,
+        replacing: currentRoundEntries,
+        with: continuation,
+        hasDynamicProfile: hasDynamicProfile,
+        convert: { $0.toOpenResponsesMessages() }
+    )
+}
+
 private enum OpenResponsesToolResolutionOutcome: Sendable {
     case stop(calls: [Transcript.ToolCall])
     case invocations([OpenResponsesToolInvocationResult])
@@ -1257,63 +1324,30 @@ private enum OpenResponsesToolResolutionOutcome: Sendable {
 
 private func resolveToolCalls(
     _ toolCalls: [OpenResponsesToolCall],
-    tools: [any Tool],
+    requestContext: LanguageModelSession.RequestContext,
+    currentRoundEntries: [Transcript.Entry],
     session: LanguageModelSession
-) async throws -> OpenResponsesToolResolutionOutcome {
-    if toolCalls.isEmpty { return .invocations([]) }
-    var byName: [String: any Tool] = [:]
-    for t in tools { if byName[t.name] == nil { byName[t.name] = t } }
+) async throws -> (calls: Transcript.ToolCalls, outcome: OpenResponsesToolResolutionOutcome) {
     var transcriptCalls: [Transcript.ToolCall] = []
     for c in toolCalls {
         let args = (c.arguments.flatMap { try? GeneratedContent(json: $0) } ?? GeneratedContent(properties: [:]))
         transcriptCalls.append(Transcript.ToolCall(id: c.id, toolName: c.name, arguments: args))
     }
-    if let d = session.toolExecutionDelegate {
-        await d.didGenerateToolCalls(transcriptCalls, in: session)
+    let callsEntry = Transcript.ToolCalls(transcriptCalls)
+    let entries = currentRoundEntries + [.toolCalls(callsEntry)]
+    switch try await session.resolveProfileToolCalls(
+        transcriptCalls,
+        requestContext: requestContext,
+        currentRoundEntries: entries
+    ) {
+    case .stop(let calls):
+        return (callsEntry, .stop(calls: calls))
+    case .invocations(let invocations):
+        return (
+            callsEntry,
+            .invocations(invocations.map { .init(call: $0.call, output: $0.output) })
+        )
     }
-    guard !transcriptCalls.isEmpty else { return .invocations([]) }
-    var decisions: [ToolExecutionDecision] = []
-    if let d = session.toolExecutionDelegate {
-        for call in transcriptCalls {
-            let dec = await d.toolCallDecision(for: call, in: session)
-            if case .stop = dec { return .stop(calls: transcriptCalls) }
-            decisions.append(dec)
-        }
-    } else {
-        decisions = Array(repeating: .execute, count: transcriptCalls.count)
-    }
-    var results: [OpenResponsesToolInvocationResult] = []
-    for (i, call) in transcriptCalls.enumerated() {
-        switch decisions[i] {
-        case .stop:
-            return .stop(calls: transcriptCalls)
-        case .provideOutput(let segs):
-            let out = Transcript.ToolOutput(id: call.id, toolName: call.toolName, segments: segs)
-            if let d = session.toolExecutionDelegate { await d.didExecuteToolCall(call, output: out, in: session) }
-            results.append(OpenResponsesToolInvocationResult(call: call, output: out))
-        case .execute:
-            guard let tool = byName[call.toolName] else {
-                let out = Transcript.ToolOutput(
-                    id: call.id,
-                    toolName: call.toolName,
-                    segments: [.text(.init(content: "Tool not found: \(call.toolName)"))]
-                )
-                if let d = session.toolExecutionDelegate { await d.didExecuteToolCall(call, output: out, in: session) }
-                results.append(OpenResponsesToolInvocationResult(call: call, output: out))
-                continue
-            }
-            do {
-                let segs = try await tool.makeOutputSegments(from: call.arguments)
-                let out = Transcript.ToolOutput(id: call.id, toolName: tool.name, segments: segs)
-                if let d = session.toolExecutionDelegate { await d.didExecuteToolCall(call, output: out, in: session) }
-                results.append(OpenResponsesToolInvocationResult(call: call, output: out))
-            } catch {
-                if let d = session.toolExecutionDelegate { await d.didFailToolCall(call, error: error, in: session) }
-                throw LanguageModelSession.ToolCallError(tool: tool, underlyingError: error)
-            }
-        }
-    }
-    return .invocations(results)
 }
 
 // MARK: - Streaming events

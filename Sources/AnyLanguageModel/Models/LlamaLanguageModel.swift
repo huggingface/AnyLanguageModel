@@ -850,7 +850,7 @@ import Foundation
             if type == String.self {
                 let maxTokens = runtimeOptions.maximumResponseTokens ?? 100
                 let outputFormat = currentToolCallFormat()
-                var toolRounds = ToolRoundLimit(provider: "Llama", options: options)
+                let toolRounds = session.toolRoundLimit(for: "Llama", options: options)
                 var allEntries: [Transcript.Entry] = []
                 var text = ""
                 var usage = RequestsUsage()
@@ -930,11 +930,11 @@ import Foundation
                         break generationLoop
                     }
 
-                    try toolRounds.record(completed: allEntries)
+                    try session.recordToolRound(toolRounds, completed: allEntries)
 
                     let resolution = try await resolveToolCalls(
                         parsedCalls,
-                        tools: tools,
+                        tools: requestContext.toolsForExecution(in: session, offeredTools: tools),
                         session: session
                     )
                     switch resolution {
@@ -1085,7 +1085,7 @@ import Foundation
                             let runtimeOptions = resolvedOptions(from: options)
                             let maxTokens = runtimeOptions.maximumResponseTokens ?? 100
                             let outputFormat = self.currentToolCallFormat()
-                            var toolRounds = ToolRoundLimit(provider: "Llama", options: options)
+                            let toolRounds = session.toolRoundLimit(for: "Llama", options: options)
                             var accumulatedEntries: [Transcript.Entry] = []
                             var emittedBase = ""
                             var usage = RequestsUsage()
@@ -1194,11 +1194,11 @@ import Foundation
                                     break generationLoop
                                 }
 
-                                try toolRounds.record(completed: accumulatedEntries)
+                                try session.recordToolRound(toolRounds, completed: accumulatedEntries)
 
                                 let resolution = try await self.resolveToolCalls(
                                     parsedCalls,
-                                    tools: tools,
+                                    tools: requestContext.toolsForExecution(in: session, offeredTools: tools),
                                     session: session
                                 )
                                 switch resolution {
