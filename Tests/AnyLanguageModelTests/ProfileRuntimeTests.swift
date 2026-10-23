@@ -681,6 +681,85 @@ struct DynamicProfileTests {
         #expect(session.transcript == durableBefore)
     }
 
+    enum UsageEntryPoint: CaseIterable {
+        case prompt, schema, images
+    }
+
+    private enum UsageFailure: Error { case failed }
+
+    @Test(arguments: UsageEntryPoint.allCases, [false, true])
+    func profileCountsEachRequestBeforeResponseCompletes(entryPoint: UsageEntryPoint, fails: Bool) async throws {
+        let usage = LanguageModelSession.Usage(
+            input: .init(totalTokenCount: 13, cachedTokenCount: 0),
+            output: .init(totalTokenCount: 5, reasoningTokenCount: 0)
+        )
+        let activeSession = Locked<LanguageModelSession?>(nil)
+        let observed = Locked<LanguageModelSession.Usage?>(nil)
+        var model = MockLanguageModel { _, _ in
+            var requests = RequestsUsage()
+            requests.add(usage)
+            observed.withLock { $0 = activeSession.withLock { $0?.usage } }
+            if fails { throw UsageFailure.failed }
+            return #""Done""#
+        }
+        model.usage = usage
+        let session = LanguageModelSession(
+            profile: LanguageModelSession.Profile { Instructions("Request accounting") }.model(model)
+        )
+        activeSession.withLock { $0 = session }
+        func respond() async throws {
+            switch entryPoint {
+            case .prompt:
+                _ = try await session.respond(to: Prompt("Hi"))
+            case .schema:
+                _ = try await session.respond(to: Prompt("Hi"), schema: String.generationSchema)
+            case .images:
+                _ = try await session.respond(to: "Hi", images: [])
+            }
+        }
+        if fails {
+            await #expect(throws: UsageFailure.self) { try await respond() }
+        } else {
+            try await respond()
+        }
+        #expect(observed.withLock { $0 } == usage)
+        #expect(session.usage == usage)
+        #expect(!session.isResponding)
+    }
+
+    @Test(arguments: UsageEntryPoint.allCases, [false, true])
+    func aStreamDoesNotReportUsageToItsSurroundingResponse(entryPoint: UsageEntryPoint, profile: Bool) async throws {
+        let usage = LanguageModelSession.Usage(
+            input: .init(totalTokenCount: 7, cachedTokenCount: 0),
+            output: .init(totalTokenCount: 3, reasoningTokenCount: 0)
+        )
+        var model = MockLanguageModel { _, _ in
+            var requests = RequestsUsage()
+            requests.add(usage)
+            return #""Done""#
+        }
+        model.usage = usage
+        let session =
+            profile
+            ? LanguageModelSession(
+                profile: LanguageModelSession.Profile { Instructions("Stream accounting") }.model(model)
+            ) : LanguageModelSession(model: model)
+        let channel = RequestUsageChannel { _ in }
+        try await RequestUsageChannel.$current.withValue(channel) {
+            switch entryPoint {
+            case .prompt:
+                _ = try await session.streamResponse(to: Prompt("Hi")).collect()
+            case .schema:
+                _ = try await session.streamResponse(to: Prompt("Hi"), schema: String.generationSchema).collect()
+            case .images:
+                _ = try await session.streamResponse(to: "Hi", images: []).collect()
+            }
+        }
+        #expect(channel.reportedUsage == .zero)
+        #expect(session.usage == usage)
+        #expect(!session.isResponding)
+    }
+
     @Test(arguments: [false, true], [false, true])
     func modelHandoffPreservesFinalAndEarlierRequestUsage(streaming: Bool, finalReportsUsage: Bool) async throws {
         let prefix = LanguageModelSession.Usage(
