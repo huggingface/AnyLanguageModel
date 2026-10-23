@@ -203,9 +203,19 @@ public struct OllamaLanguageModel: LanguageModel, ProfileRequestIdentifiedLangua
             )
             let chatResponse = try reply.response()
             usage.add(chatResponse.reportedUsage)
+            let thinking = chatResponse.message.thinking ?? ""
+            let reasoning = thinking.isEmpty ? nil : Transcript.Reasoning.ollama(thinking)
 
             if let toolCalls = chatResponse.message.toolCalls, !toolCalls.isEmpty {
                 try session.recordToolRound(toolRounds, completed: entries)
+                if let reasoning {
+                    entries.append(.reasoning(reasoning))
+                    try await session.profileDidProduceEntries(
+                        [.reasoning(reasoning)],
+                        requestContext: requestContext,
+                        currentRoundEntries: entries
+                    )
+                }
                 let (callsEntry, resolution) = try await resolveToolCalls(
                     toolCalls,
                     requestContext: requestContext,
@@ -226,6 +236,7 @@ public struct OllamaLanguageModel: LanguageModel, ProfileRequestIdentifiedLangua
                         .init(
                             role: .assistant,
                             content: chatResponse.message.content ?? "",
+                            thinking: thinking.isEmpty ? nil : thinking,
                             toolCalls: try toolCalls.map { try JSONValue($0) }
                         )
                     )
@@ -247,6 +258,7 @@ public struct OllamaLanguageModel: LanguageModel, ProfileRequestIdentifiedLangua
                 }
             }
 
+            if let reasoning { entries.append(.reasoning(reasoning)) }
             let text = earlierText + (chatResponse.message.content ?? "")
             if type == String.self {
                 return .init(
@@ -389,6 +401,15 @@ public struct OllamaLanguageModel: LanguageModel, ProfileRequestIdentifiedLangua
                         }
                         try Task.checkCancellation()
                         try session.recordToolRound(toolRounds, completed: state.entries)
+                        if !thinking.isEmpty {
+                            let reasoning = Transcript.Reasoning.ollama(thinking)
+                            state.entries.append(.reasoning(reasoning))
+                            try await session.profileDidProduceEntries(
+                                [.reasoning(reasoning)],
+                                requestContext: requestContext,
+                                currentRoundEntries: state.entries
+                            )
+                        }
                         let (callsEntry, resolution) = try await resolveToolCalls(
                             toolCalls,
                             requestContext: requestContext,
