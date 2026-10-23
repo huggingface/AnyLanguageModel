@@ -152,6 +152,31 @@ private final class Iterating<Iterator: AsyncIteratorProtocol>: ChunkSource wher
     public func makeDefaultSession() -> HTTPSession {
         return HTTPClient.shared
     }
+#elseif os(WASI)
+    /// WASI has no networking of its own, so a remote model needs its `transport` given,
+    /// such as one that sends requests with the host's `fetch`.
+    public func makeDefaultTransport() -> any HTTPTransport {
+        MissingTransport()
+    }
+
+    /// The transport a remote model sent its requests with.
+    @available(*, deprecated, message: "Use HTTPTransport, and makeDefaultTransport() for the default.")
+    public typealias HTTPSession = any HTTPTransport
+
+    private struct MissingTransport: HTTPTransport {
+        func send<Return>(
+            request: HTTPRequest,
+            body: Data?,
+            timeout: Duration?,
+            responseHandler: (HTTPResponse, HTTPResponseBody) async throws -> Return
+        ) async throws -> Return {
+            throw HTTPTransportError(kind: .invalidRequest, underlyingError: WASITransportError())
+        }
+    }
+
+    private struct WASITransportError: Error, CustomStringConvertible {
+        var description: String { "WASI has no default transport: give the model a `transport`." }
+    }
 #else
     /// The transport a remote model sends its requests with unless it's given another:
     /// a URL session with the default configuration.

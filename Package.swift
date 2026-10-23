@@ -54,7 +54,14 @@ let package = Package(
                 .product(name: "EventSource", package: "EventSource"),
                 .product(name: "JSONSchema", package: "JSONSchema"),
                 .product(name: "HTTPTypes", package: "swift-http-types"),
-                .product(name: "HTTPTypesFoundation", package: "swift-http-types"),
+                .product(
+                    name: "HTTPTypesFoundation",
+                    package: "swift-http-types",
+                    // It extends URLSession, which WASI doesn't have.
+                    condition: .when(platforms: [
+                        .macOS, .macCatalyst, .iOS, .tvOS, .watchOS, .visionOS, .linux, .windows, .android,
+                    ])
+                ),
                 .product(
                     name: "MLXLLM",
                     package: "mlx-swift-lm",

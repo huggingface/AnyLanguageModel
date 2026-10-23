@@ -1,7 +1,9 @@
 import EventSource
 import Foundation
 import HTTPTypes
-import HTTPTypesFoundation
+#if !os(WASI)
+    import HTTPTypesFoundation
+#endif
 
 /// Why a request to a model's provider failed: it couldn't be made, its answer wasn't an HTTP
 /// response, the provider answered with an error status, or a successful answer couldn't be read.
