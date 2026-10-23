@@ -100,14 +100,19 @@ struct HTTPTransportTests {
     }
 
     #if canImport(AsyncHTTPClient)
-        /// A timeout too long to count in nanoseconds means no limit, rather than a trap.
-        @Test func aHugeTimeoutDoesntTrap() async throws {
+        /// A timeout too long to count in nanoseconds means no limit, rather than a trap
+        /// or a deadline that has already passed.
+        @Test(arguments: [
+            Duration.seconds(Int64.max),
+            .seconds(9_223_372_036) + .milliseconds(900),
+        ])
+        func aHugeTimeoutHasNoLimit(timeout: Duration) async throws {
             let server = try LoopbackServer(.partial(contentLength: 2, body: "{}"))
             defer { server.stop() }
             let body = try await HTTPClient.shared.send(
                 request: HTTPRequest(url: server.url),
                 body: nil,
-                timeout: .seconds(Int64.max)
+                timeout: timeout
             ) { _, body in try await body.collect() }
             #expect(body == Data("{}".utf8))
         }

@@ -50,12 +50,13 @@ struct StreamingResponseState<Content: Generable> {
 
     /// A stopped tool call can have no response text, including for structured generation.
     ///
-    /// Without text, the snapshot uses the first empty value that the content type accepts:
+    /// When the text so far doesn't decode as the complete content type,
+    /// the snapshot uses the first empty value that the content type accepts:
     /// an empty object, an empty array, `null`, and then zero or `false` for scalar types.
     /// The value must decode as the complete content type, not only its partial form,
     /// so that `collect()` accepts the snapshot.
     func stoppedSnapshot() throws -> LanguageModelSession.ResponseStream<Content>.Snapshot {
-        if let snapshot = snapshot() { return snapshot }
+        if let snapshot = snapshot(), (try? Content(snapshot.rawContent)) != nil { return snapshot }
         let candidates: [GeneratedContent.Kind] = [
             .structure(properties: [:], orderedKeys: []), .array([]), .null, .number(0), .bool(false),
         ]

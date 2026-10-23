@@ -378,6 +378,10 @@ public struct AnthropicLanguageModel: LanguageModel {
     /// The model identifier to use for generation.
     public let model: String
 
+    /// How long to wait for a streamed response to start. With URLSession, it's how long to
+    /// wait for each part of the response, so it applies while the response streams too.
+    public let responseStartTimeout: Duration?
+
     private let transport: any HTTPTransport
 
     /// Creates an Anthropic language model.
@@ -388,6 +392,10 @@ public struct AnthropicLanguageModel: LanguageModel {
     ///   - apiVersion: The API version to use for requests. Defaults to `2023-06-01`.
     ///   - betas: Optional beta version(s) of the API to use.
     ///   - model: The model identifier (for example, "claude-3-5-sonnet-20241022").
+    ///   - responseStartTimeout: How long to wait for a streamed response to start, or `nil`, the
+    ///     default, for the transport to decide: a URL session waits as its configuration says, and
+    ///     AsyncHTTPClient up to 180 seconds. On Linux, a URL session waits whole seconds, so it
+    ///     rounds up to the next one.
     ///   - transport: How it sends its requests: by default ``makeDefaultTransport()``.
     public init(
         baseURL: URL = defaultBaseURL,
@@ -395,6 +403,7 @@ public struct AnthropicLanguageModel: LanguageModel {
         apiVersion: String = defaultAPIVersion,
         betas: [String]? = nil,
         model: String,
+        responseStartTimeout: Duration? = nil,
         transport: any HTTPTransport = makeDefaultTransport(),
     ) {
         var baseURL = baseURL
@@ -407,6 +416,7 @@ public struct AnthropicLanguageModel: LanguageModel {
         self.apiVersion = apiVersion
         self.betas = betas
         self.model = model
+        self.responseStartTimeout = responseStartTimeout
         self.transport = transport
     }
 
@@ -506,6 +516,7 @@ public struct AnthropicLanguageModel: LanguageModel {
             }
         }
         let usage = message.usage?.reportedUsage?.value ?? .zero
+        RequestUsageChannel.report(usage)
 
         // Handle tool calls, if present
         let toolUses: [AnthropicToolUse] = message.content.compactMap { block in
@@ -623,6 +634,8 @@ public struct AnthropicLanguageModel: LanguageModel {
                     let toolRounds = ToolRoundLimit(provider: "Anthropic", options: options)
                     while true {
                         try Task.checkCancellation()
+                        // The entries of the rounds that ran, before this round adds its reasoning.
+                        let completedEntries = state.entries
                         let requestContext = session.resolvedRequestContext()
                         let anthropicTools: [AnthropicTool] = try requestContext.tools.map {
                             try convertToolToAnthropicFormat($0)
@@ -641,7 +654,8 @@ public struct AnthropicLanguageModel: LanguageModel {
                         let events: AsyncThrowingStream<AnthropicStreamEvent, any Error> =
                             transport.fetchEventStream(
                                 HTTPRequest(method: .post, url: url, headerFields: headers),
-                                body: body
+                                body: body,
+                                timeout: responseStartTimeout
                             )
                         var blocks: [Int: AnthropicStreamBlock] = [:]
                         var lastSnapshot: LanguageModelSession.ResponseStream<Content>.Snapshot?
@@ -725,7 +739,7 @@ public struct AnthropicLanguageModel: LanguageModel {
                         }
                         guard !toolUses.isEmpty else { break }
                         try Task.checkCancellation()
-                        try toolRounds.record(completed: state.entries)
+                        try toolRounds.record(completed: completedEntries)
                         switch try await resolveToolUses(
                             toolUses,
                             tools: requestContext.toolsForExecution(in: session),
@@ -1117,7 +1131,7 @@ extension Transcript {
                     )
                 )
             case .reasoning(let reasoning):
-                guard reasoning.metadata["provider"] == GeneratedContent("anthropic") else {
+                guard reasoning.origin == .anthropic else {
                     // Foreign reasoning remains display history, not Anthropic replay state.
                     continue
                 }
@@ -1255,7 +1269,8 @@ private struct AnthropicRedactedThinking: Codable, Sendable {
     func transcriptReasoning(id: String = UUID().uuidString) -> Transcript.Reasoning {
         .init(
             id: id,
-            metadata: ["provider": GeneratedContent("anthropic"), "isRedacted": GeneratedContent(true)],
+            origin: .anthropic,
+            metadata: ["isRedacted": GeneratedContent(true)],
             segments: [],
             signature: Data(data.utf8)
         )
@@ -1317,7 +1332,7 @@ private extension AnthropicThinking {
     func transcriptReasoning(id: String = UUID().uuidString) -> Transcript.Reasoning {
         .init(
             id: id,
-            metadata: ["provider": GeneratedContent("anthropic")],
+            origin: .anthropic,
             segments: [.text(.init(id: id + ":text", content: thinking))],
             signature: signature.isEmpty ? nil : Data(signature.utf8)
         )

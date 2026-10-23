@@ -105,15 +105,75 @@ struct RequestsUsage: Sendable, Equatable {
         self.final = final
     }
 
-    /// Adds the usage of a request sent after the others.
+    /// Adds the usage of a request sent after the others, and counts it for the response being
+    /// made as it completes.
     mutating func add(_ request: LanguageModelSession.Usage) {
         earlier.add(final)
         final = request
+        RequestUsageChannel.report(request)
     }
 
     /// Adds the usage a request sent after the others reported, if any.
     mutating func add(_ request: ReportedUsage?) {
         add(request?.value ?? .zero)
+    }
+}
+
+/// Where the requests of a response that isn't streamed are counted as each one completes, as
+/// Foundation Models' executor sends each request's usage to its session while the session runs
+/// the tool loop. A response that throws keeps the usage of the requests it made.
+///
+/// The session sets one around each such response. What a tool or a stream asks of a model runs
+/// with none, so it's never counted for the response that called the tool or made the stream.
+///
+/// It's a task-local, so a model reaches it wherever it runs in the response's task, as when a
+/// model of another library wraps a built-in one and calls it. A `Task {}` made within the response
+/// inherits it, so what it asks of a model counts for the response; `Task.detached` doesn't.
+final class RequestUsageChannel: Sendable {
+    @TaskLocal static var current: RequestUsageChannel?
+
+    private let record: @Sendable (LanguageModelSession.Usage) -> Void
+    private let reported = Locked(LanguageModelSession.Usage.zero)
+
+    /// A channel that passes each request's usage to `record` as it's reported.
+    init(record: @escaping @Sendable (LanguageModelSession.Usage) -> Void) {
+        self.record = record
+    }
+
+    /// Counts the usage of a request that completed, for the response being made, if any.
+    static func report(_ usage: LanguageModelSession.Usage) {
+        current?.send(usage)
+    }
+
+    /// Counts the usage of a request that completed and reported any, for the response being made.
+    static func report(_ usage: ReportedUsage?) {
+        if let usage { report(usage.value) }
+    }
+
+    /// Runs `operation` where no response's requests are counted.
+    ///
+    /// It runs on the caller's executor. Swift 6.4 adds the `nonisolated(nonsending)` overload
+    /// of `withValue` that this calls; earlier versions call the one that takes an isolation.
+    nonisolated(nonsending) static func outside<T>(
+        _ operation: nonisolated(nonsending) () async throws -> T
+    ) async rethrows -> T {
+        try await $current.withValue(nil, operation: operation)
+    }
+
+    /// Runs `operation` where no response's requests are counted.
+    static func outside<T>(_ operation: () throws -> T) rethrows -> T {
+        try $current.withValue(nil, operation: operation)
+    }
+
+    /// Every request's usage reported so far, added up.
+    var reportedUsage: LanguageModelSession.Usage {
+        reported.withLock { $0 }
+    }
+
+    private func send(_ usage: LanguageModelSession.Usage) {
+        guard usage != .zero else { return }
+        reported.withLock { $0.add(usage) }
+        record(usage)
     }
 }
 
@@ -167,8 +227,19 @@ extension LanguageModelSession.ResponseStream.Snapshot {
                 (try? GeneratedContent(json: text)) ?? GeneratedContent(text),
                 fromProperty: wrapperProperty
             )
-            guard let content = try? Content(raw) else { return nil }
-            self.init(content: content.asPartiallyGenerated(), rawContent: raw, requests: requests)
+            guard let content = partiallyGenerated(Content.self, from: raw) else { return nil }
+            self.init(content: content, rawContent: raw, requests: requests)
         }
     }
+}
+
+/// Decodes partially generated content, or returns `nil`.
+///
+/// A generic function, because Swift 6.3 can't type-check
+/// this initializer inside the snapshot's extension.
+private func partiallyGenerated<Value: Generable>(
+    _: Value.Type,
+    from raw: GeneratedContent
+) -> Value.PartiallyGenerated? {
+    try? Value.PartiallyGenerated(raw)
 }
