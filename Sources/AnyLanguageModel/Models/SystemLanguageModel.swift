@@ -277,7 +277,7 @@
             // Attach the feedback to the session's conversation, including its latest response.
             let fmSession = FoundationModels.LanguageModelSession(
                 model: systemModel,
-                tools: requestContext.tools.toFoundationModels(in: session),
+                tools: requestContext.toolsForExecution(in: session).toFoundationModels(in: session),
                 transcript: requestContext.transcript.toFoundationModels(
                     instructions: requestContext.instructions,
                     toolDefinitions: requestContext.tools
@@ -319,7 +319,7 @@
             let requestContext = session.resolvedRequestContext()
             return FoundationModels.LanguageModelSession(
                 model: systemModel,
-                tools: requestContext.tools.toFoundationModels(in: session),
+                tools: requestContext.toolsForExecution(in: session).toFoundationModels(in: session),
                 transcript: fmTranscriptDroppingDuplicatePrompt(
                     requestContext.transcript,
                     prompt: prompt
@@ -388,7 +388,7 @@
                 if let instructions = requestContext.instructions {
                     instructions.toFoundationModels()
                 }
-                requestContext.tools.toFoundationModels(in: session)
+                requestContext.toolsForExecution(in: session).toFoundationModels(in: session)
             }
         }
 
@@ -420,7 +420,7 @@
             let requestContext = session.resolvedRequestContext()
             return FoundationModels.LanguageModelSession(
                 model: model,
-                tools: requestContext.tools.toFoundationModels(in: session),
+                tools: requestContext.toolsForExecution(in: session).toFoundationModels(in: session),
                 transcript: fmTranscriptDroppingDuplicatePrompt(
                     requestContext.transcript,
                     prompt: prompt
@@ -744,9 +744,10 @@
             Transcript.ToolOutput(id: call.id, toolName: tool.name, segments: segments)
         }
         guard let session, let delegate = session.toolExecutionDelegate else {
-            let text = try await tool.callFunction(content: arguments).promptRepresentation.description
-            await ToolCallRecord.current?.ran(call, output: output([.text(.init(content: text))]))
-            return FoundationModels.Prompt(text)
+            let segments = try await tool.makeOutputSegments(from: arguments)
+            let prompt = try segments.toFoundationModelsToolOutput()
+            await ToolCallRecord.current?.ran(call, output: output(segments))
+            return prompt
         }
         await delegate.didGenerateToolCalls([call], in: session)
         switch await delegate.toolCallDecision(for: call, in: session) {
@@ -761,10 +762,11 @@
             return prompt
         case .execute:
             do {
-                let text = try await tool.callFunction(content: arguments).promptRepresentation.description
-                await delegate.didExecuteToolCall(call, output: output([.text(.init(content: text))]), in: session)
-                await ToolCallRecord.current?.ran(call, output: output([.text(.init(content: text))]))
-                return FoundationModels.Prompt(text)
+                let segments = try await tool.makeOutputSegments(from: arguments)
+                let prompt = try segments.toFoundationModelsToolOutput()
+                await delegate.didExecuteToolCall(call, output: output(segments), in: session)
+                await ToolCallRecord.current?.ran(call, output: output(segments))
+                return prompt
             } catch {
                 await delegate.didFailToolCall(call, error: error, in: session)
                 throw error
