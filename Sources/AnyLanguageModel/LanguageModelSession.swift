@@ -879,6 +879,19 @@ public final class LanguageModelSession: @unchecked Sendable {
         }
     }
 
+    /// Makes a response that isn't streamed, counting each of its requests' usage as the model
+    /// reports it, so a response that throws keeps what its requests used. Once it returns, what
+    /// it used and didn't report, such as a model's that doesn't report, is counted from it.
+    nonisolated private func countingRequests<Content>(
+        of generate: () async throws -> Response<Content>
+    ) async throws -> Response<Content> {
+        let channel = RequestUsageChannel { [self] in recordUsage($0) }
+        let response = try await RequestUsageChannel.$current.withValue(channel) { try await generate() }
+        var reported = channel.reportedUsage
+        recordUsage(response.requests.total.increment(since: &reported))
+        return response
+    }
+
     nonisolated private func beginResponding() {
         withMutation(keyPath: \.isResponding) {
             state.withLock { $0.beginResponding() }
@@ -1328,7 +1341,7 @@ public final class LanguageModelSession: @unchecked Sendable {
     ) async throws -> ProfiledModelResponse<Content> where Content: Generable {
         guard dynamicProfile != nil else {
             return ProfiledModelResponse(
-                response: try await generate(model, options, .init()),
+                response: try await countingRequests { try await generate(model, options, .init()) },
                 prepared: nil
             )
         }
@@ -1352,7 +1365,9 @@ public final class LanguageModelSession: @unchecked Sendable {
                     historyEdits: context.callbackHistory
                 )
             }
-            return try await generate(context.model, context.options, context.contextOptions)
+            return try await countingRequests {
+                try await generate(context.model, context.options, context.contextOptions)
+            }
         }
         return ProfiledModelResponse(response: response, prepared: prepared)
     }
@@ -1382,8 +1397,6 @@ public final class LanguageModelSession: @unchecked Sendable {
                 in: profiled.response,
                 responseFormat: responseFormat
             )
-
-            recordUsage(response.requests.total)
 
             // Add response entry to transcript
             let textContent: String
@@ -1489,13 +1502,15 @@ public final class LanguageModelSession: @unchecked Sendable {
             )
         } else {
             profileTracker = nil
-            upstream = model.streamResponse(
-                within: self,
-                to: prompt,
-                generating: type,
-                includeSchemaInPrompt: includeSchemaInPrompt,
-                options: options
-            )
+            upstream = RequestUsageChannel.outside {
+                model.streamResponse(
+                    within: self,
+                    to: prompt,
+                    generating: type,
+                    includeSchemaInPrompt: includeSchemaInPrompt,
+                    options: options
+                )
+            }
         }
         return wrapStream(
             upstream,
@@ -1544,47 +1559,49 @@ public final class LanguageModelSession: @unchecked Sendable {
                 ContextOptions
             ) -> ResponseStream<Content>
     ) -> ResponseStream<Content> where Content: Generable {
-        let stream = AsyncThrowingStream<ResponseStream<Content>.Snapshot, any Error> { continuation in
-            let task = Task {
-                do {
-                    let context = self.resolveRequestContext(
-                        additionalEntries: [],
-                        options: options
-                    )
-                    let prepared = PreparedProfileRequest(
-                        session: self,
-                        context: context,
-                        prompt: requestPrompt,
-                        callSiteOptions: options,
-                        callSiteIncludeSchemaInPrompt: includeSchemaInPrompt
-                    )
-                    tracker.prepared = prepared
-                    try await ProfileRequestBinding.$prepared.withValue(prepared) {
-                        if let profile = context.profile {
-                            try await self.profileLifecycle.prepare(
-                                profile,
-                                properties: self.properties,
-                                history: context.canonicalTranscript,
-                                prompt: prepared.prompt,
-                                callbackState: context.callbackState,
-                                historyEdits: context.callbackHistory
-                            )
-                        }
-                        let upstream = generate(
-                            context.model,
-                            context.options,
-                            context.contextOptions
+        let stream = RequestUsageChannel.outside {
+            AsyncThrowingStream<ResponseStream<Content>.Snapshot, any Error> { continuation in
+                let task = Task {
+                    do {
+                        let context = self.resolveRequestContext(
+                            additionalEntries: [],
+                            options: options
                         )
-                        for try await snapshot in upstream {
-                            continuation.yield(snapshot)
+                        let prepared = PreparedProfileRequest(
+                            session: self,
+                            context: context,
+                            prompt: requestPrompt,
+                            callSiteOptions: options,
+                            callSiteIncludeSchemaInPrompt: includeSchemaInPrompt
+                        )
+                        tracker.prepared = prepared
+                        try await ProfileRequestBinding.$prepared.withValue(prepared) {
+                            if let profile = context.profile {
+                                try await self.profileLifecycle.prepare(
+                                    profile,
+                                    properties: self.properties,
+                                    history: context.canonicalTranscript,
+                                    prompt: prepared.prompt,
+                                    callbackState: context.callbackState,
+                                    historyEdits: context.callbackHistory
+                                )
+                            }
+                            let upstream = generate(
+                                context.model,
+                                context.options,
+                                context.contextOptions
+                            )
+                            for try await snapshot in upstream {
+                                continuation.yield(snapshot)
+                            }
                         }
+                        continuation.finish()
+                    } catch {
+                        continuation.finish(throwing: error)
                     }
-                    continuation.finish()
-                } catch {
-                    continuation.finish(throwing: error)
                 }
+                continuation.onTermination = { _ in task.cancel() }
             }
-            continuation.onTermination = { _ in task.cancel() }
         }
         return ResponseStream(stream: stream)
     }
@@ -1774,13 +1791,15 @@ extension LanguageModelSession {
             }
         } else {
             profileTracker = nil
-            upstream = model.streamResponse(
-                within: self,
-                to: prompt,
-                schema: schema,
-                includeSchemaInPrompt: includeSchemaInPrompt,
-                options: options
-            )
+            upstream = RequestUsageChannel.outside {
+                model.streamResponse(
+                    within: self,
+                    to: prompt,
+                    schema: schema,
+                    includeSchemaInPrompt: includeSchemaInPrompt,
+                    options: options
+                )
+            }
         }
         return wrapStream(
             upstream,
@@ -2002,8 +2021,6 @@ extension LanguageModelSession {
                 responseFormat: type == String.self ? nil : .init(type: type)
             )
 
-            recordUsage(response.requests.total)
-
             // Add response entry to transcript
             let textContent: String
             if case .string(let str) = response.rawContent.kind {
@@ -2146,13 +2163,15 @@ extension LanguageModelSession {
             }
         } else {
             profileTracker = nil
-            upstream = model.streamResponse(
-                within: self,
-                to: textPrompt,
-                generating: type,
-                includeSchemaInPrompt: includeSchemaInPrompt,
-                options: options
-            )
+            upstream = RequestUsageChannel.outside {
+                model.streamResponse(
+                    within: self,
+                    to: textPrompt,
+                    generating: type,
+                    includeSchemaInPrompt: includeSchemaInPrompt,
+                    options: options
+                )
+            }
         }
         return wrapStream(
             upstream,
@@ -2501,6 +2520,9 @@ extension LanguageModelSession.ResponseStream: AsyncSequence {
             for try await snapshot in streaming {
                 last = snapshot
             }
+            // AsyncThrowingStream may end normally when its task is cancelled:
+            // what came so far isn't the whole response.
+            try Task.checkCancellation()
             if let last {
                 // Attempt to materialize a concrete Content from the last snapshot
                 let finalContent: Content
@@ -2520,6 +2542,8 @@ extension LanguageModelSession.ResponseStream: AsyncSequence {
         }
 
         if let fallbackSnapshot {
+            // A response made whole isn't returned to a task that was cancelled for it either.
+            try Task.checkCancellation()
             let finalContent: Content
             if let concrete = fallbackSnapshot.content as? Content {
                 finalContent = concrete
