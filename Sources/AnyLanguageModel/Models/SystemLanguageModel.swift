@@ -838,7 +838,9 @@
     @available(macOS 26.0, iOS 26.0, watchOS 27.0, tvOS 26.0, visionOS 26.0, *)
     extension Tool {
         fileprivate func callFunction(content: GeneratedContent) async throws -> any PromptRepresentable {
-            try await call(arguments: Self.Arguments(content))
+            let arguments = try Self.Arguments(content)
+            // What a tool asks of a model is its own: it isn't counted for the response that called it.
+            return try await RequestUsageChannel.outside { try await call(arguments: arguments) }
         }
     }
 
