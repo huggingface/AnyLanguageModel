@@ -386,6 +386,10 @@ public struct OpenResponsesLanguageModel: LanguageModel, ProfileRequestIdentifie
     /// Model identifier to use for generation.
     public let model: String
 
+    /// How long to wait for a streamed response to start. With URLSession, it's how long to
+    /// wait for each part of the response, so it applies while the response streams too.
+    public let responseStartTimeout: Duration?
+
     private let transport: any HTTPTransport
     let profileRequestIdentity = UUID()
 
@@ -395,11 +399,16 @@ public struct OpenResponsesLanguageModel: LanguageModel, ProfileRequestIdentifie
     ///   - baseURL: Base URL for the API (e.g. `https://api.openai.com/v1/` or `https://openrouter.ai/api/v1/`). Must end with `/`.
     ///   - apiKey: API key or closure that returns it.
     ///   - model: Model identifier (e.g. `gpt-4o-mini` or provider-specific id).
+    ///   - responseStartTimeout: How long to wait for a streamed response to start, or `nil`, the
+    ///     default, for the transport to decide: a URL session waits as its configuration says, and
+    ///     AsyncHTTPClient up to 180 seconds. On Linux, a URL session waits whole seconds, so it
+    ///     rounds up to the next one.
     ///   - transport: How it sends its requests: by default ``makeDefaultTransport()``.
     public init(
         baseURL: URL,
         apiKey tokenProvider: @escaping @autoclosure @Sendable () -> String,
         model: String,
+        responseStartTimeout: Duration? = nil,
         transport: any HTTPTransport = makeDefaultTransport(),
     ) {
         var baseURL = baseURL
@@ -409,6 +418,7 @@ public struct OpenResponsesLanguageModel: LanguageModel, ProfileRequestIdentifie
         self.baseURL = baseURL
         self.tokenProvider = tokenProvider
         self.model = model
+        self.responseStartTimeout = responseStartTimeout
         self.transport = transport
     }
 
@@ -574,7 +584,8 @@ public struct OpenResponsesLanguageModel: LanguageModel, ProfileRequestIdentifie
                                     url: url,
                                     headerFields: [.authorization: "Bearer \(tokenProvider())"]
                                 ),
-                                body: body
+                                body: body,
+                                timeout: responseStartTimeout
                             )
                         var toolCalls: [OpenResponsesToolCall] = []
                         responseEvents: for try await event in events {

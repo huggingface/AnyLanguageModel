@@ -923,6 +923,53 @@ import Testing
         }
     }
 
+    /// What a tool asks of a model is its own, when Foundation Models calls it too:
+    /// a request the tool makes to another model isn't counted for the response that called it,
+    /// whether the session has a tool execution delegate or not. No system model is involved.
+    @available(macOS 26.0, iOS 26.0, tvOS 26.0, visionOS 26.0, *)
+    @Test(arguments: [false, true])
+    func whatASystemModelToolUsesIsntCountedForTheResponseThatCalledIt(withDelegate: Bool) async throws {
+        let tool = AskingOllama()
+        let session = LanguageModelSession(model: SystemLanguageModel.default, tools: [tool])
+        let delegate = ScriptedDelegate([.execute])
+        if withDelegate { session.toolExecutionDelegate = delegate }
+        let channel = RequestUsageChannel { _ in }
+        try await RequestUsageChannel.$current.withValue(channel) {
+            _ = try await callTool(tool, with: GeneratedContent(properties: ["term": "tea"]), in: session)
+        }
+        #expect(tool.transport.handled == 1)
+        #expect(channel.reportedUsage == .zero)
+    }
+
+    /// A tool that asks an Ollama model itself, which reports what the request used.
+    private struct AskingOllama: Tool {
+        let name = "lookup"
+        let description = "Looks something up."
+        let transport = FakeTransport(replies: [
+            .init(chunks: [
+                #"{"model":"m","created_at":"2026-10-22T10:00:00.000Z","message":{"role":"assistant","content":"Found"},"done":true,"prompt_eval_count":7,"eval_count":3}"#
+            ])
+        ])
+
+        @Generable struct Arguments { var term: String }
+
+        func call(arguments: Arguments) async throws -> String {
+            let model = OllamaLanguageModel(
+                baseURL: URL(string: "http://localhost:11434")!,
+                model: "m",
+                transport: transport
+            )
+            let response = try await model.respond(
+                within: LanguageModelSession(model: model),
+                to: Prompt(arguments.term),
+                generating: String.self,
+                includeSchemaInPrompt: false,
+                options: GenerationOptions()
+            )
+            return response.content
+        }
+    }
+
     /// Decides each tool call in turn from `decisions`, then provides "Snowing" for the rest,
     /// recording each call.
     private actor ScriptedDelegate: ToolExecutionDelegate {

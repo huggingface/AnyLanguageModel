@@ -399,6 +399,10 @@ public struct OpenAILanguageModel: LanguageModel, ProfileRequestIdentifiedLangua
     /// The API variant to use.
     public let apiVariant: APIVariant
 
+    /// How long to wait for a streamed response to start. With URLSession, it's how long to
+    /// wait for each part of the response, so it applies while the response streams too.
+    public let responseStartTimeout: Duration?
+
     private let transport: any HTTPTransport
     let profileRequestIdentity = UUID()
 
@@ -409,12 +413,17 @@ public struct OpenAILanguageModel: LanguageModel, ProfileRequestIdentifiedLangua
     ///   - apiKey: Your OpenAI API key or a closure that returns it.
     ///   - model: The model identifier (for example, "gpt-4" or "gpt-3.5-turbo").
     ///   - apiVariant: The API variant to use. Defaults to `.chatCompletions`.
+    ///   - responseStartTimeout: How long to wait for a streamed response to start, or `nil`, the
+    ///     default, for the transport to decide: a URL session waits as its configuration says, and
+    ///     AsyncHTTPClient up to 180 seconds. On Linux, a URL session waits whole seconds, so it
+    ///     rounds up to the next one.
     ///   - transport: How it sends its requests: by default ``makeDefaultTransport()``.
     public init(
         baseURL: URL = defaultBaseURL,
         apiKey tokenProvider: @escaping @autoclosure @Sendable () -> String,
         model: String,
         apiVariant: APIVariant = .chatCompletions,
+        responseStartTimeout: Duration? = nil,
         transport: any HTTPTransport = makeDefaultTransport(),
     ) {
         var baseURL = baseURL
@@ -426,6 +435,7 @@ public struct OpenAILanguageModel: LanguageModel, ProfileRequestIdentifiedLangua
         self.tokenProvider = tokenProvider
         self.model = model
         self.apiVariant = apiVariant
+        self.responseStartTimeout = responseStartTimeout
         self.transport = transport
     }
 
@@ -551,7 +561,8 @@ public struct OpenAILanguageModel: LanguageModel, ProfileRequestIdentifiedLangua
                 from: requestContext.transcript,
                 replacing: entries,
                 with: inFlightMessages,
-                hasDynamicProfile: requestContext.hasDynamicProfile
+                hasDynamicProfile: requestContext.hasDynamicProfile,
+                host: baseURL.host
             )
             let params = try ChatCompletions.createRequestBody(
                 model: model,
@@ -589,8 +600,17 @@ public struct OpenAILanguageModel: LanguageModel, ProfileRequestIdentifiedLangua
             }
 
             let toolCallMessage = choice.message
+            let reasoning = toolCallMessage.reasoningEntry(host: baseURL.host)
             if let toolCalls = toolCallMessage.toolCalls, !toolCalls.isEmpty {
                 try session.recordToolRound(toolRounds, completed: entries)
+                if let reasoning {
+                    entries.append(.reasoning(reasoning))
+                    try await session.profileDidProduceEntries(
+                        [.reasoning(reasoning)],
+                        requestContext: requestContext,
+                        currentRoundEntries: entries
+                    )
+                }
                 let (callsEntry, resolution) = try await resolveToolCalls(
                     toolCalls,
                     requestContext: requestContext,
@@ -614,7 +634,7 @@ public struct OpenAILanguageModel: LanguageModel, ProfileRequestIdentifiedLangua
                     if !invocations.isEmpty {
                         let calls = callsEntry
                         entries.append(.toolCalls(calls))
-                        inFlightMessages.append(toolCallsMessage(calls))
+                        inFlightMessages.append(toolCallsMessage(calls, reasoning: reasoning, host: baseURL.host))
                         for invocation in invocations {
                             let output = invocation.output
                             entries.append(.toolOutput(output))
@@ -631,6 +651,8 @@ public struct OpenAILanguageModel: LanguageModel, ProfileRequestIdentifiedLangua
                 }
             }
 
+            // Kept for the response that follows these entries, so replay sends it back.
+            if let reasoning { entries.append(.reasoning(reasoning)) }
             roundText = choice.message.content ?? ""
             text = earlierText + roundText
             break
@@ -703,7 +725,8 @@ public struct OpenAILanguageModel: LanguageModel, ProfileRequestIdentifiedLangua
                 from: requestContext.transcript,
                 replacing: entries,
                 with: inFlightMessages,
-                hasDynamicProfile: requestContext.hasDynamicProfile
+                hasDynamicProfile: requestContext.hasDynamicProfile,
+                host: baseURL.host
             )
             let params = try Responses.createRequestBody(
                 model: model,
@@ -879,7 +902,8 @@ public struct OpenAILanguageModel: LanguageModel, ProfileRequestIdentifiedLangua
                             from: requestContext.transcript,
                             replacing: state.entries,
                             with: inFlightMessages,
-                            hasDynamicProfile: requestContext.hasDynamicProfile
+                            hasDynamicProfile: requestContext.hasDynamicProfile,
+                            host: baseURL.host
                         )
                         let params: JSONValue
                         let path: String
@@ -912,13 +936,15 @@ public struct OpenAILanguageModel: LanguageModel, ProfileRequestIdentifiedLangua
                         let url = baseURL.appendingPathComponent(path)
                         let headers: HTTPFields = [.authorization: "Bearer \(tokenProvider())"]
                         var toolCalls: [OpenAIToolCall] = []
+                        var roundReasoning = ChatCompletionsReasoning(host: baseURL.host)
 
                         switch apiVariant {
                         case .responses:
                             let events: AsyncThrowingStream<OpenAIResponsesServerEvent, any Error> =
                                 transport.fetchEventStream(
                                     HTTPRequest(method: .post, url: url, headerFields: headers),
-                                    body: body
+                                    body: body,
+                                    timeout: responseStartTimeout
                                 )
                             responseEvents: for try await event in events {
                                 switch event {
@@ -952,13 +978,15 @@ public struct OpenAILanguageModel: LanguageModel, ProfileRequestIdentifiedLangua
                             let events: AsyncThrowingStream<OpenAIChatCompletionsChunk, any Error> =
                                 transport.fetchEventStream(
                                     HTTPRequest(method: .post, url: url, headerFields: headers),
-                                    body: body
+                                    body: body,
+                                    timeout: responseStartTimeout
                                 )
                             var calls: [Int: OpenAIStreamedToolCall] = [:]
                             for try await chunk in events {
                                 state.usage.merge(chunk.usage?.reportedUsage)
                                 let delta = chunk.choices.first?.delta
                                 if let piece = delta?.content { state.text += piece }
+                                roundReasoning.add(delta)
                                 for delta in delta?.toolCalls ?? [] {
                                     var call = calls[delta.index] ?? OpenAIStreamedToolCall()
                                     if let id = delta.id { call.id = id }
@@ -976,9 +1004,28 @@ public struct OpenAILanguageModel: LanguageModel, ProfileRequestIdentifiedLangua
                             toolCalls = calls.keys.sorted().compactMap { calls[$0]?.toolCall }
                         }
 
-                        guard !toolCalls.isEmpty else { break }
+                        let reasoning = roundReasoning.entry
+                        guard !toolCalls.isEmpty else {
+                            // The final round's reasoning, for the response that follows it.
+                            if let reasoning {
+                                state.entries.append(.reasoning(reasoning))
+                                let metadata = responseContentMetadata(state.responseText, roundText: state.text)
+                                if let snapshot = state.snapshot(providerMetadata: metadata) {
+                                    continuation.yield(snapshot)
+                                }
+                            }
+                            break
+                        }
                         try Task.checkCancellation()
                         try session.recordToolRound(toolRounds, completed: state.entries)
+                        if let reasoning {
+                            state.entries.append(.reasoning(reasoning))
+                            try await session.profileDidProduceEntries(
+                                [.reasoning(reasoning)],
+                                requestContext: requestContext,
+                                currentRoundEntries: state.entries
+                            )
+                        }
                         let (callsEntry, resolution) = try await resolveToolCalls(
                             toolCalls,
                             requestContext: requestContext,
@@ -1001,7 +1048,9 @@ public struct OpenAILanguageModel: LanguageModel, ProfileRequestIdentifiedLangua
                             let calls = callsEntry
                             state.entries.append(.toolCalls(calls))
                             if apiVariant == .chatCompletions {
-                                inFlightMessages.append(toolCallsMessage(calls))
+                                inFlightMessages.append(
+                                    toolCallsMessage(calls, reasoning: reasoning, host: baseURL.host)
+                                )
                             }
                             for invocation in invocations {
                                 state.entries.append(.toolOutput(invocation.output))
@@ -1183,12 +1232,28 @@ private enum ChatCompletions {
             let content: String?
             let refusal: String?
             let toolCalls: [OpenAIToolCall]?
+            let reasoning: String?
+            let reasoningContent: String?
+            let reasoningDetails: JSONValue?
 
             private enum CodingKeys: String, CodingKey {
                 case role
                 case content
                 case refusal
                 case toolCalls = "tool_calls"
+                case reasoning
+                case reasoningContent = "reasoning_content"
+                case reasoningDetails = "reasoning_details"
+            }
+
+            /// The message's reasoning as a transcript entry, from the API at `host`.
+            func reasoningEntry(host: String?) -> Transcript.Reasoning? {
+                ChatCompletionsReasoning(
+                    reasoning: reasoning,
+                    reasoningContent: reasoningContent,
+                    details: reasoningDetails.map { [$0] } ?? [],
+                    host: host
+                ).entry
             }
         }
     }
@@ -1475,8 +1540,14 @@ private func responseContentMetadata(_ responseText: String, roundText: String) 
 ///
 /// The model's text from this round is stored on the transcript's `ToolCalls`, so replay
 /// sends the same `content` as the in-flight request, including when that text is empty
-/// (both paths send `null`).
-private func toolCallsMessage(_ calls: Transcript.ToolCalls) -> OpenAIMessage {
+/// (both paths send `null`). Its reasoning is the transcript's reasoning entry before the
+/// calls (``ChatCompletionsReasoning``), sent back the same way on both paths, when the
+/// request goes to `host`, the API that wrote it.
+private func toolCallsMessage(
+    _ calls: Transcript.ToolCalls,
+    reasoning: Transcript.Reasoning? = nil,
+    host: String? = nil
+) -> OpenAIMessage {
     let text = calls.providerMetadata?[assistantContentMetadataKey]
     let toolCalls: [JSONValue] = calls.map { call in
         .object([
@@ -1488,12 +1559,13 @@ private func toolCallsMessage(_ calls: Transcript.ToolCalls) -> OpenAIMessage {
             ]),
         ])
     }
-    let message: JSONValue = .object([
+    var message: [String: JSONValue] = [
         "role": .string("assistant"),
         "content": text.map { .string($0) } ?? .null,
         "tool_calls": .array(toolCalls),
-    ])
-    return OpenAIMessage(role: .raw(rawContent: message), content: .text(""))
+    ]
+    message.merge(ChatCompletionsReasoning(reasoning, sentTo: host).fields) { current, _ in current }
+    return OpenAIMessage(role: .raw(rawContent: .object(message)), content: .text(""))
 }
 
 /// The content's JSON with its keys sorted, so the same arguments are always the same bytes.
@@ -1506,10 +1578,125 @@ private func stableJSON(_ content: GeneratedContent) -> String {
     return String(decoding: data, as: UTF8.self)
 }
 
+/// The reasoning a Chat Completions provider returns on an assistant message, in whichever
+/// fields it uses: `reasoning_content` (DeepSeek), or `reasoning` and `reasoning_details`
+/// (OpenRouter, Vercel AI Gateway). OpenAI's own API returns none.
+///
+/// It's kept in the transcript as a reasoning entry, just before the tool calls or response
+/// of the message it came with, and sent back on that message as received: in the tool loop,
+/// and whenever the transcript is replayed. Both requests build the message from the entry,
+/// so they stay the same, and a prompt cache keeps matching. DeepSeek requires this: when a
+/// request has tools, every earlier assistant message must carry its `reasoning_content`,
+/// including ones without tool calls, or the request fails with a 400. Other providers
+/// accept the fields, and the model keeps its train of thought between rounds.
+///
+/// The fields are stored as received in the entry's metadata — `reasoning_details` as its
+/// JSON text — and the reasoning text is the entry's segment, for display.
+///
+/// Hosts that serve Chat Completions don't agree on these fields: Groq rejects `reasoning`
+/// on an assistant message, and Mistral rejects `reasoning_content`. So the entry records the
+/// host of the API that wrote it, and the fields go back only to that host. A transcript
+/// carried to another one replays the messages without them.
+private struct ChatCompletionsReasoning {
+    private enum Field {
+        static let reasoning = "reasoning"
+        static let reasoningContent = "reasoning_content"
+        static let reasoningDetails = "reasoning_details"
+        /// Metadata only: the host of the API that wrote the reasoning.
+        static let host = "host"
+    }
+
+    private var reasoning = ""
+    private var reasoningContent = ""
+    /// The `reasoning_details` arrays received, in order; streamed chunks each carry some.
+    private var details: [JSONValue] = []
+    private var host = ""
+
+    /// Reasoning to collect from a stream from the API at `host`.
+    init(host: String?) {
+        self.host = host ?? ""
+    }
+
+    init(reasoning: String?, reasoningContent: String?, details: [JSONValue], host: String?) {
+        self.reasoning = reasoning ?? ""
+        self.reasoningContent = reasoningContent ?? ""
+        self.details = details
+        self.host = host ?? ""
+    }
+
+    /// The fields kept in `entry`, for a request to `host`: empty for a missing entry,
+    /// another provider's, or one written by another host.
+    init(_ entry: Transcript.Reasoning?, sentTo host: String?) {
+        guard let entry, entry.origin == .chatCompletions else { return }
+        func string(_ key: String) -> String { (try? entry.metadata[key]?.value(String.self)) ?? "" }
+        guard let host, !host.isEmpty, string(Field.host) == host else { return }
+        self.host = host
+        reasoning = string(Field.reasoning)
+        reasoningContent = string(Field.reasoningContent)
+        let json = string(Field.reasoningDetails)
+        if !json.isEmpty, let value = try? JSONDecoder().decode(JSONValue.self, from: Data(json.utf8)) {
+            details = [value]
+        }
+    }
+
+    /// Adds a streamed chunk's reasoning. Text arrives in pieces, and `reasoning_details` in
+    /// arrays to concatenate in order (OpenRouter's streaming).
+    mutating func add(_ delta: OpenAIChatCompletionsChunk.Choice.Delta?) {
+        guard let delta else { return }
+        reasoning += delta.reasoning ?? ""
+        reasoningContent += delta.reasoningContent ?? ""
+        if let piece = delta.reasoningDetails { details.append(piece) }
+    }
+
+    /// The details as one array, as a provider expects them back.
+    private var detailsValue: JSONValue? {
+        var items: [JSONValue] = []
+        for value in details {
+            if case .array(let array) = value { items += array } else { items.append(value) }
+        }
+        return items.isEmpty ? nil : .array(items)
+    }
+
+    /// A reasoning entry for the transcript; `nil` when the message had no reasoning.
+    var entry: Transcript.Reasoning? {
+        var metadata: [String: GeneratedContent] = [:]
+        if !reasoning.isEmpty { metadata[Field.reasoning] = GeneratedContent(reasoning) }
+        if !reasoningContent.isEmpty { metadata[Field.reasoningContent] = GeneratedContent(reasoningContent) }
+        if let detailsValue, let data = try? JSONEncoder().encode(detailsValue) {
+            metadata[Field.reasoningDetails] = GeneratedContent(String(decoding: data, as: UTF8.self))
+        }
+        guard !metadata.isEmpty else { return nil }
+        if !host.isEmpty { metadata[Field.host] = GeneratedContent(host) }
+        let id = UUID().uuidString
+        let text = reasoningContent.isEmpty ? reasoning : reasoningContent
+        return Transcript.Reasoning(
+            id: id,
+            origin: .chatCompletions,
+            metadata: metadata,
+            segments: text.isEmpty ? [] : [.text(.init(id: id + ":text", content: text))]
+        )
+    }
+
+    /// The fields to send back on the assistant message.
+    var fields: [String: JSONValue] {
+        var fields: [String: JSONValue] = [:]
+        if !reasoning.isEmpty { fields[Field.reasoning] = .string(reasoning) }
+        if !reasoningContent.isEmpty { fields[Field.reasoningContent] = .string(reasoningContent) }
+        if let detailsValue { fields[Field.reasoningDetails] = detailsValue }
+        return fields
+    }
+}
+
 extension Transcript {
-    fileprivate func toOpenAIMessages() -> [OpenAIMessage] {
+    /// The transcript as messages for a request to the API at `host`.
+    fileprivate func toOpenAIMessages(host: String?) -> [OpenAIMessage] {
         var messages = [OpenAIMessage]()
+        // A Chat Completions reasoning entry goes back on the assistant message right after
+        // it, when the request goes to the host that wrote it.
+        var pendingReasoning: Transcript.Reasoning?
         for item in self {
+            let reasoning = pendingReasoning
+            pendingReasoning = nil
             switch item {
             case .instructions(let instructions):
                 messages.append(
@@ -1525,8 +1712,9 @@ extension Transcript {
                         content: .blocks(convertSegmentsToOpenAIBlocks(prompt.segments))
                     )
                 )
-            case .reasoning:
-                // Keep display history in the transcript without sending unsupported replay state.
+            case .reasoning(let entry):
+                // Other providers' and hosts' reasoning stays display history.
+                pendingReasoning = entry
                 continue
             case .response(let response):
                 let segments =
@@ -1536,11 +1724,12 @@ extension Transcript {
                 messages.append(
                     .init(
                         role: .assistant,
-                        content: .blocks(convertSegmentsToOpenAIBlocks(segments))
+                        content: .blocks(convertSegmentsToOpenAIBlocks(segments)),
+                        reasoning: ChatCompletionsReasoning(reasoning, sentTo: host).fields
                     )
                 )
             case .toolCalls(let toolCalls):
-                messages.append(toolCallsMessage(toolCalls))
+                messages.append(toolCallsMessage(toolCalls, reasoning: reasoning, host: host))
             case .toolOutput(let toolOutput):
                 messages.append(
                     .init(
@@ -1576,6 +1765,8 @@ private struct OpenAIMessage: Hashable, Codable, Sendable {
 
     let role: Role
     let content: Content
+    /// Reasoning fields sent back on an assistant message (``ChatCompletionsReasoning``).
+    var reasoning: [String: JSONValue] = [:]
 
     func contentAsJsonValue(for apiVariant: OpenAILanguageModel.APIVariant) -> JSONValue {
         switch content {
@@ -1618,10 +1809,14 @@ private struct OpenAIMessage: Hashable, Codable, Sendable {
             }
 
         case .system, .user, .assistant:
-            return .object([
+            var message: [String: JSONValue] = [
                 "role": .string(role.description),
                 "content": contentAsJsonValue(for: apiVariant),
-            ])
+            ]
+            if apiVariant == .chatCompletions {
+                message.merge(reasoning) { current, _ in current }
+            }
+            return .object(message)
         }
     }
 
@@ -1829,10 +2024,15 @@ private struct OpenAIChatCompletionsChunk: Decodable, Sendable {
             let role: String?
             let content: String?
             let toolCalls: [OpenAIStreamedToolCall.Delta]?
+            let reasoning: String?
+            let reasoningContent: String?
+            let reasoningDetails: JSONValue?
 
             enum CodingKeys: String, CodingKey {
-                case role, content
+                case role, content, reasoning
                 case toolCalls = "tool_calls"
+                case reasoningContent = "reasoning_content"
+                case reasoningDetails = "reasoning_details"
             }
         }
         let delta: Delta
@@ -1924,14 +2124,15 @@ private func openAIMessages(
     from transcript: Transcript,
     replacing currentRoundEntries: [Transcript.Entry],
     with continuation: [OpenAIMessage],
-    hasDynamicProfile: Bool
+    hasDynamicProfile: Bool,
+    host: String?
 ) -> [OpenAIMessage] {
     toolContinuationMessages(
         from: transcript,
         replacing: currentRoundEntries,
         with: continuation,
         hasDynamicProfile: hasDynamicProfile,
-        convert: { $0.toOpenAIMessages() }
+        convert: { $0.toOpenAIMessages(host: host) }
     )
 }
 

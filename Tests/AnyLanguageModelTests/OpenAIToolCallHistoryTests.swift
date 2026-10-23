@@ -1,7 +1,7 @@
 import Foundation
 import Testing
 
-@testable import AnyLanguageModel
+@_spi(Compatibility) @testable import AnyLanguageModel
 
 #if canImport(Darwin) && !canImport(AsyncHTTPClient)
     @Suite("OpenAI tool call history", .serialized)
@@ -61,7 +61,7 @@ import Testing
                 apiKey: "test",
                 model: "test",
                 apiVariant: variant,
-                session: ToolCallHistoryURLProtocol.makeSession()
+                transport: ToolCallHistoryURLProtocol.makeSession()
             )
             let session = LanguageModelSession(model: model, transcript: try transcript())
             _ = try await session.respond(to: "And tomorrow?")
@@ -128,7 +128,7 @@ import Testing
             let model = OpenAILanguageModel(
                 apiKey: "test",
                 model: "test",
-                session: ToolCallHistoryURLProtocol.makeSession()
+                transport: ToolCallHistoryURLProtocol.makeSession()
             )
             let session = LanguageModelSession(model: model, tools: [ReorderedWeatherTool()])
             if streaming {
@@ -176,7 +176,7 @@ import Testing
             let model = OpenAILanguageModel(
                 apiKey: "test",
                 model: "test",
-                session: ToolCallHistoryURLProtocol.makeSession()
+                transport: ToolCallHistoryURLProtocol.makeSession()
             )
             let session = LanguageModelSession(model: model, tools: [ReorderedWeatherTool()])
             let first: String
@@ -195,6 +195,279 @@ import Testing
             try #require(bodies.count == 3)
             #expect(try toolCallMessage(in: bodies[2])["content"] as? String == "Let me check.")
             #expect(try assistantTexts(in: bodies[2]) == ["Sunny."])
+        }
+
+        // MARK: Reasoning
+
+        /// DeepSeek's field, and OpenRouter's and Vercel AI Gateway's.
+        private let reasoningFields =
+            #""reasoning_content": "Check the weather first.", "reasoning": "Check the weather first.", "#
+            + #""reasoning_details": [{"type": "reasoning.text", "text": "Check the weather first.", "index": 0}]"#
+
+        private func reasoningToolCallCompletion() -> String {
+            """
+            {"id": "c", "object": "chat.completion", "created": 0, "model": "test",
+             "choices": [{"index": 0, "finish_reason": "tool_calls", "message": {"role": "assistant", "content": null,
+               \(reasoningFields),
+               "tool_calls": [{"id": "call-1", "type": "function",
+                               "function": {"name": "getWeather", "arguments": "\(toolCallArguments)"}}]}}]}
+            """
+        }
+
+        private func reasoningCompletion(_ text: String, reasoning: String) -> String {
+            """
+            {"id": "c", "object": "chat.completion", "created": 0, "model": "test",
+             "choices": [{"index": 0, "finish_reason": "stop",
+               "message": {"role": "assistant", "content": "\(text)", "reasoning_content": "\(reasoning)"}}]}
+            """
+        }
+
+        /// The reasoning streamed in pieces, as providers send it, before the tool call.
+        private func reasoningToolCallStream() -> String {
+            chunk(
+                #"{"role": "assistant", "reasoning_content": "Check the ", "reasoning": "Check the ", "#
+                    + #""reasoning_details": [{"type": "reasoning.text", "text": "Check the weather first.", "index": 0}]}"#
+            )
+                + chunk(#"{"reasoning_content": "weather first.", "reasoning": "weather first."}"#)
+                + toolCallStream(content: "")
+        }
+
+        private func reasoningTextStream(_ text: String, reasoning: String) -> String {
+            chunk(#"{"role": "assistant", "reasoning_content": "\#(reasoning)"}"#) + textStream(text)
+        }
+
+        private func expectReasoning(_ message: [String: Any]) {
+            #expect(message["reasoning_content"] as? String == "Check the weather first.")
+            #expect(message["reasoning"] as? String == "Check the weather first.")
+            let details = message["reasoning_details"] as? [[String: Any]]
+            #expect(details?.count == 1)
+            #expect(details?.first?["text"] as? String == "Check the weather first.")
+        }
+
+        @Test(arguments: [false, true], [false, true])
+        func reasoningGoesBackWithItsToolRoundInFlightAndInHistory(streaming: Bool, profile: Bool) async throws {
+            ToolCallHistoryURLProtocol.reset(
+                responses: streaming
+                    ? [reasoningToolCallStream(), textStream("Sunny."), textStream("Done.")]
+                    : [reasoningToolCallCompletion(), completion("Sunny."), completion("Done.")]
+            )
+            let model = OpenAILanguageModel(
+                apiKey: "test",
+                model: "test",
+                transport: ToolCallHistoryURLProtocol.makeSession()
+            )
+            let completed = Locked(false)
+            let callbacks = Locked<[Bool]>([])
+            let session =
+                profile
+                ? LanguageModelSession(
+                    profile: OpenAIReasoningProfile(model: model, completed: completed, callbacks: callbacks)
+                ) : LanguageModelSession(model: model, tools: [ReorderedWeatherTool()])
+            if streaming {
+                for try await _ in session.streamResponse(to: "Weather in Paris?") {}
+                for try await _ in session.streamResponse(to: "And tomorrow?") {}
+            } else {
+                _ = try await session.respond(to: "Weather in Paris?")
+                _ = try await session.respond(to: "And tomorrow?")
+            }
+
+            let bodies = ToolCallHistoryURLProtocol.recordedBodies
+            try #require(bodies.count == 3)
+            let inFlight = try toolCallMessage(in: bodies[1])
+            expectReasoning(inFlight)
+            // Built from the transcript both times, so the prompt cache keeps matching.
+            #expect(NSDictionary(dictionary: inFlight).isEqual(to: try toolCallMessage(in: bodies[2])))
+
+            // And kept in the transcript, for display, just before the calls it led to.
+            let entries = Array(session.transcript)
+            let calls = try #require(entries.firstIndex { if case .toolCalls = $0 { true } else { false } })
+            guard case .reasoning(let reasoning) = entries[calls - 1] else {
+                Issue.record("Expected a reasoning entry before the tool calls")
+                return
+            }
+            let text = Transcript.TextSegment(id: reasoning.id + ":text", content: "Check the weather first.")
+            #expect(reasoning.segments == [.text(text)])
+            #expect(reasoning.origin == .chatCompletions)
+            if profile { #expect(callbacks.withLock { $0 } == [true]) }
+        }
+
+        /// A transcript stores the origin in the entry's metadata, so it survives being saved.
+        @Test func reasoningIsReplayedFromADecodedTranscript() async throws {
+            ToolCallHistoryURLProtocol.reset(responses: [
+                reasoningToolCallCompletion(), completion("Sunny."), completion("Done."),
+            ])
+            let model = OpenAILanguageModel(
+                apiKey: "test",
+                model: "test",
+                transport: ToolCallHistoryURLProtocol.makeSession()
+            )
+            let session = LanguageModelSession(model: model, tools: [ReorderedWeatherTool()])
+            _ = try await session.respond(to: "Weather in Paris?")
+
+            let data = try JSONEncoder().encode(session.transcript)
+            #expect(String(decoding: data, as: UTF8.self).contains(#""openai.chatCompletions""#))
+            let decoded = try JSONDecoder().decode(Transcript.self, from: data)
+            let reasoning = decoded.compactMap { if case .reasoning(let reasoning) = $0 { reasoning } else { nil } }
+            #expect(reasoning.map(\.origin) == [.chatCompletions])
+
+            let restored = LanguageModelSession(model: model, tools: [ReorderedWeatherTool()], transcript: decoded)
+            _ = try await restored.respond(to: "And tomorrow?")
+
+            let body = try #require(ToolCallHistoryURLProtocol.recordedBodies.last)
+            expectReasoning(try toolCallMessage(in: body))
+        }
+
+        /// DeepSeek: with tools in the request, every earlier assistant message needs its
+        /// `reasoning_content`, including ones without tool calls.
+        @Test(arguments: [false, true])
+        func responseReasoningIsReplayedOnTheNextTurn(streaming: Bool) async throws {
+            ToolCallHistoryURLProtocol.reset(
+                responses: streaming
+                    ? [reasoningTextStream("Hello.", reasoning: "Greet them."), textStream("Done.")]
+                    : [reasoningCompletion("Hello.", reasoning: "Greet them."), completion("Done.")]
+            )
+            let model = OpenAILanguageModel(
+                apiKey: "test",
+                model: "test",
+                transport: ToolCallHistoryURLProtocol.makeSession()
+            )
+            let session = LanguageModelSession(model: model, tools: [ReorderedWeatherTool()])
+            if streaming {
+                for try await _ in session.streamResponse(to: "Hi") {}
+                for try await _ in session.streamResponse(to: "Weather in Paris?") {}
+            } else {
+                _ = try await session.respond(to: "Hi")
+                _ = try await session.respond(to: "Weather in Paris?")
+            }
+
+            let body = try #require(ToolCallHistoryURLProtocol.recordedBodies.last)
+            let json = try #require(try JSONSerialization.jsonObject(with: body) as? [String: Any])
+            let messages = try #require(json["messages"] as? [[String: Any]])
+            let assistant = try #require(messages.first { $0["role"] as? String == "assistant" })
+            #expect(assistant["reasoning_content"] as? String == "Greet them.")
+        }
+
+        /// Reasoning that no assistant message followed, as a turn that failed or was cancelled
+        /// leaves it with `.preserveTranscript`, isn't sent with the next turn's answer:
+        /// a prompt or instructions start anew.
+        @Test(arguments: [
+            Transcript.Entry.prompt(.init(segments: [.text(.init(content: "Again"))])),
+            .instructions(.init(segments: [.text(.init(content: "Be brief."))], toolDefinitions: [])),
+        ])
+        func reasoningAFailedTurnLeftIsntSent(startingAnew: Transcript.Entry) async throws {
+            ToolCallHistoryURLProtocol.reset(responses: [chatCompletion])
+            let model = OpenAILanguageModel(
+                apiKey: "test",
+                model: "test",
+                transport: ToolCallHistoryURLProtocol.makeSession()
+            )
+            let transcript = Transcript(entries: [
+                .prompt(.init(segments: [.text(.init(content: "Hi"))])),
+                .reasoning(
+                    .init(
+                        origin: .chatCompletions,
+                        metadata: [
+                            "reasoning_content": GeneratedContent("Left over."),
+                            "host": GeneratedContent(try #require(model.baseURL.host)),
+                        ],
+                        segments: [.text(.init(content: "Left over."))]
+                    )
+                ),
+                startingAnew,
+                .response(.init(assetIDs: [], segments: [.text(.init(content: "Hello."))])),
+            ])
+            let session = LanguageModelSession(model: model, transcript: transcript)
+            _ = try await session.respond(to: "How are you?")
+
+            let body = try #require(ToolCallHistoryURLProtocol.recordedBodies.last)
+            let json = try #require(try JSONSerialization.jsonObject(with: body) as? [String: Any])
+            let messages = try #require(json["messages"] as? [[String: Any]])
+            #expect(messages.contains { $0["role"] as? String == "assistant" })
+            #expect(!messages.contains { $0["reasoning_content"] != nil }, "\(messages)")
+        }
+
+        /// Hosts disagree on the fields (Groq rejects `reasoning`, Mistral `reasoning_content`),
+        /// so a transcript carried to another host replays its messages without them.
+        @Test(arguments: [false, true])
+        func reasoningGoesBackOnlyToTheHostThatWroteIt(sameHost: Bool) async throws {
+            ToolCallHistoryURLProtocol.reset(responses: [
+                reasoningToolCallCompletion(), completion("Sunny."), completion("Done."),
+            ])
+            let deepSeek = URL(string: "https://api.deepseek.com/v1/")!
+            let first = OpenAILanguageModel(
+                baseURL: deepSeek,
+                apiKey: "test",
+                model: "test",
+                transport: ToolCallHistoryURLProtocol.makeSession()
+            )
+            let session = LanguageModelSession(model: first, tools: [ReorderedWeatherTool()])
+            _ = try await session.respond(to: "Weather in Paris?")
+
+            let next = OpenAILanguageModel(
+                baseURL: sameHost ? deepSeek : URL(string: "https://api.groq.com/openai/v1/")!,
+                apiKey: "test",
+                model: "test",
+                transport: ToolCallHistoryURLProtocol.makeSession()
+            )
+            let continued = LanguageModelSession(
+                model: next,
+                tools: [ReorderedWeatherTool()],
+                transcript: session.transcript
+            )
+            _ = try await continued.respond(to: "And tomorrow?")
+
+            let body = try #require(ToolCallHistoryURLProtocol.recordedBodies.last)
+            let message = try toolCallMessage(in: body)
+            if sameHost {
+                expectReasoning(message)
+            } else {
+                #expect(message["reasoning"] == nil)
+                #expect(message["reasoning_content"] == nil)
+                #expect(message["reasoning_details"] == nil)
+            }
+        }
+
+        @Test(arguments: Transcript.Reasoning.Origin.allCases.filter { $0 != .chatCompletions })
+        func otherProvidersReasoningIsNotSent(origin: Transcript.Reasoning.Origin) async throws {
+            ToolCallHistoryURLProtocol.reset(responses: [chatCompletion])
+            let model = OpenAILanguageModel(
+                apiKey: "test",
+                model: "test",
+                transport: ToolCallHistoryURLProtocol.makeSession()
+            )
+            var entries = Array(try transcript())
+            entries.insert(
+                .reasoning(
+                    Transcript.Reasoning(
+                        origin: origin,
+                        segments: [.text(.init(content: "Thinking."))],
+                        signature: Data("signature".utf8)
+                    )
+                ),
+                at: 1
+            )
+            let session = LanguageModelSession(model: model, transcript: Transcript(entries: entries))
+            _ = try await session.respond(to: "And tomorrow?")
+
+            let body = try #require(ToolCallHistoryURLProtocol.recordedBodies.last)
+            let message = try toolCallMessage(in: body)
+            #expect(message["reasoning"] == nil)
+            #expect(message["reasoning_content"] == nil)
+            #expect(message["reasoning_details"] == nil)
+        }
+    }
+
+    private struct OpenAIReasoningProfile: LanguageModelSession.DynamicProfile {
+        let model: OpenAILanguageModel
+        let completed: Locked<Bool>
+        let callbacks: Locked<[Bool]>
+
+        var body: some LanguageModelSession.DynamicProfile {
+            let beforeTool = completed.withLock { !$0 }
+            return LanguageModelSession.Profile { ReorderedWeatherTool() }
+                .model(model)
+                .onReasoning { _ in callbacks.withLock { $0.append(beforeTool) } }
+                .onToolOutput { _, _ in completed.withLock { $0 = true } }
         }
     }
 

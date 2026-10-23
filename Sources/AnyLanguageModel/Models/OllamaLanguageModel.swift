@@ -56,6 +56,10 @@ public struct OllamaLanguageModel: LanguageModel, ProfileRequestIdentifiedLangua
     /// The model identifier to use for generation.
     public let model: String
 
+    /// How long to wait for a streamed response to start. With URLSession, it's how long to
+    /// wait for each part of the response, so it applies while the response streams too.
+    public let responseStartTimeout: Duration?
+
     private let transport: any HTTPTransport
     let profileRequestIdentity = UUID()
 
@@ -64,10 +68,15 @@ public struct OllamaLanguageModel: LanguageModel, ProfileRequestIdentifiedLangua
     /// - Parameters:
     ///   - baseURL: The base URL for the Ollama server. Defaults to `http://localhost:11434`.
     ///   - model: The model identifier (for example, "qwen2.5" or "llama3.3").
+    ///   - responseStartTimeout: How long to wait for a streamed response to start, or `nil`, the
+    ///     default, for the transport to decide: a URL session waits as its configuration says, and
+    ///     AsyncHTTPClient up to 180 seconds. On Linux, a URL session waits whole seconds, so it
+    ///     rounds up to the next one.
     ///   - transport: How it sends its requests: by default ``makeDefaultTransport()``.
     public init(
         baseURL: URL = defaultBaseURL,
         model: String,
+        responseStartTimeout: Duration? = nil,
         transport: any HTTPTransport = makeDefaultTransport(),
     ) {
         var baseURL = baseURL
@@ -77,6 +86,7 @@ public struct OllamaLanguageModel: LanguageModel, ProfileRequestIdentifiedLangua
 
         self.baseURL = baseURL
         self.model = model
+        self.responseStartTimeout = responseStartTimeout
         self.transport = transport
     }
 
@@ -353,20 +363,30 @@ public struct OllamaLanguageModel: LanguageModel, ProfileRequestIdentifiedLangua
                         let chunks: AsyncThrowingStream<ChatReply, any Error> = transport.fetchStream(
                             HTTPRequest(method: .post, url: url),
                             body: body,
-                            dateDecodingStrategy: .iso8601WithFractionalSeconds
+                            dateDecodingStrategy: .iso8601WithFractionalSeconds,
+                            timeout: responseStartTimeout
                         )
                         var toolCalls: [OllamaToolCall] = []
+                        var thinking = ""
                         for try await reply in chunks {
                             let chunk = try reply.response()
                             state.usage.merge(chunk.reportedUsage)
                             if let piece = chunk.message.content { state.text += piece }
+                            if let piece = chunk.message.thinking { thinking += piece }
                             toolCalls.append(contentsOf: chunk.message.toolCalls ?? [])
                             if chunk.message.content != nil || chunk.reportedUsage != nil {
                                 if let snapshot = state.snapshot() { continuation.yield(snapshot) }
                             }
                             if chunk.done { break }
                         }
-                        guard !toolCalls.isEmpty else { break }
+                        guard !toolCalls.isEmpty else {
+                            // The final round's reasoning reaches the last snapshot.
+                            if !thinking.isEmpty {
+                                state.entries.append(.reasoning(.ollama(thinking)))
+                                if let snapshot = state.snapshot() { continuation.yield(snapshot) }
+                            }
+                            break
+                        }
                         try Task.checkCancellation()
                         try session.recordToolRound(toolRounds, completed: state.entries)
                         let (callsEntry, resolution) = try await resolveToolCalls(
@@ -386,6 +406,7 @@ public struct OllamaLanguageModel: LanguageModel, ProfileRequestIdentifiedLangua
                                 .init(
                                     role: .assistant,
                                     content: state.text,
+                                    thinking: thinking.isEmpty ? nil : thinking,
                                     toolCalls: try toolCalls.map { try JSONValue($0) }
                                 )
                             )
@@ -614,12 +635,14 @@ struct OllamaMessage: Hashable, Codable, Sendable {
 
     let role: Role
     let content: String
+    /// What the model reasoned before this message, given back so it goes on from it.
+    let thinking: String?
     let images: [String]?
     let toolCalls: [JSONValue]?
     let toolName: String?
 
     enum CodingKeys: String, CodingKey {
-        case role, content, images
+        case role, content, thinking, images
         case toolCalls = "tool_calls"
         case toolName = "tool_name"
     }
@@ -627,12 +650,14 @@ struct OllamaMessage: Hashable, Codable, Sendable {
     init(
         role: Role,
         content: String,
+        thinking: String? = nil,
         images: [String]? = nil,
         toolCalls: [JSONValue]? = nil,
         toolName: String? = nil
     ) {
         self.role = role
         self.content = content
+        self.thinking = thinking
         self.images = images
         self.toolCalls = toolCalls
         self.toolName = toolName
@@ -641,7 +666,25 @@ struct OllamaMessage: Hashable, Codable, Sendable {
 
 private extension Transcript {
     func toOllamaMessages() throws -> [OllamaMessage] {
-        try compactMap { entry -> OllamaMessage? in
+        // A model's reasoning goes back with the assistant message it came before, as Ollama
+        // takes it: a reasoning model goes on from its reasoning, not from nothing.
+        var reasoning: String?
+        return try compactMap { entry -> OllamaMessage? in
+            if case .reasoning(let entry) = entry {
+                // Only Ollama's own: another provider's reasoning is its own to replay.
+                if entry.origin == .ollama {
+                    reasoning = [reasoning, entry.segments.ollamaText].compactMap { $0 }.joined(separator: "\n")
+                }
+                return nil
+            }
+            var thinking: String?
+            switch entry {
+            case .response, .toolCalls: (thinking, reasoning) = (reasoning, nil)
+            // Reasoning no assistant message followed, from a turn that failed or was cancelled,
+            // isn't the next turn's: a prompt or instructions start anew.
+            case .prompt, .instructions: reasoning = nil
+            default: break
+            }
             let role: OllamaMessage.Role
             let segments: [Transcript.Segment]
             switch entry {
@@ -652,7 +695,6 @@ private extension Transcript {
                 role = .user
                 segments = prompt.segments
             case .reasoning:
-                // Keep display history in the transcript without sending unsupported replay state.
                 return nil
             case .response(let response):
                 role = .assistant
@@ -661,6 +703,7 @@ private extension Transcript {
                 return .init(
                     role: .assistant,
                     content: "",
+                    thinking: thinking,
                     toolCalls: try calls.map { call in
                         try JSONValue(
                             OllamaToolCall(
@@ -681,8 +724,31 @@ private extension Transcript {
                 )
             }
             let (text, images) = convertSegmentsToOllama(segments)
-            return .init(role: role, content: text, images: images.isEmpty ? nil : images)
+            return .init(
+                role: role,
+                content: text,
+                thinking: role == .assistant ? thinking : nil,
+                images: images.isEmpty ? nil : images
+            )
         }
+    }
+}
+
+private extension Transcript.Reasoning {
+    /// Ollama's reasoning, as it streamed.
+    static func ollama(_ thinking: String) -> Self {
+        .init(origin: .ollama, segments: [.text(.init(content: thinking))])
+    }
+}
+
+private extension [Transcript.Segment] {
+    /// A reasoning entry's text, as it's given back.
+    var ollamaText: String? {
+        let text = compactMap { segment -> String? in
+            if case .text(let text) = segment { return text.content }
+            return nil
+        }.joined()
+        return text.isEmpty ? nil : text
     }
 }
 
@@ -770,11 +836,14 @@ private struct ChatResponse: Decodable, Sendable {
 private struct ChatMessageResponse: Decodable, Sendable {
     let role: OllamaMessage.Role
     let content: String?
+    /// What a reasoning model reasoned, apart from its answer.
+    let thinking: String?
     let toolCalls: [OllamaToolCall]?
 
     private enum CodingKeys: String, CodingKey {
         case role
         case content
+        case thinking
         case toolCalls = "tool_calls"
     }
 }
