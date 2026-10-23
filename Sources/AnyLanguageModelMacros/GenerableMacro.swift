@@ -266,10 +266,21 @@ public struct GenerableMacro: MemberMacro, ExtensionMacro {
             {
                 constraints.maximumCount = value
             }
+        // As in a schema built from the guides directly,
+        // a later bound replaces an earlier one of the other kind that it contradicts,
+        // so the generated guides never make a range out of order.
         case "minimum":
-            constraints.minimum = parseNumericLiteral(firstArgument.expression)
+            guard let minimum = parseNumericLiteral(firstArgument.expression) else { return }
+            constraints.minimum = minimum
+            if let maximum = constraints.maximum, maximum < minimum {
+                constraints.maximum = nil
+            }
         case "maximum":
-            constraints.maximum = parseNumericLiteral(firstArgument.expression)
+            guard let maximum = parseNumericLiteral(firstArgument.expression) else { return }
+            constraints.maximum = maximum
+            if let minimum = constraints.minimum, minimum > maximum {
+                constraints.minimum = nil
+            }
         case "range":
             if let rangeExpression = firstArgument.expression.as(SequenceExprSyntax.self) {
                 let (minimum, maximum) = parseClosedRangeDouble(rangeExpression)

@@ -20,6 +20,18 @@ enum Bounds<Value: Comparable & Sendable>: Sendable, Equatable {
         }
     }
 
+    /// These bounds with `minimum` as their minimum,
+    /// dropping a maximum below it.
+    func replacing(minimum: Value) -> Bounds {
+        Bounds(minimum: minimum, maximum: maximum.flatMap { $0 >= minimum ? $0 : nil })!
+    }
+
+    /// These bounds with `maximum` as their maximum,
+    /// dropping a minimum above it.
+    func replacing(maximum: Value) -> Bounds {
+        Bounds(minimum: minimum.flatMap { $0 <= maximum ? $0 : nil }, maximum: maximum)!
+    }
+
     var minimum: Value? {
         switch self {
         case .from(let minimum): minimum

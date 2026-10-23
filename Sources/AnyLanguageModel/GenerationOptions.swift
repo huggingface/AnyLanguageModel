@@ -168,7 +168,12 @@ public struct GenerationOptions: Sendable, Equatable {
     /// with ``LanguageModelSession/ToolRoundLimitExceeded``, which carries the rounds that ran.
     /// Must be at least `1`.
     ///
-    /// ``SystemLanguageModel`` ignores it: Foundation Models runs tool calls itself.
+    /// ``SystemLanguageModel`` and ``PrivateCloudComputeLanguageModel`` ignore it:
+    /// Foundation Models runs tool calls itself.
+    /// In a response that isn't streamed,
+    /// ``AnthropicLanguageModel`` and ``OllamaLanguageModel`` run one round of tool calls
+    /// and return without sending the tools' output back to the model,
+    /// so the limit applies only to their streamed responses.
     ///
     /// - Note: This API is exclusive to AnyLanguageModel
     ///   and using it means your code is no longer drop-in compatible
