@@ -112,7 +112,8 @@ extension Tool where Self.Arguments: Generable {
 extension Tool {
     internal func makeOutputSegments(from arguments: GeneratedContent) async throws -> [Transcript.Segment] {
         let parsedArguments = try Arguments(arguments)
-        let output = try await call(arguments: parsedArguments)
+        // What a tool asks of a model is its own: it isn't counted for the response that called it.
+        let output = try await RequestUsageChannel.outside { try await call(arguments: parsedArguments) }
 
         if let structured = output as? any ConvertibleToGeneratedContent {
             let content = structured.generatedContent
