@@ -29,13 +29,12 @@
             // response to start unless it says otherwise. In nanoseconds, as far as they go: a
             // timeout too long to count in them has no limit.
             let (seconds, attoseconds) = (timeout ?? .seconds(180)).components
-            let (nanoseconds, overflowed) = seconds.multipliedReportingOverflow(by: 1_000_000_000)
-            let received = try await execute(
-                sent,
-                timeout: .nanoseconds(
-                    overflowed ? .max : nanoseconds.addingReportingOverflow(attoseconds / 1_000_000_000).partialValue
-                )
+            let (wholeNanoseconds, multiplicationOverflowed) = seconds.multipliedReportingOverflow(by: 1_000_000_000)
+            let (nanoseconds, additionOverflowed) = wholeNanoseconds.addingReportingOverflow(
+                attoseconds / 1_000_000_000
             )
+            let overflowed = multiplicationOverflowed || additionOverflowed
+            let received = try await execute(sent, timeout: .nanoseconds(overflowed ? .max : nanoseconds))
             var fields = HTTPFields()
             for (name, value) in received.headers {
                 guard let name = HTTPField.Name(name) else { continue }

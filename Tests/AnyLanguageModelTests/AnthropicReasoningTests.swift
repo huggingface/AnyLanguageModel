@@ -87,6 +87,30 @@ import Testing
             }
         }
 
+        /// The round past the limit didn't run, so its reasoning isn't carried with the rounds that did.
+        @Test func toolRoundLimitOmitsTheReasoningOfTheRoundPastIt() async throws {
+            ReasoningURLProtocol.reset()
+            ReasoningURLProtocol.enqueue(eventStream: events(tool: true))
+            ReasoningURLProtocol.enqueue(eventStream: events(tool: true))
+            var options = GenerationOptions()
+            options.maximumToolRounds = 1
+            let session = LanguageModelSession(model: model(), tools: [WeatherTool()])
+            do {
+                _ = try await session.streamResponse(to: "Weather", options: options).collect()
+                Issue.record("Expected the tool-round limit")
+            } catch let error as LanguageModelSession.ToolRoundLimitExceeded {
+                let kinds = error.transcriptEntries.map { entry in
+                    switch entry {
+                    case .reasoning: "reasoning"
+                    case .toolCalls: "toolCalls"
+                    case .toolOutput: "toolOutput"
+                    default: "other"
+                    }
+                }
+                #expect(kinds == ["reasoning", "toolCalls", "toolOutput"])
+            }
+        }
+
         @Test(arguments: [false, true])
         func redactedThinkingNeverBecomesDisplayText(streaming: Bool) async throws {
             ReasoningURLProtocol.reset()
