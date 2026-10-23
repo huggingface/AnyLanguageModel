@@ -527,7 +527,7 @@ public struct AnthropicLanguageModel: LanguageModel {
         if !toolUses.isEmpty {
             let resolution = try await resolveToolUses(
                 toolUses,
-                tools: requestContext.tools,
+                tools: requestContext.toolsForExecution(in: session),
                 session: session
             )
             switch resolution {
@@ -631,7 +631,7 @@ public struct AnthropicLanguageModel: LanguageModel {
                         type == String.self ? nil : try convertSchemaToAnthropicFormat(schema)
                     var inFlightMessages: [AnthropicMessage] = []
                     var state = StreamingResponseState<Content>()
-                    var toolRounds = ToolRoundLimit(provider: "Anthropic", options: options)
+                    let toolRounds = ToolRoundLimit(provider: "Anthropic", options: options)
                     while true {
                         try Task.checkCancellation()
                         // The entries of the rounds that ran, before this round adds its reasoning.
@@ -742,7 +742,7 @@ public struct AnthropicLanguageModel: LanguageModel {
                         try toolRounds.record(completed: completedEntries)
                         switch try await resolveToolUses(
                             toolUses,
-                            tools: requestContext.tools,
+                            tools: requestContext.toolsForExecution(in: session),
                             session: session
                         ) {
                         case .stop(let calls):
@@ -760,7 +760,10 @@ public struct AnthropicLanguageModel: LanguageModel {
                                     .toolResult(
                                         .init(
                                             toolUseId: invocation.call.id,
-                                            content: convertSegmentsToAnthropicContent(invocation.output.segments)
+                                            content: try convertSegmentsToAnthropicContent(
+                                                invocation.output.segments,
+                                                isToolOutput: true
+                                            )
                                         )
                                     )
                                 )
@@ -1117,14 +1120,14 @@ extension Transcript {
                 messages.append(
                     .init(
                         role: .user,
-                        content: convertSegmentsToAnthropicContent(instructions.segments)
+                        content: try convertSegmentsToAnthropicContent(instructions.segments)
                     )
                 )
             case .prompt(let prompt):
                 messages.append(
                     .init(
                         role: .user,
-                        content: convertSegmentsToAnthropicContent(prompt.segments)
+                        content: try convertSegmentsToAnthropicContent(prompt.segments)
                     )
                 )
             case .reasoning(let reasoning):
@@ -1151,7 +1154,7 @@ extension Transcript {
             case .response(let response):
                 // Anthropic rejects text blocks without non-whitespace text,
                 // such as the empty response of a turn that only called tools.
-                let content = convertSegmentsToAnthropicContent(response.segments).filter { block in
+                let content = try convertSegmentsToAnthropicContent(response.segments).filter { block in
                     guard case .text(let text) = block else { return true }
                     return !text.text.allSatisfy(\.isWhitespace)
                 }
@@ -1179,7 +1182,10 @@ extension Transcript {
                             .toolResult(
                                 AnthropicToolResult(
                                     toolUseId: toolOutput.id,
-                                    content: convertSegmentsToAnthropicContent(toolOutput.segments)
+                                    content: try convertSegmentsToAnthropicContent(
+                                        toolOutput.segments,
+                                        isToolOutput: true
+                                    )
                                 )
                             )
                         ]
@@ -1333,7 +1339,10 @@ private extension AnthropicThinking {
     }
 }
 
-private func convertSegmentsToAnthropicContent(_ segments: [Transcript.Segment]) -> [AnthropicContent] {
+private func convertSegmentsToAnthropicContent(
+    _ segments: [Transcript.Segment],
+    isToolOutput: Bool = false
+) throws -> [AnthropicContent] {
     var blocks: [AnthropicContent] = []
     blocks.reserveCapacity(segments.count)
     for segment in segments {
@@ -1345,13 +1354,52 @@ private func convertSegmentsToAnthropicContent(_ segments: [Transcript.Segment])
         case .image(let img):
             switch img.source {
             case .url(let url):
-                blocks.append(.image(AnthropicImage(url: url.absoluteString)))
+                if url.isFileURL {
+                    let mimeType: String
+                    switch url.pathExtension.lowercased() {
+                    case "jpg", "jpeg": mimeType = "image/jpeg"
+                    case "png": mimeType = "image/png"
+                    case "gif": mimeType = "image/gif"
+                    case "webp": mimeType = "image/webp"
+                    default:
+                        if isToolOutput {
+                            blocks.append(.text(AnthropicText(text: "<image>")))
+                            continue
+                        }
+                        throw AnthropicImageAttachmentError.unsupportedImageType(url)
+                    }
+                    blocks.append(
+                        .image(
+                            AnthropicImage(
+                                base64Data: try Data(contentsOf: url).base64EncodedString(),
+                                mimeType: mimeType
+                            )
+                        )
+                    )
+                } else {
+                    blocks.append(.image(AnthropicImage(url: url.absoluteString)))
+                }
             case .data(let data, let mimeType):
+                if isToolOutput && !["image/jpeg", "image/png", "image/gif", "image/webp"].contains(mimeType) {
+                    blocks.append(.text(AnthropicText(text: "<image>")))
+                    continue
+                }
                 blocks.append(.image(AnthropicImage(base64Data: data.base64EncodedString(), mimeType: mimeType)))
             }
         }
     }
     return blocks
+}
+
+private enum AnthropicImageAttachmentError: LocalizedError {
+    case unsupportedImageType(URL)
+
+    var errorDescription: String? {
+        switch self {
+        case .unsupportedImageType(let url):
+            "Anthropic image attachments support PNG, JPEG, GIF, and WebP files; cannot determine a supported MIME type for \(url.lastPathComponent)."
+        }
+    }
 }
 
 private struct AnthropicToolUse: Codable, Sendable {
