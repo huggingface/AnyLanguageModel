@@ -1039,7 +1039,7 @@ private enum ChatCompletions {
         }
 
         if type != String.self {
-            let jsonSchemaValue = try schema.toJSONValueForOpenAIStrictMode()
+            let jsonSchemaValue = try schema.strictModeJSONValue()
             body["response_format"] = .object([
                 "type": .string("json_schema"),
                 "json_schema": .object([
@@ -1319,7 +1319,7 @@ private enum Responses {
         }
 
         if type != String.self {
-            let jsonSchemaValue = try schema.toJSONValueForOpenAIStrictMode()
+            let jsonSchemaValue = try schema.strictModeJSONValue()
             body["text"] = .object([
                 "format": .object([
                     "type": .string("json_schema"),
@@ -2324,38 +2324,6 @@ public enum OpenAILanguageModelError: LocalizedError {
         case .streamFailed(let code, let message):
             return streamFailureDescription(code: code, message: message)
         }
-    }
-}
-
-// MARK: - OpenAI Schema Helpers
-
-private extension GenerationSchema {
-    /// Converts this schema to a JSONValue with OpenAI strict mode requirements applied.
-    ///
-    /// OpenAI strict mode requires:
-    /// 1. `additionalProperties: false` at the root
-    /// 2. All properties (including optional ones) listed in `required`
-    func toJSONValueForOpenAIStrictMode() throws -> JSONValue {
-        // OpenAI's structured outputs don't support `const`.
-        let jsonSchema = try inlinedJSONSchema(omitAdditionalProperties: false, constantsAsEnums: true)
-        var jsonSchemaValue = try JSONValue(jsonSchema)
-
-        if case .object(var schemaObj) = jsonSchemaValue {
-            schemaObj["additionalProperties"] = .bool(false)
-
-            if case .object(let properties)? = schemaObj["properties"],
-                !properties.isEmpty
-            {
-                // OpenAI strict mode requires all properties to be listed as required,
-                // even if the underlying schema marks them optional.
-                let allPropertyNames = Array(properties.keys).sorted()
-                schemaObj["required"] = .array(allPropertyNames.map { .string($0) })
-            }
-
-            jsonSchemaValue = .object(schemaObj)
-        }
-
-        return jsonSchemaValue
     }
 }
 

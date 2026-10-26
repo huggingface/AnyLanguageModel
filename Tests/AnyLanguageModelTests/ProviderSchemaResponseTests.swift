@@ -366,6 +366,57 @@ import Testing
         }
     }
 
+    extension ProviderSchemaResponseTests {
+        @Generable struct Address: Equatable { var street: String; var unit: String? }
+        @Generable struct Contact { var name: String; var address: Address; var previous: [Address]; var step: Step }
+
+        /// OpenAI's strict mode requires every property of every object in `required`,
+        /// so an optional property of a nested object, of an array's objects,
+        /// or of an enumeration case is required and allows `null`.
+        @Test(arguments: [Provider.chat, .responses, .openResponses])
+        func strictModeRequiresNestedOptionalProperties(_ provider: Provider) async throws {
+            SchemaURLProtocol.reset()
+            defer { SchemaURLProtocol.reset() }
+            let content = """
+                {"name":"Ada","address":{"street":"Main","unit":null},\
+                "previous":[{"street":"Old","unit":"2"}],"step":{"type":"note","value":null}}
+                """
+            SchemaURLProtocol.enqueue(json: try json(provider.response(text: content)))
+            let response = try await provider.session().respond(
+                to: "Contact",
+                generating: Contact.self,
+                includeSchemaInPrompt: false
+            )
+            #expect(response.content.address == Address(street: "Main", unit: nil))
+            #expect(response.content.previous == [Address(street: "Old", unit: "2")])
+            #expect(response.content.step == .note(nil))
+
+            let data = try #require(SchemaURLProtocol.recordedBodies.first)
+            let body = try #require(JSONSerialization.jsonObject(with: data) as? [String: Any])
+            let sent = try provider.requestSchema(body)
+            #expect(sent["required"] as? [String] == ["address", "name", "previous", "step"])
+            let properties = try #require(sent["properties"] as? [String: [String: Any]])
+            let previous = try #require(properties["previous"]?["items"] as? [String: Any])
+            for address in [try #require(properties["address"]), previous] {
+                #expect(address["required"] as? [String] == ["street", "unit"])
+                #expect(address["additionalProperties"] as? Bool == false)
+                let unit = (address["properties"] as? [String: [String: Any]])?["unit"]
+                #expect(unit?["type"] as? [String] == ["string", "null"])
+            }
+            let cases = try #require(properties["step"]?["anyOf"] as? [[String: Any]])
+            let note = try #require(
+                cases.first {
+                    let properties = $0["properties"] as? [String: [String: Any]]
+                    return properties?["type"]?["enum"] as? [String] == ["note"]
+                }
+            )
+            #expect(note["required"] as? [String] == ["type", "value"])
+            #expect(note["additionalProperties"] as? Bool == false)
+            let value = (note["properties"] as? [String: [String: Any]])?["value"]
+            #expect(value?["type"] as? [String] == ["string", "null"])
+        }
+    }
+
     private func json(_ value: [String: Any]) throws -> String {
         String(decoding: try JSONSerialization.data(withJSONObject: value), as: UTF8.self)
     }
