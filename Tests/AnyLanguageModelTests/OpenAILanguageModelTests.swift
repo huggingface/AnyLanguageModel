@@ -33,6 +33,7 @@ struct OpenAILanguageModelTests {
             let session = LanguageModelSession(model: model)
 
             let response = try await session.respond(to: "Say hello")
+            attachResponse(response)
             #expect(!response.content.isEmpty)
         }
 
@@ -43,6 +44,7 @@ struct OpenAILanguageModelTests {
             )
 
             let response = try await session.respond(to: "What is 2+2?")
+            attachResponse(response)
             #expect(!response.content.isEmpty)
         }
 
@@ -85,6 +87,7 @@ struct OpenAILanguageModelTests {
                 to: "Tell me a fact",
                 options: options
             )
+            attachResponse(response)
             #expect(!response.content.isEmpty)
         }
 
@@ -104,6 +107,7 @@ struct OpenAILanguageModelTests {
                 to: "Say hello",
                 options: options
             )
+            attachResponse(response)
             #expect(!response.content.isEmpty)
         }
 
@@ -113,6 +117,7 @@ struct OpenAILanguageModelTests {
                 to: "Describe this image",
                 image: .init(url: testImageURL)
             )
+            attachResponse(response)
             #expect(!response.content.isEmpty)
         }
 
@@ -122,6 +127,7 @@ struct OpenAILanguageModelTests {
                 to: "Describe this image",
                 image: .init(data: testImageData, mimeType: "image/png")
             )
+            attachResponse(response)
             #expect(!response.content.isEmpty)
         }
 
@@ -129,9 +135,11 @@ struct OpenAILanguageModelTests {
             let session = LanguageModelSession(model: model)
 
             let firstResponse = try await session.respond(to: "My favorite color is blue")
+            attachResponse(firstResponse, "firstResponse")
             #expect(!firstResponse.content.isEmpty)
 
             let secondResponse = try await session.respond(to: "What did I just tell you?")
+            attachResponse(secondResponse, "secondResponse")
             #expect(secondResponse.content.contains("color"))
         }
 
@@ -243,6 +251,7 @@ struct OpenAILanguageModelTests {
                     to: "Generate a person named John Doe, age 30, email john@example.com",
                     generating: Person.self
                 )
+                attachResponse(response)
 
                 #expect(!response.content.name.isEmpty)
                 #expect(response.content.name.contains("John") || response.content.name.contains("Doe"))
@@ -257,6 +266,7 @@ struct OpenAILanguageModelTests {
                     to: "Generate a person named Jane Smith, age 25, with no email",
                     generating: Person.self
                 )
+                attachResponse(response)
 
                 #expect(!response.content.name.isEmpty)
                 #expect(response.content.name.contains("Jane") || response.content.name.contains("Smith"))
@@ -271,6 +281,7 @@ struct OpenAILanguageModelTests {
                     to: "Generate a book titled 'The Swift Programming Language' by 'Apple Inc.' published in 2024",
                     generating: Book.self
                 )
+                attachResponse(response)
 
                 #expect(!response.content.title.isEmpty)
                 #expect(!response.content.author.isEmpty)
@@ -309,6 +320,7 @@ struct OpenAILanguageModelTests {
             let session = LanguageModelSession(model: model)
 
             let response = try await session.respond(to: "Say hello")
+            attachResponse(response)
             #expect(!response.content.isEmpty)
         }
 
@@ -319,6 +331,7 @@ struct OpenAILanguageModelTests {
             )
 
             let response = try await session.respond(to: "What is 2+2?")
+            attachResponse(response)
             #expect(!response.content.isEmpty)
         }
 
@@ -361,6 +374,7 @@ struct OpenAILanguageModelTests {
                 to: "Tell me a fact",
                 options: options
             )
+            attachResponse(response)
             #expect(!response.content.isEmpty)
         }
 
@@ -380,6 +394,7 @@ struct OpenAILanguageModelTests {
                 to: "Say hello",
                 options: options
             )
+            attachResponse(response)
             #expect(!response.content.isEmpty)
         }
 
@@ -389,6 +404,7 @@ struct OpenAILanguageModelTests {
                 to: "Describe this image",
                 image: .init(url: testImageURL)
             )
+            attachResponse(response)
             #expect(!response.content.isEmpty)
         }
 
@@ -398,6 +414,7 @@ struct OpenAILanguageModelTests {
                 to: "Describe this image",
                 image: .init(data: testImageData, mimeType: "image/png")
             )
+            attachResponse(response)
             #expect(!response.content.isEmpty)
         }
 
@@ -405,9 +422,11 @@ struct OpenAILanguageModelTests {
             let session = LanguageModelSession(model: model)
 
             let firstResponse = try await session.respond(to: "My favorite color is blue")
+            attachResponse(firstResponse, "firstResponse")
             #expect(!firstResponse.content.isEmpty)
 
             let secondResponse = try await session.respond(to: "What did I just tell you?")
+            attachResponse(secondResponse, "secondResponse")
             #expect(secondResponse.content.contains("color"))
         }
 
@@ -416,6 +435,7 @@ struct OpenAILanguageModelTests {
             let session = LanguageModelSession(model: model, tools: [weatherTool])
 
             let response = try await session.respond(to: "How's the weather in San Francisco?")
+            attachResponse(response)
 
             var foundToolOutput = false
             for case let .toolOutput(toolOutput) in response.transcriptEntries {
@@ -461,6 +481,7 @@ struct OpenAILanguageModelTests {
                     to: "Generate a person named John Doe, age 30, email john@example.com",
                     generating: Person.self
                 )
+                attachResponse(response)
 
                 #expect(!response.content.name.isEmpty)
                 #expect(response.content.name.contains("John") || response.content.name.contains("Doe"))
@@ -475,6 +496,7 @@ struct OpenAILanguageModelTests {
                     to: "Generate a person named Jane Smith, age 25, with no email",
                     generating: Person.self
                 )
+                attachResponse(response)
 
                 #expect(!response.content.name.isEmpty)
                 #expect(response.content.name.contains("Jane") || response.content.name.contains("Smith"))
@@ -489,6 +511,7 @@ struct OpenAILanguageModelTests {
                     to: "Generate a book titled 'The Swift Programming Language' by 'Apple Inc.' published in 2024",
                     generating: Book.self
                 )
+                attachResponse(response)
 
                 #expect(!response.content.title.isEmpty)
                 #expect(!response.content.author.isEmpty)

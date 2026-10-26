@@ -54,6 +54,7 @@ import Testing
 
             let session = LanguageModelSession(model: model)
             let response = try await session.respond(to: "Say hello", options: boundedOptions)
+            attachResponse(response)
             #expect(!response.content.isEmpty)
 
             #expect(model.availability == .available)
@@ -64,6 +65,7 @@ import Testing
             let session = LanguageModelSession(model: model)
 
             let response = try await session.respond(to: "Say hello", options: boundedOptions)
+            attachResponse(response)
             #expect(!response.content.isEmpty)
         }
 
@@ -107,6 +109,7 @@ import Testing
             // evaluating the prompt in two chunks changes logits slightly,
             // which can change greedy output after several tokens.
             let response = try await session.respond(to: "Name three primary colors.", options: options)
+            attachResponse(response)
             #expect(response.usage.input.cachedTokenCount > 0)
             #expect(!response.content.isEmpty)
         }
@@ -118,6 +121,7 @@ import Testing
             let session = LanguageModelSession(model: model)
             _ = try await session.respond(to: "Name three primary colors.", options: options)
             let response = try await session.respond(to: "Which of those is your favorite?", options: options)
+            attachResponse(response)
             #expect(response.usage.input.cachedTokenCount > 0)
             #expect(!response.content.isEmpty)
         }
@@ -131,6 +135,7 @@ import Testing
             )
             await model.prewarmSessionCache(for: session)
             let response = try await session.respond(to: "Name three primary colors.", options: options)
+            attachResponse(response)
             #expect(response.usage.input.cachedTokenCount > 0)
             #expect(!response.content.isEmpty)
         }
@@ -139,12 +144,14 @@ import Testing
             let options = GenerationOptions(sampling: .greedy, maximumResponseTokens: 8)
             let session = LanguageModelSession(model: model)
             let first = try await session.respond(to: "Say hello.", options: options)
+            attachResponse(first, "first")
             #expect(first.usage.input.totalTokenCount > 0)
             #expect(first.usage.input.cachedTokenCount == 0)
             #expect(first.usage.output.totalTokenCount > 0)
             #expect(first.usage.output.totalTokenCount <= 8)
 
             let second = try await session.respond(to: "Say goodbye.", options: options)
+            attachResponse(second, "second")
             #expect(second.usage.input.cachedTokenCount == first.usage.input.totalTokenCount)
             #expect(second.usage.input.totalTokenCount > second.usage.input.cachedTokenCount)
             #expect(session.usage.totalTokenCount == first.usage.totalTokenCount + second.usage.totalTokenCount)
@@ -171,6 +178,7 @@ import Testing
             _ = try await session.respond(to: "Name three primary colors.", options: options)
             let history = session.transcript
             let reused = try await session.respond(to: "Which of those is your favorite?", options: options)
+            attachResponse(reused, "reused")
             #expect(reused.usage.input.cachedTokenCount > 0)
 
             let fresh = try await LanguageModelSession(model: model, transcript: history)
@@ -217,6 +225,7 @@ import Testing
             let stopped = LanguageModelSession(model: model, tools: [WeatherTool()])
             stopped.toolExecutionDelegate = UsageStopDelegate()
             let response = try await stopped.respond(to: prompt, options: options)
+            attachResponse(response)
             #expect(response.transcriptEntries.contains { if case .toolCalls = $0 { true } else { false } })
             #expect(response.usage.input.totalTokenCount > 0)
             #expect(response.usage.output.totalTokenCount > 0)
@@ -271,12 +280,14 @@ import Testing
         @Test func multiTurnSameSession() async throws {
             let session = LanguageModelSession(model: model)
             let first = try await session.respond(to: "Say hello in one sentence.", options: boundedOptions)
+            attachResponse(first, "first")
             #expect(!first.content.isEmpty)
 
             let second = try await session.respond(
                 to: "Now answer with one more short sentence.",
                 options: boundedOptions
             )
+            attachResponse(second, "second")
             #expect(!second.content.isEmpty)
         }
 
@@ -318,6 +329,7 @@ import Testing
                 to: "Tell me a fact",
                 options: options
             )
+            attachResponse(response)
             #expect(!response.content.isEmpty)
         }
 
@@ -333,6 +345,7 @@ import Testing
                 to: "How's the weather in San Francisco?",
                 options: GenerationOptions(sampling: .greedy, maximumResponseTokens: 512)
             )
+            attachResponse(response)
 
             var foundToolOutput = false
             for case let .toolOutput(toolOutput) in response.transcriptEntries {
@@ -412,6 +425,7 @@ import Testing
             mlxOptions.userInputProcessing = .resize(to: CGSize(width: 512, height: 512))
             options[custom: MLXLanguageModel.self] = mlxOptions
             let response = try await session.respond(to: "", options: options)
+            attachResponse(response)
             #expect(!response.content.isEmpty)
         }
 
@@ -430,6 +444,7 @@ import Testing
             mlxOptions.userInputProcessing = .resize(to: CGSize(width: 512, height: 512))
             options[custom: MLXLanguageModel.self] = mlxOptions
             let response = try await session.respond(to: "", options: options)
+            attachResponse(response)
             #expect(!response.content.isEmpty)
         }
 
@@ -442,6 +457,7 @@ import Testing
                 to: "Generate a greeting message that says hello",
                 generating: SimpleString.self
             )
+            attachResponse(response)
             #expect(!response.content.message.isEmpty)
         }
 
@@ -454,6 +470,7 @@ import Testing
                 to: "Generate a count value of 42",
                 generating: SimpleInt.self
             )
+            attachResponse(response)
             #expect(response.content.count >= 0)
         }
 
@@ -466,6 +483,7 @@ import Testing
                 to: "Generate a temperature value of 72.5 degrees",
                 generating: SimpleDouble.self
             )
+            attachResponse(response)
             #expect(!response.content.temperature.isNaN)
         }
 
@@ -478,6 +496,7 @@ import Testing
                 to: "Generate a boolean value: true",
                 generating: SimpleBool.self
             )
+            attachResponse(response)
             #expect(response.content.value == true)
             let jsonData = response.rawContent.jsonString.data(using: .utf8)
             #expect(jsonData != nil)
@@ -498,6 +517,7 @@ import Testing
                 to: "Generate a person named Alex with nickname 'Lex'. Nickname may be omitted if unsure.",
                 generating: OptionalFields.self
             )
+            attachResponse(response)
             #expect(!response.content.name.isEmpty)
             if let nickname = response.content.nickname {
                 #expect(!nickname.isEmpty)
@@ -513,6 +533,7 @@ import Testing
                 to: "Generate a high priority value",
                 generating: Priority.self
             )
+            attachResponse(response)
             #expect([Priority.low, Priority.medium, Priority.high].contains(response.content))
         }
 
@@ -535,6 +556,7 @@ import Testing
                 to: "Say hello",
                 options: options
             )
+            attachResponse(response)
             #expect(!response.content.isEmpty)
         }
 
@@ -562,6 +584,7 @@ import Testing
             await MLXLanguageModel.removeAllFromCache()
             let session = LanguageModelSession(model: model)
             let response = try await session.respond(to: "Say hello after cache clear", options: boundedOptions)
+            attachResponse(response)
             #expect(!response.content.isEmpty)
         }
     }

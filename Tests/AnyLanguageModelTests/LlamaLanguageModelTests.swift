@@ -32,6 +32,7 @@ import Testing
                             to: "Reply with a single word.",
                             options: GenerationOptions(maximumResponseTokens: 16)
                         )
+                        attachResponse(response)
                         return response.content
                     }
                 }
@@ -58,6 +59,7 @@ import Testing
                 to: "\(filler)\n\nReply with a single word.",
                 options: options
             )
+            attachResponse(response)
             #expect(!response.content.isEmpty)
         }
 
@@ -70,6 +72,7 @@ import Testing
                 to: "My favorite color is blue. Reply with OK.",
                 options: options
             )
+            attachResponse(first, "first")
             #expect(!first.content.isEmpty)
             #expect(model.lastReusedTokenCount == 0)
             #expect(first.usage.input.cachedTokenCount == 0)
@@ -80,6 +83,7 @@ import Testing
                 to: "What is my favorite color? Answer with one word.",
                 options: options
             )
+            attachResponse(second, "second")
             #expect(!second.content.isEmpty)
             #expect(model.lastReusedTokenCount > 0)
             #expect(second.usage.input.cachedTokenCount == model.lastReusedTokenCount)
@@ -88,6 +92,7 @@ import Testing
 
             model.clearCachedContext()
             let afterClear = try await session.respond(to: "Say OK.", options: options)
+            attachResponse(afterClear, "afterClear")
             #expect(afterClear.usage.input.cachedTokenCount == 0)
             #expect(afterClear.usage.input.totalTokenCount == model.lastPrefillTokenCount)
         }
@@ -185,6 +190,7 @@ import Testing
             let session = LanguageModelSession(model: model)
 
             let response = try await session.respond(to: "Say hello")
+            attachResponse(response)
             #expect(!response.content.isEmpty)
         }
 
@@ -195,6 +201,7 @@ import Testing
             )
 
             let response = try await session.respond(to: "What is 2+2?")
+            attachResponse(response)
             #expect(!response.content.isEmpty)
         }
 
@@ -251,6 +258,7 @@ import Testing
                 to: "Tell me a fact",
                 options: options
             )
+            attachResponse(response)
             #expect(!response.content.isEmpty)
         }
 
@@ -258,9 +266,11 @@ import Testing
             let session = LanguageModelSession(model: model)
 
             let firstResponse = try await session.respond(to: "My favorite color is blue")
+            attachResponse(firstResponse, "firstResponse")
             #expect(!firstResponse.content.isEmpty)
 
             let secondResponse = try await session.respond(to: "What did I just tell you?")
+            attachResponse(secondResponse, "secondResponse")
             #expect(!secondResponse.content.isEmpty)
         }
 
@@ -272,6 +282,7 @@ import Testing
                 to: "Write a long essay about artificial intelligence",
                 options: options
             )
+            attachResponse(response)
 
             // Response should be limited by max tokens
             #expect(!response.content.isEmpty)
@@ -288,6 +299,7 @@ import Testing
                 to: "Tell me a fact",
                 options: options
             )
+            attachResponse(response)
             #expect(!response.content.isEmpty)
         }
 
@@ -318,6 +330,7 @@ import Testing
                 to: "Tell me a short fact",
                 options: options
             )
+            attachResponse(response)
             #expect(!response.content.isEmpty)
         }
 
@@ -338,6 +351,7 @@ import Testing
                 to: "Tell me a short fact",
                 options: options
             )
+            attachResponse(response)
             #expect(!response.content.isEmpty)
         }
 
@@ -409,6 +423,7 @@ import Testing
                 to: "Generate a person with name Alice, age 30, active status true, and score 95.5",
                 generating: BasicStruct.self
             )
+            attachResponse(response)
             #expect(!response.content.name.isEmpty)
             #expect(response.content.age >= 0)
         }
@@ -422,6 +437,7 @@ import Testing
                 to: "Generate a person named John, age 25, living at 123 Main St, Springfield, 12345",
                 generating: StructuredPerson.self
             )
+            attachResponse(response)
             #expect(!response.content.name.isEmpty)
             #expect(response.content.age >= 0)
             #expect(!response.content.address.street.isEmpty)
@@ -437,6 +453,7 @@ import Testing
                 to: "Generate a task titled 'Complete project' with high priority, not completed",
                 generating: TaskItem.self
             )
+            attachResponse(response)
             #expect(!response.content.title.isEmpty)
             #expect([Priority.low, Priority.medium, Priority.high].contains(response.content.priority))
         }
@@ -450,6 +467,7 @@ import Testing
                 to: "Generate a list of 3 color names: red, green, blue",
                 generating: SimpleArray.self
             )
+            attachResponse(response)
             #expect(!response.content.colors.isEmpty)
         }
 
@@ -468,6 +486,7 @@ import Testing
                     """,
                 generating: MultiChoiceQuestion.self
             )
+            attachResponse(response)
             #expect(!response.content.text.isEmpty)
             #expect(response.content.choices.count == 4)
             #expect(!response.content.answer.isEmpty)
@@ -510,6 +529,7 @@ import Testing
             ])
             let session = LanguageModelSession(model: model, transcript: transcript)
             let response = try await session.respond(to: "")
+            attachResponse(response)
             #expect(response.content.lowercased().contains("red"))
         }
 
