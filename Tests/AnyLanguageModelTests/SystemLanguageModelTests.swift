@@ -708,6 +708,7 @@ import Testing
                 }
                 throw error
             }
+            attachResponse(firstResponse, "firstResponse")
             #expect(!firstResponse.content.isEmpty)
 
             let secondResponse: LanguageModelSession.Response<String>
@@ -722,6 +723,7 @@ import Testing
                 }
                 throw error
             }
+            attachResponse(secondResponse, "secondResponse")
             let repliedNumbers = secondResponse.content
                 .split { !$0.isNumber }
                 .compactMap { Int($0) }

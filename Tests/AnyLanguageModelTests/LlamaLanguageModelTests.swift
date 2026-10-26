@@ -209,6 +209,7 @@ import Testing
             var options = GenerationOptions(sampling: .greedy, maximumResponseTokens: 8)
             options[custom: LlamaLanguageModel.self] = .init(seed: 42)
             let response = try await LanguageModelSession(model: model).respond(to: "Say hello.", options: options)
+            attachResponse(response)
             let session = LanguageModelSession(model: model)
             let streamed = try await session.streamResponse(to: "Say hello.", options: options).collect()
             #expect(response.usage.input.totalTokenCount > 0)

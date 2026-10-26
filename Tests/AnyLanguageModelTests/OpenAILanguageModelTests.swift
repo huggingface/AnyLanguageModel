@@ -158,6 +158,7 @@ struct OpenAILanguageModelTests {
                     options: options
                 )
             }
+            attachResponse(response)
 
             #expect(!response.content.isEmpty)
             let calls = await weatherTool.calls
@@ -196,18 +197,20 @@ struct OpenAILanguageModelTests {
                 maxToolCalls: 1
             )
 
-            _ = try await withOpenAIRateLimitRetry {
+            let firstResponse = try await withOpenAIRateLimitRetry {
                 try await session.respond(
                     to: "Call getWeather for San Francisco exactly once, then reply with only: done",
                     options: options
                 )
             }
+            attachResponse(firstResponse, "firstResponse")
 
             let secondResponse = try await withOpenAIRateLimitRetry {
                 try await session.respond(
                     to: "Which city did the tool call use? Reply with city only."
                 )
             }
+            attachResponse(secondResponse, "secondResponse")
             #expect(!secondResponse.content.isEmpty)
             #expect(secondResponse.content.localizedCaseInsensitiveContains("san"))
 

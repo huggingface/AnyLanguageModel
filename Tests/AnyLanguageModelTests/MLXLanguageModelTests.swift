@@ -119,7 +119,8 @@ import Testing
             let model = MLXLanguageModel(modelId: "mlx-community/Qwen3-VL-2B-Instruct-4bit")
             let options = GenerationOptions(sampling: .greedy, maximumResponseTokens: 8)
             let session = LanguageModelSession(model: model)
-            _ = try await session.respond(to: "Name three primary colors.", options: options)
+            let first = try await session.respond(to: "Name three primary colors.", options: options)
+            attachResponse(first, "first")
             let response = try await session.respond(to: "Which of those is your favorite?", options: options)
             attachResponse(response)
             #expect(response.usage.input.cachedTokenCount > 0)
@@ -175,7 +176,8 @@ import Testing
             // so it should match a fresh session with the same history.
             let options = GenerationOptions(sampling: .greedy, maximumResponseTokens: 48)
             let session = LanguageModelSession(model: model)
-            _ = try await session.respond(to: "Name three primary colors.", options: options)
+            let first = try await session.respond(to: "Name three primary colors.", options: options)
+            attachResponse(first, "first")
             let history = session.transcript
             let reused = try await session.respond(to: "Which of those is your favorite?", options: options)
             attachResponse(reused, "reused")
@@ -183,6 +185,7 @@ import Testing
 
             let fresh = try await LanguageModelSession(model: model, transcript: history)
                 .respond(to: "Which of those is your favorite?", options: options)
+            attachResponse(fresh, "fresh")
             #expect(fresh.usage.input.cachedTokenCount == 0)
             #expect(reused.content == fresh.content)
         }
@@ -194,6 +197,7 @@ import Testing
                 generating: Bool.self,
                 options: options
             )
+            attachResponse(response)
             let session = LanguageModelSession(model: model)
             let streamed = try await session.streamResponse(
                 to: "Return true.",
@@ -213,6 +217,7 @@ import Testing
                 includeSchemaInPrompt: false,
                 options: options
             )
+            attachResponse(withoutSchema, "withoutSchema")
             #expect(response.usage.input.totalTokenCount > withoutSchema.usage.input.totalTokenCount)
         }
 
@@ -253,6 +258,7 @@ import Testing
                 to: prompt,
                 options: options
             )
+            attachResponse(fullResponse, "fullResponse")
             #expect(fullResponse.usage == total)
 
             let failing = LanguageModelSession(model: model, tools: [UsageFailingWeatherTool()])
