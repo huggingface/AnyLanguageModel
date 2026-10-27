@@ -1,4 +1,4 @@
-@testable import AnyLanguageModel
+@_spi(Compatibility) @testable import AnyLanguageModel
 
 struct MockLanguageModel: LanguageModel {
     enum UnavailableReason: Hashable, Sendable {

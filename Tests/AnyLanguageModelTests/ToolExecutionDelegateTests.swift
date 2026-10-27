@@ -1,6 +1,6 @@
 import Testing
 
-@testable import AnyLanguageModel
+@_spi(Compatibility) @testable import AnyLanguageModel
 
 private actor ToolExecutionDelegateSpy: ToolExecutionDelegate {
     private(set) var generatedToolCalls: [Transcript.ToolCall] = []
