@@ -744,9 +744,10 @@
             Transcript.ToolOutput(id: call.id, toolName: tool.name, segments: segments)
         }
         guard let session, let delegate = session.toolExecutionDelegate else {
-            let text = try await tool.callFunction(content: arguments).promptRepresentation.description
-            await ToolCallRecord.current?.ran(call, output: output([.text(.init(content: text))]))
-            return FoundationModels.Prompt(text)
+            let segments = try await tool.makeOutputSegments(from: arguments)
+            let prompt = try segments.toFoundationModelsToolOutput()
+            await ToolCallRecord.current?.ran(call, output: output(segments))
+            return prompt
         }
         await delegate.didGenerateToolCalls([call], in: session)
         switch await delegate.toolCallDecision(for: call, in: session) {
@@ -761,10 +762,11 @@
             return prompt
         case .execute:
             do {
-                let text = try await tool.callFunction(content: arguments).promptRepresentation.description
-                await delegate.didExecuteToolCall(call, output: output([.text(.init(content: text))]), in: session)
-                await ToolCallRecord.current?.ran(call, output: output([.text(.init(content: text))]))
-                return FoundationModels.Prompt(text)
+                let segments = try await tool.makeOutputSegments(from: arguments)
+                let prompt = try segments.toFoundationModelsToolOutput()
+                await delegate.didExecuteToolCall(call, output: output(segments), in: session)
+                await ToolCallRecord.current?.ran(call, output: output(segments))
+                return prompt
             } catch {
                 await delegate.didFailToolCall(call, error: error, in: session)
                 throw error
