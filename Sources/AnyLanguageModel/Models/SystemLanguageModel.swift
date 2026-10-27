@@ -277,7 +277,7 @@
             // Attach the feedback to the session's conversation, including its latest response.
             let fmSession = FoundationModels.LanguageModelSession(
                 model: systemModel,
-                tools: requestContext.tools.toFoundationModels(in: session),
+                tools: requestContext.toolsForExecution(in: session).toFoundationModels(in: session),
                 transcript: requestContext.transcript.toFoundationModels(
                     instructions: requestContext.instructions,
                     toolDefinitions: requestContext.tools
@@ -319,7 +319,7 @@
             let requestContext = session.resolvedRequestContext()
             return FoundationModels.LanguageModelSession(
                 model: systemModel,
-                tools: requestContext.tools.toFoundationModels(in: session),
+                tools: requestContext.toolsForExecution(in: session).toFoundationModels(in: session),
                 transcript: fmTranscriptDroppingDuplicatePrompt(
                     requestContext.transcript,
                     prompt: prompt
@@ -377,18 +377,28 @@
     }
 
     #if compiler(>=6.4) && !os(tvOS)
-        /// Dynamic instructions that resolve an AnyLanguageModel session
-        /// each time Foundation Models evaluates them.
+        /// Dynamic instructions that reuse the initial request context and
+        /// resolve the session again for native continuations.
         @available(macOS 27.0, iOS 27.0, visionOS 27.0, watchOS 27.0, *)
-        struct FoundationModelsDynamicInstructionsAdapter: FoundationModels.DynamicInstructions {
+        struct FoundationModelsDynamicInstructionsAdapter: FoundationModels.DynamicInstructions, Sendable {
             let session: LanguageModelSession
+            private let initialContext: Locked<LanguageModelSession.RequestContext?>
+
+            init(session: LanguageModelSession, initialContext: LanguageModelSession.RequestContext? = nil) {
+                self.session = session
+                self.initialContext = Locked(initialContext)
+            }
 
             var body: some FoundationModels.DynamicInstructions {
-                let requestContext = session.resolvedRequestContext()
+                let requestContext =
+                    initialContext.withLock { context in
+                        defer { context = nil }
+                        return context
+                    } ?? session.resolvedRequestContext()
                 if let instructions = requestContext.instructions {
                     instructions.toFoundationModels()
                 }
-                requestContext.tools.toFoundationModels(in: session)
+                requestContext.toolsForExecution(in: session).toFoundationModels(in: session)
             }
         }
 
@@ -399,11 +409,12 @@
             prompt: Prompt
         ) -> FoundationModels.LanguageModelSession {
             if session.usesDynamicInstructions {
+                let initialContext = session.usesDynamicProfile ? session.resolvedRequestContext() : nil
                 // Foundation Models evaluates the dynamic instructions itself,
                 // so the history leaves out the instructions entry.
                 let history = fmTranscriptDroppingDuplicatePrompt(
                     Transcript(
-                        entries: session.transcript.filter { entry in
+                        entries: (initialContext?.transcript ?? session.transcript).filter { entry in
                             if case .instructions = entry { return false }
                             return true
                         }
@@ -412,7 +423,10 @@
                 ).toFoundationModels(instructions: nil, toolDefinitions: [])
                 return FoundationModels.LanguageModelSession(
                     model: model,
-                    dynamicInstructions: FoundationModelsDynamicInstructionsAdapter(session: session),
+                    dynamicInstructions: FoundationModelsDynamicInstructionsAdapter(
+                        session: session,
+                        initialContext: initialContext
+                    ),
                     history: history
                 )
             }
@@ -420,7 +434,7 @@
             let requestContext = session.resolvedRequestContext()
             return FoundationModels.LanguageModelSession(
                 model: model,
-                tools: requestContext.tools.toFoundationModels(in: session),
+                tools: requestContext.toolsForExecution(in: session).toFoundationModels(in: session),
                 transcript: fmTranscriptDroppingDuplicatePrompt(
                     requestContext.transcript,
                     prompt: prompt
