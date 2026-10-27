@@ -9,14 +9,11 @@ import Testing
         enum Provider: CaseIterable, Equatable, Sendable {
             case chat, responses, openResponses, anthropic, gemini, ollama
 
-            func makeSession(tools: [any Tool] = [], responseStartTimeout: Duration = .seconds(60))
-                -> LanguageModelSession
-            {
+            func makeModel(responseStartTimeout: Duration = .seconds(60)) -> any LanguageModel {
                 let http = UsageURLProtocol.makeSession()
-                let model: any LanguageModel
                 switch self {
                 case .chat, .responses:
-                    model = OpenAILanguageModel(
+                    return OpenAILanguageModel(
                         apiKey: "test",
                         model: "test",
                         apiVariant: self == .chat ? .chatCompletions : .responses,
@@ -24,7 +21,7 @@ import Testing
                         transport: http
                     )
                 case .openResponses:
-                    model = OpenResponsesLanguageModel(
+                    return OpenResponsesLanguageModel(
                         baseURL: URL(string: "https://example.com/v1")!,
                         apiKey: "test",
                         model: "test",
@@ -32,27 +29,33 @@ import Testing
                         transport: http
                     )
                 case .anthropic:
-                    model = AnthropicLanguageModel(
+                    return AnthropicLanguageModel(
                         apiKey: "test",
                         model: "test",
                         responseStartTimeout: responseStartTimeout,
                         transport: http
                     )
                 case .gemini:
-                    model = GeminiLanguageModel(
+                    return GeminiLanguageModel(
                         apiKey: "test",
                         model: "test",
                         responseStartTimeout: responseStartTimeout,
                         transport: http
                     )
                 case .ollama:
-                    model = OllamaLanguageModel(
+                    return OllamaLanguageModel(
                         model: "test",
                         responseStartTimeout: responseStartTimeout,
                         transport: http
                     )
                 }
-                return LanguageModelSession(model: model, tools: tools)
+            }
+
+            func makeSession(
+                tools: [any Tool] = [],
+                responseStartTimeout: Duration = .seconds(60)
+            ) -> LanguageModelSession {
+                LanguageModelSession(model: makeModel(responseStartTimeout: responseStartTimeout), tools: tools)
             }
 
             var counts: [String: Any] {
@@ -881,7 +884,7 @@ import Testing
         }
 
         /// Returns what `body` throws when it goes past its tool-round limit, if it does.
-        private static func toolRoundLimitExceeded(
+        static func toolRoundLimitExceeded(
             _ body: () async throws -> Void
         ) async -> LanguageModelSession.ToolRoundLimitExceeded? {
             do {
@@ -1058,9 +1061,6 @@ import Testing
             #expect(UsageURLProtocol.recordedBodies.count == 1)
         }
     }
-    /// A `URLProtocol` that answers requests from a queue of canned responses
-    /// and records every request body it sees,
-    /// so request/response round trips can be asserted offline.
     extension ProviderUsageTests {
         // MARK: Responses that throw
 
@@ -1143,7 +1143,10 @@ import Testing
         }
     }
 
-    private final class UsageURLProtocol: URLProtocol {
+    /// A `URLProtocol` that answers requests from a queue of canned responses
+    /// and records every request body it sees,
+    /// so request/response round trips can be asserted offline.
+    final class UsageURLProtocol: URLProtocol {
         struct Exchange: Sendable {
             var statusCode: Int = 200
             var body: Data
