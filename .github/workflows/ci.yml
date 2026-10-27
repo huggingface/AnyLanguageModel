@@ -170,3 +170,42 @@ jobs:
 
       - name: Test
         run: swift test${{ matrix.traits != '' && format(' --traits {0}', matrix.traits) || '' }}
+
+  build-wasi:
+    permissions:
+      contents: read
+    name: Swift ${{ matrix.swift }} for WASI
+    runs-on: ubuntu-latest
+    container: swift:${{ matrix.swift }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - swift: "6.4.1"
+            wasm-sdk-checksum: "783e6128d174d9f975b4eda68be02a5960681b723ef372e6876a7c2543a365d8"
+    timeout-minutes: 20
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Cache Swift Package Manager dependencies
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cache/org.swift.swiftpm
+            .build
+          key: ${{ runner.os }}-swift-${{ matrix.swift }}-wasi-spm-${{ hashFiles('Package.swift', 'Package.resolved') }}
+          restore-keys: |
+            ${{ runner.os }}-swift-${{ matrix.swift }}-wasi-spm-
+
+      - name: Install Swift SDK for WASI
+        run: |
+          swift sdk install \
+            "https://download.swift.org/swift-${{ matrix.swift }}-release/wasm-sdk/swift-${{ matrix.swift }}-RELEASE/swift-${{ matrix.swift }}-RELEASE_wasm.artifactbundle.tar.gz" \
+            --checksum "${{ matrix.wasm-sdk-checksum }}"
+
+      # Foundation's C layer on WASI needs signal and mmap emulation.
+      - name: Build
+        run: |
+          swift build --swift-sdk "swift-${{ matrix.swift }}-RELEASE_wasm" \
+            -Xcc -D_WASI_EMULATED_SIGNAL -Xcc -D_WASI_EMULATED_MMAN
