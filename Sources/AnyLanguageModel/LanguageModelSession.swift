@@ -112,6 +112,9 @@ public final class LanguageModelSession: @unchecked Sendable {
     private let dynamicInstructions: AnyDynamicInstructions?
     private let dynamicInstructionsLock = NSLock()
 
+    /// Session-scoped values available to dynamic instructions.
+    public let properties: SessionPropertyValues
+
     /// Whether the session resolves its instructions and tools before each request.
     nonisolated var usesDynamicInstructions: Bool {
         dynamicInstructions != nil
@@ -150,6 +153,16 @@ public final class LanguageModelSession: @unchecked Sendable {
         /// The tools that the model can call in response to the request.
         public let tools: [any Tool]
 
+        func toolsForExecution(in session: LanguageModelSession, offeredTools: [any Tool]? = nil) -> [any Tool] {
+            let history = Transcript.HistoryView(
+                transcript.filter {
+                    if case .instructions = $0 { return false }
+                    return true
+                }
+            )
+            return (offeredTools ?? tools).map { $0.bindingSessionProperties(session.properties, history: history) }
+        }
+
         fileprivate init(transcript: Transcript, instructions: Instructions?, tools: [any Tool]) {
             self.transcript = transcript
             self.instructions = instructions
@@ -159,7 +172,9 @@ public final class LanguageModelSession: @unchecked Sendable {
 
     /// Returns the transcript, instructions, and tools for the next model request.
     ///
-    /// Calling this method doesn't change the session.
+    /// Dynamic instructions may read and update custom session properties while
+    /// being resolved. Their history snapshot is read-only and instructions are
+    /// not committed to the canonical transcript.
     ///
     /// - Note: This API is exclusive to AnyLanguageModel
     ///   and using it means your code is no longer drop-in compatible
@@ -168,16 +183,26 @@ public final class LanguageModelSession: @unchecked Sendable {
     ///   can read the inputs for each request.
     nonisolated public func resolvedRequestContext() -> RequestContext {
         guard let dynamicInstructions else {
-            return RequestContext(transcript: transcript, instructions: instructions, tools: tools)
+            let transcript = transcript
+            return RequestContext(
+                transcript: transcript,
+                instructions: instructions,
+                tools: tools
+            )
         }
 
         // Evaluate the body for this request.
         // The resolved instructions go into the request's transcript,
         // never into the session's.
+        let canonicalHistory = Transcript.HistoryView(transcript)
         let resolved = dynamicInstructionsLock.withLock {
-            dynamicInstructions.resolveForRequest()
+            SessionPropertyBinding.$values.withValue(properties) {
+                SessionPropertyBinding.$history.withValue(canonicalHistory) {
+                    dynamicInstructions.resolveForRequest()
+                }
+            }
         }
-        var requestTranscript = transcript
+        var requestTranscript = Transcript(entries: Array(canonicalHistory))
         if let instructions = resolved.instructions {
             let instructionsEntry = Transcript.Entry.instructions(
                 Transcript.Instructions(
@@ -189,7 +214,11 @@ public final class LanguageModelSession: @unchecked Sendable {
             )
             requestTranscript = Transcript(entries: [instructionsEntry] + requestTranscript)
         }
-        return RequestContext(transcript: requestTranscript, instructions: resolved.instructions, tools: resolved.tools)
+        return RequestContext(
+            transcript: requestTranscript,
+            instructions: resolved.instructions,
+            tools: resolved.tools
+        )
     }
 
     /// Creates a session with a model, tools,
@@ -324,7 +353,52 @@ public final class LanguageModelSession: @unchecked Sendable {
             }
         }
 
-        self.state = .init(.init(finalTranscript))
+        let state = Locked(State(finalTranscript))
+        self.state = state
+        let setHistory: @Sendable (Transcript.HistoryView) -> Void = { history in
+            let history = history.filter { entry in
+                if case .instructions = entry { return false }
+                return true
+            }
+            state.withLock { locked in
+                let instructions = locked.transcript.prefix {
+                    if case .instructions = $0 { return true }
+                    return false
+                }
+                locked.transcript = Transcript(entries: Array(instructions) + history)
+            }
+        }
+        let observedHistorySetter = Locked<(@Sendable (Transcript.HistoryView) -> Void)?>(nil)
+        self.properties = SessionPropertyValues(
+            historyGetter: {
+                state.withLock { locked in
+                    Transcript.HistoryView(
+                        locked.transcript.filter { entry in
+                            if case .instructions = entry { return false }
+                            return true
+                        }
+                    )
+                }
+            },
+            historySetter: { history in
+                if let setter = observedHistorySetter.withLock({ $0 }) {
+                    setter(history)
+                } else {
+                    setHistory(history)
+                }
+            }
+        )
+        observedHistorySetter.withLock { setter in
+            setter = { [weak self] history in
+                guard let self else {
+                    setHistory(history)
+                    return
+                }
+                self.withMutation(keyPath: \.transcript) {
+                    setHistory(history)
+                }
+            }
+        }
     }
 
     private static func instructions(from transcript: Transcript) -> Instructions? {
@@ -373,10 +447,18 @@ public final class LanguageModelSession: @unchecked Sendable {
         }
     }
 
+    nonisolated private func withTranscriptMutation<Result>(
+        _ mutation: () throws -> Result
+    ) rethrows -> Result {
+        try properties._withSessionPropertyMutation(keyPath: \.history) {
+            try withMutation(keyPath: \.transcript, mutation)
+        }
+    }
+
     // The prompt is the only entry committed before a request succeeds. Checkpoints and
     // the final response commit atomically at completion, so rollback owns only this ID.
     nonisolated private func removePrompt(id: String) {
-        withMutation(keyPath: \.transcript) {
+        withTranscriptMutation {
             state.withLock { state in
                 state.transcript = Transcript(entries: state.transcript.filter { $0.id != id })
             }
@@ -485,17 +567,19 @@ public final class LanguageModelSession: @unchecked Sendable {
                                 providerMetadata: lastSnapshot.providerMetadata
                             )
                         )
-                        session.withMutation(keyPath: \.transcript) {
-                            session.state.withLock {
-                                $0.transcript.append(contentsOf: lastSnapshot.transcriptEntries)
-                                $0.transcript.append(responseEntry)
+                        session.withTranscriptMutation {
+                            session.state.withLock { state in
+                                guard state.transcript.contains(where: { $0.id == promptEntry.id }) else { return }
+                                state.transcript.append(contentsOf: lastSnapshot.transcriptEntries)
+                                state.transcript.append(responseEntry)
                             }
                         }
                         session.endResponding()
                         continuation.finish()
                     } catch {
-                        session.withMutation(keyPath: \.transcript) {
+                        session.withTranscriptMutation {
                             session.state.withLock { state in
+                                guard state.transcript.contains(where: { $0.id == promptEntry.id }) else { return }
                                 if state.transcriptErrorHandlingPolicy == .preserveTranscript {
                                     state.transcript.append(contentsOf: lastSnapshot?.transcriptEntries ?? [])
                                 } else if state.transcriptErrorHandlingPolicy == .revertTranscript {
@@ -751,7 +835,7 @@ public final class LanguageModelSession: @unchecked Sendable {
                     responseFormat: responseFormat
                 )
             )
-            withMutation(keyPath: \.transcript) {
+            withTranscriptMutation {
                 state.withLock { $0.transcript.append(promptEntry) }
             }
 
@@ -777,8 +861,9 @@ public final class LanguageModelSession: @unchecked Sendable {
             )
 
             // Add tool entries and response to transcript
-            withMutation(keyPath: \.transcript) {
+            withTranscriptMutation {
                 state.withLock { lockedState in
+                    guard lockedState.transcript.contains(where: { $0.id == promptID }) else { return }
                     lockedState.transcript.append(contentsOf: response.transcriptEntries)
                     lockedState.transcript.append(responseEntry)
                 }
@@ -810,7 +895,7 @@ public final class LanguageModelSession: @unchecked Sendable {
                 responseFormat: type == String.self ? nil : .init(type: type)
             )
         )
-        withMutation(keyPath: \.transcript) {
+        withTranscriptMutation {
             state.withLock { $0.transcript.append(promptEntry) }
         }
 
@@ -970,7 +1055,7 @@ extension LanguageModelSession {
                 responseFormat: .init(schema: schema)
             )
         )
-        withMutation(keyPath: \.transcript) {
+        withTranscriptMutation {
             state.withLock { $0.transcript.append(promptEntry) }
         }
 
@@ -1173,7 +1258,7 @@ extension LanguageModelSession {
                     responseFormat: type == String.self ? nil : .init(type: type)
                 )
             )
-            withMutation(keyPath: \.transcript) {
+            withTranscriptMutation {
                 state.withLock { $0.transcript.append(promptEntry) }
             }
 
@@ -1210,8 +1295,9 @@ extension LanguageModelSession {
             )
 
             // Add tool entries and response to transcript
-            withMutation(keyPath: \.transcript) {
+            withTranscriptMutation {
                 state.withLock { lockedState in
+                    guard lockedState.transcript.contains(where: { $0.id == promptID }) else { return }
                     lockedState.transcript.append(contentsOf: response.transcriptEntries)
                     lockedState.transcript.append(responseEntry)
                 }
@@ -1305,7 +1391,7 @@ extension LanguageModelSession {
                 responseFormat: type == String.self ? nil : .init(type: type)
             )
         )
-        withMutation(keyPath: \.transcript) {
+        withTranscriptMutation {
             state.withLock { $0.transcript.append(promptEntry) }
         }
 
