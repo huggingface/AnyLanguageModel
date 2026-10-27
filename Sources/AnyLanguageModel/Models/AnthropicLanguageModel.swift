@@ -29,7 +29,7 @@ import OrderedCollections
 ///     betas: ["beta1", "beta2"]
 /// )
 /// ```
-public struct AnthropicLanguageModel: LanguageModel {
+public struct AnthropicLanguageModel: LanguageModel, ProfileRequestIdentifiedLanguageModel {
     /// Custom generation options specific to Anthropic's Claude API.
     ///
     /// Reached through `GenerationOptions[custom: AnthropicLanguageModel.self]`,
@@ -383,6 +383,7 @@ public struct AnthropicLanguageModel: LanguageModel {
     public let responseStartTimeout: Duration?
 
     private let transport: any HTTPTransport
+    let profileRequestIdentity = UUID()
 
     /// Creates an Anthropic language model.
     ///
@@ -484,98 +485,141 @@ public struct AnthropicLanguageModel: LanguageModel {
     ) async throws -> LanguageModelSession.Response<Content> where Content: Generable {
         let url = baseURL.appendingPathComponent("v1/messages")
         let headers = buildHeaders()
-        let requestContext = session.resolvedRequestContext()
-
-        // Convert available tools to Anthropic format
-        let anthropicTools: [AnthropicTool] = try requestContext.tools.map { tool in
-            try convertToolToAnthropicFormat(tool)
-        }
-
         let responseSchema = type == String.self ? nil : try convertSchemaToAnthropicFormat(schema)
-        let params = try createMessageParams(
-            model: model,
-            system: nil,
-            messages: try requestContext.transcript.toAnthropicMessages(),
-            tools: anthropicTools.isEmpty ? nil : anthropicTools,
-            responseSchema: responseSchema,
-            options: options
-        )
+        var entries: [Transcript.Entry] = []
+        var usage = RequestsUsage()
+        var earlierText = ""
+        var inFlightMessages: [AnthropicMessage] = []
+        let toolRounds = session.toolRoundLimit(for: "Anthropic", options: options)
 
-        let body = try JSONEncoder().encode(params)
-
-        let message: AnthropicMessageResponse = try await transport.fetch(
-            HTTPRequest(method: .post, url: url, headerFields: headers),
-            body: body
-        )
-
-        var entries: [Transcript.Entry] = message.content.compactMap { block in
-            switch block {
-            case .thinking(let thinking): return .reasoning(thinking.transcriptReasoning())
-            case .redactedThinking(let redacted): return .reasoning(redacted.transcriptReasoning())
-            default: return nil
-            }
-        }
-        let usage = message.usage?.reportedUsage?.value ?? .zero
-        RequestUsageChannel.report(usage)
-
-        // Handle tool calls, if present
-        let toolUses: [AnthropicToolUse] = message.content.compactMap { block in
-            if case .toolUse(let u) = block { return u }
-            return nil
-        }
-
-        if !toolUses.isEmpty {
-            let resolution = try await resolveToolUses(
-                toolUses,
-                tools: requestContext.tools,
-                session: session
+        while true {
+            let completedEntries = entries
+            let requestContext = try await session.resolvedRequestContext(
+                including: session.usesDynamicProfile ? entries : [],
+                options: options
             )
-            switch resolution {
-            case .stop(let calls):
-                if !calls.isEmpty {
-                    entries.append(.toolCalls(Transcript.ToolCalls(calls)))
+            if let continuation = try await session.profileContinuationResponse(
+                ifSelectedModelDiffersFrom: profileRequestIdentity,
+                requestContext: requestContext,
+                prompt: prompt,
+                generating: type,
+                schema: schema,
+                includeSchemaInPrompt: includeSchemaInPrompt,
+                prefixEntries: entries,
+                prefixUsage: usage.total,
+                prefixText: earlierText
+            ) {
+                return continuation
+            }
+            let anthropicTools: [AnthropicTool] = try requestContext.tools.map {
+                try convertToolToAnthropicFormat($0)
+            }
+            let params = try createMessageParams(
+                model: model,
+                system: nil,
+                messages: try anthropicMessages(
+                    from: requestContext.transcript,
+                    replacing: entries,
+                    with: inFlightMessages,
+                    hasDynamicProfile: requestContext.hasDynamicProfile
+                ),
+                tools: anthropicTools.isEmpty ? nil : anthropicTools,
+                responseSchema: responseSchema,
+                options: requestContext.options
+            )
+            let message: AnthropicMessageResponse = try await transport.fetch(
+                HTTPRequest(method: .post, url: url, headerFields: headers),
+                body: try JSONEncoder().encode(params)
+            )
+            usage.add(message.usage?.reportedUsage)
+
+            let reasoningEntries: [Transcript.Entry] = message.content.compactMap { block in
+                switch block {
+                case .thinking(let thinking): return .reasoning(thinking.transcriptReasoning())
+                case .redactedThinking(let redacted): return .reasoning(redacted.transcriptReasoning())
+                default: return nil
                 }
-                let empty = try emptyResponseContent(for: type)
-                return LanguageModelSession.Response(
-                    content: empty.content,
-                    rawContent: empty.rawContent,
-                    transcriptEntries: ArraySlice(entries),
-                    usage: usage
+            }
+            entries.append(contentsOf: reasoningEntries)
+            let toolUses: [AnthropicToolUse] = message.content.compactMap { block in
+                if case .toolUse(let use) = block { return use }
+                return nil
+            }
+            if !toolUses.isEmpty {
+                try session.recordToolRound(toolRounds, completed: completedEntries)
+                try await session.profileDidProduceEntries(
+                    reasoningEntries,
+                    requestContext: requestContext,
+                    currentRoundEntries: entries
                 )
-            case .invocations(let invocations):
-                if !invocations.isEmpty {
-                    entries.append(.toolCalls(Transcript.ToolCalls(invocations.map(\.call))))
+                let (callsEntry, resolution) = try await resolveToolUses(
+                    toolUses,
+                    requestContext: requestContext,
+                    currentRoundEntries: entries,
+                    session: session
+                )
+                switch resolution {
+                case .stop:
+                    entries.append(.toolCalls(callsEntry))
+                    let empty = try emptyResponseContent(for: type)
+                    return .init(
+                        content: empty.content,
+                        rawContent: empty.rawContent,
+                        transcriptEntries: ArraySlice(entries),
+                        requests: usage
+                    )
+                case .invocations(let invocations):
+                    entries.append(.toolCalls(callsEntry))
                     for invocation in invocations {
                         entries.append(.toolOutput(invocation.output))
                     }
+                    if requestContext.hasDynamicProfile {
+                        inFlightMessages.append(.init(role: .assistant, content: message.content))
+                        let results: [AnthropicContent] = try invocations.map { invocation in
+                            .toolResult(
+                                .init(
+                                    toolUseId: invocation.call.id,
+                                    content: try convertSegmentsToAnthropicContent(
+                                        invocation.output.segments,
+                                        isToolOutput: true
+                                    )
+                                )
+                            )
+                        }
+                        inFlightMessages.append(.init(role: .user, content: results))
+                        if type == String.self {
+                            earlierText += message.content.compactMap { block -> String? in
+                                if case .text(let text) = block { return text.text }
+                                return nil
+                            }.joined()
+                        }
+                        continue
+                    }
                 }
             }
-        }
 
-        let text = message.content.compactMap { block -> String? in
-            switch block {
-            case .text(let t): return t.text
-            default: return nil
+            let text =
+                earlierText
+                + message.content.compactMap { block -> String? in
+                    if case .text(let text) = block { return text.text }
+                    return nil
+                }.joined()
+            if type == String.self {
+                return .init(
+                    content: text as! Content,
+                    rawContent: GeneratedContent(text),
+                    transcriptEntries: ArraySlice(entries),
+                    requests: usage
+                )
             }
-        }.joined()
-
-        if type == String.self {
-            return LanguageModelSession.Response(
-                content: text as! Content,
-                rawContent: GeneratedContent(text),
+            let rawContent = try GeneratedContent(json: text)
+            return .init(
+                content: try Content(rawContent),
+                rawContent: rawContent,
                 transcriptEntries: ArraySlice(entries),
-                usage: usage
+                requests: usage
             )
         }
-
-        let rawContent = try GeneratedContent(json: text)
-        let content = try Content(rawContent)
-        return LanguageModelSession.Response(
-            content: content,
-            rawContent: rawContent,
-            transcriptEntries: ArraySlice(entries),
-            usage: usage
-        )
     }
 
     public func streamResponse<Content>(
@@ -631,23 +675,45 @@ public struct AnthropicLanguageModel: LanguageModel {
                         type == String.self ? nil : try convertSchemaToAnthropicFormat(schema)
                     var inFlightMessages: [AnthropicMessage] = []
                     var state = StreamingResponseState<Content>()
-                    var toolRounds = ToolRoundLimit(provider: "Anthropic", options: options)
+                    let toolRounds = session.toolRoundLimit(for: "Anthropic", options: options)
                     while true {
                         try Task.checkCancellation()
-                        // The entries of the rounds that ran, before this round adds its reasoning.
                         let completedEntries = state.entries
-                        let requestContext = session.resolvedRequestContext()
+                        let requestContext = try await session.resolvedRequestContext(
+                            including: session.usesDynamicProfile ? state.entries : [],
+                            options: options
+                        )
+                        if let handoff = session.profileContinuationStream(
+                            ifSelectedModelDiffersFrom: profileRequestIdentity,
+                            requestContext: requestContext,
+                            prompt: prompt,
+                            generating: type,
+                            schema: schema,
+                            includeSchemaInPrompt: includeSchemaInPrompt,
+                            prefixEntries: state.entries,
+                            prefixUsage: state.requests.total,
+                            prefixText: state.responseText
+                        ) {
+                            for try await snapshot in handoff { continuation.yield(snapshot) }
+                            continuation.finish()
+                            return
+                        }
                         let anthropicTools: [AnthropicTool] = try requestContext.tools.map {
                             try convertToolToAnthropicFormat($0)
                         }
-                        let messages = try requestContext.transcript.toAnthropicMessages() + inFlightMessages
+                        let messages = try anthropicMessages(
+                            from: requestContext.transcript,
+                            replacing: state.entries,
+                            with: inFlightMessages,
+                            hasDynamicProfile: requestContext.hasDynamicProfile
+                        )
                         var params = try createMessageParams(
                             model: model,
                             system: nil,
                             messages: messages,
                             tools: anthropicTools.isEmpty ? nil : anthropicTools,
                             responseSchema: responseSchema,
-                            options: options
+                            options: requestContext.options
                         )
                         params["stream"] = .bool(true)
                         let body = try JSONEncoder().encode(params)
@@ -739,20 +805,27 @@ public struct AnthropicLanguageModel: LanguageModel {
                         }
                         guard !toolUses.isEmpty else { break }
                         try Task.checkCancellation()
-                        try toolRounds.record(completed: completedEntries)
-                        switch try await resolveToolUses(
+                        try session.recordToolRound(toolRounds, completed: completedEntries)
+                        try await session.profileDidProduceEntries(
+                            state.entries,
+                            requestContext: requestContext,
+                            currentRoundEntries: state.entries
+                        )
+                        let (callsEntry, resolution) = try await resolveToolUses(
                             toolUses,
-                            tools: requestContext.tools,
+                            requestContext: requestContext,
+                            currentRoundEntries: state.entries,
                             session: session
-                        ) {
-                        case .stop(let calls):
-                            state.entries.append(.toolCalls(Transcript.ToolCalls(calls)))
+                        )
+                        switch resolution {
+                        case .stop:
+                            state.entries.append(.toolCalls(callsEntry))
                             continuation.yield(try state.stoppedSnapshot())
                             continuation.finish()
                             return
                         case .invocations(let invocations):
                             inFlightMessages.append(.init(role: .assistant, content: content))
-                            state.entries.append(.toolCalls(Transcript.ToolCalls(invocations.map(\.call))))
+                            state.entries.append(.toolCalls(callsEntry))
                             var results: [AnthropicContent] = []
                             for invocation in invocations {
                                 state.entries.append(.toolOutput(invocation.output))
@@ -760,7 +833,10 @@ public struct AnthropicLanguageModel: LanguageModel {
                                     .toolResult(
                                         .init(
                                             toolUseId: invocation.call.id,
-                                            content: convertSegmentsToAnthropicContent(invocation.output.segments)
+                                            content: try convertSegmentsToAnthropicContent(
+                                                invocation.output.segments,
+                                                isToolOutput: true
+                                            )
                                         )
                                     )
                                 )
@@ -944,6 +1020,21 @@ private func createMessageParams(
 
 // MARK: - Tool Invocation Handling
 
+private func anthropicMessages(
+    from transcript: Transcript,
+    replacing currentRoundEntries: [Transcript.Entry],
+    with continuation: [AnthropicMessage],
+    hasDynamicProfile: Bool
+) throws -> [AnthropicMessage] {
+    try toolContinuationMessages(
+        from: transcript,
+        replacing: currentRoundEntries,
+        with: continuation,
+        hasDynamicProfile: hasDynamicProfile,
+        convert: { try $0.toAnthropicMessages() }
+    )
+}
+
 private struct ToolInvocationResult {
     let call: Transcript.ToolCall
     let output: Transcript.ToolOutput
@@ -989,18 +1080,10 @@ private func convertSchemaToAnthropicFormat(_ schema: GenerationSchema) throws -
 
 private func resolveToolUses(
     _ toolUses: [AnthropicToolUse],
-    tools: [any Tool],
+    requestContext: LanguageModelSession.RequestContext,
+    currentRoundEntries: [Transcript.Entry],
     session: LanguageModelSession
-) async throws -> ToolResolutionOutcome {
-    if toolUses.isEmpty { return .invocations([]) }
-
-    var toolsByName: [String: any Tool] = [:]
-    for tool in tools {
-        if toolsByName[tool.name] == nil {
-            toolsByName[tool.name] = tool
-        }
-    }
-
+) async throws -> (calls: Transcript.ToolCalls, outcome: ToolResolutionOutcome) {
     var transcriptCalls: [Transcript.ToolCall] = []
     transcriptCalls.reserveCapacity(toolUses.count)
     for use in toolUses {
@@ -1015,82 +1098,18 @@ private func resolveToolUses(
         )
     }
 
-    if let delegate = session.toolExecutionDelegate {
-        await delegate.didGenerateToolCalls(transcriptCalls, in: session)
+    let callsEntry = Transcript.ToolCalls(transcriptCalls)
+    let entries = currentRoundEntries + [.toolCalls(callsEntry)]
+    switch try await session.resolveProfileToolCalls(
+        transcriptCalls,
+        requestContext: requestContext,
+        currentRoundEntries: entries
+    ) {
+    case .stop(let calls):
+        return (callsEntry, .stop(calls: calls))
+    case .invocations(let invocations):
+        return (callsEntry, .invocations(invocations.map { .init(call: $0.call, output: $0.output) }))
     }
-
-    guard !transcriptCalls.isEmpty else { return .invocations([]) }
-
-    var decisions: [ToolExecutionDecision] = []
-    decisions.reserveCapacity(transcriptCalls.count)
-
-    if let delegate = session.toolExecutionDelegate {
-        for call in transcriptCalls {
-            let decision = await delegate.toolCallDecision(for: call, in: session)
-            if case .stop = decision {
-                return .stop(calls: transcriptCalls)
-            }
-            decisions.append(decision)
-        }
-    } else {
-        decisions = Array(repeating: .execute, count: transcriptCalls.count)
-    }
-
-    var results: [ToolInvocationResult] = []
-    results.reserveCapacity(transcriptCalls.count)
-
-    for (index, call) in transcriptCalls.enumerated() {
-        switch decisions[index] {
-        case .stop:
-            // This branch should be unreachable because `.stop` returns during decision collection.
-            // Keep it as a defensive guard in case that logic changes.
-            return .stop(calls: transcriptCalls)
-        case .provideOutput(let segments):
-            let output = Transcript.ToolOutput(
-                id: call.id,
-                toolName: call.toolName,
-                segments: segments
-            )
-            if let delegate = session.toolExecutionDelegate {
-                await delegate.didExecuteToolCall(call, output: output, in: session)
-            }
-            results.append(ToolInvocationResult(call: call, output: output))
-        case .execute:
-            guard let tool = toolsByName[call.toolName] else {
-                let message = Transcript.Segment.text(.init(content: "Tool not found: \(call.toolName)"))
-                let output = Transcript.ToolOutput(
-                    id: call.id,
-                    toolName: call.toolName,
-                    segments: [message]
-                )
-                if let delegate = session.toolExecutionDelegate {
-                    await delegate.didExecuteToolCall(call, output: output, in: session)
-                }
-                results.append(ToolInvocationResult(call: call, output: output))
-                continue
-            }
-
-            do {
-                let segments = try await tool.makeOutputSegments(from: call.arguments)
-                let output = Transcript.ToolOutput(
-                    id: call.id,
-                    toolName: tool.name,
-                    segments: segments
-                )
-                if let delegate = session.toolExecutionDelegate {
-                    await delegate.didExecuteToolCall(call, output: output, in: session)
-                }
-                results.append(ToolInvocationResult(call: call, output: output))
-            } catch {
-                if let delegate = session.toolExecutionDelegate {
-                    await delegate.didFailToolCall(call, error: error, in: session)
-                }
-                throw LanguageModelSession.ToolCallError(tool: tool, underlyingError: error)
-            }
-        }
-    }
-
-    return .invocations(results)
 }
 
 // Convert our GenerationSchema into Anthropic's expected JSON Schema payload
@@ -1117,14 +1136,14 @@ extension Transcript {
                 messages.append(
                     .init(
                         role: .user,
-                        content: convertSegmentsToAnthropicContent(instructions.segments)
+                        content: try convertSegmentsToAnthropicContent(instructions.segments)
                     )
                 )
             case .prompt(let prompt):
                 messages.append(
                     .init(
                         role: .user,
-                        content: convertSegmentsToAnthropicContent(prompt.segments)
+                        content: try convertSegmentsToAnthropicContent(prompt.segments)
                     )
                 )
             case .reasoning(let reasoning):
@@ -1151,7 +1170,7 @@ extension Transcript {
             case .response(let response):
                 // Anthropic rejects text blocks without non-whitespace text,
                 // such as the empty response of a turn that only called tools.
-                let content = convertSegmentsToAnthropicContent(response.segments).filter { block in
+                let content = try convertSegmentsToAnthropicContent(response.segments).filter { block in
                     guard case .text(let text) = block else { return true }
                     return !text.text.allSatisfy(\.isWhitespace)
                 }
@@ -1179,7 +1198,10 @@ extension Transcript {
                             .toolResult(
                                 AnthropicToolResult(
                                     toolUseId: toolOutput.id,
-                                    content: convertSegmentsToAnthropicContent(toolOutput.segments)
+                                    content: try convertSegmentsToAnthropicContent(
+                                        toolOutput.segments,
+                                        isToolOutput: true
+                                    )
                                 )
                             )
                         ]
@@ -1333,7 +1355,10 @@ private extension AnthropicThinking {
     }
 }
 
-private func convertSegmentsToAnthropicContent(_ segments: [Transcript.Segment]) -> [AnthropicContent] {
+private func convertSegmentsToAnthropicContent(
+    _ segments: [Transcript.Segment],
+    isToolOutput: Bool = false
+) throws -> [AnthropicContent] {
     var blocks: [AnthropicContent] = []
     blocks.reserveCapacity(segments.count)
     for segment in segments {
@@ -1345,13 +1370,52 @@ private func convertSegmentsToAnthropicContent(_ segments: [Transcript.Segment])
         case .image(let img):
             switch img.source {
             case .url(let url):
-                blocks.append(.image(AnthropicImage(url: url.absoluteString)))
+                if url.isFileURL {
+                    let mimeType: String
+                    switch url.pathExtension.lowercased() {
+                    case "jpg", "jpeg": mimeType = "image/jpeg"
+                    case "png": mimeType = "image/png"
+                    case "gif": mimeType = "image/gif"
+                    case "webp": mimeType = "image/webp"
+                    default:
+                        if isToolOutput {
+                            blocks.append(.text(AnthropicText(text: "<image>")))
+                            continue
+                        }
+                        throw AnthropicImageAttachmentError.unsupportedImageType(url)
+                    }
+                    blocks.append(
+                        .image(
+                            AnthropicImage(
+                                base64Data: try Data(contentsOf: url).base64EncodedString(),
+                                mimeType: mimeType
+                            )
+                        )
+                    )
+                } else {
+                    blocks.append(.image(AnthropicImage(url: url.absoluteString)))
+                }
             case .data(let data, let mimeType):
+                if isToolOutput && !["image/jpeg", "image/png", "image/gif", "image/webp"].contains(mimeType) {
+                    blocks.append(.text(AnthropicText(text: "<image>")))
+                    continue
+                }
                 blocks.append(.image(AnthropicImage(base64Data: data.base64EncodedString(), mimeType: mimeType)))
             }
         }
     }
     return blocks
+}
+
+private enum AnthropicImageAttachmentError: LocalizedError {
+    case unsupportedImageType(URL)
+
+    var errorDescription: String? {
+        switch self {
+        case .unsupportedImageType(let url):
+            "Anthropic image attachments support PNG, JPEG, GIF, and WebP files; cannot determine a supported MIME type for \(url.lastPathComponent)."
+        }
+    }
 }
 
 private struct AnthropicToolUse: Codable, Sendable {
