@@ -15,7 +15,7 @@ import OrderedCollections
 /// ```swift
 /// let model = OllamaLanguageModel(model: "qwen2.5")
 /// ```
-public struct OllamaLanguageModel: LanguageModel {
+public struct OllamaLanguageModel: LanguageModel, ProfileRequestIdentifiedLanguageModel {
     /// The reason the model is unavailable.
     /// This model is always available.
     public typealias UnavailableReason = Never
@@ -61,6 +61,7 @@ public struct OllamaLanguageModel: LanguageModel {
     public let responseStartTimeout: Duration?
 
     private let transport: any HTTPTransport
+    let profileRequestIdentity = UUID()
 
     /// Creates an Ollama language model.
     ///
@@ -141,7 +142,6 @@ public struct OllamaLanguageModel: LanguageModel {
         includeSchemaInPrompt: Bool,
         options: GenerationOptions
     ) async throws -> LanguageModelSession.Response<Content> where Content: Generable {
-        let ollamaOptions = convertOptions(options)
         let ollamaFormat: JSONValue?
         if type == String.self {
             ollamaFormat = nil
@@ -150,85 +150,132 @@ public struct OllamaLanguageModel: LanguageModel {
             ollamaFormat = try JSONValue(schema)
         }
 
-        let requestContext = session.resolvedRequestContext()
-        // Ollama has no tool-choice setting.
-        let tools = options.toolsOffered(from: requestContext.tools)
-        let ollamaTools = try tools.map(convertToolToOllamaFormat)
-        var messages = try requestContext.transcript.toOllamaMessages()
-        if messages.isEmpty {
-            messages.append(.init(role: .user, content: prompt.description))
-        }
-        let params = try createChatParams(
-            model: model,
-            messages: messages,
-            tools: ollamaTools.isEmpty ? nil : ollamaTools,
-            options: ollamaOptions,
-            stream: false,
-            format: ollamaFormat,
-            parameters: extractTopLevelChatParameters(options)
-        )
-
         let url = baseURL.appendingPathComponent("api/chat")
-        let body = try encodeChatParams(params)
-        let reply: ChatReply = try await transport.fetch(
-            HTTPRequest(method: .post, url: url),
-            body: body,
-            dateDecodingStrategy: .iso8601WithFractionalSeconds
-        )
-        let chatResponse = try reply.response()
-
         var entries: [Transcript.Entry] = []
-        let usage = chatResponse.reportedUsage?.value ?? .zero
-        RequestUsageChannel.report(usage)
-        if let thinking = chatResponse.message.thinking, !thinking.isEmpty {
-            entries.append(.reasoning(.ollama(thinking)))
-        }
+        var usage = RequestsUsage()
+        var earlierText = ""
+        var inFlightMessages: [OllamaMessage] = []
+        let toolRounds = session.toolRoundLimit(for: "Ollama", options: options)
 
-        if let toolCalls = chatResponse.message.toolCalls, !toolCalls.isEmpty {
-            let resolution = try await resolveToolCalls(
-                toolCalls,
-                tools: tools,
-                session: session
+        while true {
+            let requestContext = try await session.resolvedRequestContext(
+                including: session.usesDynamicProfile ? entries : [],
+                options: options
             )
-            switch resolution {
-            case .stop(let calls):
-                if !calls.isEmpty {
-                    entries.append(.toolCalls(Transcript.ToolCalls(calls)))
+            if let continuation = try await session.profileContinuationResponse(
+                ifSelectedModelDiffersFrom: profileRequestIdentity,
+                requestContext: requestContext,
+                prompt: prompt,
+                generating: type,
+                schema: schema,
+                includeSchemaInPrompt: includeSchemaInPrompt,
+                prefixEntries: entries,
+                prefixUsage: usage.total,
+                prefixText: earlierText
+            ) {
+                return continuation
+            }
+            let ollamaTools = try requestContext.options.toolsOffered(from: requestContext.tools).map(
+                convertToolToOllamaFormat
+            )
+            var messages = try ollamaMessages(
+                from: requestContext.transcript,
+                replacing: entries,
+                with: inFlightMessages,
+                hasDynamicProfile: requestContext.hasDynamicProfile
+            )
+            if messages.isEmpty {
+                messages.append(.init(role: .user, content: prompt.description))
+            }
+            let params = try createChatParams(
+                model: model,
+                messages: messages,
+                tools: ollamaTools.isEmpty ? nil : ollamaTools,
+                options: convertOptions(requestContext.options),
+                stream: false,
+                format: ollamaFormat,
+                parameters: extractTopLevelChatParameters(requestContext.options)
+            )
+            let reply: ChatReply = try await transport.fetch(
+                HTTPRequest(method: .post, url: url),
+                body: try encodeChatParams(params),
+                dateDecodingStrategy: .iso8601WithFractionalSeconds
+            )
+            let chatResponse = try reply.response()
+            usage.add(chatResponse.reportedUsage)
+            let thinking = chatResponse.message.thinking ?? ""
+            let reasoning = thinking.isEmpty ? nil : Transcript.Reasoning.ollama(thinking)
+
+            if let toolCalls = chatResponse.message.toolCalls, !toolCalls.isEmpty {
+                try session.recordToolRound(toolRounds, completed: entries)
+                if let reasoning {
+                    entries.append(.reasoning(reasoning))
+                    try await session.profileDidProduceEntries(
+                        [.reasoning(reasoning)],
+                        requestContext: requestContext,
+                        currentRoundEntries: entries
+                    )
                 }
-                return LanguageModelSession.Response(
-                    content: "" as! Content,
-                    rawContent: GeneratedContent(""),
-                    transcriptEntries: ArraySlice(entries),
-                    usage: usage
+                let (callsEntry, resolution) = try await resolveToolCalls(
+                    toolCalls,
+                    requestContext: requestContext,
+                    currentRoundEntries: entries,
+                    session: session
                 )
-            case .invocations(let invocations):
-                if !invocations.isEmpty {
-                    entries.append(.toolCalls(Transcript.ToolCalls(invocations.map(\.call))))
+                switch resolution {
+                case .stop:
+                    entries.append(.toolCalls(callsEntry))
+                    return .init(
+                        content: "" as! Content,
+                        rawContent: GeneratedContent(""),
+                        transcriptEntries: ArraySlice(entries),
+                        requests: usage
+                    )
+                case .invocations(let invocations):
+                    inFlightMessages.append(
+                        .init(
+                            role: .assistant,
+                            content: chatResponse.message.content ?? "",
+                            thinking: thinking.isEmpty ? nil : thinking,
+                            toolCalls: try toolCalls.map { try JSONValue($0) }
+                        )
+                    )
+                    entries.append(.toolCalls(callsEntry))
                     for invocation in invocations {
                         entries.append(.toolOutput(invocation.output))
+                        let (text, images) = convertSegmentsToOllama(invocation.output.segments)
+                        inFlightMessages.append(
+                            .init(
+                                role: .tool,
+                                content: text,
+                                images: images.isEmpty ? nil : images,
+                                toolName: invocation.call.toolName
+                            )
+                        )
                     }
+                    if type == String.self { earlierText += chatResponse.message.content ?? "" }
+                    continue
                 }
             }
-        }
 
-        let text = chatResponse.message.content ?? ""
-        if type == String.self {
-            return LanguageModelSession.Response(
-                content: text as! Content,
-                rawContent: GeneratedContent(text),
+            if let reasoning { entries.append(.reasoning(reasoning)) }
+            let text = earlierText + (chatResponse.message.content ?? "")
+            if type == String.self {
+                return .init(
+                    content: text as! Content,
+                    rawContent: GeneratedContent(text),
+                    transcriptEntries: ArraySlice(entries),
+                    requests: usage
+                )
+            }
+            let generatedContent = try GeneratedContent(json: text)
+            return .init(
+                content: try type.init(generatedContent),
+                rawContent: generatedContent,
                 transcriptEntries: ArraySlice(entries),
-                usage: usage
+                requests: usage
             )
         }
-
-        let generatedContent = try GeneratedContent(json: text)
-        let content = try type.init(generatedContent)
-        return LanguageModelSession.Response(
-            content: content,
-            rawContent: generatedContent,
-            transcriptEntries: ArraySlice(entries),
-            usage: usage
-        )
     }
 
     public func streamResponse<Content>(
@@ -281,26 +328,48 @@ public struct OllamaLanguageModel: LanguageModel {
                     let format = type == String.self ? nil : try JSONValue(convertSchemaToOllamaFormat(schema))
                     var inFlightMessages: [OllamaMessage] = []
                     var state = StreamingResponseState<Content>()
-                    var toolRounds = ToolRoundLimit(provider: "Ollama", options: options)
+                    let toolRounds = session.toolRoundLimit(for: "Ollama", options: options)
                     while true {
                         try Task.checkCancellation()
-                        let requestContext = session.resolvedRequestContext()
-                        // Ollama has no tool-choice setting.
-                        let offeredTools = options.toolsOffered(from: requestContext.tools)
-                        let tools = try offeredTools.map(convertToolToOllamaFormat)
-                        var messages = try requestContext.transcript.toOllamaMessages()
+                        let requestContext = try await session.resolvedRequestContext(
+                            including: session.usesDynamicProfile ? state.entries : [],
+                            options: options
+                        )
+                        if let handoff = session.profileContinuationStream(
+                            ifSelectedModelDiffersFrom: profileRequestIdentity,
+                            requestContext: requestContext,
+                            prompt: prompt,
+                            generating: type,
+                            schema: schema,
+                            includeSchemaInPrompt: includeSchemaInPrompt,
+                            prefixEntries: state.entries,
+                            prefixUsage: state.requests.total,
+                            prefixText: state.responseText
+                        ) {
+                            for try await snapshot in handoff { continuation.yield(snapshot) }
+                            continuation.finish()
+                            return
+                        }
+                        let tools = try requestContext.options.toolsOffered(from: requestContext.tools).map(
+                            convertToolToOllamaFormat
+                        )
+                        var messages = try ollamaMessages(
+                            from: requestContext.transcript,
+                            replacing: state.entries,
+                            with: inFlightMessages,
+                            hasDynamicProfile: requestContext.hasDynamicProfile
+                        )
                         if messages.isEmpty {
                             messages.append(.init(role: .user, content: prompt.description))
                         }
-                        messages.append(contentsOf: inFlightMessages)
                         let params = try createChatParams(
                             model: model,
                             messages: messages,
                             tools: tools.isEmpty ? nil : tools,
-                            options: convertOptions(options),
+                            options: convertOptions(requestContext.options),
                             stream: true,
                             format: format,
-                            parameters: extractTopLevelChatParameters(options)
+                            parameters: extractTopLevelChatParameters(requestContext.options)
                         )
                         let body = try encodeChatParams(params)
                         let chunks: AsyncThrowingStream<ChatReply, any Error> = transport.fetchStream(
@@ -331,18 +400,25 @@ public struct OllamaLanguageModel: LanguageModel {
                             break
                         }
                         try Task.checkCancellation()
-                        try toolRounds.record(completed: state.entries)
-                        // The round's reasoning, kept in the transcript before what it led to.
+                        try session.recordToolRound(toolRounds, completed: state.entries)
                         if !thinking.isEmpty {
-                            state.entries.append(.reasoning(.ollama(thinking)))
+                            let reasoning = Transcript.Reasoning.ollama(thinking)
+                            state.entries.append(.reasoning(reasoning))
+                            try await session.profileDidProduceEntries(
+                                [.reasoning(reasoning)],
+                                requestContext: requestContext,
+                                currentRoundEntries: state.entries
+                            )
                         }
-                        switch try await resolveToolCalls(
+                        let (callsEntry, resolution) = try await resolveToolCalls(
                             toolCalls,
-                            tools: offeredTools,
+                            requestContext: requestContext,
+                            currentRoundEntries: state.entries,
                             session: session
-                        ) {
-                        case .stop(let calls):
-                            state.entries.append(.toolCalls(Transcript.ToolCalls(calls)))
+                        )
+                        switch resolution {
+                        case .stop:
+                            state.entries.append(.toolCalls(callsEntry))
                             continuation.yield(try state.stoppedSnapshot())
                             continuation.finish()
                             return
@@ -355,7 +431,7 @@ public struct OllamaLanguageModel: LanguageModel {
                                     toolCalls: try toolCalls.map { try JSONValue($0) }
                                 )
                             )
-                            state.entries.append(.toolCalls(Transcript.ToolCalls(invocations.map(\.call))))
+                            state.entries.append(.toolCalls(callsEntry))
                             for invocation in invocations {
                                 state.entries.append(.toolOutput(invocation.output))
                                 let (text, images) = convertSegmentsToOllama(invocation.output.segments)
@@ -385,6 +461,21 @@ public struct OllamaLanguageModel: LanguageModel {
 
 // MARK: - Tool Invocation Handling
 
+private func ollamaMessages(
+    from transcript: Transcript,
+    replacing currentRoundEntries: [Transcript.Entry],
+    with continuation: [OllamaMessage],
+    hasDynamicProfile: Bool
+) throws -> [OllamaMessage] {
+    try toolContinuationMessages(
+        from: transcript,
+        replacing: currentRoundEntries,
+        with: continuation,
+        hasDynamicProfile: hasDynamicProfile,
+        convert: { try $0.toOllamaMessages() }
+    )
+}
+
 private struct ToolInvocationResult {
     let call: Transcript.ToolCall
     let output: Transcript.ToolOutput
@@ -397,20 +488,10 @@ private enum ToolResolutionOutcome {
 
 private func resolveToolCalls(
     _ toolCalls: [OllamaToolCall],
-    tools: [any Tool],
+    requestContext: LanguageModelSession.RequestContext,
+    currentRoundEntries: [Transcript.Entry],
     session: LanguageModelSession
-) async throws -> ToolResolutionOutcome {
-    if toolCalls.isEmpty {
-        return .invocations([])
-    }
-
-    var toolsByName: [String: any Tool] = [:]
-    for tool in tools {
-        if toolsByName[tool.name] == nil {
-            toolsByName[tool.name] = tool
-        }
-    }
-
+) async throws -> (calls: Transcript.ToolCalls, outcome: ToolResolutionOutcome) {
     var transcriptCalls: [Transcript.ToolCall] = []
     transcriptCalls.reserveCapacity(toolCalls.count)
     for call in toolCalls {
@@ -425,82 +506,19 @@ private func resolveToolCalls(
         )
     }
 
-    if let delegate = session.toolExecutionDelegate {
-        await delegate.didGenerateToolCalls(transcriptCalls, in: session)
+    let callsEntry = Transcript.ToolCalls(transcriptCalls)
+    let entries = currentRoundEntries + [.toolCalls(callsEntry)]
+    switch try await session.resolveProfileToolCalls(
+        transcriptCalls,
+        requestContext: requestContext,
+        currentRoundEntries: entries,
+        offeredTools: requestContext.options.toolsOffered(from: requestContext.tools)
+    ) {
+    case .stop(let calls):
+        return (callsEntry, .stop(calls: calls))
+    case .invocations(let invocations):
+        return (callsEntry, .invocations(invocations.map { .init(call: $0.call, output: $0.output) }))
     }
-
-    guard !transcriptCalls.isEmpty else { return .invocations([]) }
-
-    var decisions: [ToolExecutionDecision] = []
-    decisions.reserveCapacity(transcriptCalls.count)
-
-    if let delegate = session.toolExecutionDelegate {
-        for call in transcriptCalls {
-            let decision = await delegate.toolCallDecision(for: call, in: session)
-            if case .stop = decision {
-                return .stop(calls: transcriptCalls)
-            }
-            decisions.append(decision)
-        }
-    } else {
-        decisions = Array(repeating: .execute, count: transcriptCalls.count)
-    }
-
-    var results: [ToolInvocationResult] = []
-    results.reserveCapacity(transcriptCalls.count)
-
-    for (index, call) in transcriptCalls.enumerated() {
-        switch decisions[index] {
-        case .stop:
-            // This branch should be unreachable because `.stop` returns during decision collection.
-            // Keep it as a defensive guard in case that logic changes.
-            return .stop(calls: transcriptCalls)
-        case .provideOutput(let segments):
-            let output = Transcript.ToolOutput(
-                id: call.id,
-                toolName: call.toolName,
-                segments: segments
-            )
-            if let delegate = session.toolExecutionDelegate {
-                await delegate.didExecuteToolCall(call, output: output, in: session)
-            }
-            results.append(ToolInvocationResult(call: call, output: output))
-        case .execute:
-            guard let tool = toolsByName[call.toolName] else {
-                let message = Transcript.Segment.text(.init(content: "Tool not found: \(call.toolName)"))
-                let output = Transcript.ToolOutput(
-                    id: call.id,
-                    toolName: call.toolName,
-                    segments: [message]
-                )
-                if let delegate = session.toolExecutionDelegate {
-                    await delegate.didExecuteToolCall(call, output: output, in: session)
-                }
-                results.append(ToolInvocationResult(call: call, output: output))
-                continue
-            }
-
-            do {
-                let segments = try await tool.makeOutputSegments(from: call.arguments)
-                let output = Transcript.ToolOutput(
-                    id: call.id,
-                    toolName: tool.name,
-                    segments: segments
-                )
-                if let delegate = session.toolExecutionDelegate {
-                    await delegate.didExecuteToolCall(call, output: output, in: session)
-                }
-                results.append(ToolInvocationResult(call: call, output: output))
-            } catch {
-                if let delegate = session.toolExecutionDelegate {
-                    await delegate.didFailToolCall(call, error: error, in: session)
-                }
-                throw LanguageModelSession.ToolCallError(tool: tool, underlyingError: error)
-            }
-        }
-    }
-
-    return .invocations(results)
 }
 
 // MARK: - Conversions

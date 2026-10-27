@@ -1,7 +1,7 @@
 import Foundation
 import Testing
 
-@testable import AnyLanguageModel
+@_spi(Compatibility) @testable import AnyLanguageModel
 
 #if canImport(Darwin) && !canImport(AsyncHTTPClient)
     @Suite("OpenAI tool call history", .serialized)
@@ -244,8 +244,8 @@ import Testing
             #expect(details?.first?["text"] as? String == "Check the weather first.")
         }
 
-        @Test(arguments: [false, true])
-        func reasoningGoesBackWithItsToolRoundInFlightAndInHistory(streaming: Bool) async throws {
+        @Test(arguments: [false, true], [false, true])
+        func reasoningGoesBackWithItsToolRoundInFlightAndInHistory(streaming: Bool, profile: Bool) async throws {
             ToolCallHistoryURLProtocol.reset(
                 responses: streaming
                     ? [reasoningToolCallStream(), textStream("Sunny."), textStream("Done.")]
@@ -256,7 +256,13 @@ import Testing
                 model: "test",
                 transport: ToolCallHistoryURLProtocol.makeSession()
             )
-            let session = LanguageModelSession(model: model, tools: [ReorderedWeatherTool()])
+            let completed = Locked(false)
+            let callbacks = Locked<[Bool]>([])
+            let session =
+                profile
+                ? LanguageModelSession(
+                    profile: OpenAIReasoningProfile(model: model, completed: completed, callbacks: callbacks)
+                ) : LanguageModelSession(model: model, tools: [ReorderedWeatherTool()])
             if streaming {
                 for try await _ in session.streamResponse(to: "Weather in Paris?") {}
                 for try await _ in session.streamResponse(to: "And tomorrow?") {}
@@ -282,6 +288,7 @@ import Testing
             let text = Transcript.TextSegment(id: reasoning.id + ":text", content: "Check the weather first.")
             #expect(reasoning.segments == [.text(text)])
             #expect(reasoning.origin == .chatCompletions)
+            if profile { #expect(callbacks.withLock { $0 } == [true]) }
         }
 
         /// A transcript stores the origin in the entry's metadata, so it survives being saved.
@@ -447,6 +454,20 @@ import Testing
             #expect(message["reasoning"] == nil)
             #expect(message["reasoning_content"] == nil)
             #expect(message["reasoning_details"] == nil)
+        }
+    }
+
+    private struct OpenAIReasoningProfile: LanguageModelSession.DynamicProfile {
+        let model: OpenAILanguageModel
+        let completed: Locked<Bool>
+        let callbacks: Locked<[Bool]>
+
+        var body: some LanguageModelSession.DynamicProfile {
+            let beforeTool = completed.withLock { !$0 }
+            return LanguageModelSession.Profile { ReorderedWeatherTool() }
+                .model(model)
+                .onReasoning { _ in callbacks.withLock { $0.append(beforeTool) } }
+                .onToolOutput { _, _ in completed.withLock { $0 = true } }
         }
     }
 
