@@ -187,7 +187,7 @@ public struct OllamaLanguageModel: LanguageModel {
         if let toolCalls = chatResponse.message.toolCalls, !toolCalls.isEmpty {
             let resolution = try await resolveToolCalls(
                 toolCalls,
-                tools: tools,
+                tools: requestContext.toolsForExecution(in: session, offeredTools: tools),
                 session: session
             )
             switch resolution {
@@ -338,7 +338,7 @@ public struct OllamaLanguageModel: LanguageModel {
                         }
                         switch try await resolveToolCalls(
                             toolCalls,
-                            tools: offeredTools,
+                            tools: requestContext.toolsForExecution(in: session, offeredTools: offeredTools),
                             session: session
                         ) {
                         case .stop(let calls):

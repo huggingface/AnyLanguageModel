@@ -1,7 +1,7 @@
 import Foundation
 import Testing
 
-@testable import AnyLanguageModel
+@_spi(Compatibility) @testable import AnyLanguageModel
 
 @Suite("Dynamic instructions")
 struct DynamicInstructionsTests {
@@ -407,7 +407,7 @@ private struct DynamicContextModel: LanguageModel {
         var entries: [Transcript.Entry] = []
 
         if continuesAfterTool {
-            let tool = try #require(first.tools.first)
+            let tool = try #require(first.toolsForExecution(in: session).first)
             state.select(.b)
             let call = Transcript.ToolCall(
                 id: "request-a-call",
@@ -475,7 +475,7 @@ private struct FailingAfterToolModel: LanguageModel {
             return !didFail
         }
         if shouldFail {
-            let tool = try #require(context.tools.first)
+            let tool = try #require(context.toolsForExecution(in: session).first)
             _ = try await tool.makeOutputSegments(from: GeneratedContent(properties: [:]))
             state.select(.b)
             throw DynamicFixtureError.failed
@@ -565,7 +565,7 @@ private struct CancellingAfterToolModel: LanguageModel {
             return !didSuspend
         }
         if shouldSuspend {
-            let tool = try #require(context.tools.first)
+            let tool = try #require(context.toolsForExecution(in: session).first)
             _ = try await tool.makeOutputSegments(from: GeneratedContent(properties: [:]))
             state.select(.b)
             control.signalStarted()
