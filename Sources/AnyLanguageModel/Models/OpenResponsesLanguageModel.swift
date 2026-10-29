@@ -477,6 +477,7 @@ public struct OpenResponsesLanguageModel: LanguageModel {
         return try await respondWithOpenResponses(
             generating: type,
             schema: schema,
+            includeSchemaInPrompt: includeSchemaInPrompt,
             options: options,
             session: session
         )
@@ -527,6 +528,11 @@ public struct OpenResponsesLanguageModel: LanguageModel {
         let url = baseURL.appendingPathComponent("responses")
         // Open Responses follows OpenAI's structured outputs, which need an object root.
         let responseSchema = ProviderResponseSchema(schema, generating: type, wrapping: .nonObjectRoots)
+        let schemaInstructions = GenerationSchema.promptInstructions(
+            generating: type,
+            schema: responseSchema.schema,
+            includeSchemaInPrompt: includeSchemaInPrompt
+        )
         let stream = AsyncThrowingStream<LanguageModelSession.ResponseStream<Content>.Snapshot, any Error> {
             continuation in
             let task = Task {
@@ -540,7 +546,9 @@ public struct OpenResponsesLanguageModel: LanguageModel {
                         let tools: [OpenResponsesTool]? =
                             requestContext.tools.isEmpty
                             ? nil : requestContext.tools.map(convertToolToOpenResponsesFormat)
-                        let messages = requestContext.transcript.toOpenResponsesMessages() + inFlightMessages
+                        let messages =
+                            requestContext.transcript.saying(schemaInstructions).toOpenResponsesMessages()
+                            + inFlightMessages
                         let params = try OpenResponsesAPI.createRequestBody(
                             model: model,
                             messages: messages,
@@ -634,11 +642,17 @@ public struct OpenResponsesLanguageModel: LanguageModel {
     private func respondWithOpenResponses<Content>(
         generating type: Content.Type,
         schema: GenerationSchema,
+        includeSchemaInPrompt: Bool,
         options: GenerationOptions,
         session: LanguageModelSession
     ) async throws -> LanguageModelSession.Response<Content> where Content: Generable {
         // Open Responses follows OpenAI's structured outputs, which need an object root.
         let responseSchema = ProviderResponseSchema(schema, generating: type, wrapping: .nonObjectRoots)
+        let schemaInstructions = GenerationSchema.promptInstructions(
+            generating: type,
+            schema: responseSchema.schema,
+            includeSchemaInPrompt: includeSchemaInPrompt
+        )
         var entries: [Transcript.Entry] = []
         var usage = RequestsUsage()
         var text = ""
@@ -654,7 +668,8 @@ public struct OpenResponsesLanguageModel: LanguageModel {
             let tools: [OpenResponsesTool]? =
                 requestContext.tools.isEmpty
                 ? nil : requestContext.tools.map(convertToolToOpenResponsesFormat)
-            let messages = requestContext.transcript.toOpenResponsesMessages() + inFlightMessages
+            let messages =
+                requestContext.transcript.saying(schemaInstructions).toOpenResponsesMessages() + inFlightMessages
             let params = try OpenResponsesAPI.createRequestBody(
                 model: model,
                 messages: messages,

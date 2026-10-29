@@ -1103,16 +1103,6 @@ extension GenerationSchema {
     /// Defaults to `false` (encodes `const`, as Foundation Models does) if not specified.
     static let constantsAsEnumsKey = CodingUserInfoKey(rawValue: "GenerationSchema.constantsAsEnums")!
 
-    func schemaPrompt() -> String {
-        let encoder = JSONEncoder()
-        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
-        guard let data = try? encoder.encode(self),
-            let schemaJSON = String(data: data, encoding: .utf8)
-        else {
-            return "Respond with valid JSON only."
-        }
-        return "Respond with valid JSON matching this schema:\n\(schemaJSON)"
-    }
 }
 
 // MARK: - Explicit nil
