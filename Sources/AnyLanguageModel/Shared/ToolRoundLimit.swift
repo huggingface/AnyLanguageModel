@@ -56,7 +56,8 @@ extension LanguageModelSession {
         /// The provider whose response called tools past the limit.
         public let provider: String
 
-        /// The rounds that ran, each tool call followed by its output.
+        /// The rounds that ran, each tool call followed by its output
+        /// and any messages the delegate added after the round.
         public let transcriptEntries: ArraySlice<Transcript.Entry>
 
         public var description: String {

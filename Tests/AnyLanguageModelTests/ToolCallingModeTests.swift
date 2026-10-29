@@ -432,6 +432,47 @@ struct ToolsOfferedTests {
             #expect(body["tools"] != nil)
             #expect(body["toolConfig"] == nil)
         }
+
+        /// A delegate's messages join a response after its tool round, in every provider whose
+        /// nonstreaming tool loop continues after a round. (Anthropic's and Ollama's make one
+        /// request; their streaming loops are covered with their history tests.)
+        @Test(arguments: [Provider.chat, .responses, .openResponses, .gemini])
+        func pendingMessagesJoinTheResponseAfterTheToolRound(provider: Provider) async throws {
+            ToolCallingModeURLProtocol.reset()
+            ToolCallingModeURLProtocol.enqueue(provider.response(tool: true))
+            ToolCallingModeURLProtocol.enqueue(provider.response())
+            ToolCallingModeURLProtocol.enqueue(provider.response())
+            let session = provider.makeSession()
+            session.toolExecutionDelegate = SteeringDelegate()
+            _ = try await session.respond(to: "Weather?")
+            _ = try await session.respond(to: "And tomorrow?")
+
+            let bodies = ToolCallingModeURLProtocol.recordedBodies.map { String(decoding: $0, as: UTF8.self) }
+            try #require(bodies.count == 3)
+            #expect(!bodies[0].contains("Skip the umbrella advice."))
+            #expect(bodies[1].contains("Skip the umbrella advice."))
+            // The next turn replays it from the transcript.
+            #expect(bodies[2].contains("Skip the umbrella advice."))
+            let entries = Array(session.transcript)
+            let output = try #require(entries.firstIndex { if case .toolOutput = $0 { true } else { false } })
+            guard case .prompt = entries[output + 1] else {
+                Issue.record("Expected the message after the tool output")
+                return
+            }
+        }
+    }
+
+    /// Hands over one message, once.
+    private final class SteeringDelegate: ToolExecutionDelegate, @unchecked Sendable {
+        private let lock = NSLock()
+        private var pending = [AnyLanguageModel.Prompt("Skip the umbrella advice.")]
+
+        func pendingMessages(in session: LanguageModelSession) async -> [AnyLanguageModel.Prompt] {
+            lock.withLock {
+                defer { pending = [] }
+                return pending
+            }
+        }
     }
 
     /// Offers `getWeather` until it's called,

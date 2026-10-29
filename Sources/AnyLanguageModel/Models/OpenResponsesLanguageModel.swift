@@ -652,6 +652,10 @@ public struct OpenResponsesLanguageModel: LanguageModel, ProfileRequestIdentifie
                                     )
                                 )
                             }
+                            for prompt in try await pendingPrompts(in: session) {
+                                state.entries.append(.prompt(prompt))
+                                inFlightMessages.append(openResponsesUserMessage(prompt))
+                            }
                         }
                         if let snapshot = state.snapshot() { continuation.yield(snapshot) }
                         state.beginNextRound()
@@ -776,6 +780,10 @@ public struct OpenResponsesLanguageModel: LanguageModel, ProfileRequestIdentifie
                                     content: .text(openResponsesConvertSegmentsToToolContentString(inv.output.segments))
                                 )
                             )
+                        }
+                        for prompt in try await pendingPrompts(in: session) {
+                            entries.append(.prompt(prompt))
+                            inFlightMessages.append(openResponsesUserMessage(prompt))
                         }
                         if type == String.self {
                             earlierText += resp.outputText ?? extractTextFromOutput(resp.output) ?? ""
@@ -1058,6 +1066,12 @@ private enum OpenResponsesBlock: Sendable {
     case imageURL(String)
 }
 
+/// A prompt as an Open Responses server is sent it: in a transcript's history, and added to a
+/// response in progress (`pendingPrompts`), in the same form.
+private func openResponsesUserMessage(_ prompt: Transcript.Prompt) -> OpenResponsesMessage {
+    OpenResponsesMessage(role: .user, content: .blocks(openResponsesConvertSegmentsToBlocks(prompt.segments)))
+}
+
 extension Transcript {
     fileprivate func toOpenResponsesMessages() -> [OpenResponsesMessage] {
         var list: [OpenResponsesMessage] = []
@@ -1071,12 +1085,7 @@ extension Transcript {
                     )
                 )
             case .prompt(let prompt):
-                list.append(
-                    OpenResponsesMessage(
-                        role: .user,
-                        content: .blocks(openResponsesConvertSegmentsToBlocks(prompt.segments))
-                    )
-                )
+                list.append(openResponsesUserMessage(prompt))
             case .reasoning:
                 // Keep display history in the transcript without sending unsupported replay state.
                 continue

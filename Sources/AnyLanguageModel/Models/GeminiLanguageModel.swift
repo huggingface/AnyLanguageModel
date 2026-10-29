@@ -356,6 +356,10 @@ public struct GeminiLanguageModel: LanguageModel, ProfileRequestIdentifiedLangua
                     for invocation in invocations {
                         entries.append(.toolOutput(invocation.output))
                     }
+                    // `entries` go through the same conversion as history.
+                    for prompt in try await pendingPrompts(in: session) {
+                        entries.append(.prompt(prompt))
+                    }
 
                     if type == String.self { earlierText += textPartsText(firstCandidate.content.parts) }
 
@@ -550,6 +554,9 @@ public struct GeminiLanguageModel: LanguageModel, ProfileRequestIdentifiedLangua
                             state.entries.append(.toolCalls(callsEntry))
                             for invocation in invocations {
                                 state.entries.append(.toolOutput(invocation.output))
+                            }
+                            for prompt in try await pendingPrompts(in: session) {
+                                state.entries.append(.prompt(prompt))
                             }
                         }
                         if let snapshot = state.snapshot() { continuation.yield(snapshot) }

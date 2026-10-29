@@ -109,6 +109,68 @@ import Testing
             return try #require(try JSONSerialization.jsonObject(with: body) as? [String: Any])
         }
 
+        /// Hands over one message, once.
+        private final class SteeringDelegate: ToolExecutionDelegate, @unchecked Sendable {
+            private let lock = NSLock()
+            private var pending = [AnyLanguageModel.Prompt("Skip the umbrella advice.")]
+
+            func pendingMessages(in session: LanguageModelSession) async -> [AnyLanguageModel.Prompt] {
+                lock.withLock {
+                    defer { pending = [] }
+                    return pending
+                }
+            }
+        }
+
+        @Test(arguments: [false, true])
+        func pendingMessagesJoinTheResponseAfterTheToolRound(streaming: Bool) async throws {
+            let call = #""tool_calls": [{"function": {"name": "getWeather", "arguments": {"city": "Paris"}}}]"#
+            if streaming {
+                // A stream is one JSON object a line.
+                let toolCall = """
+                    {"model": "test", "created_at": "2026-10-03T00:00:00.000Z", "message": {"role": "assistant", "content": "", \(call)}, "done": false}
+                    {"model": "test", "created_at": "2026-10-03T00:00:00.000Z", "message": {"role": "assistant", "content": ""}, "done": true}
+
+                    """
+                let text = """
+                    {"model": "test", "created_at": "2026-10-03T00:00:00.000Z", "message": {"role": "assistant", "content": "Sunny."}, "done": true}
+
+                    """
+                OllamaHistoryURLProtocol.reset(responses: [toolCall, text, text])
+            } else {
+                let toolCall = """
+                    {"model": "test", "created_at": "2026-10-03T00:00:00.000Z", "message": {"role": "assistant", "content": "", \(call)}, "done": true}
+                    """
+                OllamaHistoryURLProtocol.reset(responses: [toolCall, response("Sunny."), response("Sunny.")])
+            }
+
+            let model = OllamaLanguageModel(model: "test", session: OllamaHistoryURLProtocol.makeSession())
+            let session = LanguageModelSession(model: model, tools: [WeatherTool()])
+            session.toolExecutionDelegate = SteeringDelegate()
+            if streaming {
+                for try await _ in session.streamResponse(to: "Weather in Paris?") {}
+            } else {
+                _ = try await session.respond(to: "Weather in Paris?")
+            }
+            _ = try await session.respond(to: "And tomorrow?")
+
+            let bodies = OllamaHistoryURLProtocol.recordedBodies
+            try #require(bodies.count == 3)
+            func messages(_ body: Data) throws -> [[String: Any]] {
+                let json = try #require(try JSONSerialization.jsonObject(with: body) as? [String: Any])
+                return try #require(json["messages"] as? [[String: Any]])
+            }
+            let inFlight = try messages(bodies[1])
+            #expect(inFlight.suffix(3).map { $0["role"] as? String } == ["assistant", "tool", "user"])
+            #expect(inFlight.last?["content"] as? String == "Skip the umbrella advice.")
+            // The next turn replays it from the transcript as it was sent.
+            let replayed = try messages(bodies[2])
+            #expect(replayed.map { $0["role"] as? String }.contains("user"))
+            let replayedNote = try #require(replayed.first { $0["content"] as? String == "Skip the umbrella advice." })
+            let sentNote = try #require(inFlight.last)
+            #expect(NSDictionary(dictionary: sentNote).isEqual(to: replayedNote))
+        }
+
         @Test func anErrorReplyIsThrownWithOllamasMessage() async throws {
             OllamaHistoryURLProtocol.reset(responses: [#"{"error": "model requires more system memory"}"#])
 
