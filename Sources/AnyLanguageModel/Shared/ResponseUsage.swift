@@ -105,6 +105,11 @@ struct RequestsUsage: Sendable, Equatable {
         self.final = final
     }
 
+    /// Requests whose usage is known as a total, with the final request's usage.
+    init(final: LanguageModelSession.Usage, total: LanguageModelSession.Usage) {
+        self.init(earlier: total.subtracting(final), final: final)
+    }
+
     /// Adds the usage of a request sent after the others, and counts it for the response being
     /// made as it completes.
     mutating func add(_ request: LanguageModelSession.Usage) {
