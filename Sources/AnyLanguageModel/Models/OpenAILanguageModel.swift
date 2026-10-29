@@ -618,6 +618,10 @@ public struct OpenAILanguageModel: LanguageModel {
                                 )
                             )
                         }
+                        for prompt in try await pendingPrompts(in: session) {
+                            entries.append(.prompt(prompt))
+                            inFlightMessages.append(openAIUserMessage(prompt))
+                        }
                         if type == String.self { earlierText += toolCallMessage.content ?? "" }
                         continue
                     }
@@ -735,6 +739,10 @@ public struct OpenAILanguageModel: LanguageModel {
                                     content: .text(convertSegmentsToToolContentString(output.segments))
                                 )
                             )
+                        }
+                        for prompt in try await pendingPrompts(in: session) {
+                            entries.append(.prompt(prompt))
+                            inFlightMessages.append(openAIUserMessage(prompt))
                         }
                         if type == String.self {
                             earlierText += resp.outputText ?? extractTextFromOutput(resp.output) ?? ""
@@ -986,6 +994,10 @@ public struct OpenAILanguageModel: LanguageModel {
                                         content: .text(convertSegmentsToToolContentString(invocation.output.segments))
                                     )
                                 )
+                            }
+                            for prompt in try await pendingPrompts(in: session) {
+                                state.entries.append(.prompt(prompt))
+                                inFlightMessages.append(openAIUserMessage(prompt))
                             }
                         }
                         // This round's text now goes with its tool calls, so a response that
@@ -1613,6 +1625,12 @@ private struct ChatCompletionsReasoning {
     }
 }
 
+/// A prompt as OpenAI is sent it: in a transcript's history, and added to a response in
+/// progress (`pendingPrompts`), in the same form.
+private func openAIUserMessage(_ prompt: Transcript.Prompt) -> OpenAIMessage {
+    OpenAIMessage(role: .user, content: .blocks(convertSegmentsToOpenAIBlocks(prompt.segments)))
+}
+
 extension Transcript {
     /// The transcript as messages for a request to the API at `host`.
     fileprivate func toOpenAIMessages(host: String?) -> [OpenAIMessage] {
@@ -1632,12 +1650,7 @@ extension Transcript {
                     )
                 )
             case .prompt(let prompt):
-                messages.append(
-                    .init(
-                        role: .user,
-                        content: .blocks(convertSegmentsToOpenAIBlocks(prompt.segments))
-                    )
-                )
+                messages.append(openAIUserMessage(prompt))
             case .reasoning(let entry):
                 // Other providers' and hosts' reasoning stays display history.
                 pendingReasoning = entry

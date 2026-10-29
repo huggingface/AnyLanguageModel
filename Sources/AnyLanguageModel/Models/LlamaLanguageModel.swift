@@ -962,6 +962,11 @@ import Foundation
                             allEntries.append(outputEntry)
                             pendingEntries.append(outputEntry)
                         }
+                        // `pendingEntries` go through the same conversion as history.
+                        for prompt in try await pendingPrompts(in: session) {
+                            allEntries.append(.prompt(prompt))
+                            pendingEntries.append(.prompt(prompt))
+                        }
                     }
                 }
 
@@ -1223,6 +1228,10 @@ import Foundation
                                         let outputEntry = Transcript.Entry.toolOutput(invocation.output)
                                         accumulatedEntries.append(outputEntry)
                                         pendingEntries.append(outputEntry)
+                                    }
+                                    for prompt in try await pendingPrompts(in: session) {
+                                        accumulatedEntries.append(.prompt(prompt))
+                                        pendingEntries.append(.prompt(prompt))
                                     }
                                     emittedBase += roundVisible
                                     yieldSnapshot(emittedBase)

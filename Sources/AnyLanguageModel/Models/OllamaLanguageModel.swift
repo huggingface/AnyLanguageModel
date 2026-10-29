@@ -368,6 +368,10 @@ public struct OllamaLanguageModel: LanguageModel {
                                     )
                                 )
                             }
+                            for prompt in try await pendingPrompts(in: session) {
+                                state.entries.append(.prompt(prompt))
+                                inFlightMessages.append(ollamaUserMessage(prompt))
+                            }
                         }
                         if let snapshot = state.snapshot() { continuation.yield(snapshot) }
                         state.beginNextRound()
@@ -753,6 +757,13 @@ private extension [Transcript.Segment] {
         }.joined()
         return text.isEmpty ? nil : text
     }
+}
+
+/// A prompt as Ollama is sent it, the way a transcript replays one (a user message carries no
+/// thinking), added to a response in progress (`pendingPrompts`).
+private func ollamaUserMessage(_ prompt: Transcript.Prompt) -> OllamaMessage {
+    let (text, images) = convertSegmentsToOllama(prompt.segments)
+    return .init(role: .user, content: text, thinking: nil, images: images.isEmpty ? nil : images)
 }
 
 private func convertSegmentsToOllama(_ segments: [Transcript.Segment]) -> (String, [String]) {

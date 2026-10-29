@@ -87,6 +87,49 @@ import Testing
             }
         }
 
+        /// Hands over one message, once.
+        private final class SteeringDelegate: ToolExecutionDelegate, @unchecked Sendable {
+            private let lock = NSLock()
+            private var pending = [AnyLanguageModel.Prompt("Skip the umbrella advice.")]
+
+            func pendingMessages(in session: LanguageModelSession) async -> [AnyLanguageModel.Prompt] {
+                lock.withLock {
+                    defer { pending = [] }
+                    return pending
+                }
+            }
+        }
+
+        @Test func pendingMessagesJoinAStreamedResponseAfterTheToolRound() async throws {
+            ReasoningURLProtocol.reset()
+            ReasoningURLProtocol.enqueue(eventStream: events(tool: true))
+            ReasoningURLProtocol.enqueue(eventStream: events())
+            ReasoningURLProtocol.enqueue(eventStream: events())
+            let session = LanguageModelSession(model: model(), tools: [WeatherTool()])
+            session.toolExecutionDelegate = SteeringDelegate()
+            _ = try await session.streamResponse(to: "Weather").collect()
+            _ = try await session.streamResponse(to: "And tomorrow?").collect()
+
+            let bodies = ReasoningURLProtocol.recordedBodies
+            try #require(bodies.count == 3)
+            func messages(_ body: Data) throws -> [[String: Any]] {
+                let json = try #require(try JSONSerialization.jsonObject(with: body) as? [String: Any])
+                return try #require(json["messages"] as? [[String: Any]])
+            }
+            // After the round's tool results, the message, as its own user message.
+            let inFlight = try messages(bodies[1])
+            let note = try #require(inFlight.last)
+            #expect(note["role"] as? String == "user")
+            #expect(String(describing: note["content"] ?? "").contains("Skip the umbrella advice."))
+            #expect(String(describing: inFlight[inFlight.count - 2]["content"] ?? "").contains("tool_result"))
+            // The next turn replays it from the transcript as it was sent.
+            let replayed = try messages(bodies[2])
+            let replayedNote = try #require(
+                replayed.first { String(describing: $0["content"] ?? "").contains("Skip the umbrella advice.") }
+            )
+            #expect(NSDictionary(dictionary: note).isEqual(to: replayedNote))
+        }
+
         /// The round past the limit didn't run, so its reasoning isn't carried with the rounds that did.
         @Test func toolRoundLimitOmitsTheReasoningOfTheRoundPastIt() async throws {
             ReasoningURLProtocol.reset()

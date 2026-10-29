@@ -343,6 +343,12 @@ public struct GeminiLanguageModel: LanguageModel {
                             inFlightEntries.append(output)
                             entries.append(output)
                         }
+                        // Sent as the transcript replays them: `inFlightEntries` go through the
+                        // same conversion as history.
+                        for prompt in try await pendingPrompts(in: session) {
+                            inFlightEntries.append(.prompt(prompt))
+                            entries.append(.prompt(prompt))
+                        }
                     }
 
                     if type == String.self { earlierText += textPartsText(firstCandidate.content.parts) }
@@ -519,6 +525,10 @@ public struct GeminiLanguageModel: LanguageModel {
                                 let output = Transcript.Entry.toolOutput(invocation.output)
                                 inFlightEntries.append(output)
                                 state.entries.append(output)
+                            }
+                            for prompt in try await pendingPrompts(in: session) {
+                                inFlightEntries.append(.prompt(prompt))
+                                state.entries.append(.prompt(prompt))
                             }
                         }
                         if let snapshot = state.snapshot() { continuation.yield(snapshot) }

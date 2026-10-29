@@ -766,6 +766,10 @@ public struct AnthropicLanguageModel: LanguageModel {
                                 )
                             }
                             inFlightMessages.append(.init(role: .user, content: results))
+                            for prompt in try await pendingPrompts(in: session) {
+                                state.entries.append(.prompt(prompt))
+                                inFlightMessages.append(anthropicUserMessage(prompt))
+                            }
                         }
                         if let snapshot = snapshot() { continuation.yield(snapshot) }
                         state.beginNextRound()
@@ -1093,6 +1097,12 @@ private func resolveToolUses(
     return .invocations(results)
 }
 
+/// A prompt as Anthropic is sent it: in a transcript's history, and added to a response in
+/// progress (`pendingPrompts`), in the same form.
+private func anthropicUserMessage(_ prompt: Transcript.Prompt) -> AnthropicMessage {
+    .init(role: .user, content: convertSegmentsToAnthropicContent(prompt.segments))
+}
+
 // Convert our GenerationSchema into Anthropic's expected JSON Schema payload
 private func convertToolToAnthropicFormat(_ tool: any Tool) throws -> AnthropicTool {
     let schema = try convertSchemaToAnthropicFormat(tool.parameters)
@@ -1121,12 +1131,7 @@ extension Transcript {
                     )
                 )
             case .prompt(let prompt):
-                messages.append(
-                    .init(
-                        role: .user,
-                        content: convertSegmentsToAnthropicContent(prompt.segments)
-                    )
-                )
+                messages.append(anthropicUserMessage(prompt))
             case .reasoning(let reasoning):
                 guard reasoning.origin == .anthropic else {
                     // Foreign reasoning remains display history, not Anthropic replay state.

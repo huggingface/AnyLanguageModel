@@ -111,6 +111,129 @@ import Testing
                 + "data: [DONE]\n\n"
         }
 
+        /// Hands over its messages once, after the first round: someone steering the response
+        /// while a tool runs.
+        private final class SteeringDelegate: ToolExecutionDelegate, @unchecked Sendable {
+            private let lock = NSLock()
+            private var pending: [AnyLanguageModel.Prompt]
+            private(set) var asked = 0
+
+            init(_ pending: [AnyLanguageModel.Prompt]) {
+                self.pending = pending
+            }
+
+            func pendingMessages(in session: LanguageModelSession) async -> [AnyLanguageModel.Prompt] {
+                lock.withLock {
+                    asked += 1
+                    defer { pending = [] }
+                    return pending
+                }
+            }
+        }
+
+        /// The messages of a request body, as dictionaries.
+        private func messages(in body: Data) throws -> [[String: Any]] {
+            let json = try #require(try JSONSerialization.jsonObject(with: body) as? [String: Any])
+            return try #require(json["messages"] as? [[String: Any]])
+        }
+
+        @Test(arguments: [false, true])
+        func pendingMessagesJoinTheResponseAfterTheToolRound(streaming: Bool) async throws {
+            ToolCallHistoryURLProtocol.reset(
+                responses: streaming
+                    ? [toolCallStream(content: ""), textStream("Sunny."), textStream("Done.")]
+                    : [toolCallCompletion(content: ""), completion("Sunny."), completion("Done.")]
+            )
+            let model = OpenAILanguageModel(
+                apiKey: "test",
+                model: "test",
+                transport: ToolCallHistoryURLProtocol.makeSession()
+            )
+            let session = LanguageModelSession(model: model, tools: [ReorderedWeatherTool()])
+            session.toolExecutionDelegate = SteeringDelegate([AnyLanguageModel.Prompt("Skip the umbrella advice.")])
+            if streaming {
+                for try await _ in session.streamResponse(to: "Weather in Paris?") {}
+                for try await _ in session.streamResponse(to: "And tomorrow?") {}
+            } else {
+                _ = try await session.respond(to: "Weather in Paris?")
+                _ = try await session.respond(to: "And tomorrow?")
+            }
+
+            let bodies = ToolCallHistoryURLProtocol.recordedBodies
+            try #require(bodies.count == 3)
+            // Request 2 continues the response: the message follows the tool's output.
+            let inFlight = try messages(in: bodies[1])
+            #expect(inFlight.suffix(3).map { $0["role"] as? String } == ["assistant", "tool", "user"])
+            let note = try #require(inFlight.last)
+            #expect(String(describing: note["content"] ?? "").contains("Skip the umbrella advice."))
+            // It's in the transcript as a prompt, after the round's tool output.
+            let entries = Array(session.transcript)
+            let outputIndex = try #require(entries.firstIndex { if case .toolOutput = $0 { true } else { false } })
+            guard case .prompt(let steered) = entries[outputIndex + 1] else {
+                Issue.record("Expected the message after the tool output")
+                return
+            }
+            #expect(
+                steered.segments.contains {
+                    if case .text(let t) = $0 { t.content == "Skip the umbrella advice." } else { false }
+                }
+            )
+            // Request 3 starts the next turn from the transcript, which replays the response in
+            // the same order and form, so a prompt cache still matches it.
+            let replayed = try messages(in: bodies[2])
+            try #require(replayed.count > inFlight.count)
+            for (sent, again) in zip(inFlight, replayed) {
+                #expect(NSDictionary(dictionary: sent).isEqual(to: again))
+            }
+        }
+
+        @Test func aPendingMessageCanCarryAnImage() async throws {
+            ToolCallHistoryURLProtocol.reset(responses: [toolCallCompletion(content: ""), completion("Sunny.")])
+            let model = OpenAILanguageModel(
+                apiKey: "test",
+                model: "test",
+                transport: ToolCallHistoryURLProtocol.makeSession()
+            )
+            let session = LanguageModelSession(model: model, tools: [ReorderedWeatherTool()])
+            let photo = URL(string: "https://example.com/sky.png")!
+            session.toolExecutionDelegate = SteeringDelegate([
+                AnyLanguageModel.Prompt {
+                    "Here's the sky right now."
+                    AnyLanguageModel.Attachment(imageURL: photo)
+                }
+            ])
+            _ = try await session.respond(to: "Weather in Paris?")
+
+            let inFlight = try messages(in: ToolCallHistoryURLProtocol.recordedBodies[1])
+            let note = try #require(inFlight.last)
+            #expect(note["role"] as? String == "user")
+            let blocks = try #require(note["content"] as? [[String: Any]])
+            #expect(blocks.contains { $0["type"] as? String == "image_url" })
+            #expect(String(describing: blocks).contains(photo.absoluteString))
+        }
+
+        @Test func steeringDoesntResetTheToolRoundLimit() async throws {
+            ToolCallHistoryURLProtocol.reset(
+                responses: [toolCallCompletion(content: ""), toolCallCompletion(content: ""), completion("Sunny.")]
+            )
+            let model = OpenAILanguageModel(
+                apiKey: "test",
+                model: "test",
+                transport: ToolCallHistoryURLProtocol.makeSession()
+            )
+            let session = LanguageModelSession(model: model, tools: [ReorderedWeatherTool()])
+            let delegate = SteeringDelegate([AnyLanguageModel.Prompt("Keep going.")])
+            session.toolExecutionDelegate = delegate
+            var options = GenerationOptions()
+            options.maximumToolRounds = 1
+
+            await #expect(throws: LanguageModelSession.ToolRoundLimitExceeded.self) {
+                _ = try await session.respond(to: "Weather in Paris?", options: options)
+            }
+            // The first round ran and was steered; the second was past the limit.
+            #expect(delegate.asked == 1)
+        }
+
         /// The assistant message carrying the tool call, as sent in a request body.
         private func toolCallMessage(in body: Data) throws -> [String: Any] {
             let json = try #require(try JSONSerialization.jsonObject(with: body) as? [String: Any])

@@ -1224,6 +1224,10 @@ import Foundation
                                 allEntries.append(.toolOutput(invocation.output))
                             }
                             pendingChat += toolCallMessages(for: invocations, text: assistantText)
+                            for prompt in try await pendingPrompts(in: session) {
+                                allEntries.append(.prompt(prompt))
+                                pendingChat.append(makeMLXChatMessage(from: prompt.segments, role: .user))
+                            }
 
                             // Continue loop to generate with tool results
                             continue
@@ -1467,6 +1471,11 @@ import Foundation
                                     for: invocations,
                                     text: String(accumulatedText.dropFirst(roundStartTextCount))
                                 )
+                                // As the transcript replays a prompt (`makeMLXChatMessage`).
+                                for prompt in try await pendingPrompts(in: session) {
+                                    accumulatedEntries.append(.prompt(prompt))
+                                    pendingChat.append(makeMLXChatMessage(from: prompt.segments, role: .user))
+                                }
                                 yieldSnapshot()
                             }
                         }
