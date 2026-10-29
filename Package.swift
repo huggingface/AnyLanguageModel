@@ -44,7 +44,7 @@ let package = Package(
         .package(url: "https://github.com/ml-explore/mlx-swift-lm", .upToNextMinor(from: "3.32.3")),
         .package(url: "https://github.com/swiftlang/swift-syntax", from: "602.0.0"),
         .package(url: "https://github.com/swift-server/async-http-client.git", from: "1.24.0"),
-        .package(url: "https://github.com/apple/swift-http-types", from: "1.0.0"),
+        .package(url: "https://github.com/apple/swift-http-types", from: "1.5.0"),
     ],
     targets: [
         .target(
