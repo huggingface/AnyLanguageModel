@@ -1245,75 +1245,18 @@ private func extractJSONFromOutput(_ output: [JSONValue]?) -> String? {
     return nil
 }
 
-private struct OpenResponsesToolInvocationResult: Sendable {
-    let call: Transcript.ToolCall
-    let output: Transcript.ToolOutput
-}
-
-private enum OpenResponsesToolResolutionOutcome: Sendable {
-    case stop(calls: [Transcript.ToolCall])
-    case invocations([OpenResponsesToolInvocationResult])
-}
-
 private func resolveToolCalls(
     _ toolCalls: [OpenResponsesToolCall],
     tools: [any Tool],
     session: LanguageModelSession
-) async throws -> OpenResponsesToolResolutionOutcome {
+) async throws -> ToolResolutionOutcome {
     if toolCalls.isEmpty { return .invocations([]) }
-    var byName: [String: any Tool] = [:]
-    for t in tools { if byName[t.name] == nil { byName[t.name] = t } }
     var transcriptCalls: [Transcript.ToolCall] = []
     for c in toolCalls {
         let args = (c.arguments.flatMap { try? GeneratedContent(json: $0) } ?? GeneratedContent(properties: [:]))
         transcriptCalls.append(Transcript.ToolCall(id: c.id, toolName: c.name, arguments: args))
     }
-    if let d = session.toolExecutionDelegate {
-        await d.didGenerateToolCalls(transcriptCalls, in: session)
-    }
-    guard !transcriptCalls.isEmpty else { return .invocations([]) }
-    var decisions: [ToolExecutionDecision] = []
-    if let d = session.toolExecutionDelegate {
-        for call in transcriptCalls {
-            let dec = await d.toolCallDecision(for: call, in: session)
-            if case .stop = dec { return .stop(calls: transcriptCalls) }
-            decisions.append(dec)
-        }
-    } else {
-        decisions = Array(repeating: .execute, count: transcriptCalls.count)
-    }
-    var results: [OpenResponsesToolInvocationResult] = []
-    for (i, call) in transcriptCalls.enumerated() {
-        switch decisions[i] {
-        case .stop:
-            return .stop(calls: transcriptCalls)
-        case .provideOutput(let segs):
-            let out = Transcript.ToolOutput(id: call.id, toolName: call.toolName, segments: segs)
-            if let d = session.toolExecutionDelegate { await d.didExecuteToolCall(call, output: out, in: session) }
-            results.append(OpenResponsesToolInvocationResult(call: call, output: out))
-        case .execute:
-            guard let tool = byName[call.toolName] else {
-                let out = Transcript.ToolOutput(
-                    id: call.id,
-                    toolName: call.toolName,
-                    segments: [.text(.init(content: "Tool not found: \(call.toolName)"))]
-                )
-                if let d = session.toolExecutionDelegate { await d.didExecuteToolCall(call, output: out, in: session) }
-                results.append(OpenResponsesToolInvocationResult(call: call, output: out))
-                continue
-            }
-            do {
-                let segs = try await tool.makeOutputSegments(from: call.arguments)
-                let out = Transcript.ToolOutput(id: call.id, toolName: tool.name, segments: segs)
-                if let d = session.toolExecutionDelegate { await d.didExecuteToolCall(call, output: out, in: session) }
-                results.append(OpenResponsesToolInvocationResult(call: call, output: out))
-            } catch {
-                if let d = session.toolExecutionDelegate { await d.didFailToolCall(call, error: error, in: session) }
-                throw LanguageModelSession.ToolCallError(tool: tool, underlyingError: error)
-            }
-        }
-    }
-    return .invocations(results)
+    return try await resolveToolRound(transcriptCalls, tools: tools, session: session)
 }
 
 // MARK: - Streaming events
