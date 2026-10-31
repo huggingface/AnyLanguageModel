@@ -4,7 +4,7 @@ import HTTPTypes
 import HTTPTypesFoundation
 
 /// Why a request to a model's provider failed: it couldn't be made, its answer wasn't an HTTP
-/// response, the provider answered with an error status, or a successful answer couldn't be read.
+/// response, the provider answered with an error status or stream event, or a successful answer couldn't be read.
 ///
 /// A caller can read an error response's status, headers and body,
 /// for example to wait as its `Retry-After` header says.
@@ -31,6 +31,8 @@ public struct HTTPTransportError: Error, Sendable, CustomStringConvertible {
         public static let invalidResponse = Kind("Invalid response")
         /// The provider answered with an error status: the error has its response and body.
         public static let httpError = Kind("HTTP error")
+        /// The provider sent an error event in a successful HTTP stream: the body is that event's data.
+        public static let providerError = Kind("Provider error")
         /// A successful answer couldn't be read as what was expected.
         public static let decodingError = Kind("Decoding error")
     }
@@ -41,7 +43,7 @@ public struct HTTPTransportError: Error, Sendable, CustomStringConvertible {
     /// The response, headers included, when the provider answered.
     public let response: HTTPResponse?
 
-    /// The response's body, when it was read.
+    /// The response's body, when it was read, or a failed SSE event's data.
     public let body: Data?
 
     /// The error that caused this one, such as a decoding error's.
@@ -135,6 +137,9 @@ extension HTTPTransport {
                 let decoder = JSONDecoder()
                 for try await event in body.bytes.events {
                     guard let data = event.data.data(using: .utf8) else { continue }
+                    if let failure = try? decoder.decode(ProviderErrorEvent.self, from: data), failure.isError {
+                        throw HTTPTransportError(kind: .providerError, response: response, body: data)
+                    }
                     if let decoded = try? decoder.decode(T.self, from: data) {
                         continuation.yield(decoded)
                     }
@@ -192,5 +197,22 @@ extension HTTPTransport {
         guard response.status.kind == .successful else {
             throw HTTPTransportError(kind: .httpError, response: response, body: try await body.collect())
         }
+    }
+}
+
+/// Known provider failures must be checked before a normal chunk decoder can ignore them.
+/// Unknown events and malformed chunks retain their existing handling.
+private struct ProviderErrorEvent: Decodable {
+    struct Message: Decodable {
+        let message: String
+    }
+
+    let error: Message?
+    let type: String?
+    let message: String?
+
+    var isError: Bool {
+        guard type == nil || type == "error" else { return false }
+        return error != nil || (type == "error" && message != nil)
     }
 }
