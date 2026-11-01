@@ -839,6 +839,9 @@ When the provider answers with an error status,
 the model throws an `HTTPTransportError`
 with the response's status, headers, and body,
 so you can read a header such as `Retry-After`.
+Known provider error events in an HTTP 200 SSE stream also terminate the stream.
+They throw `HTTPTransportError` with `kind == .providerError`,
+the successful HTTP response, and the failed event's JSON data in `body`.
 Network failures throw the transport's own error,
 such as `URLError` or AsyncHTTPClient's `HTTPClientError`.
 
