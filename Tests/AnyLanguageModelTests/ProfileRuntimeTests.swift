@@ -896,6 +896,16 @@ struct DynamicProfileTests {
         #expect(state.events.withLock { $0 }.isEmpty)
     }
 
+    @Test func requestResolutionForAMissingModelKeepsTheHistory() async throws {
+        let prompt = Transcript.Entry.prompt(.init(segments: [.text(.init(content: "Kept"))]))
+        let session = LanguageModelSession(profile: HistoryClearingProfileWithoutModel(), history: [prompt])
+
+        await #expect(throws: LanguageModelSession.DynamicProfileError.missingModel) {
+            _ = try await session.resolvedRequestContext(including: [])
+        }
+        #expect(Array(session.transcript) == [prompt])
+    }
+
     @Test(arguments: [false, true])
     func switchingToAProfileWithoutAModelKeepsTheActiveProfile(streaming: Bool) async throws {
         let state = LifecycleFixtureState()
@@ -914,6 +924,15 @@ struct DynamicProfileTests {
 
         #expect(state.events.withLock { $0 } == ["activate:A", "prompt:A"])
         #expect(session.transcript.map(\.id) == transcript)
+    }
+}
+
+private struct HistoryClearingProfileWithoutModel: LanguageModelSession.DynamicProfile, @unchecked Sendable {
+    @SessionProperty(\.history) private var history
+
+    var body: some LanguageModelSession.DynamicProfile {
+        history.removeAll()
+        return LanguageModelSession.Profile { Instructions("Clears history without a model") }
     }
 }
 

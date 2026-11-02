@@ -416,6 +416,8 @@ public final class LanguageModelSession: @unchecked Sendable {
 
     /// Resolves the request context and commits the profile's history edits.
     ///
+    /// If the profile sets no model,
+    /// this throws ``DynamicProfileError/missingModel`` without keeping the edits.
     /// If the history changed while the profile ran,
     /// this throws ``DynamicProfileError/historyMutationWhileResolving``
     /// without keeping the edits or running the profile again.
@@ -429,6 +431,9 @@ public final class LanguageModelSession: @unchecked Sendable {
             options: options,
             snapshot: snapshot
         )
+        if let profile = resolution.context.profile, profile.model == nil {
+            throw DynamicProfileError.missingModel
+        }
         guard commitHistoryEdits(resolution.editedHistory, ifUnchangedSince: snapshot) else {
             throw DynamicProfileError.historyMutationWhileResolving
         }
