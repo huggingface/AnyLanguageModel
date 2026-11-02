@@ -976,6 +976,7 @@ import Testing
                 _ = try await session.streamResponse(to: "Weather?").collect()
                 Issue.record("Expected the tool error")
             } catch let error as LanguageModelSession.ToolCallError {
+                #expect(error.tool is RecordingWeatherTool)
                 #expect(error.underlyingError is ToolFailure)
             }
             #expect(tool.cities.withLock { $0 } == ["Paris"])
@@ -1411,7 +1412,10 @@ import Testing
             var tool = RecordingWeatherTool()
             tool.fails = true
             let session = provider.makeSession(tools: [tool])
-            await #expect(throws: LanguageModelSession.ToolCallError.self) { try await session.respond(to: "Weather?") }
+            let error = await #expect(throws: LanguageModelSession.ToolCallError.self) {
+                try await session.respond(to: "Weather?")
+            }
+            #expect(error?.tool is RecordingWeatherTool)
             #expect(UsageURLProtocol.recordedBodies.count == 1)
             #expect(session.usage == provider.expected)
             #expect(!session.isResponding)

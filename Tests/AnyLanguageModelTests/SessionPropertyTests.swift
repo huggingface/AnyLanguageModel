@@ -277,6 +277,20 @@ struct SessionPropertyTests {
         #expect(second.properties.annotatedCounter.count == 0)
     }
 
+    @Test func toolCallErrorsReportTheCallersTool() throws {
+        let session = LanguageModelSession(
+            model: SessionPropertyFixtureModel(),
+            tools: [PropertyBoundTool()]
+        )
+        let tool = try #require(session.resolvedRequestContext().toolsForExecution(in: session).first)
+        #expect(!(tool is PropertyBoundTool))
+
+        let error = LanguageModelSession.ToolCallError(tool: tool, underlyingError: CancellationError())
+
+        #expect(error.tool is PropertyBoundTool)
+        #expect(error.tool.name == "property")
+    }
+
     @Test func replacingHistoryPreservesStaticInstructions() {
         let session = LanguageModelSession(
             model: SessionPropertyFixtureModel(),
