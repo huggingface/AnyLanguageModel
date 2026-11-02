@@ -48,29 +48,54 @@ func mergingTranscriptEntries(
 // A write can remove a pending output's parent and so change its key;
 // an output whose key isn't durable in `original`
 // and whose call ID belongs to a protected output is still pending.
+// When the new key is a durable output's key, as when an earlier round
+// reused the call ID, each durable output keeps only one output:
+// one equal to it if there is one, otherwise the first one left.
 func removingProtectedTranscriptEntries(
     from entries: [Transcript.Entry],
     protecting protectedKeys: Set<TranscriptEntryKey>,
     in original: [Transcript.Entry]
 ) -> [Transcript.Entry] {
     guard !protectedKeys.isEmpty else { return entries }
-    let originalKeys = keyedTranscriptEntries(original).map(\.key)
-    let durableKeys = Set(originalKeys.filter { !protectedKeys.contains($0) })
+    let originalItems = keyedTranscriptEntries(original)
+    let durableKeys = Set(originalItems.map(\.key).filter { !protectedKeys.contains($0) })
     let protectedCallIDs = Set(
-        originalKeys.compactMap { key -> String? in
-            guard protectedKeys.contains(key), case .toolOutput(_, let call) = key else { return nil }
+        originalItems.compactMap { item -> String? in
+            guard protectedKeys.contains(item.key), case .toolOutput(_, let call) = item.key else { return nil }
             return call
         }
     )
-    return keyedTranscriptEntries(entries)
-        .filter { item in
-            if protectedKeys.contains(item.key) { return false }
-            if case .toolOutput(_, let call) = item.key, !durableKeys.contains(item.key) {
-                return !protectedCallIDs.contains(call)
-            }
-            return true
+    var unclaimed: [TranscriptEntryKey: [Transcript.Entry]] = [:]
+    for item in originalItems where durableKeys.contains(item.key) {
+        if case .toolOutput(_, let call) = item.key, protectedCallIDs.contains(call) {
+            unclaimed[item.key, default: []].append(item.entry)
         }
-        .map(\.entry)
+    }
+
+    let items = keyedTranscriptEntries(entries).filter { !protectedKeys.contains($0.key) }
+    var keeps = Array(repeating: true, count: items.count)
+    var unmatched: [Int] = []
+    for (index, item) in items.enumerated() {
+        guard case .toolOutput(_, let call) = item.key, protectedCallIDs.contains(call) else { continue }
+        guard durableKeys.contains(item.key) else {
+            keeps[index] = false
+            continue
+        }
+        if let match = unclaimed[item.key]?.firstIndex(of: item.entry) {
+            unclaimed[item.key]?.remove(at: match)
+        } else {
+            unmatched.append(index)
+        }
+    }
+    for index in unmatched {
+        let key = items[index].key
+        if unclaimed[key]?.isEmpty == false {
+            unclaimed[key]?.removeFirst()
+        } else {
+            keeps[index] = false
+        }
+    }
+    return zip(items, keeps).filter(\.1).map(\.0.entry)
 }
 
 func toolContinuationMessages<Message>(

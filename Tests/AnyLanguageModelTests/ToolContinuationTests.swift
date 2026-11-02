@@ -40,6 +40,26 @@ struct ToolContinuationTests {
         #expect(session.properties.history.isEmpty)
     }
 
+    // Without its parent, the pending output's round-scoped key
+    // is the same as the durable output's.
+    @Test(arguments: [false, true])
+    func removingPendingParentDoesNotCommitItsOutputWithAReusedCallID(sameResult: Bool) async throws {
+        let previous = Self.round("previous")
+        let current = Self.round(sameResult ? "previous" : "current")
+        let session = LanguageModelSession(
+            profile: LanguageModelSession.Profile { Instructions("History") }
+                .model(MockLanguageModel())
+                .historyTransform { entries in
+                    let properties = SessionPropertyBinding.values!
+                    properties.history.removeAll { $0.id == current[0].id }
+                    return entries
+                },
+            history: previous
+        )
+        _ = try await session.resolvedRequestContext(including: current)
+        #expect(Array(session.properties.history) == previous)
+    }
+
     @Test func ordinaryContinuationKeepsTranscriptAndOpaqueMessages() {
         let previous = Self.round("previous")
         let current = Self.round("current")
