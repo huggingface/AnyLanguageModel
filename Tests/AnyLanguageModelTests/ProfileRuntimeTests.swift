@@ -881,6 +881,58 @@ struct DynamicProfileTests {
         #expect(session.transcript.allSatisfy { if case .prompt = $0 { true } else { false } })
         #expect(session.transcriptErrorHandlingPolicy == .preserveTranscript)
     }
+
+    @Test func requestResolutionThrowsForAMissingModelBeforeLifecycleActionsRun() async throws {
+        let state = LifecycleFixtureState()
+        let session = LanguageModelSession(
+            profile: LanguageModelSession.Profile { Instructions("No model") }
+                .onActivate { state.record("activate") }
+                .onPrompt { _ in state.record("prompt") }
+        )
+
+        await #expect(throws: LanguageModelSession.DynamicProfileError.missingModel) {
+            _ = try await session.resolvedRequestContext(including: [])
+        }
+        #expect(state.events.withLock { $0 }.isEmpty)
+    }
+
+    @Test(arguments: [false, true])
+    func switchingToAProfileWithoutAModelKeepsTheActiveProfile(streaming: Bool) async throws {
+        let state = LifecycleFixtureState()
+        let session = LanguageModelSession(profile: MissingModelSwitchProfile(state: state))
+        _ = try await session.respond(to: "First")
+        let transcript = session.transcript.map(\.id)
+
+        state.useSecond.withLock { $0 = true }
+        await #expect(throws: LanguageModelSession.DynamicProfileError.missingModel) {
+            if streaming {
+                _ = try await session.streamResponse(to: "Second").collect()
+            } else {
+                _ = try await session.respond(to: "Second")
+            }
+        }
+
+        #expect(state.events.withLock { $0 } == ["activate:A", "prompt:A"])
+        #expect(session.transcript.map(\.id) == transcript)
+    }
+}
+
+private struct MissingModelSwitchProfile: LanguageModelSession.DynamicProfile {
+    let state: LifecycleFixtureState
+
+    var body: some LanguageModelSession.DynamicProfile {
+        if state.useSecond.withLock({ $0 }) {
+            LanguageModelSession.Profile { Instructions("Profile B without a model") }
+                .onActivate { state.record("activate:B") }
+                .onPrompt { _ in state.record("prompt:B") }
+        } else {
+            LanguageModelSession.Profile { Instructions("Profile A") }
+                .model(LifecycleFixtureModel())
+                .onActivate { state.record("activate:A") }
+                .onDeactivate { state.record("deactivate:A") }
+                .onPrompt { _ in state.record("prompt:A") }
+        }
+    }
 }
 
 private struct FixtureProfile: LanguageModelSession.DynamicProfile, @unchecked Sendable {

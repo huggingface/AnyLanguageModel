@@ -1,3 +1,5 @@
+import protocol Foundation.LocalizedError
+
 extension LanguageModelSession {
     /// A declarative, per-model-request session profile.
     ///
@@ -532,6 +534,10 @@ actor ProfileLifecycle {
         historyEdits: Locked<[Transcript.Entry]?>,
         protectedEntryKeys: Set<TranscriptEntryKey> = []
     ) async throws {
+        // Run no lifecycle action for a profile that can't make the request.
+        guard profile.model != nil else {
+            throw LanguageModelSession.DynamicProfileError.missingModel
+        }
         let previous = pendingPreparation?.task
         nextPreparationID += 1
         let id = nextPreparationID
@@ -629,7 +635,7 @@ struct MissingDynamicProfileModel: LanguageModel {
         includeSchemaInPrompt: Bool,
         options: GenerationOptions
     ) async throws -> LanguageModelSession.Response<Content> where Content: Generable {
-        throw MissingDynamicProfileModelError.missingModelModifier
+        throw LanguageModelSession.DynamicProfileError.missingModel
     }
 
     func streamResponse<Content>(
@@ -641,12 +647,27 @@ struct MissingDynamicProfileModel: LanguageModel {
     ) -> sending LanguageModelSession.ResponseStream<Content> where Content: Generable {
         let stream = AsyncThrowingStream<LanguageModelSession.ResponseStream<Content>.Snapshot, any Error> {
             continuation in
-            continuation.finish(throwing: MissingDynamicProfileModelError.missingModelModifier)
+            continuation.finish(throwing: LanguageModelSession.DynamicProfileError.missingModel)
         }
         return LanguageModelSession.ResponseStream(stream: stream)
     }
 }
 
-enum MissingDynamicProfileModelError: Error {
-    case missingModelModifier
+extension LanguageModelSession {
+    /// An error that occurs when a dynamic profile can't make a request.
+    ///
+    /// - Note: This API is exclusive to AnyLanguageModel.
+    ///   Foundation Models uses the system language model
+    ///   when a profile sets no model.
+    public enum DynamicProfileError: Error, LocalizedError, Sendable, Equatable {
+        /// The active profile sets no model.
+        case missingModel
+
+        public var errorDescription: String? {
+            switch self {
+            case .missingModel:
+                return "The active dynamic profile sets no model. Add `.model(_:)` to the profile."
+            }
+        }
+    }
 }

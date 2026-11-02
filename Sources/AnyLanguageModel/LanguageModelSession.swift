@@ -357,6 +357,35 @@ public final class LanguageModelSession: @unchecked Sendable {
         return context
     }
 
+    /// Throws if the profile for a request with this prompt sets no model.
+    ///
+    /// The check resolves the profile against the history that the request would see,
+    /// but discards any history edits that the profile makes during resolution,
+    /// so it can run before the prompt is appended
+    /// and before any profile action runs.
+    nonisolated private func checkDynamicProfileModel(for promptEntry: Transcript.Entry) throws {
+        guard let dynamicProfile else { return }
+        let committed = Array(transcript)
+        var entryKeys = Set(keyedTranscriptEntries(committed).map(\.key))
+        let pending = keyedTranscriptEntries([promptEntry])
+            .filter { entryKeys.insert($0.key).inserted }
+        let history = SessionHistoryBinding(
+            committed + pending.map(\.entry),
+            isWritable: true,
+            protectedEntryKeys: Set(pending.map(\.key))
+        )
+        let resolved = dynamicProfileLock.withLock {
+            SessionPropertyBinding.$values.withValue(properties) {
+                SessionPropertyBinding.$history.withValue(history) {
+                    dynamicProfile.resolveForRequest()
+                }
+            }
+        }
+        if resolved.model == nil {
+            throw DynamicProfileError.missingModel
+        }
+    }
+
     nonisolated private func resolveRequestContext(
         additionalEntries: [Transcript.Entry],
         options: GenerationOptions
@@ -754,7 +783,15 @@ public final class LanguageModelSession: @unchecked Sendable {
 
     /// Creates a session whose active model, instructions, Tools, and request
     /// projection are resolved before every model request.
-    @_spi(Compatibility)
+    ///
+    /// The profile must set a model with `.model(_:)`.
+    /// Each request checks this before it appends the prompt to the transcript
+    /// and before it runs the profile's `onActivate` or `onPrompt` actions,
+    /// and throws ``DynamicProfileError/missingModel`` if the profile sets no model.
+    ///
+    /// - Note: Foundation Models uses the system language model
+    ///   when a profile sets no model.
+    ///   AnyLanguageModel requires a model, as its other initializers do.
     public convenience init(
         profile: sending some DynamicProfile,
         history: some Collection<Transcript.Entry> = []
@@ -1388,6 +1425,7 @@ public final class LanguageModelSession: @unchecked Sendable {
                 responseFormat: responseFormat
             )
             let promptEntry = Transcript.Entry.prompt(requestPrompt)
+            try checkDynamicProfileModel(for: promptEntry)
             withTranscriptMutation {
                 state.withLock { $0.transcript.append(promptEntry) }
             }
@@ -1483,6 +1521,11 @@ public final class LanguageModelSession: @unchecked Sendable {
             responseFormat: type == String.self ? nil : .init(type: type)
         )
         let promptEntry = Transcript.Entry.prompt(requestPrompt)
+        do {
+            try checkDynamicProfileModel(for: promptEntry)
+        } catch {
+            return ResponseStream(stream: AsyncThrowingStream { $0.finish(throwing: error) })
+        }
         withTranscriptMutation {
             state.withLock { $0.transcript.append(promptEntry) }
         }
@@ -1762,6 +1805,11 @@ extension LanguageModelSession {
             responseFormat: .init(schema: schema)
         )
         let promptEntry = Transcript.Entry.prompt(requestPrompt)
+        do {
+            try checkDynamicProfileModel(for: promptEntry)
+        } catch {
+            return ResponseStream(stream: AsyncThrowingStream { $0.finish(throwing: error) })
+        }
         withTranscriptMutation {
             state.withLock { $0.transcript.append(promptEntry) }
         }
@@ -1991,6 +2039,7 @@ extension LanguageModelSession {
                 responseFormat: type == String.self ? nil : .init(type: type)
             )
             let promptEntry = Transcript.Entry.prompt(requestPrompt)
+            try checkDynamicProfileModel(for: promptEntry)
             withTranscriptMutation {
                 state.withLock { $0.transcript.append(promptEntry) }
             }
@@ -2131,6 +2180,11 @@ extension LanguageModelSession {
             responseFormat: type == String.self ? nil : .init(type: type)
         )
         let promptEntry = Transcript.Entry.prompt(requestPrompt)
+        do {
+            try checkDynamicProfileModel(for: promptEntry)
+        } catch {
+            return ResponseStream(stream: AsyncThrowingStream { $0.finish(throwing: error) })
+        }
         withTranscriptMutation {
             state.withLock { $0.transcript.append(promptEntry) }
         }
