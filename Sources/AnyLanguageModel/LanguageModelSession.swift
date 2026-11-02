@@ -537,28 +537,31 @@ public final class LanguageModelSession: @unchecked Sendable {
             persists: false
         )
         let unedited = history.entries
-        let resolved = dynamicProfileLock.withLock {
-            SessionPropertyBinding.$values.withValue(properties) {
+        // History transforms can capture the same non-Sendable state as the profile body,
+        // so they run under the same lock.
+        let (resolved, projected) = dynamicProfileLock.withLock {
+            let resolved = SessionPropertyBinding.$values.withValue(properties) {
                 SessionPropertyBinding.$history.withValue(history) {
                     dynamicProfile.resolveForRequest()
                 }
             }
-        }
-        canonical = history.entries
-        var projected = canonical
-        for transform in resolved.historyTransforms {
-            let transformHistory = properties.historyBinding(
-                canonical,
-                isWritable: true,
-                protecting: protectedEntryKeys,
-                persists: false
-            )
-            projected = SessionPropertyBinding.$values.withValue(properties) {
-                SessionPropertyBinding.$history.withValue(transformHistory) {
-                    transform(projected)
+            canonical = history.entries
+            var projected = canonical
+            for transform in resolved.historyTransforms {
+                let transformHistory = properties.historyBinding(
+                    canonical,
+                    isWritable: true,
+                    protecting: protectedEntryKeys,
+                    persists: false
+                )
+                projected = SessionPropertyBinding.$values.withValue(properties) {
+                    SessionPropertyBinding.$history.withValue(transformHistory) {
+                        transform(projected)
+                    }
                 }
+                canonical = transformHistory.entries
             }
-            canonical = transformHistory.entries
+            return (resolved, projected)
         }
         var requestTranscript = Transcript(entries: projected)
         if let currentInstructions = resolved.instructions {
