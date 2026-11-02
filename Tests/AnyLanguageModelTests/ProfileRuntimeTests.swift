@@ -291,12 +291,13 @@ struct DynamicProfileTests {
                 currentRoundEntries: [entry]
             )
         }
-
-        try await second.value
-        let invocationCount = await probe.invocationCount
+        // The second dispatch waits for the first callback to finish.
+        await session.profileLifecycle.callbackGate.waitUntilContended()
         await probe.releaseFirstInvocation()
         try await first.value
+        try await second.value
 
+        let invocationCount = await probe.invocationCount
         #expect(invocationCount == 1)
     }
 

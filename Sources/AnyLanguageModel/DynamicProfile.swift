@@ -524,6 +524,9 @@ actor ProfileLifecycle {
     /// The lifecycle whose preparation runs the current task's lifecycle actions, if any.
     @TaskLocal private static var preparing: ObjectIdentifier?
 
+    /// The gate that runs the session's profile callbacks and lifecycle actions one at a time.
+    nonisolated let callbackGate = ProfileCallbackGate()
+
     private var activeProfile: ResolvedDynamicProfile?
     private var pendingPreparation: (id: Int, task: Task<Void, any Error>)?
     private var nextPreparationID = 0
@@ -547,6 +550,33 @@ actor ProfileLifecycle {
         guard profile.model != nil else {
             throw LanguageModelSession.DynamicProfileError.missingModel
         }
+        // Wait for the gate before joining the queue of preparations,
+        // so that a queued preparation never waits for a gate
+        // that a request nested in another callback needs to finish.
+        try await callbackGate.run {
+            try await self.enqueuePreparation(
+                profile,
+                properties: properties,
+                history: history,
+                prompt: prompt,
+                callbackState: callbackState,
+                historyEdits: historyEdits,
+                historyVersion: historyVersion,
+                protectedEntryKeys: protectedEntryKeys
+            )
+        }
+    }
+
+    private func enqueuePreparation(
+        _ profile: ResolvedDynamicProfile,
+        properties: SessionPropertyValues,
+        history: [Transcript.Entry],
+        prompt: Transcript.Prompt?,
+        callbackState: ProfileCallbackState,
+        historyEdits: Locked<[Transcript.Entry]?>,
+        historyVersion: Locked<UInt64?>,
+        protectedEntryKeys: Set<TranscriptEntryKey>
+    ) async throws {
         let previous = pendingPreparation?.task
         nextPreparationID += 1
         let id = nextPreparationID

@@ -168,6 +168,8 @@ struct ProfileHistoryConflictTests {
     }
 
     // A stale `onResponse` write must not delete an overlapping request's turn.
+    // The overlapping request adds its prompt,
+    // then waits for the paused callback before its own profile actions run.
     @Test(arguments: [false, true])
     func concurrentResponseSurvivesAResponseCallbackEdit(streaming: Bool) async throws {
         let gates = ConflictRequestGates()
@@ -178,17 +180,20 @@ struct ProfileHistoryConflictTests {
 
         let request = Task { try await send("A", to: session, streaming: streaming) }
         await gates.entered.wait()
-        try await send("B", to: session, streaming: streaming)
+        let overlapping = Task { try await send("B", to: session, streaming: streaming) }
+        await session.profileLifecycle.callbackGate.waitUntilContended()
         await gates.release.open()
 
         await #expect(throws: LanguageModelSession.DynamicProfileError.historyMutationWhileRunningCallback) {
             try await request.value
         }
+        try await overlapping.value
         #expect(texts(session.transcript) == ["Seed", "A", "B", "response"])
     }
 
-    // Two callbacks in one request can read the same snapshot;
-    // the later write must not undo the earlier one.
+    // Two callbacks in one request run one at a time,
+    // and the later one reads the history after the earlier one's write,
+    // so the later write doesn't undo the earlier one.
     @Test func staleCallbackSnapshotDoesNotUndoAnotherCallbackEdit() async throws {
         let gates = ConflictRequestGates()
         let session = LanguageModelSession(
@@ -222,17 +227,19 @@ struct ProfileHistoryConflictTests {
             )
         }
         await gates.entered.wait()
-        try await session.profileWillExecuteToolCall(
-            call("first"),
-            requestContext: context,
-            currentRoundEntries: []
-        )
-        await gates.release.open()
-
-        await #expect(throws: LanguageModelSession.DynamicProfileError.historyMutationWhileRunningCallback) {
-            try await paused.value
+        let second = Task {
+            try await session.profileWillExecuteToolCall(
+                call("second"),
+                requestContext: context,
+                currentRoundEntries: []
+            )
         }
-        #expect(texts(session.transcript) == ["Seed", "first"])
+        await session.profileLifecycle.callbackGate.waitUntilContended()
+        await gates.release.open()
+        try await paused.value
+        try await second.value
+
+        #expect(texts(session.transcript) == ["Seed", "paused", "second"])
     }
 
     @Test func conflictErrorsHaveMessages() {

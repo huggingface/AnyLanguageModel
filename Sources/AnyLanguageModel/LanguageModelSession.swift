@@ -114,7 +114,7 @@ public final class LanguageModelSession: @unchecked Sendable {
     private let dynamicProfile: AnyDynamicProfile?
     private let dynamicInstructionsLock = NSLock()
     private let dynamicProfileLock = NSLock()
-    private let profileLifecycle = ProfileLifecycle()
+    let profileLifecycle = ProfileLifecycle()
 
     /// Session-scoped values available to profiles and dynamic instructions.
     public let properties: SessionPropertyValues
@@ -757,14 +757,16 @@ public final class LanguageModelSession: @unchecked Sendable {
         currentRoundEntries: [Transcript.Entry]
     ) async throws {
         guard let profile = requestContext.profile else { return }
-        let binding = callbackHistoryBinding(
-            requestContext: requestContext,
-            currentRoundEntries: currentRoundEntries
-        )
-        try await withSessionProperties(history: binding) {
-            for action in profile.onToolCall { try await action(call) }
+        try await profileLifecycle.callbackGate.run {
+            let binding = callbackHistoryBinding(
+                requestContext: requestContext,
+                currentRoundEntries: currentRoundEntries
+            )
+            try await withSessionProperties(history: binding) {
+                for action in profile.onToolCall { try await action(call) }
+            }
+            try checkCallbackHistory(binding)
         }
-        try checkCallbackHistory(binding)
     }
 
     /// Runs the active request snapshot's Tool-output callbacks.
@@ -776,14 +778,16 @@ public final class LanguageModelSession: @unchecked Sendable {
         currentRoundEntries: [Transcript.Entry]
     ) async throws {
         guard let profile = requestContext.profile else { return }
-        let binding = callbackHistoryBinding(
-            requestContext: requestContext,
-            currentRoundEntries: currentRoundEntries
-        )
-        try await withSessionProperties(history: binding) {
-            for action in profile.onToolOutput { try await action(call, output) }
+        try await profileLifecycle.callbackGate.run {
+            let binding = callbackHistoryBinding(
+                requestContext: requestContext,
+                currentRoundEntries: currentRoundEntries
+            )
+            try await withSessionProperties(history: binding) {
+                for action in profile.onToolOutput { try await action(call, output) }
+            }
+            try checkCallbackHistory(binding)
         }
-        try checkCallbackHistory(binding)
     }
 
     /// Runs reasoning and response callbacks from the profile snapshot that
@@ -799,36 +803,38 @@ public final class LanguageModelSession: @unchecked Sendable {
         currentRoundEntries: [Transcript.Entry]
     ) async throws {
         guard let profile = requestContext.profile else { return }
-        let binding = callbackHistoryBinding(
-            requestContext: requestContext,
-            currentRoundEntries: currentRoundEntries
-        )
-        for entry in entries {
-            switch entry {
-            case .reasoning(let reasoning):
-                guard requestContext.callbackState.reserve(entry.id) else { continue }
-                do {
-                    try await withSessionProperties(history: binding) {
-                        for action in profile.onReasoning { try await action(reasoning) }
+        try await profileLifecycle.callbackGate.run {
+            let binding = callbackHistoryBinding(
+                requestContext: requestContext,
+                currentRoundEntries: currentRoundEntries
+            )
+            for entry in entries {
+                switch entry {
+                case .reasoning(let reasoning):
+                    guard requestContext.callbackState.reserve(entry.id) else { continue }
+                    do {
+                        try await withSessionProperties(history: binding) {
+                            for action in profile.onReasoning { try await action(reasoning) }
+                        }
+                        try checkCallbackHistory(binding)
+                    } catch {
+                        requestContext.callbackState.release(entry.id)
+                        throw error
                     }
-                    try checkCallbackHistory(binding)
-                } catch {
-                    requestContext.callbackState.release(entry.id)
-                    throw error
-                }
-            case .response(let response):
-                guard requestContext.callbackState.reserve(entry.id) else { continue }
-                do {
-                    try await withSessionProperties(history: binding) {
-                        for action in profile.onResponse { try await action(response) }
+                case .response(let response):
+                    guard requestContext.callbackState.reserve(entry.id) else { continue }
+                    do {
+                        try await withSessionProperties(history: binding) {
+                            for action in profile.onResponse { try await action(response) }
+                        }
+                        try checkCallbackHistory(binding)
+                    } catch {
+                        requestContext.callbackState.release(entry.id)
+                        throw error
                     }
-                    try checkCallbackHistory(binding)
-                } catch {
-                    requestContext.callbackState.release(entry.id)
-                    throw error
+                default:
+                    continue
                 }
-            default:
-                continue
             }
         }
     }
