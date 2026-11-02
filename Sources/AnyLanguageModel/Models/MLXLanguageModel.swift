@@ -1201,7 +1201,7 @@ import Foundation
 
                     let resolution = try await resolveToolCalls(
                         collectedToolCalls,
-                        tools: tools,
+                        tools: requestContext.toolsForExecution(in: session, offeredTools: tools),
                         session: session
                     )
                     switch resolution {
@@ -1444,7 +1444,7 @@ import Foundation
 
                             let resolution = try await resolveToolCalls(
                                 collectedToolCalls,
-                                tools: tools,
+                                tools: requestContext.toolsForExecution(in: session, offeredTools: tools),
                                 session: session
                             )
                             switch resolution {
