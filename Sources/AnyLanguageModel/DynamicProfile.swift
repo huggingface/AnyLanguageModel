@@ -521,6 +521,9 @@ private func resolveDynamicProfile(
 }
 
 actor ProfileLifecycle {
+    /// The lifecycle whose preparation runs the current task's lifecycle actions, if any.
+    @TaskLocal private static var preparing: ObjectIdentifier?
+
     private var activeProfile: ResolvedDynamicProfile?
     private var pendingPreparation: (id: Int, task: Task<Void, any Error>)?
     private var nextPreparationID = 0
@@ -535,6 +538,11 @@ actor ProfileLifecycle {
         historyVersion: Locked<UInt64?>,
         protectedEntryKeys: Set<TranscriptEntryKey> = []
     ) async throws {
+        // A lifecycle action that awaits a request on the same session
+        // would wait for its own preparation to finish.
+        guard Self.preparing != ObjectIdentifier(self) else {
+            throw LanguageModelSession.DynamicProfileError.requestDuringLifecycleAction
+        }
         // Run no lifecycle action for a profile that can't make the request.
         guard profile.model != nil else {
             throw LanguageModelSession.DynamicProfileError.missingModel
@@ -546,16 +554,18 @@ actor ProfileLifecycle {
             // Wait for the previous preparation without cancelling it.
             _ = try? await previous?.value
             try Task.checkCancellation()
-            try await self.performPreparation(
-                profile,
-                properties: properties,
-                history: history,
-                prompt: prompt,
-                callbackState: callbackState,
-                historyEdits: historyEdits,
-                historyVersion: historyVersion,
-                protectedEntryKeys: protectedEntryKeys
-            )
+            try await Self.$preparing.withValue(ObjectIdentifier(self)) {
+                try await self.performPreparation(
+                    profile,
+                    properties: properties,
+                    history: history,
+                    prompt: prompt,
+                    callbackState: callbackState,
+                    historyEdits: historyEdits,
+                    historyVersion: historyVersion,
+                    protectedEntryKeys: protectedEntryKeys
+                )
+            }
         }
         pendingPreparation = (id, task)
         do {
@@ -715,6 +725,17 @@ extension LanguageModelSession {
         /// and the request fails like a request whose callback throws.
         case historyMutationWhileRunningCallback
 
+        /// A profile's lifecycle action made a request on its own session.
+        ///
+        /// A session prepares one request's profile at a time,
+        /// so a request that an `onActivate`, `onDeactivate`, or `onPrompt` action awaits
+        /// would wait for that action to finish.
+        /// The session throws this error from the nested request instead.
+        /// The session can detect only a request that the action makes
+        /// in its own task or in a child or unstructured task of it,
+        /// not one in a detached task.
+        case requestDuringLifecycleAction
+
         public var errorDescription: String? {
             switch self {
             case .missingModel:
@@ -725,6 +746,9 @@ extension LanguageModelSession {
             case .historyMutationWhileRunningCallback:
                 return
                     "The session history changed before a dynamic profile callback edited it. The callback's edits weren't kept."
+            case .requestDuringLifecycleAction:
+                return
+                    "A dynamic profile's lifecycle action made a request on its own session, which would wait for the action to finish."
             }
         }
     }
