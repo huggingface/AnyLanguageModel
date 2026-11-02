@@ -1198,7 +1198,7 @@ public final class LanguageModelSession: @unchecked Sendable {
                     session.beginResponding()
                     var lastSnapshot: ResponseStream<Content>.Snapshot?
                     var accountedUsage = Usage.zero
-                    var committedEntryKeys: Set<TranscriptEntryKey> = []
+                    var committedEntries = AppendedTranscriptEntries.none
                     do {
                         for try await snapshot in stream {
                             lastSnapshot = snapshot
@@ -1250,17 +1250,17 @@ public final class LanguageModelSession: @unchecked Sendable {
                                 providerMetadata: lastSnapshot.providerMetadata
                             )
                         )
-                        committedEntryKeys = session.withTranscriptMutation {
+                        committedEntries = session.withTranscriptMutation {
                             session.state.withLock { state in
                                 guard state.transcript.contains(where: { $0.id == promptEntry.id }) else {
-                                    return []
+                                    return .none
                                 }
                                 return state.appendResponse(
                                     Array(lastSnapshot.transcriptEntries) + [responseEntry]
                                 )
                             }
                         }
-                        if !committedEntryKeys.isEmpty, let prepared = profileTracker?.prepared {
+                        if !committedEntries.isEmpty, let prepared = profileTracker?.prepared {
                             let context = prepared.context.withCanonicalTranscript(Array(session.transcript))
                             try await session.profileDidProduceEntries(
                                 Array(lastSnapshot.transcriptEntries) + [responseEntry],
@@ -1274,7 +1274,7 @@ public final class LanguageModelSession: @unchecked Sendable {
                     } catch {
                         session.withTranscriptMutation {
                             session.state.withLock { state in
-                                state.removeEntries(keyedBy: committedEntryKeys)
+                                state.removeEntries(committedEntries)
                                 guard state.transcript.contains(where: { $0.id == promptEntry.id }) else { return }
                                 let policy: TranscriptErrorHandlingPolicy?
                                 if let prepared = profileTracker?.prepared {
@@ -1654,16 +1654,16 @@ public final class LanguageModelSession: @unchecked Sendable {
         promptID: String,
         prepared: PreparedProfileRequest?
     ) async throws where Content: Generable {
-        let committedKeys = withTranscriptMutation {
+        let committedEntries = withTranscriptMutation {
             state.withLock { lockedState in
                 guard lockedState.transcript.contains(where: { $0.id == promptID }) else {
-                    return Set<TranscriptEntryKey>()
+                    return AppendedTranscriptEntries.none
                 }
                 return lockedState.appendResponse(Array(response.transcriptEntries) + [responseEntry])
             }
         }
 
-        guard !committedKeys.isEmpty, let prepared else { return }
+        guard !committedEntries.isEmpty, let prepared else { return }
         let context = prepared.context.withCanonicalTranscript(Array(transcript))
         do {
             try await profileDidProduceEntries(
@@ -1674,7 +1674,7 @@ public final class LanguageModelSession: @unchecked Sendable {
             lastResponseModel.withLock { $0 = prepared.context.model }
         } catch {
             withTranscriptMutation {
-                state.withLock { $0.removeEntries(keyedBy: committedKeys) }
+                state.withLock { $0.removeEntries(committedEntries) }
             }
             throw error
         }
@@ -2929,14 +2929,18 @@ private struct State: Equatable, Sendable {
         count = max(0, count - 1)
     }
 
-    /// Appends a response's entries and returns their keys.
+    /// Appends a response's entries and returns what it appended, for a rollback.
     ///
     /// Providers can reuse a call ID, such as `call_0`, in later responses,
     /// so a key scopes each Tool output to its round.
-    mutating func appendResponse(_ entries: [Transcript.Entry]) -> Set<TranscriptEntryKey> {
+    mutating func appendResponse(_ entries: [Transcript.Entry]) -> AppendedTranscriptEntries {
         let start = transcript.count
         transcript.append(contentsOf: entries)
-        return Set(keyedTranscriptEntries(Array(transcript)).dropFirst(start).map(\.key))
+        let history = Array(transcript)
+        return AppendedTranscriptEntries(
+            keys: Set(keyedTranscriptEntries(history).dropFirst(start).map(\.key)),
+            history: history
+        )
     }
 
     /// Replaces the history after the instructions
@@ -2955,12 +2959,8 @@ private struct State: Equatable, Sendable {
 
     /// Removes the entries that a rolled-back response appended,
     /// keeping earlier entries with the same IDs.
-    mutating func removeEntries(keyedBy keys: Set<TranscriptEntryKey>) {
-        guard !keys.isEmpty else { return }
-        transcript = Transcript(
-            entries: keyedTranscriptEntries(Array(transcript))
-                .filter { !keys.contains($0.key) }
-                .map(\.entry)
-        )
+    mutating func removeEntries(_ appended: AppendedTranscriptEntries) {
+        guard !appended.isEmpty else { return }
+        transcript = Transcript(entries: removingAppendedTranscriptEntries(appended, from: Array(transcript)))
     }
 }

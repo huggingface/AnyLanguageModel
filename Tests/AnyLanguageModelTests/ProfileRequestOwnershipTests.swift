@@ -49,6 +49,39 @@ struct ProfileRequestOwnershipTests {
         #expect(session.transcript.count == first.count + 1)
     }
 
+    @Test(arguments: [false, true])
+    func rollbackRemovesAnOutputWhoseToolCallsTheCallbackRemoved(streaming: Bool) async throws {
+        let rejects = Locked(false)
+        let session = LanguageModelSession(
+            profile: LanguageModelSession.Profile { Instructions("Reused call IDs") }
+                .model(OwnershipModel(toolRound: true))
+                .onResponse { _ in
+                    guard rejects.withLock({ $0 }) else { return }
+                    let properties = try #require(SessionPropertyBinding.values)
+                    let toolCalls = properties.history.last { entry in
+                        if case .toolCalls = entry { return true }
+                        return false
+                    }
+                    properties.history.removeAll { $0.id == toolCalls?.id }
+                    throw OwnershipError.rejected
+                }
+        )
+
+        _ = try await session.respond(to: "First")
+        let first = Array(session.transcript)
+        rejects.withLock { $0 = true }
+        await #expect(throws: OwnershipError.self) {
+            if streaming {
+                _ = try await session.streamResponse(to: "Second").collect()
+            } else {
+                _ = try await session.respond(to: "Second")
+            }
+        }
+
+        #expect(Array(session.transcript.prefix(first.count)) == first)
+        #expect(session.transcript.count == first.count + 1)
+    }
+
     @Test func historyWritesKeepEarlierOutputsThatMatchAPendingOutput() throws {
         let session = LanguageModelSession(model: OwnershipModel())
         let call = Transcript.ToolCall(id: "call_0", toolName: "fixture", arguments: GeneratedContent(properties: [:]))

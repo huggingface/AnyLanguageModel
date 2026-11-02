@@ -49,8 +49,7 @@ func mergingTranscriptEntries(
 // an output whose key isn't durable in `original`
 // and whose call ID belongs to a protected output is still pending.
 // When the new key is a durable output's key, as when an earlier round
-// reused the call ID, each durable output keeps only one output:
-// one equal to it if there is one, otherwise the first one left.
+// reused the call ID, the durable outputs claim the outputs with that key.
 func removingProtectedTranscriptEntries(
     from entries: [Transcript.Entry],
     protecting protectedKeys: Set<TranscriptEntryKey>,
@@ -65,37 +64,102 @@ func removingProtectedTranscriptEntries(
             return call
         }
     )
-    var unclaimed: [TranscriptEntryKey: [Transcript.Entry]] = [:]
-    for item in originalItems where durableKeys.contains(item.key) {
-        if case .toolOutput(_, let call) = item.key, protectedCallIDs.contains(call) {
-            unclaimed[item.key, default: []].append(item.entry)
-        }
-    }
-
     let items = keyedTranscriptEntries(entries).filter { !protectedKeys.contains($0.key) }
-    var keeps = Array(repeating: true, count: items.count)
-    var unmatched: [Int] = []
+    var candidates: [Int] = []
+    var dropped: Set<Int> = []
     for (index, item) in items.enumerated() {
         guard case .toolOutput(_, let call) = item.key, protectedCallIDs.contains(call) else { continue }
-        guard durableKeys.contains(item.key) else {
-            keeps[index] = false
-            continue
+        if durableKeys.contains(item.key) {
+            candidates.append(index)
+        } else {
+            dropped.insert(index)
         }
+    }
+    let claimed = claimingOutputs(
+        in: items,
+        at: candidates,
+        by: originalItems.filter { durableKeys.contains($0.key) }
+    )
+    return items.indices
+        .filter { !dropped.contains($0) && (!candidates.contains($0) || claimed.contains($0)) }
+        .map { items[$0].entry }
+}
+
+/// The entries that a response appended to the session history.
+struct AppendedTranscriptEntries: Sendable {
+    static let none = AppendedTranscriptEntries(keys: [], history: [])
+
+    /// The round-scoped keys of the appended entries.
+    let keys: Set<TranscriptEntryKey>
+
+    /// The history right after the append.
+    let history: [Transcript.Entry]
+
+    var isEmpty: Bool { keys.isEmpty }
+}
+
+// Remove the entries that a response appended from a later version of the history.
+// A callback can remove an appended output's parent and so change its key.
+// An output with an appended output's call ID that is now in a round
+// that the history had before the append, or in no round, is still appended,
+// unless an earlier output with that key claims it.
+// Outputs in later rounds belong to later responses and stay.
+func removingAppendedTranscriptEntries(
+    _ appended: AppendedTranscriptEntries,
+    from entries: [Transcript.Entry]
+) -> [Transcript.Entry] {
+    guard !appended.isEmpty else { return entries }
+    let originalItems = keyedTranscriptEntries(appended.history)
+    var earlierRounds: Set<String?> = [nil]
+    var appendedCallIDs: Set<String> = []
+    for item in originalItems {
+        if appended.keys.contains(item.key) {
+            if case .toolOutput(_, let call) = item.key { appendedCallIDs.insert(call) }
+        } else if case .toolCalls(let calls) = item.entry {
+            earlierRounds.insert(calls.id)
+        }
+    }
+    let items = keyedTranscriptEntries(entries).filter { !appended.keys.contains($0.key) }
+    let candidates = items.indices.filter { index in
+        guard case .toolOutput(let round, let call) = items[index].key else { return false }
+        return appendedCallIDs.contains(call) && earlierRounds.contains(round)
+    }
+    let claimed = claimingOutputs(
+        in: items,
+        at: candidates,
+        by: originalItems.filter { !appended.keys.contains($0.key) }
+    )
+    return items.indices
+        .filter { !candidates.contains($0) || claimed.contains($0) }
+        .map { items[$0].entry }
+}
+
+// Each owner claims one candidate with its key:
+// one equal to it if there is one, otherwise the first one left.
+// Returns the indices of the claimed candidates.
+private func claimingOutputs(
+    in items: [(key: TranscriptEntryKey, entry: Transcript.Entry)],
+    at candidates: [Int],
+    by owners: [(key: TranscriptEntryKey, entry: Transcript.Entry)]
+) -> Set<Int> {
+    var unclaimed: [TranscriptEntryKey: [Transcript.Entry]] = [:]
+    for owner in owners { unclaimed[owner.key, default: []].append(owner.entry) }
+    var claimed: Set<Int> = []
+    var unmatched: [Int] = []
+    for index in candidates {
+        let item = items[index]
         if let match = unclaimed[item.key]?.firstIndex(of: item.entry) {
             unclaimed[item.key]?.remove(at: match)
+            claimed.insert(index)
         } else {
             unmatched.append(index)
         }
     }
-    for index in unmatched {
-        let key = items[index].key
-        if unclaimed[key]?.isEmpty == false {
-            unclaimed[key]?.removeFirst()
-        } else {
-            keeps[index] = false
-        }
+    for index in unmatched where unclaimed[items[index].key]?.isEmpty == false {
+        unclaimed[items[index].key]?.removeFirst()
+        claimed.insert(index)
     }
-    return zip(items, keeps).filter(\.1).map(\.0.entry)
+    return claimed
 }
 
 func toolContinuationMessages<Message>(
