@@ -6,8 +6,11 @@ import Testing
 /// Each test pauses profile resolution after it reads the history,
 /// changes the history from outside the resolution,
 /// and then lets the profile continue.
+/// The paused request runs on a ``BlockingTaskExecutor``,
+/// so the pause doesn't block a thread of the cooperative pool.
 @Suite("Profile history conflicts")
 struct ProfileHistoryConflictTests {
+    @available(macOS 15.0, iOS 18.0, macCatalyst 18.0, tvOS 18.0, watchOS 11.0, visionOS 2.0, *)
     @Test(arguments: [false, true])
     func concurrentResponseSurvivesAProfileEdit(streaming: Bool) async throws {
         let other = ConflictRequestGates()
@@ -19,7 +22,9 @@ struct ProfileHistoryConflictTests {
 
         let otherRequest = Task { try await session.respond(to: "B") }
         await other.entered.wait()
-        let request = Task.detached { try await send("A", to: session, streaming: streaming) }
+        let request = Task.detached(executorPreference: BlockingTaskExecutor()) {
+            try await send("A", to: session, streaming: streaming)
+        }
         await probe.waitUntilPaused()
         await other.release.open()
         _ = try await otherRequest.value
@@ -31,6 +36,7 @@ struct ProfileHistoryConflictTests {
         #expect(texts(session.transcript) == ["Seed", "B", "response"])
     }
 
+    @available(macOS 15.0, iOS 18.0, macCatalyst 18.0, tvOS 18.0, watchOS 11.0, visionOS 2.0, *)
     @Test(arguments: [false, true])
     func directHistoryWriteSurvivesAProfileEdit(streaming: Bool) async throws {
         let probe = ConflictProbe(pausesAfter: "A", edits: true)
@@ -39,7 +45,9 @@ struct ProfileHistoryConflictTests {
             history: [seed]
         )
 
-        let request = Task.detached { try await send("A", to: session, streaming: streaming) }
+        let request = Task.detached(executorPreference: BlockingTaskExecutor()) {
+            try await send("A", to: session, streaming: streaming)
+        }
         await probe.waitUntilPaused()
         session.properties.history = [seed, direct]
         probe.resume()
@@ -50,6 +58,7 @@ struct ProfileHistoryConflictTests {
         #expect(texts(session.transcript) == ["Seed", "Direct"])
     }
 
+    @available(macOS 15.0, iOS 18.0, macCatalyst 18.0, tvOS 18.0, watchOS 11.0, visionOS 2.0, *)
     @Test(arguments: [false, true])
     func profileWithoutAnEditAppendsThePrompt(streaming: Bool) async throws {
         let probe = ConflictProbe(pausesAfter: "A", edits: false)
@@ -58,7 +67,9 @@ struct ProfileHistoryConflictTests {
             history: [seed]
         )
 
-        let request = Task.detached { try await send("A", to: session, streaming: streaming) }
+        let request = Task.detached(executorPreference: BlockingTaskExecutor()) {
+            try await send("A", to: session, streaming: streaming)
+        }
         await probe.waitUntilPaused()
         session.properties.history = [seed, direct]
         probe.resume()
@@ -67,6 +78,7 @@ struct ProfileHistoryConflictTests {
         #expect(texts(session.transcript) == ["Seed", "Direct", "A", "response"])
     }
 
+    @available(macOS 15.0, iOS 18.0, macCatalyst 18.0, tvOS 18.0, watchOS 11.0, visionOS 2.0, *)
     @Test(arguments: [false, true])
     func resolutionEditDoesNotReplaceAChangedHistory(throwing: Bool) async throws {
         let probe = ConflictProbe(pausesAfter: "Seed", edits: true)
@@ -75,7 +87,7 @@ struct ProfileHistoryConflictTests {
             history: [seed]
         )
 
-        let resolution = Task.detached {
+        let resolution = Task.detached(executorPreference: BlockingTaskExecutor()) {
             if throwing {
                 _ = try await session.resolvedRequestContext(including: [])
             } else {
