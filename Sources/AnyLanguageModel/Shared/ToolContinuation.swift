@@ -51,6 +51,8 @@ func mergingTranscriptEntries(
 // When the new key is a durable output's key, as when an earlier round
 // reused the call ID, the durable outputs claim the outputs with that key,
 // except for an unchanged pending output.
+// A round that isn't in `original` is one that the write added,
+// and it owns its outputs, except for an unchanged pending output.
 func removingProtectedTranscriptEntries(
     from entries: [Transcript.Entry],
     protecting protectedKeys: Set<TranscriptEntryKey>,
@@ -65,13 +67,22 @@ func removingProtectedTranscriptEntries(
             return call
         }
     )
+    let originalRounds = Set(
+        originalItems.compactMap { item -> String? in
+            guard case .toolCalls(let calls) = item.entry else { return nil }
+            return calls.id
+        }
+    )
+    let protectedEntries = originalItems.filter { protectedKeys.contains($0.key) }.map(\.entry)
     let items = keyedTranscriptEntries(entries).filter { !protectedKeys.contains($0.key) }
     var candidates: [Int] = []
     var dropped: Set<Int> = []
     for (index, item) in items.enumerated() {
-        guard case .toolOutput(_, let call) = item.key, protectedCallIDs.contains(call) else { continue }
+        guard case .toolOutput(let round, let call) = item.key, protectedCallIDs.contains(call) else { continue }
         if durableKeys.contains(item.key) {
             candidates.append(index)
+        } else if let round, !originalRounds.contains(round), !protectedEntries.contains(item.entry) {
+            continue
         } else {
             dropped.insert(index)
         }
@@ -80,7 +91,7 @@ func removingProtectedTranscriptEntries(
         in: items,
         at: candidates,
         by: originalItems.filter { durableKeys.contains($0.key) },
-        excluding: originalItems.filter { protectedKeys.contains($0.key) }.map(\.entry)
+        excluding: protectedEntries
     )
     return items.indices
         .filter { !dropped.contains($0) && (!candidates.contains($0) || claimed.contains($0)) }

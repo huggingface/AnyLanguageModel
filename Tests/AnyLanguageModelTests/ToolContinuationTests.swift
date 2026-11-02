@@ -85,6 +85,26 @@ struct ToolContinuationTests {
         #expect(Array(session.properties.history) == durable)
     }
 
+    // A round that a write adds owns its outputs, even with a pending output's call ID,
+    // but an unchanged copy of the pending output in it stays pending.
+    @Test(arguments: [false, true])
+    func newRoundKeepsItsOutputWithAPendingCallID(copiesPendingOutput: Bool) async throws {
+        let current = Self.round("current")
+        let added = Self.round("added")
+        let addedRound = [added[0], copiesPendingOutput ? current[1] : added[1]]
+        let session = LanguageModelSession(
+            profile: LanguageModelSession.Profile { Instructions("History") }
+                .model(MockLanguageModel())
+                .historyTransform { entries in
+                    let properties = SessionPropertyBinding.values!
+                    properties.history.append(contentsOf: addedRound)
+                    return entries
+                }
+        )
+        _ = try await session.resolvedRequestContext(including: current)
+        #expect(Array(session.properties.history) == (copiesPendingOutput ? [added[0]] : added))
+    }
+
     @Test(arguments: [false, true])
     func rollbackRemovesAnUnchangedOutputThatTookADurableOutputsKey(edited: Bool) {
         let previous = Self.round("previous")
