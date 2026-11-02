@@ -1970,8 +1970,9 @@ import Foundation
                 // structured content already has jsonString property
                 textParts.append(structuredSegment.content.jsonString)
             case .image:
-                // Image segments are not supported in MLX tool output
-                break
+                // MLX tool output is text,
+                // so an image becomes a placeholder at its position.
+                textParts.append("<image>")
             }
         }
         return textParts.joined(separator: "\n")

@@ -747,6 +747,33 @@ import Testing
             return collect(try JSONDecoder().decode(JSONValue.self, from: body))
         }
 
+        /// These providers take only text in a tool output,
+        /// so an image becomes a placeholder at its position.
+        @Test(arguments: [Provider.chat, .responses, .openResponses], [false, true])
+        func textOnlyToolOutputsUseImagePlaceholder(_ provider: Provider, _ streaming: Bool) async throws {
+            let image = Transcript.Segment.image(.init(data: testImageData, mimeType: "image/png"))
+            for (segments, expected) in [
+                ([.text(.init(content: "before")), image, .text(.init(content: "after"))], "before\n<image>\nafter"),
+                ([image], "<image>"),
+            ] as [([Transcript.Segment], String)] {
+                UsageURLProtocol.reset()
+                UsageURLProtocol.enqueue(
+                    json: try streaming ? provider.toolStream() : Self.json(provider.response(text: "", tool: true))
+                )
+                UsageURLProtocol.enqueue(json: try streaming ? provider.stream() : Self.json(provider.response()))
+                let session = provider.makeSession(tools: [WeatherTool()])
+                session.toolExecutionDelegate = ImageSegmentsDelegate(segments: segments)
+                if streaming {
+                    _ = try await session.streamResponse(to: "Weather?").collect()
+                } else {
+                    _ = try await session.respond(to: "Weather?")
+                }
+                try #require(UsageURLProtocol.recordedBodies.count == 2)
+                let followUp = try stringValues(in: try #require(UsageURLProtocol.recordedBodies.last))
+                #expect(followUp.contains(expected))
+            }
+        }
+
         private struct MultilineWeatherTool: Tool {
             static let output = "Sunny\nHigh of \"21\""
             let name = "getWeather"
