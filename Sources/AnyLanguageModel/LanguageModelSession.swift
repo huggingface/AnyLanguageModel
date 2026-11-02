@@ -616,6 +616,22 @@ public final class LanguageModelSession: @unchecked Sendable {
             metadata.merge(other.metadata) { _, latest in latest }
         }
 
+        /// The counts of `self` that aren't in `other`, which `self` adds up with others.
+        /// A count `other` reports past `self`'s, read later, is none.
+        func subtracting(_ other: Self) -> Self {
+            Self(
+                input: .init(
+                    totalTokenCount: max(0, input.totalTokenCount - other.input.totalTokenCount),
+                    cachedTokenCount: max(0, input.cachedTokenCount - other.input.cachedTokenCount)
+                ),
+                output: .init(
+                    totalTokenCount: max(0, output.totalTokenCount - other.output.totalTokenCount),
+                    reasoningTokenCount: max(0, output.reasoningTokenCount - other.output.reasoningTokenCount)
+                ),
+                metadata: metadata
+            )
+        }
+
         /// Returns counts not yet accounted for in this stream,
         /// retaining the highest reported count for each field
         /// and returning only new or changed metadata keys.
