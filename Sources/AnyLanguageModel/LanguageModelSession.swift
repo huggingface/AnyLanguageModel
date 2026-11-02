@@ -185,7 +185,7 @@ public final class LanguageModelSession: @unchecked Sendable {
         fileprivate let canonicalTranscript: [Transcript.Entry]
         fileprivate let pendingEntryKeys: Set<TranscriptEntryKey>
         fileprivate let callbackState: ProfileCallbackState
-        fileprivate let callbackHistory = Locked<[Transcript.Entry]?>(nil)
+        fileprivate let callbackHistory: Locked<[Transcript.Entry]?>
 
         var hasDynamicProfile: Bool { profile != nil }
 
@@ -200,7 +200,8 @@ public final class LanguageModelSession: @unchecked Sendable {
             profile: ResolvedDynamicProfile? = nil,
             canonicalTranscript: [Transcript.Entry]? = nil,
             pendingEntryKeys: Set<TranscriptEntryKey> = [],
-            callbackState: ProfileCallbackState = ProfileCallbackState()
+            callbackState: ProfileCallbackState = ProfileCallbackState(),
+            callbackHistory: Locked<[Transcript.Entry]?> = Locked(nil)
         ) {
             self.transcript = transcript
             self.instructions = instructions
@@ -213,6 +214,7 @@ public final class LanguageModelSession: @unchecked Sendable {
             self.canonicalTranscript = canonicalTranscript ?? Array(transcript)
             self.pendingEntryKeys = pendingEntryKeys
             self.callbackState = callbackState
+            self.callbackHistory = callbackHistory
         }
 
         fileprivate func sharingCallbackState(with context: RequestContext) -> RequestContext {
@@ -228,6 +230,26 @@ public final class LanguageModelSession: @unchecked Sendable {
                 canonicalTranscript: canonicalTranscript,
                 pendingEntryKeys: pendingEntryKeys,
                 callbackState: context.callbackState
+            )
+        }
+
+        fileprivate func withRequestHistory(
+            transcript: Transcript,
+            canonicalTranscript: [Transcript.Entry]
+        ) -> RequestContext {
+            RequestContext(
+                transcript: transcript,
+                instructions: instructions,
+                tools: tools,
+                model: model,
+                options: options,
+                contextOptions: contextOptions,
+                transcriptErrorHandlingPolicy: transcriptErrorHandlingPolicy,
+                profile: profile,
+                canonicalTranscript: canonicalTranscript,
+                pendingEntryKeys: pendingEntryKeys,
+                callbackState: callbackState,
+                callbackHistory: callbackHistory
             )
         }
 
@@ -360,6 +382,7 @@ public final class LanguageModelSession: @unchecked Sendable {
                 historyEdits: context.callbackHistory,
                 protectedEntryKeys: context.pendingEntryKeys
             )
+            context = applyingLifecycleHistoryEdits(to: context)
         }
         if let prepared, prepared.session === self {
             prepared.context = context
@@ -545,21 +568,17 @@ public final class LanguageModelSession: @unchecked Sendable {
                     dynamicProfile.resolveForRequest()
                 }
             }
-            canonical = history.entries
-            var projected = canonical
-            for transform in resolved.historyTransforms {
-                let transformHistory = properties.historyBinding(
-                    canonical,
+            let projected: [Transcript.Entry]
+            (canonical, projected) = applyingHistoryTransforms(
+                resolved.historyTransforms,
+                to: history.entries
+            ) { entries in
+                properties.historyBinding(
+                    entries,
                     isWritable: true,
                     protecting: protectedEntryKeys,
                     persists: false
                 )
-                projected = SessionPropertyBinding.$values.withValue(properties) {
-                    SessionPropertyBinding.$history.withValue(transformHistory) {
-                        transform(projected)
-                    }
-                }
-                canonical = transformHistory.entries
             }
             return (resolved, projected)
         }
@@ -605,6 +624,63 @@ public final class LanguageModelSession: @unchecked Sendable {
             pendingEntryKeys: protectedEntryKeys
         )
         return (context, editedHistory)
+    }
+
+    /// Applies a profile's history transforms in order.
+    ///
+    /// Each transform runs with a history binding from `binding`,
+    /// so it can edit the canonical history as well as return a projection.
+    /// Returns the edited canonical history and the request projection.
+    /// Call this while holding `dynamicProfileLock`.
+    nonisolated private func applyingHistoryTransforms(
+        _ transforms: [([Transcript.Entry]) -> [Transcript.Entry]],
+        to entries: [Transcript.Entry],
+        binding: ([Transcript.Entry]) -> SessionHistoryBinding
+    ) -> (canonical: [Transcript.Entry], projected: [Transcript.Entry]) {
+        var canonical = entries
+        var projected = entries
+        for transform in transforms {
+            let transformHistory = binding(canonical)
+            projected = SessionPropertyBinding.$values.withValue(properties) {
+                SessionPropertyBinding.$history.withValue(transformHistory) {
+                    transform(projected)
+                }
+            }
+            canonical = transformHistory.entries
+        }
+        return (canonical, projected)
+    }
+
+    /// Returns the request context with its request transcript projected again
+    /// from the history that the profile's lifecycle actions edited.
+    ///
+    /// The profile body doesn't run again; its history transforms do,
+    /// and their history edits persist like a lifecycle action's edits.
+    /// Returns `context` unchanged when no lifecycle action edited the history.
+    nonisolated private func applyingLifecycleHistoryEdits(to context: RequestContext) -> RequestContext {
+        guard let profile = context.profile,
+            let edited = context.callbackHistory.withLock({ $0 }),
+            edited != context.canonicalTranscript
+        else {
+            return context
+        }
+        let (canonical, projected) = dynamicProfileLock.withLock {
+            applyingHistoryTransforms(profile.historyTransforms, to: edited) { entries in
+                properties.historyBinding(
+                    entries,
+                    isWritable: true,
+                    protecting: context.pendingEntryKeys,
+                    onChange: { updated in context.callbackHistory.withLock { $0 = updated } }
+                )
+            }
+        }
+        var requestTranscript = Transcript(entries: projected)
+        if let instructions = context.instructions {
+            requestTranscript = Transcript(
+                entries: [instructionsEntry(instructions, tools: context.tools)] + projected
+            )
+        }
+        return context.withRequestHistory(transcript: requestTranscript, canonicalTranscript: canonical)
     }
 
     nonisolated private func instructionsEntry(
@@ -1512,6 +1588,7 @@ public final class LanguageModelSession: @unchecked Sendable {
                     callbackState: context.callbackState,
                     historyEdits: context.callbackHistory
                 )
+                prepared.context = applyingLifecycleHistoryEdits(to: context)
             }
             return try await countingRequests {
                 try await generate(context.model, context.options, context.contextOptions)
@@ -1735,6 +1812,7 @@ public final class LanguageModelSession: @unchecked Sendable {
                                     callbackState: context.callbackState,
                                     historyEdits: context.callbackHistory
                                 )
+                                prepared.context = self.applyingLifecycleHistoryEdits(to: context)
                             }
                             let upstream = generate(
                                 context.model,
