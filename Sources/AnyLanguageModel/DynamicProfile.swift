@@ -674,10 +674,28 @@ extension LanguageModelSession {
         /// The active profile sets no model.
         case missingModel
 
+        /// The session history changed while the active profile edited it.
+        ///
+        /// Profile resolution reads one snapshot of the history.
+        /// If the profile edits that history,
+        /// the session replaces its history with the edited history
+        /// only if no other change happened since the snapshot,
+        /// such as a response from an overlapping request
+        /// or a direct `properties.history` write.
+        /// Otherwise, the session keeps the other change and throws this error.
+        /// It doesn't keep the profile's edits, and a new request's prompt isn't added.
+        /// Unlike Foundation Models,
+        /// which rejects a transcript change while a session responds,
+        /// AnyLanguageModel allows overlapping requests.
+        case historyMutationWhileResolving
+
         public var errorDescription: String? {
             switch self {
             case .missingModel:
                 return "The active dynamic profile sets no model. Add `.model(_:)` to the profile."
+            case .historyMutationWhileResolving:
+                return
+                    "The session history changed while the active dynamic profile edited it. The profile's edits weren't kept."
             }
         }
     }
