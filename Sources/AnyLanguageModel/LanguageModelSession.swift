@@ -1028,6 +1028,16 @@ public final class LanguageModelSession: @unchecked Sendable {
     /// and before it runs the profile's `onActivate` or `onPrompt` actions,
     /// and throws ``DynamicProfileError/missingModel`` if the profile sets no model.
     ///
+    /// The session can respond to overlapping requests,
+    /// but it runs the profile's callbacks and lifecycle actions one at a time.
+    ///
+    /// - Parameters:
+    ///   - profile: The profile that sets the model, instructions, tools, options,
+    ///     and callbacks for each request.
+    ///   - history: The transcript entries to start the session with.
+    ///     The session ignores instructions entries,
+    ///     because the profile provides the instructions for each request.
+    ///
     /// - Note: Foundation Models uses the system language model
     ///   when a profile sets no model.
     ///   AnyLanguageModel requires a model, as its other initializers do.

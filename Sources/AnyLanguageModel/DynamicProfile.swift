@@ -1,25 +1,68 @@
 import protocol Foundation.LocalizedError
 
 extension LanguageModelSession {
-    /// A declarative, per-model-request session profile.
+    /// A declarative description of a session's model, instructions, tools,
+    /// options, and callbacks, which the session resolves before each model request.
     ///
-    /// - Note: This API is exclusive to AnyLanguageModel on OS 26 and mirrors
-    ///   Foundation Models 27.
+    /// Create a session with a profile with ``LanguageModelSession/init(profile:history:)``.
+    /// The session evaluates ``body`` again before every model request,
+    /// including the requests that continue a response after a tool call,
+    /// so the body can choose a different model, instructions, or tools
+    /// from the session's properties and history.
+    ///
+    /// Build a profile from a ``Profile`` and modifiers such as `model(_:)`,
+    /// ``temperature(_:)``, and `onResponse(perform:)`.
+    /// The body can use `if`-`else` and `if #available` to choose between profiles.
+    ///
+    /// The profile must set a model with `.model(_:)`.
+    /// When a modifier that sets a value appears more than once,
+    /// the innermost one, closest to the ``Profile``, sets the value.
+    /// A value that you pass when you call a method such as `respond(to:options:)`
+    /// overrides the profile's value for that request.
+    ///
+    /// A session runs its profile's callbacks and lifecycle actions one at a time,
+    /// even when requests overlap,
+    /// so the state that a callback captures needs no other protection.
+    /// A request that a callback makes on its own session
+    /// runs its callbacks while the first callback waits for it.
+    /// History transforms also run one at a time.
+    ///
+    /// - Note: This API is exclusive to AnyLanguageModel on OS 26.
+    ///   It follows the Foundation Models 27 `LanguageModelSession.DynamicProfile` API,
+    ///   so code that uses it ports to Foundation Models on OS 27.
+    ///   Unlike Foundation Models, which uses the system language model
+    ///   when a profile sets no model,
+    ///   AnyLanguageModel requires a model.
     @_typeEraser(AnyDynamicProfile)
     public protocol DynamicProfile {
+        /// The type of profile that the body produces.
         associatedtype Body: DynamicProfile
 
+        /// The profile that this profile resolves to.
+        ///
+        /// The session evaluates the body before each model request.
         @DynamicProfileBuilder
         var body: Body { get }
     }
 
-    /// A concrete profile containing dynamic instructions and Tools.
+    /// A profile with dynamic instructions and tools,
+    /// which modifiers add a model, options, and callbacks to.
+    ///
+    /// - Note: This API is exclusive to AnyLanguageModel on OS 26.
+    ///   It follows the Foundation Models 27 `LanguageModelSession.Profile` API,
+    ///   so code that uses it ports to Foundation Models on OS 27.
     public struct Profile: DynamicProfile {
+        /// A profile has no body; the session reads its instructions and tools directly.
         public typealias Body = Never
 
         fileprivate let dynamicInstructions: AnyDynamicInstructions
         fileprivate let identity: String
 
+        /// Creates a profile with instructions and tools that you build with a result builder.
+        ///
+        /// The session evaluates `dynamicInstructions` before each model request.
+        ///
+        /// - Parameter dynamicInstructions: A closure that returns the instructions and tools.
         public init(
             @DynamicInstructionsBuilder _ dynamicInstructions: () -> some DynamicInstructions
         ) {
@@ -28,17 +71,30 @@ extension LanguageModelSession {
             self.identity = String(reflecting: type(of: value))
         }
 
+        /// A profile has no body.
+        ///
+        /// Accessing this property stops the program.
         public var body: Never {
             fatalError("LanguageModelSession.Profile has no body")
         }
     }
 
     /// A type-erased dynamic profile.
+    ///
+    /// The ``DynamicProfileBuilder`` uses this type for an `if #available` branch.
+    ///
+    /// - Note: This API is exclusive to AnyLanguageModel on OS 26.
+    ///   It follows the Foundation Models 27 `LanguageModelSession.AnyDynamicProfile` API,
+    ///   so code that uses it ports to Foundation Models on OS 27.
     public struct AnyDynamicProfile: DynamicProfile {
+        /// A type-erased profile has no body; the session resolves the profile that it wraps.
         public typealias Body = Never
 
         fileprivate let resolveValue: () -> ResolvedDynamicProfile
 
+        /// Creates a type-erased profile that wraps the given profile.
+        ///
+        /// - Parameter dynamicProfile: The profile to wrap.
         public init(_ dynamicProfile: any DynamicProfile) {
             let identity = String(reflecting: type(of: dynamicProfile))
             resolveValue = {
@@ -48,10 +104,16 @@ extension LanguageModelSession {
             }
         }
 
+        /// Creates a type-erased profile that wraps the given profile.
+        ///
+        /// - Parameter dynamicProfile: The profile to wrap.
         public init(erasing dynamicProfile: some DynamicProfile) {
             self.init(dynamicProfile)
         }
 
+        /// A type-erased profile has no body.
+        ///
+        /// Accessing this property stops the program.
         public var body: Never {
             fatalError("LanguageModelSession.AnyDynamicProfile has no body")
         }
@@ -61,6 +123,16 @@ extension LanguageModelSession {
         }
     }
 
+    /// A profile that the ``DynamicProfileBuilder`` creates
+    /// for the branches of an `if`-`else` statement.
+    ///
+    /// The session treats the two branches as different profiles,
+    /// so a change of branch between requests runs the lifecycle actions
+    /// of ``DynamicProfile/onDeactivate(perform:)`` and ``DynamicProfile/onActivate(perform:)``.
+    ///
+    /// - Note: This API is exclusive to AnyLanguageModel on OS 26.
+    ///   It follows the Foundation Models 27 `LanguageModelSession.ConditionalDynamicProfile` API,
+    ///   so code that uses it ports to Foundation Models on OS 27.
     public struct ConditionalDynamicProfile<TrueContent, FalseContent>: DynamicProfile
     where TrueContent: DynamicProfile, FalseContent: DynamicProfile {
         enum Branch {
@@ -68,6 +140,7 @@ extension LanguageModelSession {
             case falseContent(FalseContent)
         }
 
+        /// A conditional profile has no body; the session resolves the active branch.
         public typealias Body = Never
         fileprivate let branch: Branch
 
@@ -75,18 +148,34 @@ extension LanguageModelSession {
             self.branch = branch
         }
 
+        /// A conditional profile has no body.
+        ///
+        /// Accessing this property stops the program.
         public var body: Never {
             fatalError("ConditionalDynamicProfile has no body")
         }
     }
 
+    /// A result builder that creates a dynamic profile from a closure.
+    ///
+    /// The body must produce one profile.
+    /// It can use `if`-`else` to choose between two profiles,
+    /// and `if #available` with an `else` branch to use a profile
+    /// only on some operating system versions.
+    /// An `if` statement without an `else` branch isn't supported.
+    ///
+    /// - Note: This API is exclusive to AnyLanguageModel on OS 26.
+    ///   It follows the Foundation Models 27 `LanguageModelSession.DynamicProfileBuilder` API,
+    ///   so code that uses it ports to Foundation Models on OS 27.
     @resultBuilder
     public struct DynamicProfileBuilder {
+        /// Returns the single profile in a body unchanged.
         public static func buildBlock<Content>(_ content: Content) -> Content
         where Content: DynamicProfile {
             content
         }
 
+        /// Returns a profile for the first branch of an `if`-`else` statement.
         public static func buildEither<TrueContent, FalseContent>(
             first content: TrueContent
         ) -> ConditionalDynamicProfile<TrueContent, FalseContent>
@@ -94,6 +183,7 @@ extension LanguageModelSession {
             ConditionalDynamicProfile(.trueContent(content))
         }
 
+        /// Returns a profile for the second branch of an `if`-`else` statement.
         public static func buildEither<TrueContent, FalseContent>(
             second content: FalseContent
         ) -> ConditionalDynamicProfile<TrueContent, FalseContent>
@@ -101,12 +191,15 @@ extension LanguageModelSession {
             ConditionalDynamicProfile(.falseContent(content))
         }
 
+        /// A body with more than one profile doesn't compile;
+        /// combine profiles with `if`-`else` or modifiers instead.
         @available(*, unavailable, message: "The body of a 'DynamicProfile' must evaluate to a single active profile")
         public static func buildBlock<each Content>(_ contents: repeat each Content) -> Never
         where repeat each Content: DynamicProfile {
             fatalError("A DynamicProfile must have one active profile")
         }
 
+        /// Returns a type-erased profile for an `if #available` branch.
         public static func buildLimitedAvailability(
             _ component: some DynamicProfile
         ) -> AnyDynamicProfile {
@@ -114,16 +207,43 @@ extension LanguageModelSession {
         }
     }
 
+    /// A modifier that you apply to a dynamic profile
+    /// to produce a different version of the profile.
+    ///
+    /// Apply a modifier with ``DynamicProfile/modifier(_:)``.
+    /// The modifiers that ``body(content:)`` applies to its content
+    /// are outer to the modifiers in the content,
+    /// so the content's own values take precedence
+    /// and the modifier's callbacks run before the content's,
+    /// as for any other modifier.
+    ///
+    /// - Note: This API is exclusive to AnyLanguageModel on OS 26.
+    ///   It follows the Foundation Models 27 `LanguageModelSession.DynamicProfileModifier` API,
+    ///   so code that uses it ports to Foundation Models on OS 27.
     public protocol DynamicProfileModifier {
+        /// The type of profile that the modifier produces.
         associatedtype Body: DynamicProfile
+
+        /// The profile that the modifier receives as its content.
         typealias Content = DynamicProfileModifierContent<Self>
 
+        /// Returns the modified profile.
+        ///
+        /// The session calls this method before each model request.
+        ///
+        /// - Parameter content: The profile that the modifier applies to.
         @DynamicProfileBuilder
         func body(content: Content) -> Body
     }
 
+    /// The profile that a ``DynamicProfileModifier`` receives as its content.
+    ///
+    /// - Note: This API is exclusive to AnyLanguageModel on OS 26.
+    ///   It follows the Foundation Models 27 `LanguageModelSession.DynamicProfileModifierContent` API,
+    ///   so code that uses it ports to Foundation Models on OS 27.
     public struct DynamicProfileModifierContent<Modifier>: DynamicProfile
     where Modifier: DynamicProfileModifier {
+        /// The content has no body; the session resolves the profile that it wraps.
         public typealias Body = Never
         fileprivate let content: AnyDynamicProfile
 
@@ -131,13 +251,22 @@ extension LanguageModelSession {
             self.content = AnyDynamicProfile(content)
         }
 
+        /// The content has no body.
+        ///
+        /// Accessing this property stops the program.
         public var body: Never {
             fatalError("DynamicProfileModifierContent has no body")
         }
     }
 
+    /// A profile with a ``DynamicProfileModifier`` applied to it.
+    ///
+    /// - Note: This API is exclusive to AnyLanguageModel on OS 26.
+    ///   It follows the Foundation Models 27 `LanguageModelSession.ModifiedDynamicProfile` API,
+    ///   so code that uses it ports to Foundation Models on OS 27.
     public struct ModifiedDynamicProfile<Content, Modifier>: DynamicProfile
     where Content: DynamicProfile, Modifier: DynamicProfileModifier {
+        /// A modified profile has no body; the session resolves the modifier's body.
         public typealias Body = Never
         fileprivate let content: Content
         fileprivate let modifier: Modifier
@@ -147,17 +276,41 @@ extension LanguageModelSession {
             self.modifier = modifier
         }
 
+        /// A modified profile has no body.
+        ///
+        /// Accessing this property stops the program.
         public var body: Never {
             fatalError("ModifiedDynamicProfile has no body")
         }
     }
 }
 
+// Modifiers that set a value: when a modifier repeats, the innermost one wins
+// (`BuiltinDynamicProfileModifier.apply` keeps a value that the content set).
+// Callback modifiers and history transforms: the outermost runs first,
+// except `onDeactivate`, where the innermost runs first.
 extension LanguageModelSession.DynamicProfile {
+    /// A profile with dynamic instructions and tools.
+    ///
+    /// This alias lets a profile's body write `Profile` instead of `LanguageModelSession.Profile`.
     public typealias Profile = LanguageModelSession.Profile
+
+    /// A declarative description of a session's model, instructions, tools, and callbacks.
+    ///
+    /// This alias lets a profile's body write `DynamicProfile`
+    /// instead of `LanguageModelSession.DynamicProfile`.
     public typealias DynamicProfile = LanguageModelSession.DynamicProfile
+
+    /// A property wrapper that reads and writes a session property.
+    ///
+    /// This alias lets a profile write `@SessionProperty`
+    /// instead of `@LanguageModelSession.SessionProperty`.
     public typealias SessionProperty = LanguageModelSession.SessionProperty
 
+    /// Applies a custom modifier to this profile.
+    ///
+    /// - Parameter modifier: The modifier to apply.
+    /// - Returns: A profile with the modifier applied.
     public func modifier<Modifier>(
         _ modifier: Modifier
     ) -> some LanguageModelSession.DynamicProfile
@@ -165,28 +318,81 @@ extension LanguageModelSession.DynamicProfile {
         LanguageModelSession.ModifiedDynamicProfile(content: self, modifier: modifier)
     }
 
+    /// Sets the language model that responds to requests with this profile.
+    ///
+    /// A profile must set a model.
+    /// If the active profile sets none, a request throws
+    /// ``LanguageModelSession/DynamicProfileError/missingModel``
+    /// before it changes the transcript or runs any of the profile's actions.
+    /// If the modifier appears more than once, the innermost one sets the model.
+    ///
+    /// - Parameter model: The model to use.
+    /// - Returns: A profile that uses the model.
+    ///
+    /// - Note: Foundation Models takes its own `LanguageModel` type here
+    ///   and uses the system language model when a profile sets no model.
+    ///   AnyLanguageModel takes an AnyLanguageModel ``LanguageModel`` and requires a model.
     public func model(
         _ model: any LanguageModel
     ) -> some LanguageModelSession.DynamicProfile {
         BuiltinModifiedDynamicProfile(content: self, modifier: .model(model))
     }
 
+    /// Sets the language model that responds to requests with this profile.
+    ///
+    /// A profile must set a model.
+    /// If the active profile sets none, a request throws
+    /// ``LanguageModelSession/DynamicProfileError/missingModel``
+    /// before it changes the transcript or runs any of the profile's actions.
+    /// If the modifier appears more than once, the innermost one sets the model.
+    ///
+    /// - Parameter model: The model to use.
+    /// - Returns: A profile that uses the model.
+    ///
+    /// - Note: Foundation Models takes its own `LanguageModel` type here
+    ///   and uses the system language model when a profile sets no model.
+    ///   AnyLanguageModel takes an AnyLanguageModel ``LanguageModel`` and requires a model.
     public func model<Model>(
         _ model: Model
     ) -> some LanguageModelSession.DynamicProfile where Model: LanguageModel {
         BuiltinModifiedDynamicProfile(content: self, modifier: .model(model))
     }
 
+    /// Sets the default temperature for requests with this profile.
+    ///
+    /// A non-`nil` ``GenerationOptions/temperature`` that you pass with a request
+    /// overrides this value.
+    /// If the modifier appears more than once, the innermost one sets the value.
+    ///
+    /// - Parameter temperature: The temperature, or `nil` for the model's default.
+    /// - Returns: A profile with the temperature.
     public func temperature(_ temperature: Double?) -> some LanguageModelSession.DynamicProfile {
         BuiltinModifiedDynamicProfile(content: self, modifier: .temperature(temperature))
     }
 
+    /// Sets the default sampling mode for requests with this profile.
+    ///
+    /// A non-`nil` ``GenerationOptions/sampling`` that you pass with a request
+    /// overrides this value.
+    /// If the modifier appears more than once, the innermost one sets the value.
+    ///
+    /// - Parameter samplingMode: The sampling mode, or `nil` for the model's default.
+    /// - Returns: A profile with the sampling mode.
     public func samplingMode(
         _ samplingMode: GenerationOptions.SamplingMode?
     ) -> some LanguageModelSession.DynamicProfile {
         BuiltinModifiedDynamicProfile(content: self, modifier: .samplingMode(samplingMode))
     }
 
+    /// Sets the default maximum number of tokens in a response for requests with this profile.
+    ///
+    /// A non-`nil` ``GenerationOptions/maximumResponseTokens`` that you pass with a request
+    /// overrides this value.
+    /// If the modifier appears more than once, the innermost one sets the value.
+    ///
+    /// - Parameter maximumResponseTokens: The maximum number of tokens,
+    ///   or `nil` for the model's default.
+    /// - Returns: A profile with the maximum.
     public func maximumResponseTokens(
         _ maximumResponseTokens: Int?
     ) -> some LanguageModelSession.DynamicProfile {
@@ -196,12 +402,31 @@ extension LanguageModelSession.DynamicProfile {
         )
     }
 
+    /// Sets how much the model may reason before it responds to requests with this profile.
+    ///
+    /// If the modifier appears more than once, the innermost one sets the value.
+    ///
+    /// - Parameter reasoningLevel: The reasoning level, or `nil` for the model's default.
+    /// - Returns: A profile with the reasoning level.
+    ///
+    /// - Important: At this time, none of the language models in AnyLanguageModel
+    ///   apply this value.
     public func reasoningLevel(
         _ reasoningLevel: ContextOptions.ReasoningLevel?
     ) -> some LanguageModelSession.DynamicProfile {
         BuiltinModifiedDynamicProfile(content: self, modifier: .reasoningLevel(reasoningLevel))
     }
 
+    /// Sets whether requests with this profile include the response schema in the prompt.
+    ///
+    /// Unlike the options that ``GenerationOptions`` carries,
+    /// a non-`nil` value here overrides the `includeSchemaInPrompt` argument
+    /// that you pass with a request.
+    /// If the modifier appears more than once, the innermost one sets the value.
+    ///
+    /// - Parameter includeSchemaInPrompt: Whether to include the schema,
+    ///   or `nil` to use the request's argument.
+    /// - Returns: A profile with the setting.
     @_spi(Compatibility)
     public func includeSchemaInPrompt(
         _ includeSchemaInPrompt: Bool?
@@ -212,24 +437,68 @@ extension LanguageModelSession.DynamicProfile {
         )
     }
 
+    /// Sets the default tool calling mode for requests with this profile.
+    ///
+    /// A non-`nil` ``GenerationOptions/toolCallingMode`` that you pass with a request
+    /// overrides this value.
+    /// If the modifier appears more than once, the innermost one sets the value.
+    ///
+    /// - Parameter toolCallingMode: The tool calling mode, or `nil` for the model's default.
+    /// - Returns: A profile with the tool calling mode.
     public func toolCallingMode(
         _ toolCallingMode: GenerationOptions.ToolCallingMode?
     ) -> some LanguageModelSession.DynamicProfile {
         BuiltinModifiedDynamicProfile(content: self, modifier: .toolCallingMode(toolCallingMode))
     }
 
+    /// Changes the history that the model receives with each request.
+    ///
+    /// Before each model request, the session calls `transform` with the session history
+    /// and sends the entries that it returns to the model in place of the history.
+    /// The session's ``LanguageModelSession/transcript`` doesn't change,
+    /// unless the transform writes to the `history` session property.
+    ///
+    /// When a profile has more than one history transform, the outermost one runs first,
+    /// and each one receives the entries that the one before it returned.
+    /// Transforms run synchronously and one at a time, while the session holds a lock.
+    ///
+    /// - Parameter transform: A closure that returns the entries to send to the model.
+    /// - Returns: A profile with the history transform.
     public func historyTransform(
         _ transform: @escaping ([Transcript.Entry]) -> [Transcript.Entry]
     ) -> some LanguageModelSession.DynamicProfile {
         BuiltinModifiedDynamicProfile(content: self, modifier: .historyTransform(transform))
     }
 
+    /// Sets what the transcript keeps when a request with this profile fails.
+    ///
+    /// The value replaces the session's
+    /// ``LanguageModelSession/transcriptErrorHandlingPolicy`` for the request,
+    /// including when the value is `nil`.
+    /// If the modifier appears more than once, the innermost one sets the value.
+    ///
+    /// - Parameter policy: The policy for a failed request.
+    /// - Returns: A profile with the policy.
+    ///
+    /// - Note: This API is exclusive to AnyLanguageModel
+    ///   and using it means your code is no longer drop-in compatible
+    ///   with the Foundation Models framework.
     public func transcriptErrorHandlingPolicy(
         _ policy: TranscriptErrorHandlingPolicy?
     ) -> some LanguageModelSession.DynamicProfile {
         BuiltinModifiedDynamicProfile(content: self, modifier: .transcriptErrorHandlingPolicy(policy))
     }
 
+    /// Adds an action to run when the session receives a prompt.
+    ///
+    /// The action runs once for each prompt, after the session adds the prompt to the transcript
+    /// and before the first model request for it,
+    /// and after the lifecycle actions of ``onActivate(perform:)``.
+    /// If the action throws, the request throws the error.
+    /// When a profile has more than one `onPrompt` action, the outermost one runs first.
+    ///
+    /// - Parameter action: The action to run, which receives the prompt.
+    /// - Returns: A profile with the action.
     public func onPrompt(
         @_inheritActorContext perform action:
             nonisolated(nonsending) sending @escaping (
@@ -239,12 +508,30 @@ extension LanguageModelSession.DynamicProfile {
         BuiltinModifiedDynamicProfile(content: self, modifier: .onPrompt(action))
     }
 
+    /// Adds an action to run when the session receives a prompt.
+    ///
+    /// This is the same as `onPrompt(perform:)`
+    /// for an action that doesn't use the prompt.
+    ///
+    /// - Parameter action: The action to run.
+    /// - Returns: A profile with the action.
     public func onPrompt(
         @_inheritActorContext perform action: nonisolated(nonsending) sending @escaping () async throws -> Void
     ) -> some LanguageModelSession.DynamicProfile {
         onPrompt { _ in try await action() }
     }
 
+    /// Adds an action to run when the model produces a response.
+    ///
+    /// The action runs once for each response,
+    /// after the session adds the response to the transcript;
+    /// for a streamed response, it runs after the stream ends.
+    /// If the action throws, the session removes the response from the transcript,
+    /// and the request throws the error.
+    /// When a profile has more than one `onResponse` action, the outermost one runs first.
+    ///
+    /// - Parameter action: The action to run, which receives the response.
+    /// - Returns: A profile with the action.
     public func onResponse(
         @_inheritActorContext perform action:
             nonisolated(nonsending) sending @escaping (
@@ -254,12 +541,30 @@ extension LanguageModelSession.DynamicProfile {
         BuiltinModifiedDynamicProfile(content: self, modifier: .onResponse(action))
     }
 
+    /// Adds an action to run when the model produces a response.
+    ///
+    /// This is the same as `onResponse(perform:)`
+    /// for an action that doesn't use the response.
+    ///
+    /// - Parameter action: The action to run.
+    /// - Returns: A profile with the action.
     public func onResponse(
         @_inheritActorContext perform action: nonisolated(nonsending) sending @escaping () async throws -> Void
     ) -> some LanguageModelSession.DynamicProfile {
         onResponse { _ in try await action() }
     }
 
+    /// Adds an action to run when the model produces reasoning.
+    ///
+    /// The action runs once for each reasoning entry in a response,
+    /// after the session adds the response to the transcript
+    /// and before the actions of `onResponse(perform:)`.
+    /// If the action throws, the session removes the response from the transcript,
+    /// and the request throws the error.
+    /// When a profile has more than one `onReasoning` action, the outermost one runs first.
+    ///
+    /// - Parameter action: The action to run, which receives the reasoning.
+    /// - Returns: A profile with the action.
     public func onReasoning(
         @_inheritActorContext perform action:
             nonisolated(nonsending) sending @escaping (
@@ -269,12 +574,28 @@ extension LanguageModelSession.DynamicProfile {
         BuiltinModifiedDynamicProfile(content: self, modifier: .onReasoning(action))
     }
 
+    /// Adds an action to run when the model produces reasoning.
+    ///
+    /// This is the same as `onReasoning(perform:)`
+    /// for an action that doesn't use the reasoning.
+    ///
+    /// - Parameter action: The action to run.
+    /// - Returns: A profile with the action.
     public func onReasoning(
         @_inheritActorContext perform action: nonisolated(nonsending) sending @escaping () async throws -> Void
     ) -> some LanguageModelSession.DynamicProfile {
         onReasoning { _ in try await action() }
     }
 
+    /// Adds an action to run before the session calls a tool.
+    ///
+    /// When a profile has more than one `onToolCall` action, the outermost one runs first.
+    ///
+    /// - Parameter action: The action to run, which receives the tool call.
+    /// - Returns: A profile with the action.
+    ///
+    /// - Important: At this time, none of the language models in AnyLanguageModel
+    ///   run this action when they call a tool.
     public func onToolCall(
         @_inheritActorContext perform action:
             nonisolated(nonsending) sending @escaping (
@@ -284,12 +605,31 @@ extension LanguageModelSession.DynamicProfile {
         BuiltinModifiedDynamicProfile(content: self, modifier: .onToolCall(action))
     }
 
+    /// Adds an action to run before the session calls a tool.
+    ///
+    /// This is the same as `onToolCall(perform:)`
+    /// for an action that doesn't use the tool call.
+    ///
+    /// - Parameter action: The action to run.
+    /// - Returns: A profile with the action.
+    ///
+    /// - Important: At this time, none of the language models in AnyLanguageModel
+    ///   run this action when they call a tool.
     public func onToolCall(
         @_inheritActorContext perform action: nonisolated(nonsending) sending @escaping () async throws -> Void
     ) -> some LanguageModelSession.DynamicProfile {
         onToolCall { _ in try await action() }
     }
 
+    /// Adds an action to run after a tool produces its output.
+    ///
+    /// When a profile has more than one `onToolOutput` action, the outermost one runs first.
+    ///
+    /// - Parameter action: The action to run, which receives the tool call and its output.
+    /// - Returns: A profile with the action.
+    ///
+    /// - Important: At this time, none of the language models in AnyLanguageModel
+    ///   run this action when they call a tool.
     public func onToolOutput(
         @_inheritActorContext perform action:
             nonisolated(nonsending) sending @escaping (
@@ -300,12 +640,38 @@ extension LanguageModelSession.DynamicProfile {
         BuiltinModifiedDynamicProfile(content: self, modifier: .onToolOutput(action))
     }
 
+    /// Adds an action to run after a tool produces its output.
+    ///
+    /// This is the same as `onToolOutput(perform:)`
+    /// for an action that doesn't use the tool call or its output.
+    ///
+    /// - Parameter action: The action to run.
+    /// - Returns: A profile with the action.
+    ///
+    /// - Important: At this time, none of the language models in AnyLanguageModel
+    ///   run this action when they call a tool.
     public func onToolOutput(
         @_inheritActorContext perform action: nonisolated(nonsending) sending @escaping () async throws -> Void
     ) -> some LanguageModelSession.DynamicProfile {
         onToolOutput { _, _ in try await action() }
     }
 
+    /// Adds an action to run when this profile becomes the session's active profile.
+    ///
+    /// Before a model request, the session compares the profile that the body resolves to
+    /// with the profile of the previous request.
+    /// For the first request, or when the profile changed,
+    /// such as when the body takes a different `if`-`else` branch,
+    /// the session runs the previous profile's ``onDeactivate(perform:)`` actions
+    /// and then the new profile's `onActivate` actions,
+    /// before the actions of `onPrompt(perform:)`.
+    /// When a profile has more than one `onActivate` action, the outermost one runs first.
+    ///
+    /// The action can't make a request on its own session;
+    /// that request throws ``LanguageModelSession/DynamicProfileError/requestDuringLifecycleAction``.
+    ///
+    /// - Parameter action: The action to run.
+    /// - Returns: A profile with the action.
     public func onActivate(
         @_inheritActorContext perform action: sending @escaping @isolated(any) () async -> Void
     ) -> some LanguageModelSession.DynamicProfile {
@@ -313,6 +679,18 @@ extension LanguageModelSession.DynamicProfile {
         return BuiltinModifiedDynamicProfile(content: self, modifier: .onActivate(wrapped))
     }
 
+    /// Adds an action to run when this profile stops being the session's active profile.
+    ///
+    /// The action runs before a model request whose profile differs from this one,
+    /// before the new profile's ``onActivate(perform:)`` actions.
+    /// It doesn't run when the session ends.
+    /// When a profile has more than one `onDeactivate` action, the innermost one runs first.
+    ///
+    /// The action can't make a request on its own session;
+    /// that request throws ``LanguageModelSession/DynamicProfileError/requestDuringLifecycleAction``.
+    ///
+    /// - Parameter action: The action to run.
+    /// - Returns: A profile with the action.
     public func onDeactivate(
         @_inheritActorContext perform action: sending @escaping @isolated(any) () async -> Void
     ) -> some LanguageModelSession.DynamicProfile {
@@ -322,10 +700,21 @@ extension LanguageModelSession.DynamicProfile {
 }
 
 extension LanguageModelSession.DynamicProfileModifier {
+    /// A declarative description of a session's model, instructions, tools, and callbacks.
+    ///
+    /// This alias lets a modifier write `DynamicProfile`
+    /// instead of `LanguageModelSession.DynamicProfile`.
     public typealias DynamicProfile = LanguageModelSession.DynamicProfile
+
+    /// A property wrapper that reads and writes a session property.
+    ///
+    /// This alias lets a modifier write `@SessionProperty`
+    /// instead of `@LanguageModelSession.SessionProperty`.
     public typealias SessionProperty = LanguageModelSession.SessionProperty
 }
 
+/// `Never` is the body type of profiles that have no body,
+/// such as ``LanguageModelSession/Profile``.
 extension Never: LanguageModelSession.DynamicProfile {}
 
 private protocol PrimitiveDynamicProfile {
@@ -766,6 +1155,7 @@ extension LanguageModelSession {
         /// not one in a detached task.
         case requestDuringLifecycleAction
 
+        /// A message that describes the error.
         public var errorDescription: String? {
             switch self {
             case .missingModel:
