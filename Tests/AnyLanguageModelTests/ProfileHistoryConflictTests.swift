@@ -3,11 +3,12 @@ import Testing
 
 @_spi(Compatibility) @testable import AnyLanguageModel
 
-/// Each test pauses profile resolution after it reads the history,
-/// changes the history from outside the resolution,
+/// Each test pauses profile resolution or a profile callback after it reads the history,
+/// changes the history from outside the request,
 /// and then lets the profile continue.
-/// The paused request runs on a ``BlockingTaskExecutor``,
-/// so the pause doesn't block a thread of the cooperative pool.
+/// A paused resolution runs on a ``BlockingTaskExecutor``,
+/// so the pause doesn't block a thread of the cooperative pool;
+/// a callback is asynchronous and pauses without blocking.
 @Suite("Profile history conflicts")
 struct ProfileHistoryConflictTests {
     @available(macOS 15.0, iOS 18.0, macCatalyst 18.0, tvOS 18.0, watchOS 11.0, visionOS 2.0, *)
@@ -110,9 +111,143 @@ struct ProfileHistoryConflictTests {
         #expect(texts(session.transcript) == ["Seed", "Direct"])
     }
 
-    @Test func conflictErrorHasAMessage() {
-        let error = LanguageModelSession.DynamicProfileError.historyMutationWhileResolving
-        #expect(error.errorDescription?.contains("history changed") == true)
+    @Test(arguments: CallbackKind.allCases)
+    func directHistoryWriteSurvivesACallbackEdit(kind: CallbackKind) async throws {
+        let gates = ConflictRequestGates()
+        let session = LanguageModelSession(
+            profile: CallbackConflictProfile(pausing: kind, gates: gates),
+            history: [seed]
+        )
+        let call = Transcript.ToolCall(id: "call", toolName: "fixture", arguments: .init(properties: [:]))
+        let calls = Transcript.Entry.toolCalls(.init([call]))
+        let output = Transcript.ToolOutput(id: call.id, toolName: call.toolName, segments: [])
+        let reasoning = Transcript.Entry.reasoning(.init(segments: [.text(.init(content: "Thinking"))]))
+        let response = Transcript.Entry.response(.init(assetIDs: [], segments: [.text(.init(content: "Answer"))]))
+
+        // Activation and `onPrompt` run while the request context resolves;
+        // the other callbacks run with a context that resolved first.
+        let context: LanguageModelSession.RequestContext? =
+            kind.isLifecycle ? nil : try await session.resolvedRequestContext(including: [])
+        let request = Task {
+            guard let context else {
+                _ = try await session.resolvedRequestContext(including: [])
+                return
+            }
+            switch kind {
+            case .toolCall:
+                try await session.profileWillExecuteToolCall(
+                    call,
+                    requestContext: context,
+                    currentRoundEntries: [calls]
+                )
+            case .toolOutput:
+                try await session.profileDidProduceToolOutput(
+                    for: call,
+                    output: output,
+                    requestContext: context,
+                    currentRoundEntries: [calls, .toolOutput(output)]
+                )
+            case .reasoning, .response:
+                try await session.profileDidProduceEntries(
+                    [kind == .reasoning ? reasoning : response],
+                    requestContext: context,
+                    currentRoundEntries: []
+                )
+            case .activate, .prompt:
+                break
+            }
+        }
+        await gates.entered.wait()
+        session.properties.history = [seed, direct]
+        await gates.release.open()
+
+        await #expect(throws: LanguageModelSession.DynamicProfileError.historyMutationWhileRunningCallback) {
+            try await request.value
+        }
+        #expect(texts(session.transcript) == ["Seed", "Direct"])
+    }
+
+    // A stale `onResponse` write must not delete an overlapping request's turn.
+    @Test(arguments: [false, true])
+    func concurrentResponseSurvivesAResponseCallbackEdit(streaming: Bool) async throws {
+        let gates = ConflictRequestGates()
+        let session = LanguageModelSession(
+            profile: CallbackConflictProfile(pausing: .response, gates: gates, rewritesSnapshotOnce: true),
+            history: [seed]
+        )
+
+        let request = Task { try await send("A", to: session, streaming: streaming) }
+        await gates.entered.wait()
+        try await send("B", to: session, streaming: streaming)
+        await gates.release.open()
+
+        await #expect(throws: LanguageModelSession.DynamicProfileError.historyMutationWhileRunningCallback) {
+            try await request.value
+        }
+        #expect(texts(session.transcript) == ["Seed", "A", "B", "response"])
+    }
+
+    @Test func conflictErrorsHaveMessages() {
+        let resolving = LanguageModelSession.DynamicProfileError.historyMutationWhileResolving
+        #expect(resolving.errorDescription?.contains("history changed") == true)
+        let callback = LanguageModelSession.DynamicProfileError.historyMutationWhileRunningCallback
+        #expect(callback.errorDescription?.contains("callback") == true)
+    }
+}
+
+enum CallbackKind: CaseIterable, Sendable {
+    case activate, prompt, toolCall, toolOutput, reasoning, response
+
+    var isLifecycle: Bool { self == .activate || self == .prompt }
+}
+
+/// Pauses one kind of callback until its gate opens,
+/// and then removes the seed prompt from the history that the callback saw.
+/// With `rewritesSnapshotOnce`, only the first such callback pauses,
+/// and it writes back the history that it saw, as `history = history` would.
+private struct CallbackConflictProfile: LanguageModelSession.DynamicProfile {
+    let pausing: CallbackKind
+    let gates: ConflictRequestGates
+    var rewritesSnapshotOnce = false
+    private let hasEdited = Locked(false)
+
+    init(pausing: CallbackKind, gates: ConflictRequestGates, rewritesSnapshotOnce: Bool = false) {
+        self.pausing = pausing
+        self.gates = gates
+        self.rewritesSnapshotOnce = rewritesSnapshotOnce
+    }
+
+    var body: some LanguageModelSession.DynamicProfile {
+        let pausing = pausing
+        let gates = gates
+        let rewritesSnapshotOnce = rewritesSnapshotOnce
+        let hasEdited = hasEdited
+        @Sendable func pauseAndEdit(_ kind: CallbackKind) async {
+            guard kind == pausing else { return }
+            if rewritesSnapshotOnce {
+                let isFirst = hasEdited.withLock { hasEdited in
+                    defer { hasEdited = true }
+                    return !hasEdited
+                }
+                guard isFirst else { return }
+            }
+            guard let properties = SessionPropertyBinding.values else {
+                Issue.record("Expected session properties in the callback")
+                return
+            }
+            let history = properties.history
+            await gates.entered.open()
+            await gates.release.wait()
+            properties.history = rewritesSnapshotOnce ? history : history.filter { text(of: $0) != "Seed" }
+        }
+        return LanguageModelSession.Profile { Instructions("Callback conflicts") }
+            .model(ConflictModel())
+            .onActivate { await pauseAndEdit(.activate) }
+            .onPrompt { await pauseAndEdit(.prompt) }
+            .onToolCall { await pauseAndEdit(.toolCall) }
+            .onToolOutput { await pauseAndEdit(.toolOutput) }
+            .onReasoning { await pauseAndEdit(.reasoning) }
+            .onResponse { await pauseAndEdit(.response) }
     }
 }
 

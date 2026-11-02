@@ -532,6 +532,7 @@ actor ProfileLifecycle {
         prompt: Transcript.Prompt?,
         callbackState: ProfileCallbackState,
         historyEdits: Locked<[Transcript.Entry]?>,
+        historyVersion: Locked<UInt64?>,
         protectedEntryKeys: Set<TranscriptEntryKey> = []
     ) async throws {
         // Run no lifecycle action for a profile that can't make the request.
@@ -552,6 +553,7 @@ actor ProfileLifecycle {
                 prompt: prompt,
                 callbackState: callbackState,
                 historyEdits: historyEdits,
+                historyVersion: historyVersion,
                 protectedEntryKeys: protectedEntryKeys
             )
         }
@@ -578,12 +580,14 @@ actor ProfileLifecycle {
         prompt: Transcript.Prompt?,
         callbackState: ProfileCallbackState,
         historyEdits: Locked<[Transcript.Entry]?>,
+        historyVersion: Locked<UInt64?>,
         protectedEntryKeys: Set<TranscriptEntryKey>
     ) async throws {
         let history = properties.historyBinding(
             history,
             isWritable: true,
             protecting: protectedEntryKeys,
+            persistingAt: historyVersion,
             onChange: { updated in historyEdits.withLock { $0 = updated } }
         )
         try Task.checkCancellation()
@@ -603,6 +607,10 @@ actor ProfileLifecycle {
                 for action in profile.onActivate { await action() }
             }
             activeProfile = profile
+            // The hooks ran, so the profile is active even if their history edits weren't kept.
+            if history.hasConflict {
+                throw LanguageModelSession.DynamicProfileError.historyMutationWhileRunningCallback
+            }
         } else {
             activeProfile = profile
         }
@@ -616,6 +624,9 @@ actor ProfileLifecycle {
                 history: history
             ) {
                 for action in profile.onPrompt { try await action(prompt) }
+            }
+            if history.hasConflict {
+                throw LanguageModelSession.DynamicProfileError.historyMutationWhileRunningCallback
             }
         } catch {
             callbackState.release(prompt.id)
@@ -689,6 +700,21 @@ extension LanguageModelSession {
         /// AnyLanguageModel allows overlapping requests.
         case historyMutationWhileResolving
 
+        /// The session history changed before a profile callback edited it.
+        ///
+        /// A profile's lifecycle actions and its callbacks,
+        /// such as `onToolCall`, `onToolOutput`, `onReasoning`, and `onResponse`,
+        /// see the history from the request's latest snapshot.
+        /// The session keeps a callback's history edit only if
+        /// no other change happened since that snapshot,
+        /// such as a response from an overlapping request
+        /// or a direct `properties.history` write.
+        /// Otherwise, the session keeps the other change
+        /// and throws this error after the callback returns.
+        /// It doesn't keep that edit or any later edit in the request,
+        /// and the request fails like a request whose callback throws.
+        case historyMutationWhileRunningCallback
+
         public var errorDescription: String? {
             switch self {
             case .missingModel:
@@ -696,6 +722,9 @@ extension LanguageModelSession {
             case .historyMutationWhileResolving:
                 return
                     "The session history changed while the active dynamic profile edited it. The profile's edits weren't kept."
+            case .historyMutationWhileRunningCallback:
+                return
+                    "The session history changed before a dynamic profile callback edited it. The callback's edits weren't kept."
             }
         }
     }

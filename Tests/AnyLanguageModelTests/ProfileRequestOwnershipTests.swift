@@ -96,7 +96,12 @@ struct ProfileRequestOwnershipTests {
         // The pending round reuses the call ID and produces an identical output.
         let entries = durable + [.toolCalls(.init(id: "round-2", [call])), output]
         let pendingKeys = Set(keyedTranscriptEntries(entries).suffix(2).map(\.key))
-        let binding = session.properties.historyBinding(entries, isWritable: true, protecting: pendingKeys)
+        let binding = session.properties.historyBinding(
+            entries,
+            isWritable: true,
+            protecting: pendingKeys,
+            persistingAt: Locked(session.historyVersion)
+        )
 
         binding.entries = durable
         binding.persist(binding.entries)
@@ -115,7 +120,12 @@ struct ProfileRequestOwnershipTests {
         ]
         let entries = durable + pending
         let pendingKeys = Set(keyedTranscriptEntries(entries).suffix(2).map(\.key))
-        let binding = session.properties.historyBinding(entries, isWritable: true, protecting: pendingKeys)
+        let binding = session.properties.historyBinding(
+            entries,
+            isWritable: true,
+            protecting: pendingKeys,
+            persistingAt: Locked(session.historyVersion)
+        )
         let edited = Transcript.Entry.toolOutput(
             .init(id: call.id, toolName: call.toolName, segments: [.text(.init(content: "edited"))])
         )

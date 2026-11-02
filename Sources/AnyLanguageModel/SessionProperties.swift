@@ -85,13 +85,20 @@ public final class SessionPropertyValues: @unchecked Sendable {
     @ObservationIgnored private let customValues = Locked<[ObjectIdentifier: Any]>([:])
     @ObservationIgnored private let historyGetter: @Sendable () -> [Transcript.Entry]
     @ObservationIgnored private let historySetter: @Sendable ([Transcript.Entry]) -> Void
+    @ObservationIgnored private let historyReplacer: @Sendable ([Transcript.Entry], UInt64) -> UInt64?
 
+    /// Creates session properties backed by a session's history.
+    ///
+    /// `historyReplacer` replaces the history only if it's still at the given version,
+    /// and returns the new version, or `nil` if the history changed.
     init(
         historyGetter: @escaping @Sendable () -> [Transcript.Entry],
-        historySetter: @escaping @Sendable ([Transcript.Entry]) -> Void
+        historySetter: @escaping @Sendable ([Transcript.Entry]) -> Void,
+        historyReplacer: @escaping @Sendable ([Transcript.Entry], UInt64) -> UInt64?
     ) {
         self.historyGetter = historyGetter
         self.historySetter = historySetter
+        self.historyReplacer = historyReplacer
     }
 
     /// The canonical session history after dynamic instructions.
@@ -142,20 +149,45 @@ public final class SessionPropertyValues: @unchecked Sendable {
         }
     }
 
+    /// Returns a history binding for a profile, dynamic instructions, or a Tool.
+    ///
+    /// A writable binding with a `version` persists each write right away,
+    /// but only if the session history is still at that version,
+    /// which is the version that `entries` reflect.
+    /// A committed write moves `version` to the new history version.
+    /// Otherwise, the write isn't kept, `version` becomes `nil`
+    /// so that later writes aren't kept either,
+    /// and ``SessionHistoryBinding/hasConflict`` becomes `true`.
+    /// A writable binding without a version keeps its writes to itself.
     func historyBinding(
         _ entries: [Transcript.Entry],
         isWritable: Bool,
         protecting protectedEntryKeys: Set<TranscriptEntryKey> = [],
-        persists: Bool = true,
+        persistingAt version: Locked<UInt64?>? = nil,
         onChange: (@Sendable ([Transcript.Entry]) -> Void)? = nil
     ) -> SessionHistoryBinding {
+        let conflict = Locked(false)
         let persist: (@Sendable ([Transcript.Entry]) -> Void)?
-        if isWritable, persists {
-            persist = { [historySetter] updated in
-                onChange?(updated)
-                historySetter(
-                    removingProtectedTranscriptEntries(from: updated, protecting: protectedEntryKeys, in: entries)
+        if isWritable, let version {
+            persist = { [historyReplacer] updated in
+                let durable = removingProtectedTranscriptEntries(
+                    from: updated,
+                    protecting: protectedEntryKeys,
+                    in: entries
                 )
+                let isCommitted = version.withLock { base in
+                    guard let expected = base, let committed = historyReplacer(durable, expected) else {
+                        base = nil
+                        return false
+                    }
+                    base = committed
+                    return true
+                }
+                if isCommitted {
+                    onChange?(updated)
+                } else {
+                    conflict.withLock { $0 = true }
+                }
             }
         } else {
             persist = nil
@@ -164,6 +196,7 @@ public final class SessionPropertyValues: @unchecked Sendable {
             entries,
             isWritable: isWritable,
             protectedEntryKeys: protectedEntryKeys,
+            conflict: conflict,
             persist: persist
         )
     }
@@ -199,12 +232,14 @@ final class SessionHistoryBinding: @unchecked Sendable {
     private let protectedEntryKeys: Set<TranscriptEntryKey>
     private let protectedEntries: [Transcript.Entry]
     private let originalEntries: [Transcript.Entry]
+    private let conflict: Locked<Bool>
     private let persistValue: (@Sendable ([Transcript.Entry]) -> Void)?
 
     init(
         _ entries: [Transcript.Entry],
         isWritable: Bool,
         protectedEntryKeys: Set<TranscriptEntryKey> = [],
+        conflict: Locked<Bool> = Locked(false),
         persist: (@Sendable ([Transcript.Entry]) -> Void)? = nil
     ) {
         storage = Locked(
@@ -219,8 +254,13 @@ final class SessionHistoryBinding: @unchecked Sendable {
         self.protectedEntries = keyedTranscriptEntries(entries).filter { protectedEntryKeys.contains($0.key) }.map(
             \.entry
         )
+        self.conflict = conflict
         self.persistValue = persist
     }
+
+    /// Whether the session history changed after the snapshot that this binding reflects,
+    /// so that a write wasn't kept.
+    var hasConflict: Bool { conflict.withLock { $0 } }
 
     var entries: [Transcript.Entry] {
         get { storage.withLock { $0 } }
