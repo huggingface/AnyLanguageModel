@@ -97,7 +97,7 @@ Add this package to your `Package.swift`:
 
 ```swift
 dependencies: [
-    .package(url: "https://github.com/huggingface/AnyLanguageModel", from: "1.1.0")
+    .package(url: "https://github.com/huggingface/AnyLanguageModel", from: "1.1.1")
 ]
 ```
 
@@ -128,7 +128,7 @@ To enable specific traits, specify them in your package's dependencies:
 dependencies: [
     .package(
         url: "https://github.com/huggingface/AnyLanguageModel.git",
-        from: "1.1.0",
+        from: "1.1.1",
         traits: ["CoreML", "MLX"] // Enable CoreML and MLX support
     )
 ]
@@ -145,12 +145,12 @@ dependencies: [
 > dependencies: [
 >     .package(
 >         url: "https://github.com/huggingface/AnyLanguageModel.git",
->         from: "1.1.0",
+>         from: "1.1.1",
 >         traits: ["CoreML", "MLX", "Llama"]
 >     ),
->     .package(url: "https://github.com/huggingface/swift-transformers", from: "1.0.0"), // CoreML
->     .package(url: "https://github.com/ml-explore/mlx-swift-lm", from: "2.25.5"),       // MLX
->     .package(url: "https://github.com/mattt/llama.swift", from: "2.0.0"),              // Llama
+>     .package(url: "https://github.com/huggingface/swift-transformers", from: "1.0.0"),           // CoreML
+>     .package(url: "https://github.com/ml-explore/mlx-swift-lm", .upToNextMinor(from: "3.32.3")), // MLX
+>     .package(url: "https://github.com/mattt/llama.swift", .upToNextMajor(from: "2.10549.0")),    // Llama
 > ]
 > ```
 >
@@ -387,19 +387,22 @@ pass the model's multimodal projector with `mmprojPath:`.
 
 ### Prompt attachments
 
-Image attachments use the Foundation Models 27 prompt construction syntax:
+Image attachments use the Foundation Models 27 prompt construction syntax,
+including ordinary Tool outputs:
 
 ```swift
-let prompt = Prompt {
-    "Describe this image"
-    Attachment(imageURL: fileURL)
+func call(arguments: Arguments) async throws -> Prompt {
+    Prompt {
+        "Image read from the selected file"
+        Attachment(imageURL: fileURL)
+    }
 }
 ```
 
 On Apple platforms, `Attachment(CGImage, orientation:)` retains typed image
-content and orientation. Prompt builders preserve the order of text and images,
-and the OS 26 compatibility transcript continues to store images using its
-existing `Transcript.Segment.image` Codable representation.
+content and orientation. Prompts, builders, and Tool outputs preserve the order
+of text and images, and the OS 26 compatibility transcript continues to store
+images using its existing `Transcript.Segment.image` Codable representation.
 
 `SystemLanguageModel` and `FoundationLanguageModel` bridge prompt attachments
 to Foundation Models only in apps built with Swift 6.4 or later
@@ -409,9 +412,18 @@ they throw an error when a prompt has an attachment.
 The system bridge requires local file URLs; other provider adapters retain URL
 images in their existing transcript representation.
 
-This first compatibility surface covers prompt `CGImage` and `imageURL`
-attachments. Tool outputs, instruction attachments, labels, `CIImage`, pixel
-buffers, and newer data attachments remain outside this change.
+Ordinary Tool outputs read local image files once when the output is created,
+and retain the image bytes and MIME type in the compatibility transcript.
+Continuations and saved transcript replay therefore do not depend on the original
+file remaining at its URL. Remote image URLs are retained without downloading.
+
+Gemini supports images in Tool function responses only with Gemini 3 and later.
+In Gemini Tool outputs, remote image URLs are sent as text at their original
+position without downloading the image; the transcript retains the image segment.
+
+This compatibility surface covers `CGImage` and `imageURL` attachments in
+prompts and ordinary Tool outputs. Instruction attachments, labels, `CIImage`,
+pixel buffers, and newer data attachments remain outside this change.
 
 ### Tool Calling
 
@@ -839,6 +851,9 @@ When the provider answers with an error status,
 the model throws an `HTTPTransportError`
 with the response's status, headers, and body,
 so you can read a header such as `Retry-After`.
+Known provider error events in an HTTP 200 SSE stream also terminate the stream.
+They throw `HTTPTransportError` with `kind == .providerError`,
+the successful HTTP response, and the failed event's JSON data in `body`.
 Network failures throw the transport's own error,
 such as `URLError` or AsyncHTTPClient's `HTTPClientError`.
 
@@ -895,6 +910,10 @@ say which API they follow.
   [image inputs](#image-inputs).
   Foundation Models 27-style [prompt attachments](#prompt-attachments) are also
   available for ordered text and image prompt construction.
+- `Tool.makeOutputSegments(from:)`, exposed only through the `Compatibility` SPI:
+  an integration extension for back-deployment provider adapters to lower normal
+  Tool outputs into the compatibility transcript. It is not an Apple Tool API;
+  OS 27 canonical executors use Foundation Models' own Tool execution instead.
 - `ToolExecutionDelegate`, `ToolExecutionDecision`, and `toolExecutionDelegate`:
   [observing and controlling tool calls](#tool-calling).
 - `transcriptErrorHandlingPolicy` and `waitForResponseCompletion()`:
@@ -1037,7 +1056,7 @@ Enable the trait in Package.swift:
 ```swift
 .package(
     url: "https://github.com/huggingface/AnyLanguageModel.git",
-    from: "1.1.0",
+    from: "1.1.1",
     traits: ["CoreML"]
 )
 ```
@@ -1134,7 +1153,7 @@ Enable the trait in Package.swift:
 ```swift
 .package(
     url: "https://github.com/huggingface/AnyLanguageModel.git",
-    from: "1.1.0",
+    from: "1.1.1",
     traits: ["MLX"]
 )
 ```
@@ -1158,7 +1177,7 @@ Enable the trait in Package.swift:
 ```swift
 .package(
     url: "https://github.com/huggingface/AnyLanguageModel.git",
-    from: "1.1.0",
+    from: "1.1.1",
     traits: ["Llama"]
 )
 ```
@@ -1526,11 +1545,15 @@ swift test --traits CoreML,Llama
 > + .default(enabledTraits: ["MLX"]),
 > ```
 > 
+> The `-skipMacroValidation` flag allows the `MLXHuggingFaceMacros` macro
+> to run without prior approval in Xcode.
+>
 > Pass environment variables with `TEST_RUNNER_` prefix:
 >
 > ```bash
 > export TEST_RUNNER_HF_TOKEN=your_huggingface_token
 > xcodebuild test \
+>   -skipMacroValidation \
 >   -scheme AnyLanguageModel \
 >   -destination 'platform=macOS' \
 >   -only-testing:AnyLanguageModelTests/MLXLanguageModelTests

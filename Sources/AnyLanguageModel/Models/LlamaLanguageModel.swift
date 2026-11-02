@@ -981,7 +981,7 @@ import Foundation
                 if includeSchemaInPrompt {
                     fullPrompt = try formatPrompt(
                         requestContext: requestContext,
-                        extraSystemMessage: schemaPrompt(for: schema),
+                        extraSystemMessage: schema.schemaPrompt(),
                         assistantPrefill: runtimeOptions.assistantPrefill,
                         imageMarker: imageMarker,
                         images: &promptImages
@@ -1412,39 +1412,6 @@ import Foundation
             llama_sampler_chain_add(sampler, llama_sampler_init_temp(effectiveTemperature))
             llama_sampler_chain_add(sampler, llama_sampler_init_dist(options.seed))
         }
-
-        /// Builds a JSONSchema-informed prompt for structured output.
-        private func schemaPrompt(for schema: GenerationSchema) -> String {
-            let encoder = JSONEncoder()
-            encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
-            guard
-                let data = try? encoder.encode(schema),
-                let jsonSchema = try? JSONDecoder().decode(JSONSchema.self, from: data),
-                let schemaJSON = String(data: data, encoding: .utf8)
-            else {
-                return schema.schemaPrompt()
-            }
-
-            var header = "Respond with valid JSON matching this \(jsonSchema.typeName) schema"
-            if let description = jsonSchema.description, !description.isEmpty {
-                header += " (\(description))"
-            }
-
-            if let constValue = jsonSchema.const,
-                let data = try? encoder.encode(constValue),
-                let constString = String(data: data, encoding: .utf8)
-            {
-                header += ". Expected value: \(constString)"
-            } else if let enumValues = jsonSchema.enum, !enumValues.isEmpty,
-                let data = try? encoder.encode(enumValues),
-                let enumString = String(data: data, encoding: .utf8)
-            {
-                header += ". Allowed values: \(enumString)"
-            }
-
-            return "\(header):\n\(schemaJSON)"
-        }
-
         // MARK: - Structured JSON Generation
 
         private func generateStructuredJSON(

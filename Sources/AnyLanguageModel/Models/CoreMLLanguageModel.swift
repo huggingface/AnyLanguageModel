@@ -461,7 +461,7 @@
             if let chatTemplateHandler = chatTemplateHandler {
                 var messages = chatTemplateHandler(requestContext.instructions, prompt)
                 if includeSchemaInPrompt {
-                    let schemaPrompt = schemaPrompt(for: schema)
+                    let schemaPrompt = schema.schemaPrompt()
                     if !schemaPrompt.isEmpty {
                         messages.insert(["role": "system", "content": schemaPrompt], at: 0)
                     }
@@ -472,45 +472,13 @@
 
             var text = prompt.description
             if includeSchemaInPrompt {
-                let schemaPrompt = schemaPrompt(for: schema)
+                let schemaPrompt = schema.schemaPrompt()
                 if !schemaPrompt.isEmpty {
                     text = "\(schemaPrompt)\n\n\(text)"
                 }
             }
             return tokenizer.encode(text: text)
         }
-
-        private func schemaPrompt(for schema: GenerationSchema) -> String {
-            let encoder = JSONEncoder()
-            encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
-            guard
-                let data = try? encoder.encode(schema),
-                let jsonSchema = try? JSONDecoder().decode(JSONSchema.self, from: data),
-                let schemaJSON = String(data: data, encoding: .utf8)
-            else {
-                return schema.schemaPrompt()
-            }
-
-            var header = "Respond with valid JSON matching this \(jsonSchema.typeName) schema"
-            if let description = jsonSchema.description, !description.isEmpty {
-                header += " (\(description))"
-            }
-
-            if let constValue = jsonSchema.const,
-                let data = try? encoder.encode(constValue),
-                let constString = String(data: data, encoding: .utf8)
-            {
-                header += ". Expected value: \(constString)"
-            } else if let enumValues = jsonSchema.enum, !enumValues.isEmpty,
-                let data = try? encoder.encode(enumValues),
-                let enumString = String(data: data, encoding: .utf8)
-            {
-                header += ". Allowed values: \(enumString)"
-            }
-
-            return "\(header):\n\(schemaJSON)"
-        }
-
         private struct CoreMLTokenBackend: TokenBackend {
             let model: Models.LanguageModel
             let tokenizer: any Tokenizer

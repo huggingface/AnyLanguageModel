@@ -106,6 +106,7 @@ import Testing
         let response = try await session.respond(options: options) {
             Prompt("Say 'Hello'")
         }
+        attachResponse(response)
         #expect(!response.content.isEmpty)
 
         let stream = session.streamResponse {
