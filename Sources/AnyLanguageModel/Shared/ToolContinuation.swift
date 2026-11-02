@@ -42,15 +42,35 @@ func mergingTranscriptEntries(
     return result
 }
 
+// Match protected entries by their round-scoped key, not by value,
+// so that an identical output from an earlier round stays
+// and an edited copy of a pending entry doesn't survive.
+// A write can remove a pending output's parent and so change its key;
+// an output whose key isn't durable in `original`
+// and whose call ID belongs to a protected output is still pending.
 func removingProtectedTranscriptEntries(
     from entries: [Transcript.Entry],
-    protecting protected: [Transcript.Entry]
+    protecting protectedKeys: Set<TranscriptEntryKey>,
+    in original: [Transcript.Entry]
 ) -> [Transcript.Entry] {
-    var result = entries
-    for entry in protected.reversed() {
-        if let index = result.lastIndex(of: entry) { result.remove(at: index) }
-    }
-    return result
+    guard !protectedKeys.isEmpty else { return entries }
+    let originalKeys = keyedTranscriptEntries(original).map(\.key)
+    let durableKeys = Set(originalKeys.filter { !protectedKeys.contains($0) })
+    let protectedCallIDs = Set(
+        originalKeys.compactMap { key -> String? in
+            guard protectedKeys.contains(key), case .toolOutput(_, let call) = key else { return nil }
+            return call
+        }
+    )
+    return keyedTranscriptEntries(entries)
+        .filter { item in
+            if protectedKeys.contains(item.key) { return false }
+            if case .toolOutput(_, let call) = item.key, !durableKeys.contains(item.key) {
+                return !protectedCallIDs.contains(call)
+            }
+            return true
+        }
+        .map(\.entry)
 }
 
 func toolContinuationMessages<Message>(

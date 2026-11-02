@@ -138,15 +138,15 @@ public final class SessionPropertyValues: @unchecked Sendable {
         _ entries: [Transcript.Entry],
         isWritable: Bool,
         protecting protectedEntryKeys: Set<TranscriptEntryKey> = [],
+        persists: Bool = true,
         onChange: (@Sendable ([Transcript.Entry]) -> Void)? = nil
     ) -> SessionHistoryBinding {
-        let protected = keyedTranscriptEntries(entries).filter { protectedEntryKeys.contains($0.key) }.map(\.entry)
         let persist: (@Sendable ([Transcript.Entry]) -> Void)?
-        if isWritable {
+        if isWritable, persists {
             persist = { [historySetter] updated in
                 onChange?(updated)
                 historySetter(
-                    removingProtectedTranscriptEntries(from: updated, protecting: protected)
+                    removingProtectedTranscriptEntries(from: updated, protecting: protectedEntryKeys, in: entries)
                 )
             }
         } else {
@@ -188,7 +188,9 @@ enum SessionPropertyBinding {
 final class SessionHistoryBinding: @unchecked Sendable {
     private let storage: Locked<[Transcript.Entry]>
     let isWritable: Bool
+    private let protectedEntryKeys: Set<TranscriptEntryKey>
     private let protectedEntries: [Transcript.Entry]
+    private let originalEntries: [Transcript.Entry]
     private let persistValue: (@Sendable ([Transcript.Entry]) -> Void)?
 
     init(
@@ -204,6 +206,8 @@ final class SessionHistoryBinding: @unchecked Sendable {
             }
         )
         self.isWritable = isWritable
+        self.protectedEntryKeys = protectedEntryKeys
+        self.originalEntries = entries
         self.protectedEntries = keyedTranscriptEntries(entries).filter { protectedEntryKeys.contains($0.key) }.map(
             \.entry
         )
@@ -215,7 +219,11 @@ final class SessionHistoryBinding: @unchecked Sendable {
         set {
             storage.withLock { current in
                 current =
-                    removingProtectedTranscriptEntries(from: newValue, protecting: protectedEntries)
+                    removingProtectedTranscriptEntries(
+                        from: newValue,
+                        protecting: protectedEntryKeys,
+                        in: originalEntries
+                    )
                     + protectedEntries
             }
         }

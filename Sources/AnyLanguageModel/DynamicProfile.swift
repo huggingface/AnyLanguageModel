@@ -542,7 +542,9 @@ actor ProfileLifecycle {
         nextPreparationID += 1
         let id = nextPreparationID
         let task = Task {
+            // Wait for the previous preparation without cancelling it.
             _ = try? await previous?.value
+            try Task.checkCancellation()
             try await self.performPreparation(
                 profile,
                 properties: properties,
@@ -555,7 +557,13 @@ actor ProfileLifecycle {
         }
         pendingPreparation = (id, task)
         do {
-            try await task.value
+            // The preparation runs in an unstructured task so that it stays ordered
+            // after its predecessor; forward the request's cancellation to it.
+            try await withTaskCancellationHandler {
+                try await task.value
+            } onCancel: {
+                task.cancel()
+            }
             if pendingPreparation?.id == id { pendingPreparation = nil }
         } catch {
             if pendingPreparation?.id == id { pendingPreparation = nil }
@@ -578,6 +586,7 @@ actor ProfileLifecycle {
             protecting: protectedEntryKeys,
             onChange: { updated in historyEdits.withLock { $0 = updated } }
         )
+        try Task.checkCancellation()
         if activeProfile?.identity != profile.identity {
             if let previous = activeProfile {
                 await withBindings(
@@ -598,7 +607,9 @@ actor ProfileLifecycle {
             activeProfile = profile
         }
 
-        guard let prompt, callbackState.reserve(prompt.id) else { return }
+        guard let prompt else { return }
+        try Task.checkCancellation()
+        guard callbackState.reserve(prompt.id) else { return }
         do {
             try await withBindings(
                 properties: properties,
