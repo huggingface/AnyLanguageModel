@@ -5,6 +5,8 @@ import Testing
 
 #if MLX
     import class MLX.MLXArray
+    import enum MLX.MLXError
+    import func MLX.save
     import struct MLXLMCommon.DefaultMessageGenerator
     import struct MLXLMCommon.LMInput
     import struct MLXLMCommon.ToolCall
@@ -688,6 +690,135 @@ import Testing
 
             let results = messages.filter { $0["role"] as? String == "tool" }.map { $0["content"] as? String }
             #expect(results == ["before\n<image>\nafter", "<image>"])
+        }
+    }
+
+    private let shouldRunLocalMLXTests = {
+        if ProcessInfo.processInfo.environment["ENABLE_MLX_TESTS"] != nil {
+            return true
+        }
+        if ProcessInfo.processInfo.environment["CI"] != nil {
+            return false
+        }
+        // MLX needs its Metal library, which only xcodebuild provides.
+        return ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] != nil
+    }()
+
+    // These tests load a tiny model from a temporary directory, so they download nothing.
+    @Suite("MLXLanguageModel errors", .enabled(if: shouldRunLocalMLXTests), .serialized)
+    struct MLXErrorTests {
+        // After the MLX error, mlx-swift-lm 3.32.3 indexes the empty logits in
+        // `TokenIterator.convertToToken(logits:)`, and that Swift trap can't be caught.
+        @Test(.disabled("mlx-swift-lm traps on the logits of a failed forward pass"))
+        func respondThrowsMLXError() async throws {
+            let model = try Self.mismatchedModel()
+            let session = LanguageModelSession(model: model)
+
+            await #expect(throws: MLXError.self) {
+                _ = try await session.respond(to: "hello")
+            }
+        }
+
+        // After the MLX error, mlx-swift-lm 3.32.3 indexes the empty logits in
+        // `TokenIterator.convertToToken(logits:)`, and that Swift trap can't be caught.
+        @Test(.disabled("mlx-swift-lm traps on the logits of a failed forward pass"))
+        func streamResponseThrowsMLXError() async throws {
+            let model = try Self.mismatchedModel()
+            let session = LanguageModelSession(model: model)
+
+            await #expect(throws: MLXError.self) {
+                for try await _ in session.streamResponse(to: "hello") {}
+            }
+        }
+
+        @Test func structuredResponseThrowsMLXError() async throws {
+            let model = try Self.mismatchedModel()
+            let session = LanguageModelSession(model: model)
+
+            await #expect(throws: MLXError.self) {
+                _ = try await session.respond(to: "hello", generating: Int.self)
+            }
+        }
+
+        @Test func prewarmIgnoresMLXError() async throws {
+            let model = try Self.mismatchedModel()
+            let session = LanguageModelSession(model: model, instructions: "hello")
+
+            await model.prewarmSessionCache(for: session)
+        }
+
+        /// Writes a Llama model whose weights match its configuration,
+        /// but whose 3 attention heads can't share 2 key-value heads.
+        /// MLX reports this when it builds the attention graph for the prompt.
+        private static func mismatchedModel() throws -> MLXLanguageModel {
+            let directory = FileManager.default.temporaryDirectory
+                .appendingPathComponent("AnyLanguageModel-MLXErrorTests-\(UUID().uuidString)")
+            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+
+            let hiddenSize = 16
+            let headDimensions = 4
+            let attentionHeads = 3
+            let kvHeads = 2
+            let intermediateSize = 32
+            let letters = "abcdefghijklmnopqrstuvwxyz".map(String.init)
+            let vocabulary = ["<unk>", "</s>"] + letters
+
+            let config: [String: Any] = [
+                "model_type": "llama",
+                "hidden_size": hiddenSize,
+                "num_hidden_layers": 1,
+                "intermediate_size": intermediateSize,
+                "num_attention_heads": attentionHeads,
+                "num_key_value_heads": kvHeads,
+                "head_dim": headDimensions,
+                "rms_norm_eps": 1e-5,
+                "vocab_size": vocabulary.count,
+                "tie_word_embeddings": true,
+                "eos_token_id": 1,
+            ]
+            let tokenizer: [String: Any] = [
+                "model": [
+                    "type": "BPE",
+                    "vocab": Dictionary(uniqueKeysWithValues: vocabulary.enumerated().map { ($1, $0) }),
+                    "merges": [String](),
+                ],
+                "added_tokens": [
+                    ["id": 0, "content": "<unk>", "special": true],
+                    ["id": 1, "content": "</s>", "special": true],
+                ],
+            ]
+            let tokenizerConfig: [String: Any] = [
+                "tokenizer_class": "PreTrainedTokenizer",
+                "unk_token": "<unk>",
+                "eos_token": "</s>",
+                "chat_template": "{% for message in messages %}{{ message['content'] }}{% endfor %}",
+            ]
+            for (name, object) in [
+                ("config.json", config),
+                ("tokenizer.json", tokenizer),
+                ("tokenizer_config.json", tokenizerConfig),
+            ] {
+                try JSONSerialization.data(withJSONObject: object)
+                    .write(to: directory.appendingPathComponent(name))
+            }
+
+            let layer = "model.layers.0"
+            let weights: [String: MLXArray] = [
+                "model.embed_tokens.weight": MLXArray.zeros([vocabulary.count, hiddenSize]),
+                "\(layer).self_attn.q_proj.weight": MLXArray.zeros([attentionHeads * headDimensions, hiddenSize]),
+                "\(layer).self_attn.k_proj.weight": MLXArray.zeros([kvHeads * headDimensions, hiddenSize]),
+                "\(layer).self_attn.v_proj.weight": MLXArray.zeros([kvHeads * headDimensions, hiddenSize]),
+                "\(layer).self_attn.o_proj.weight": MLXArray.zeros([hiddenSize, attentionHeads * headDimensions]),
+                "\(layer).mlp.gate_proj.weight": MLXArray.zeros([intermediateSize, hiddenSize]),
+                "\(layer).mlp.up_proj.weight": MLXArray.zeros([intermediateSize, hiddenSize]),
+                "\(layer).mlp.down_proj.weight": MLXArray.zeros([hiddenSize, intermediateSize]),
+                "\(layer).input_layernorm.weight": MLXArray.ones([hiddenSize]),
+                "\(layer).post_attention_layernorm.weight": MLXArray.ones([hiddenSize]),
+                "model.norm.weight": MLXArray.ones([hiddenSize]),
+            ]
+            try save(arrays: weights, url: directory.appendingPathComponent("model.safetensors"))
+
+            return MLXLanguageModel(modelId: directory.lastPathComponent, directory: directory)
         }
     }
 #endif  // MLX

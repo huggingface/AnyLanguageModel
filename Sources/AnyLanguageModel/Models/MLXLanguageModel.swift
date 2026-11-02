@@ -177,6 +177,20 @@ import Foundation
         }
     }
 
+    /// Runs `body` so that MLX errors throw instead of stopping the process.
+    ///
+    /// After an error, MLX returns empty arrays, and later code can fail on them.
+    /// The first MLX error takes precedence over the error that follows it.
+    private func withMLXErrors<R>(_ body: (ErrorBox) async throws -> R) async throws -> R {
+        try await withError { mlxErrors in
+            do {
+                return try await body(mlxErrors)
+            } catch {
+                throw mlxErrors.firstError ?? error
+            }
+        }
+    }
+
     /// Shared cache across MLXLanguageModel instances.
     private nonisolated(unsafe) let modelCache = ModelContextCache(countLimit: 3)
 
@@ -746,25 +760,27 @@ import Foundation
             let key = directory?.absoluteString ?? modelId
 
             return try await modelCache.context(for: key) {
-                // mlx-swift-lm 3 requires explicit downloader and tokenizer loaders,
-                // macros resolve them to be backed by HubClient, AutoTokenizer.
-                if let directory {
-                    return try await loadModel(from: directory, using: #huggingFaceTokenizerLoader())
-                }
+                try await withMLXErrors { _ in
+                    // mlx-swift-lm 3 requires explicit downloader and tokenizer loaders,
+                    // macros resolve them to be backed by HubClient, AutoTokenizer.
+                    if let directory {
+                        return try await loadModel(from: directory, using: #huggingFaceTokenizerLoader())
+                    }
 
-                if let hub {
+                    if let hub {
+                        return try await loadModel(
+                            from: #hubDownloader(hub),
+                            using: #huggingFaceTokenizerLoader(),
+                            id: modelId
+                        )
+                    }
+
                     return try await loadModel(
-                        from: #hubDownloader(hub),
+                        from: #hubDownloader(),
                         using: #huggingFaceTokenizerLoader(),
                         id: modelId
                     )
                 }
-
-                return try await loadModel(
-                    from: #hubDownloader(),
-                    using: #huggingFaceTokenizerLoader(),
-                    id: modelId
-                )
             }
         }
 
@@ -1081,6 +1097,28 @@ import Foundation
             includeSchemaInPrompt: Bool,
             options: GenerationOptions
         ) async throws -> LanguageModelSession.Response<Content> where Content: Generable {
+            try await withMLXErrors { mlxErrors in
+                try await generateResponse(
+                    within: session,
+                    to: prompt,
+                    generating: type,
+                    schema: schema,
+                    includeSchemaInPrompt: includeSchemaInPrompt,
+                    options: options,
+                    mlxErrors: mlxErrors
+                )
+            }
+        }
+
+        private func generateResponse<Content>(
+            within session: LanguageModelSession,
+            to prompt: Prompt,
+            generating type: Content.Type,
+            schema: GenerationSchema,
+            includeSchemaInPrompt: Bool,
+            options: GenerationOptions,
+            mlxErrors: ErrorBox
+        ) async throws -> LanguageModelSession.Response<Content> where Content: Generable {
             guard Self.acquireGenerationSlot(for: session) else {
                 throw Self.concurrentSessionError()
             }
@@ -1163,6 +1201,8 @@ import Foundation
                 var rejectedToolCall: MLXLMCommon.RejectedToolCall?
 
                 for await item in stream {
+                    // Stop reading after an MLX error; leaving the stream cancels generation.
+                    if mlxErrors.firstError != nil { break }
                     switch item {
                     case .chunk(let text):
                         chunks.append(text)
@@ -1179,6 +1219,10 @@ import Foundation
                     case .rejectedToolCall(let rejection):
                         rejectedToolCall = rejectedToolCall ?? rejection
                     }
+                }
+                if let error = mlxErrors.firstError {
+                    removeSessionCache(for: session)
+                    throw error
                 }
                 if let rejectedToolCall {
                     removeSessionCache(for: session)
@@ -1338,136 +1382,145 @@ import Foundation
                     }
 
                     do {
-                        // Get cached or load fresh ModelContext
-                        let loaded = try await loadContext(modelId: modelId, hub: hub, directory: directory)
-                        defer { withExtendedLifetime(loaded) {} }
-                        let context = loaded.context
+                        try await withMLXErrors { mlxErrors in
+                            // Get cached or load fresh ModelContext
+                            let loaded = try await loadContext(modelId: modelId, hub: hub, directory: directory)
+                            defer { withExtendedLifetime(loaded) {} }
+                            let context = loaded.context
 
-                        // Build chat inside task to avoid Sendable issues
-                        let generateParameters = toGenerateParameters(options)
-                        let additionalContext = options[custom: MLXLanguageModel.self]?.additionalContextForUserInput
-                        let userInputProcessing =
-                            options[custom: MLXLanguageModel.self]?.processingForUserInput
-                            ?? .init(resize: nil)
-                        var pendingChat: [MLXLMCommon.Chat.Message] = []
+                            // Build chat inside task to avoid Sendable issues
+                            let generateParameters = toGenerateParameters(options)
+                            let additionalContext =
+                                options[custom: MLXLanguageModel.self]?.additionalContextForUserInput
+                            let userInputProcessing =
+                                options[custom: MLXLanguageModel.self]?.processingForUserInput
+                                ?? .init(resize: nil)
+                            var pendingChat: [MLXLMCommon.Chat.Message] = []
 
-                        // Accumulators live outside the tool loop so streamed snapshots stay
-                        // monotonic across rounds: text never shrinks, entries only grow.
-                        var usage = RequestsUsage()
-                        var accumulatedText = ""
-                        var accumulatedEntries: [Transcript.Entry] = []
-                        var toolRounds = ToolRoundLimit(provider: "MLX", options: options)
+                            // Accumulators live outside the tool loop so streamed snapshots stay
+                            // monotonic across rounds: text never shrinks, entries only grow.
+                            var usage = RequestsUsage()
+                            var accumulatedText = ""
+                            var accumulatedEntries: [Transcript.Entry] = []
+                            var toolRounds = ToolRoundLimit(provider: "MLX", options: options)
 
-                        // Yields a snapshot carrying the cumulative text and tool entries so far.
-                        func yieldSnapshot() {
-                            let raw = GeneratedContent(accumulatedText)
-                            let content: Content.PartiallyGenerated = (accumulatedText as! Content)
-                                .asPartiallyGenerated()
-                            continuation.yield(
-                                .init(
-                                    content: content,
-                                    rawContent: raw,
-                                    transcriptEntries: ArraySlice(accumulatedEntries),
-                                    requests: usage
+                            // Yields a snapshot carrying the cumulative text and tool entries so far.
+                            func yieldSnapshot() {
+                                let raw = GeneratedContent(accumulatedText)
+                                let content: Content.PartiallyGenerated = (accumulatedText as! Content)
+                                    .asPartiallyGenerated()
+                                continuation.yield(
+                                    .init(
+                                        content: content,
+                                        rawContent: raw,
+                                        transcriptEntries: ArraySlice(accumulatedEntries),
+                                        requests: usage
+                                    )
                                 )
-                            )
-                        }
+                            }
 
-                        // Loop until the model stops without pending tool calls (mirrors `respond()`).
-                        toolLoop: while true {
-                            let requestContext = session.resolvedRequestContext()
-                            // MLX has no tool-choice setting.
-                            let tools = options.toolsOffered(from: requestContext.tools)
-                            let toolSpecs = mlxToolSpecs(for: tools)
-                            let chat =
-                                convertTranscriptToMLXChat(
-                                    requestContext: requestContext,
-                                    fallbackPrompt: prompt.description
-                                ) + pendingChat
-                            let userInput = makeUserInput(
-                                chat: chat,
-                                tools: toolSpecs,
-                                processing: userInputProcessing,
-                                additionalContext: additionalContext
-                            )
-                            let lmInput = try await context.processor.prepare(input: userInput)
-                            let resolved = try startGeneration(
-                                session: session,
-                                lmInput: lmInput,
-                                generateParameters: generateParameters,
-                                context: context
-                            )
-                            let mlxStream = resolved.stream
+                            // Loop until the model stops without pending tool calls (mirrors `respond()`).
+                            toolLoop: while true {
+                                let requestContext = session.resolvedRequestContext()
+                                // MLX has no tool-choice setting.
+                                let tools = options.toolsOffered(from: requestContext.tools)
+                                let toolSpecs = mlxToolSpecs(for: tools)
+                                let chat =
+                                    convertTranscriptToMLXChat(
+                                        requestContext: requestContext,
+                                        fallbackPrompt: prompt.description
+                                    ) + pendingChat
+                                let userInput = makeUserInput(
+                                    chat: chat,
+                                    tools: toolSpecs,
+                                    processing: userInputProcessing,
+                                    additionalContext: additionalContext
+                                )
+                                let lmInput = try await context.processor.prepare(input: userInput)
+                                let resolved = try startGeneration(
+                                    session: session,
+                                    lmInput: lmInput,
+                                    generateParameters: generateParameters,
+                                    context: context
+                                )
+                                let mlxStream = resolved.stream
 
-                            let roundStartTextCount = accumulatedText.count
-                            var collectedToolCalls: [MLXLMCommon.ToolCall] = []
-                            var rejectedToolCall: MLXLMCommon.RejectedToolCall?
+                                let roundStartTextCount = accumulatedText.count
+                                var collectedToolCalls: [MLXLMCommon.ToolCall] = []
+                                var rejectedToolCall: MLXLMCommon.RejectedToolCall?
 
-                            for await item in mlxStream {
-                                if Task.isCancelled { break toolLoop }
+                                for await item in mlxStream {
+                                    if Task.isCancelled { break toolLoop }
+                                    // Stop reading after an MLX error; leaving the stream cancels generation.
+                                    if mlxErrors.firstError != nil { break }
 
-                                switch item {
-                                case .chunk(let text):
-                                    accumulatedText += text
-                                    yieldSnapshot()
-                                case .toolCall(let call):
-                                    collectedToolCalls.append(call)
-                                case .rejectedToolCall(let rejection):
-                                    rejectedToolCall = rejectedToolCall ?? rejection
-                                case .info(let info):
-                                    usage.add(
-                                        LocalGenerationUsage(
-                                            promptTokenCount: lmInput.text.tokens.size,
-                                            cachedTokenCount: resolved.cachedTokenCount,
-                                            generatedTokenCount: info.generationTokenCount
-                                        ).value
+                                    switch item {
+                                    case .chunk(let text):
+                                        accumulatedText += text
+                                        yieldSnapshot()
+                                    case .toolCall(let call):
+                                        collectedToolCalls.append(call)
+                                    case .rejectedToolCall(let rejection):
+                                        rejectedToolCall = rejectedToolCall ?? rejection
+                                    case .info(let info):
+                                        usage.add(
+                                            LocalGenerationUsage(
+                                                promptTokenCount: lmInput.text.tokens.size,
+                                                cachedTokenCount: resolved.cachedTokenCount,
+                                                generatedTokenCount: info.generationTokenCount
+                                            ).value
+                                        )
+                                        yieldSnapshot()
+                                    }
+                                }
+                                if let error = mlxErrors.firstError {
+                                    removeSessionCache(for: session)
+                                    throw error
+                                }
+                                if let rejectedToolCall {
+                                    removeSessionCache(for: session)
+                                    throw MLXLMCommon.RejectedToolCallError(rejectedToolCall)
+                                }
+
+                                storeSessionCache(
+                                    cache: resolved.cache,
+                                    fullTokens: resolved.fullTokens,
+                                    state: resolved.state,
+                                    generateParameters: generateParameters,
+                                    session: session
+                                )
+
+                                guard !collectedToolCalls.isEmpty else { break }
+
+                                try toolRounds.record(completed: accumulatedEntries)
+
+                                let resolution = try await resolveToolCalls(
+                                    collectedToolCalls,
+                                    tools: requestContext.toolsForExecution(in: session, offeredTools: tools),
+                                    session: session
+                                )
+                                switch resolution {
+                                case .stop(let calls):
+                                    if !calls.isEmpty {
+                                        accumulatedEntries.append(.toolCalls(Transcript.ToolCalls(calls)))
+                                        yieldSnapshot()
+                                    }
+                                    break toolLoop
+                                case .invocations(let invocations):
+                                    if invocations.isEmpty { break toolLoop }
+
+                                    accumulatedEntries.append(
+                                        .toolCalls(Transcript.ToolCalls(invocations.map(\.call)))
+                                    )
+                                    for invocation in invocations {
+                                        accumulatedEntries.append(.toolOutput(invocation.output))
+                                    }
+                                    pendingChat += toolCallMessages(
+                                        for: invocations,
+                                        text: String(accumulatedText.dropFirst(roundStartTextCount))
                                     )
                                     yieldSnapshot()
                                 }
-                            }
-                            if let rejectedToolCall {
-                                removeSessionCache(for: session)
-                                throw MLXLMCommon.RejectedToolCallError(rejectedToolCall)
-                            }
-
-                            storeSessionCache(
-                                cache: resolved.cache,
-                                fullTokens: resolved.fullTokens,
-                                state: resolved.state,
-                                generateParameters: generateParameters,
-                                session: session
-                            )
-
-                            guard !collectedToolCalls.isEmpty else { break }
-
-                            try toolRounds.record(completed: accumulatedEntries)
-
-                            let resolution = try await resolveToolCalls(
-                                collectedToolCalls,
-                                tools: requestContext.toolsForExecution(in: session, offeredTools: tools),
-                                session: session
-                            )
-                            switch resolution {
-                            case .stop(let calls):
-                                if !calls.isEmpty {
-                                    accumulatedEntries.append(.toolCalls(Transcript.ToolCalls(calls)))
-                                    yieldSnapshot()
-                                }
-                                break toolLoop
-                            case .invocations(let invocations):
-                                if invocations.isEmpty { break toolLoop }
-
-                                accumulatedEntries.append(
-                                    .toolCalls(Transcript.ToolCalls(invocations.map(\.call)))
-                                )
-                                for invocation in invocations {
-                                    accumulatedEntries.append(.toolOutput(invocation.output))
-                                }
-                                pendingChat += toolCallMessages(
-                                    for: invocations,
-                                    text: String(accumulatedText.dropFirst(roundStartTextCount))
-                                )
-                                yieldSnapshot()
                             }
                         }
 
@@ -1525,50 +1578,53 @@ import Foundation
             defer { endGenerationScope(generationScope) }
 
             do {
-                let loaded = try await loadContext(modelId: modelId, hub: hub, directory: directory)
-                defer { withExtendedLifetime(loaded) {} }
-                let context = loaded.context
-                let requestContext = session.resolvedRequestContext()
-                guard let instructions = requestContext.instructions?.description, !instructions.isEmpty else {
-                    return
-                }
-
-                let toolSpecs = mlxToolSpecs(for: requestContext.tools)
-
-                let params = toGenerateParameters(.init())
-                let newCache = try context.model.newCache(parameters: params)
-                let userInput = MLXLMCommon.UserInput(
-                    chat: [.init(role: .system, content: instructions)],
-                    processing: .init(resize: nil),
-                    tools: toolSpecs
-                )
-                let lmInput = try await context.processor.prepare(input: userInput)
-                let prepareResult = try context.model.prepare(
-                    lmInput,
-                    cache: newCache,
-                    state: nil,
-                    prefill: params.prefill
-                )
-                // `prepare` can leave the last chunk for the first decoding step;
-                // evaluate it so that the cache holds every token.
-                var state: MLXLMCommon.LMOutput.State?
-                switch prepareResult {
-                case .logits(let output):
-                    state = output.state
-                case .tokens(let remaining):
-                    if remaining.tokens.size > 0 {
-                        let output = context.model(remaining[text: .newAxis], cache: newCache, state: nil)
-                        eval(newCache)
-                        state = output.state
+                try await withMLXErrors { mlxErrors in
+                    let loaded = try await loadContext(modelId: modelId, hub: hub, directory: directory)
+                    defer { withExtendedLifetime(loaded) {} }
+                    let context = loaded.context
+                    let requestContext = session.resolvedRequestContext()
+                    guard let instructions = requestContext.instructions?.description, !instructions.isEmpty else {
+                        return
                     }
+
+                    let toolSpecs = mlxToolSpecs(for: requestContext.tools)
+
+                    let params = toGenerateParameters(.init())
+                    let newCache = try context.model.newCache(parameters: params)
+                    let userInput = MLXLMCommon.UserInput(
+                        chat: [.init(role: .system, content: instructions)],
+                        processing: .init(resize: nil),
+                        tools: toolSpecs
+                    )
+                    let lmInput = try await context.processor.prepare(input: userInput)
+                    let prepareResult = try context.model.prepare(
+                        lmInput,
+                        cache: newCache,
+                        state: nil,
+                        prefill: params.prefill
+                    )
+                    // `prepare` can leave the last chunk for the first decoding step;
+                    // evaluate it so that the cache holds every token.
+                    var state: MLXLMCommon.LMOutput.State?
+                    switch prepareResult {
+                    case .logits(let output):
+                        state = output.state
+                    case .tokens(let remaining):
+                        if remaining.tokens.size > 0 {
+                            let output = context.model(remaining[text: .newAxis], cache: newCache, state: nil)
+                            eval(newCache)
+                            state = output.state
+                        }
+                    }
+                    try mlxErrors.check()
+                    storeSessionCache(
+                        cache: newCache,
+                        fullTokens: tokens(from: lmInput),
+                        state: state,
+                        generateParameters: params,
+                        session: session
+                    )
                 }
-                storeSessionCache(
-                    cache: newCache,
-                    fullTokens: tokens(from: lmInput),
-                    state: state,
-                    generateParameters: params,
-                    session: session
-                )
             } catch {
                 // Ignore errors during prewarm
             }
