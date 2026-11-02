@@ -60,6 +60,45 @@ struct ToolContinuationTests {
         #expect(Array(session.properties.history) == previous)
     }
 
+    // Removing the durable output and the pending parent
+    // gives the pending output the durable output's key.
+    @Test(arguments: [false, true])
+    func removingDurableOutputAndPendingParentDoesNotCommitThePendingOutput(edited: Bool) async throws {
+        let previous = Self.round("previous")
+        let current = Self.round("current")
+        let kept = edited ? Self.round("edited")[1] : current[1]
+        let visible = Locked<[Transcript.Entry]>([])
+        let session = LanguageModelSession(
+            profile: LanguageModelSession.Profile { Instructions("History") }
+                .model(MockLanguageModel())
+                .historyTransform { entries in
+                    let properties = SessionPropertyBinding.values!
+                    properties.history = Transcript.HistoryView([previous[0], kept])
+                    visible.withLock { $0 = Array(properties.history) }
+                    return entries
+                },
+            history: previous
+        )
+        _ = try await session.resolvedRequestContext(including: current)
+        let durable = edited ? [previous[0], kept] : [previous[0]]
+        #expect(visible.withLock { $0 } == durable + current)
+        #expect(Array(session.properties.history) == durable)
+    }
+
+    @Test(arguments: [false, true])
+    func rollbackRemovesAnUnchangedOutputThatTookADurableOutputsKey(edited: Bool) {
+        let previous = Self.round("previous")
+        let current = Self.round("current")
+        let history = previous + current
+        let appended = AppendedTranscriptEntries(
+            keys: Set(keyedTranscriptEntries(history).suffix(current.count).map(\.key)),
+            history: history
+        )
+        let kept = edited ? Self.round("edited")[1] : current[1]
+        let remaining = removingAppendedTranscriptEntries(appended, from: [previous[0], kept])
+        #expect(remaining == (edited ? [previous[0], kept] : [previous[0]]))
+    }
+
     @Test func ordinaryContinuationKeepsTranscriptAndOpaqueMessages() {
         let previous = Self.round("previous")
         let current = Self.round("current")

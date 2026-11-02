@@ -49,7 +49,8 @@ func mergingTranscriptEntries(
 // an output whose key isn't durable in `original`
 // and whose call ID belongs to a protected output is still pending.
 // When the new key is a durable output's key, as when an earlier round
-// reused the call ID, the durable outputs claim the outputs with that key.
+// reused the call ID, the durable outputs claim the outputs with that key,
+// except for an unchanged pending output.
 func removingProtectedTranscriptEntries(
     from entries: [Transcript.Entry],
     protecting protectedKeys: Set<TranscriptEntryKey>,
@@ -78,7 +79,8 @@ func removingProtectedTranscriptEntries(
     let claimed = claimingOutputs(
         in: items,
         at: candidates,
-        by: originalItems.filter { durableKeys.contains($0.key) }
+        by: originalItems.filter { durableKeys.contains($0.key) },
+        excluding: originalItems.filter { protectedKeys.contains($0.key) }.map(\.entry)
     )
     return items.indices
         .filter { !dropped.contains($0) && (!candidates.contains($0) || claimed.contains($0)) }
@@ -103,6 +105,7 @@ struct AppendedTranscriptEntries: Sendable {
 // An output with an appended output's call ID that is now in a round
 // that the history had before the append, or in no round, is still appended,
 // unless an earlier output with that key claims it.
+// An unchanged appended output is never claimed.
 // Outputs in later rounds belong to later responses and stay.
 func removingAppendedTranscriptEntries(
     _ appended: AppendedTranscriptEntries,
@@ -127,7 +130,8 @@ func removingAppendedTranscriptEntries(
     let claimed = claimingOutputs(
         in: items,
         at: candidates,
-        by: originalItems.filter { !appended.keys.contains($0.key) }
+        by: originalItems.filter { !appended.keys.contains($0.key) },
+        excluding: originalItems.filter { appended.keys.contains($0.key) }.map(\.entry)
     )
     return items.indices
         .filter { !candidates.contains($0) || claimed.contains($0) }
@@ -135,12 +139,17 @@ func removingAppendedTranscriptEntries(
 }
 
 // Each owner claims one candidate with its key:
-// one equal to it if there is one, otherwise the first one left.
+// one equal to it if there is one, otherwise the first one left
+// that isn't equal to an excluded entry.
+// An owner that a callback removed can't otherwise tell an edited copy of itself
+// from an unchanged pending output that has taken its key,
+// so an exact copy of a pending output stays pending.
 // Returns the indices of the claimed candidates.
 private func claimingOutputs(
     in items: [(key: TranscriptEntryKey, entry: Transcript.Entry)],
     at candidates: [Int],
-    by owners: [(key: TranscriptEntryKey, entry: Transcript.Entry)]
+    by owners: [(key: TranscriptEntryKey, entry: Transcript.Entry)],
+    excluding excluded: [Transcript.Entry]
 ) -> Set<Int> {
     var unclaimed: [TranscriptEntryKey: [Transcript.Entry]] = [:]
     for owner in owners { unclaimed[owner.key, default: []].append(owner.entry) }
@@ -155,7 +164,8 @@ private func claimingOutputs(
             unmatched.append(index)
         }
     }
-    for index in unmatched where unclaimed[items[index].key]?.isEmpty == false {
+    for index in unmatched
+    where unclaimed[items[index].key]?.isEmpty == false && !excluded.contains(items[index].entry) {
         unclaimed[items[index].key]?.removeFirst()
         claimed.insert(index)
     }
