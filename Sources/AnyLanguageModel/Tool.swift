@@ -124,14 +124,16 @@ extension Tool {
         // What a tool asks of a model is its own: it isn't counted for the response that called it.
         let output = try await RequestUsageChannel.outside { try await call(arguments: parsedArguments) }
 
+        // `String` is also `ConvertibleToGeneratedContent`,
+        // so check for it first to send it as plain text, not as a JSON string.
+        if let stringOutput = output as? String {
+            return [Transcript.Segment.text(.init(content: stringOutput))]
+        }
+
         if let structured = output as? any ConvertibleToGeneratedContent {
             let content = structured.generatedContent
             let segment = Transcript.Segment.structure(.init(source: name, content: content))
             return [segment]
-        }
-
-        if let stringOutput = output as? String {
-            return [Transcript.Segment.text(.init(content: stringOutput))]
         }
 
         return try output.promptRepresentation.makeTranscriptSegments().map { segment in
@@ -150,18 +152,34 @@ extension Tool {
                 }
                 mimeType = type.preferredMIMEType
             #else
-                mimeType =
-                    switch url.pathExtension.lowercased() {
-                    case "jpg", "jpeg": "image/jpeg"
-                    case "png": "image/png"
-                    case "gif": "image/gif"
-                    case "webp": "image/webp"
-                    default: nil
-                    }
+                mimeType = toolOutputImageMIMEType(forPathExtension: url.pathExtension)
             #endif
             guard let mimeType else { throw ToolAttachmentError.unknownImageType(url) }
             return .image(.init(id: image.id, data: try Data(contentsOf: url), mimeType: mimeType))
         }
+    }
+}
+
+/// The MIME type of a tool output image file with the given extension,
+/// for platforms without UniformTypeIdentifiers.
+///
+/// The types match what `UTType` reports on Apple platforms,
+/// so that a tool's image output gets the same type everywhere.
+/// A provider that can't take a type sends a placeholder for it.
+func toolOutputImageMIMEType(forPathExtension pathExtension: String) -> String? {
+    switch pathExtension.lowercased() {
+    case "jpg", "jpeg": "image/jpeg"
+    case "png": "image/png"
+    case "gif": "image/gif"
+    case "webp": "image/webp"
+    case "tif", "tiff": "image/tiff"
+    case "svg": "image/svg+xml"
+    case "bmp": "image/bmp"
+    case "heic": "image/heic"
+    case "heif": "image/heif"
+    case "avif": "image/avif"
+    case "ico": "image/vnd.microsoft.icon"
+    default: nil
     }
 }
 
