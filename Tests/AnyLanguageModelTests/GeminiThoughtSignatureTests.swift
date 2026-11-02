@@ -294,6 +294,92 @@ import Testing
             try expectURLText(in: replayBodies[2])
         }
 
+        @Generable
+        struct LookupArguments {
+            var query: String
+        }
+
+        @Generable
+        struct Count {
+            var count: Int
+        }
+
+        private struct ContentOutputTool: Tool {
+            let name = "lookup"
+            let description = "Look something up"
+            let content: GeneratedContent
+
+            func call(arguments: LookupArguments) async throws -> GeneratedContent {
+                content
+            }
+        }
+
+        private struct CountOutputTool: Tool {
+            let name = "lookup"
+            let description = "Count something"
+
+            func call(arguments: LookupArguments) async throws -> Count {
+                Count(count: 3)
+            }
+        }
+
+        /// Runs one tool call and returns the `response` object
+        /// that the follow-up request sends for the tool's output.
+        private func functionResponse(for tool: some Tool) async throws -> JSONValue {
+            StubURLProtocol.reset()
+            StubURLProtocol.enqueue(
+                json:
+                    #"{"candidates":[{"content":{"role":"model","parts":[{"functionCall":{"name":"lookup","args":{"query":"q"}}}]},"finishReason":"STOP"}]}"#
+            )
+            StubURLProtocol.enqueue(json: textResponse("OK"))
+
+            let session = LanguageModelSession(model: makeModel(), tools: [tool])
+            _ = try await session.respond(to: "look it up")
+
+            let bodies = StubURLProtocol.recordedBodies
+            try #require(bodies.count == 2)
+            let body = try JSONDecoder().decode(JSONValue.self, from: bodies[1])
+            guard case .object(let request) = body,
+                case .array(let contents) = request["contents"],
+                case .object(let content) = contents.last,
+                case .array(let parts) = content["parts"],
+                case .object(let part) = parts.first,
+                case .object(let functionResponse) = part["functionResponse"],
+                let response = functionResponse["response"]
+            else {
+                Issue.record("The follow-up request has no function response.")
+                return .null
+            }
+            return response
+        }
+
+        @Test(
+            "sends structured tool output as plain JSON under the result key",
+            arguments: [
+                #"{"count":3}"#,
+                #"{"city":"Paris","forecast":{"high":21,"conditions":["sunny","windy"]}}"#,
+                #""done""#,
+                "3",
+                "2.5",
+                "true",
+                "null",
+                #"[1,"two",{"three":3}]"#,
+            ]
+        )
+        func sendsStructuredToolOutputAsPlainJSON(json: String) async throws {
+            let content = try GeneratedContent(json: json)
+            let response = try await functionResponse(for: ContentOutputTool(content: content))
+
+            let expected = try JSONDecoder().decode(JSONValue.self, from: Data(json.utf8))
+            #expect(response == .object(["result": expected]))
+        }
+
+        @Test("sends a Generable tool output as plain JSON")
+        func sendsGenerableToolOutputAsPlainJSON() async throws {
+            let response = try await functionResponse(for: CountOutputTool())
+            #expect(response == .object(["result": .object(["count": .int(3)])]))
+        }
+
         @Test("does not replay the conversation history on later turns")
         func doesNotReplayHistoryOnLaterTurns() async throws {
             StubURLProtocol.reset()
