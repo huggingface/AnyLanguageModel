@@ -148,9 +148,9 @@ dependencies: [
 >         from: "1.1.1",
 >         traits: ["CoreML", "MLX", "Llama"]
 >     ),
->     .package(url: "https://github.com/huggingface/swift-transformers", from: "1.0.0"), // CoreML
->     .package(url: "https://github.com/ml-explore/mlx-swift-lm", from: "2.25.5"),       // MLX
->     .package(url: "https://github.com/mattt/llama.swift", from: "2.0.0"),              // Llama
+>     .package(url: "https://github.com/huggingface/swift-transformers", from: "1.0.0"),           // CoreML
+>     .package(url: "https://github.com/ml-explore/mlx-swift-lm", .upToNextMinor(from: "3.32.3")), // MLX
+>     .package(url: "https://github.com/mattt/llama.swift", .upToNextMajor(from: "2.10549.0")),    // Llama
 > ]
 > ```
 >
@@ -1545,11 +1545,15 @@ swift test --traits CoreML,Llama
 > + .default(enabledTraits: ["MLX"]),
 > ```
 > 
+> The `-skipMacroValidation` flag allows the `MLXHuggingFaceMacros` macro
+> to run without prior approval in Xcode.
+>
 > Pass environment variables with `TEST_RUNNER_` prefix:
 >
 > ```bash
 > export TEST_RUNNER_HF_TOKEN=your_huggingface_token
 > xcodebuild test \
+>   -skipMacroValidation \
 >   -scheme AnyLanguageModel \
 >   -destination 'platform=macOS' \
 >   -only-testing:AnyLanguageModelTests/MLXLanguageModelTests
