@@ -1835,8 +1835,9 @@ private func convertSegmentsToOpenAIBlocks(_ segments: [Transcript.Segment]) -> 
 private func convertSegmentsToToolContentString(_ segments: [Transcript.Segment]) -> String {
     // Tool message content must be string (or text-only parts) per API spec.
     // String is used for broad provider compatibility.
-    // Image segments are intentionally omitted because tool outputs only support text.
-    segments.compactMap { segment in
+    // Tool outputs only support text,
+    // so an image segment becomes an `<image>` placeholder at its position.
+    segments.map { segment in
         switch segment {
         case .text(let textSegment):
             return textSegment.content
@@ -1846,7 +1847,7 @@ private func convertSegmentsToToolContentString(_ segments: [Transcript.Segment]
             default: return structuredSegment.content.jsonString
             }
         case .image:
-            return nil
+            return "<image>"
         }
     }.joined(separator: "\n")
 }

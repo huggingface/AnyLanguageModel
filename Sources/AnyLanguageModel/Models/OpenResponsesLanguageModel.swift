@@ -1097,8 +1097,10 @@ private func openResponsesConvertSegmentsToBlocks(_ segments: [Transcript.Segmen
     }
 }
 
+/// Tool output content is a string,
+/// so an image segment becomes an `<image>` placeholder at its position.
 private func openResponsesConvertSegmentsToToolContentString(_ segments: [Transcript.Segment]) -> String {
-    segments.compactMap { seg in
+    segments.map { seg in
         switch seg {
         case .text(let t): return t.content
         case .structure(let s):
@@ -1106,7 +1108,7 @@ private func openResponsesConvertSegmentsToToolContentString(_ segments: [Transc
             case .string(let t): return t
             default: return s.content.jsonString
             }
-        case .image: return nil
+        case .image: return "<image>"
         }
     }.joined(separator: "\n")
 }

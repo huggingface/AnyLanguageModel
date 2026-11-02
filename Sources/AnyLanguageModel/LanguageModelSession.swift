@@ -2574,7 +2574,9 @@ extension LanguageModelSession {
         public var underlyingError: any Error
 
         public init(tool: any Tool, underlyingError: any Error) {
-            self.tool = tool
+            // Providers run tools with the session's properties bound;
+            // report the tool that the caller gave instead.
+            self.tool = (tool as? any SessionPropertyBoundTool)?.unboundTool ?? tool
             self.underlyingError = underlyingError
         }
 

@@ -473,26 +473,27 @@ extension LlamaToolCallFormat {
     /// continues the open model turn with a `<|tool_response>` block.
     /// Gemma preserves segment types, wrapping non-object values in `value`
     /// and collecting multiple segments into an array in their original order.
+    /// An image segment becomes an `<image>` placeholder at its position.
     func toolResponseMessage(
         toolName: String,
         segments: [Transcript.Segment]
     ) -> (role: String, content: String) {
         switch self {
         case .hermesJSON, .qwenXML:
-            let content = segments.compactMap { segment -> String? in
+            let content = segments.map { segment -> String in
                 switch segment {
                 case .text(let text): return text.content
                 case .structure(let structure): return structure.content.jsonString
-                case .image: return nil
+                case .image: return "<image>"
                 }
             }.joined(separator: "\n")
             return ("user", "<tool_response>\n\(content)\n</tool_response>")
         case .gemma:
-            let values = segments.compactMap { segment -> GeneratedContent? in
+            let values = segments.map { segment -> GeneratedContent in
                 switch segment {
                 case .text(let text): return GeneratedContent(text.content)
                 case .structure(let structure): return structure.content
-                case .image: return nil
+                case .image: return GeneratedContent("<image>")
                 }
             }
             let content: GeneratedContent

@@ -650,5 +650,44 @@ import Testing
                 #expect(messages[index + 1]["content"] as? String == result)
             }
         }
+
+        @Test func toolOutputImagesBecomePlaceholders() throws {
+            let image = Transcript.Segment.image(.init(data: Data([0x89]), mimeType: "image/png"))
+            let outputs: [[Transcript.Segment]] = [
+                [.text(.init(content: "before")), image, .text(.init(content: "after"))],
+                [image],
+            ]
+            var entries: [Transcript.Entry] = [
+                .prompt(Transcript.Prompt(segments: [.text(.init(content: "Show me Paris and Tokyo."))])),
+                .toolCalls(
+                    Transcript.ToolCalls([
+                        Transcript.ToolCall(
+                            id: "call_1",
+                            toolName: "getPhoto",
+                            arguments: try GeneratedContent(json: #"{"city":"Paris"}"#)
+                        ),
+                        Transcript.ToolCall(
+                            id: "call_2",
+                            toolName: "getPhoto",
+                            arguments: try GeneratedContent(json: #"{"city":"Tokyo"}"#)
+                        ),
+                    ])
+                ),
+            ]
+            for (index, segments) in outputs.enumerated() {
+                entries.append(
+                    .toolOutput(
+                        Transcript.ToolOutput(id: "call_\(index + 1)", toolName: "getPhoto", segments: segments)
+                    )
+                )
+            }
+            let session = LanguageModelSession(model: MockLanguageModel(), transcript: Transcript(entries: entries))
+
+            let chat = convertTranscriptToMLXChat(requestContext: session.resolvedRequestContext(), fallbackPrompt: "")
+            let messages = DefaultMessageGenerator().generate(messages: chat)
+
+            let results = messages.filter { $0["role"] as? String == "tool" }.map { $0["content"] as? String }
+            #expect(results == ["before\n<image>\nafter", "<image>"])
+        }
     }
 #endif  // MLX
