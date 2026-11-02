@@ -124,14 +124,16 @@ extension Tool {
         // What a tool asks of a model is its own: it isn't counted for the response that called it.
         let output = try await RequestUsageChannel.outside { try await call(arguments: parsedArguments) }
 
+        // `String` is also `ConvertibleToGeneratedContent`,
+        // so check for it first to send it as plain text, not as a JSON string.
+        if let stringOutput = output as? String {
+            return [Transcript.Segment.text(.init(content: stringOutput))]
+        }
+
         if let structured = output as? any ConvertibleToGeneratedContent {
             let content = structured.generatedContent
             let segment = Transcript.Segment.structure(.init(source: name, content: content))
             return [segment]
-        }
-
-        if let stringOutput = output as? String {
-            return [Transcript.Segment.text(.init(content: stringOutput))]
         }
 
         return try output.promptRepresentation.makeTranscriptSegments().map { segment in

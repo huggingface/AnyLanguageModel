@@ -730,6 +730,60 @@ import Testing
             { .provideOutput(segments) }
         }
 
+        /// Every string value in a request body, at any depth,
+        /// including inside strings that hold JSON, as Open Responses tool outputs do.
+        private func stringValues(in body: Data) throws -> [String] {
+            func collect(_ value: JSONValue) -> [String] {
+                if let string = value.stringValue {
+                    guard string.hasPrefix("{") || string.hasPrefix("["),
+                        let nested = try? JSONDecoder().decode(JSONValue.self, from: Data(string.utf8))
+                    else { return [string] }
+                    return [string] + collect(nested)
+                }
+                if let array = value.arrayValue { return array.flatMap(collect) }
+                if let object = value.objectValue { return object.values.flatMap(collect) }
+                return []
+            }
+            return collect(try JSONDecoder().decode(JSONValue.self, from: body))
+        }
+
+        private struct MultilineWeatherTool: Tool {
+            static let output = "Sunny\nHigh of \"21\""
+            let name = "getWeather"
+            let description = "Get the weather"
+
+            func call(arguments: WeatherTool.Arguments) async throws -> String {
+                Self.output
+            }
+        }
+
+        /// A `String` output reaches each provider as plain text, not as a JSON string.
+        @Test(arguments: Provider.allCases)
+        func stringToolOutputIsPlainText(_ provider: Provider) async throws {
+            UsageURLProtocol.reset()
+            UsageURLProtocol.enqueue(json: try provider.toolStream())
+            UsageURLProtocol.enqueue(json: try provider.stream())
+            let session = provider.makeSession(tools: [MultilineWeatherTool()])
+            _ = try await session.streamResponse(to: "Weather?").collect()
+            let output = try #require(
+                session.transcript.compactMap { entry -> Transcript.ToolOutput? in
+                    if case .toolOutput(let output) = entry { return output }
+                    return nil
+                }.first
+            )
+            guard case .text(let text) = try #require(output.segments.first) else {
+                Issue.record("A String output must be a text segment")
+                return
+            }
+            #expect(output.segments.count == 1)
+            #expect(text.content == MultilineWeatherTool.output)
+            try #require(UsageURLProtocol.recordedBodies.count == 2)
+            let followUp = try stringValues(in: try #require(UsageURLProtocol.recordedBodies.last))
+            #expect(followUp.contains { $0.contains(MultilineWeatherTool.output) })
+            let quoted = String(decoding: try JSONEncoder().encode(MultilineWeatherTool.output), as: UTF8.self)
+            #expect(!followUp.contains(quoted))
+        }
+
         @Test(arguments: [Provider.anthropic, .gemini])
         func legacyUnsupportedToolImageURLsUsePlaceholder(_ provider: Provider) async throws {
             for fileExtension in ["tiff", "svg"] {
