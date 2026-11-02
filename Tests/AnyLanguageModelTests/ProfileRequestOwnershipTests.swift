@@ -12,6 +12,8 @@ struct ProfileRequestOwnershipTests {
     @Test(arguments: [false, true])
     func initialRequestResolvesTheProfileOnce(streaming: Bool) async throws {
         let session = LanguageModelSession(profile: CountingProfile(model: OwnershipModel()))
+        // Creating the session evaluates the body once to record its instructions.
+        #expect(session.properties.ownershipResolutionCount == 1)
 
         if streaming {
             _ = try await session.streamResponse(to: "Count").collect()
@@ -19,8 +21,9 @@ struct ProfileRequestOwnershipTests {
             _ = try await session.respond(to: "Count")
         }
 
-        #expect(session.properties.ownershipResolutionCount == 1)
-        #expect(session.transcript.count == 2)
+        #expect(session.properties.ownershipResolutionCount == 2)
+        #expect(session.transcript.count == 3)
+        #expect(session.properties.history.count == 2)
     }
 
     @Test(arguments: [false, true])

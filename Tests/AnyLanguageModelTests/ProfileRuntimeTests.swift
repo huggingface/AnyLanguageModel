@@ -194,8 +194,16 @@ struct DynamicProfileTests {
         #expect(requests.map(\.maximumResponseTokens) == [64, 128])
         #expect(requests.map(\.reasoningLevel) == [.light, .deep])
         #expect(requests.map(\.includeSchemaInPrompt) == [false, true])
-        #expect(session.transcript.count == 4)
-        #expect(!session.transcript.contains { if case .instructions = $0 { true } else { false } })
+        #expect(session.transcript.count == 5)
+        #expect(session.properties.history.count == 4)
+        let instructions = session.transcript.compactMap { entry -> Transcript.Instructions? in
+            if case .instructions(let instructions) = entry { return instructions }
+            return nil
+        }
+        // The transcript's one instructions entry reflects the profile of the latest request.
+        #expect(instructions.map { $0.segments.map(\.description) } == [["Profile B revision 7"]])
+        #expect(instructions.first?.toolDefinitions.map(\.name) == ["fixture"])
+        #expect(session.transcript.first?.id == instructions.first?.id)
     }
 
     @Test func callSiteOptionsOverrideProfileDefaults() async throws {
@@ -322,7 +330,8 @@ struct DynamicProfileTests {
         }
 
         let history = try #require(histories.withLock { $0.first })
-        #expect(history == Array(session.transcript))
+        #expect(history == Array(session.properties.history))
+        #expect(session.transcript.count == history.count + 1)
         #expect(history.contains { if case .response = $0 { true } else { false } })
         #expect(history.contains { if case .reasoning = $0 { true } else { false } })
     }
@@ -363,16 +372,18 @@ struct DynamicProfileTests {
 
         #expect(completionObserved.withLock { $0 })
         #expect(rollbackObserved.withLock { $0 })
-        #expect(session.transcript.count == 1)
+        #expect(session.properties.history.count == 1)
     }
 
     @Test func nestedInstructionsReceiveReadOnlyHistory() {
         let writability = Locked<[Bool]>([])
         let session = LanguageModelSession(profile: HistoryBindingProfile(writability: writability))
 
+        // Creating the session evaluates the body once, then the request evaluates it again.
+        #expect(writability.withLock { $0 } == [true, false])
         _ = session.resolvedRequestContext()
 
-        #expect(writability.withLock { $0 } == [true, false])
+        #expect(writability.withLock { $0 } == [true, false, true, false])
     }
 
     @Test func toolHistoryExcludesStaticInstructions() async {
@@ -437,8 +448,8 @@ struct DynamicProfileTests {
             }
         }
 
-        #expect(session.transcript.count == 1)
-        #expect(session.transcript.allSatisfy { if case .prompt = $0 { true } else { false } })
+        #expect(session.properties.history.count == 1)
+        #expect(session.properties.history.allSatisfy { if case .prompt = $0 { true } else { false } })
     }
 
     @Test(arguments: [false, true])
@@ -457,7 +468,7 @@ struct DynamicProfileTests {
                 _ = try await session.respond(to: "Revert")
             }
         }
-        #expect(session.transcript.isEmpty)
+        #expect(session.properties.history.isEmpty)
         #expect(session.transcriptErrorHandlingPolicy == nil)
 
         state.useRevert.withLock { $0 = false }
@@ -470,8 +481,8 @@ struct DynamicProfileTests {
                 _ = try await session.respond(to: "Keep")
             }
         }
-        #expect(session.transcript.count == 1)
-        guard case .prompt = session.transcript[0] else {
+        #expect(session.properties.history.count == 1)
+        guard case .prompt? = session.properties.history.first else {
             Issue.record("Expected the second request prompt to be retained")
             return
         }
@@ -523,7 +534,14 @@ struct DynamicProfileTests {
 
         #expect(restoredState.requests.withLock { $0.last?.instructions } == "Profile B revision 0")
         #expect(restored.transcript.count == saved.count + 2)
-        #expect(!restored.transcript.contains { if case .instructions = $0 { true } else { false } })
+        // The restored session keeps the saved instructions entry's ID
+        // and replaces its content with the current profile's instructions.
+        let instructions = restored.transcript.compactMap { entry -> Transcript.Instructions? in
+            if case .instructions(let instructions) = entry { return instructions }
+            return nil
+        }
+        #expect(instructions.map(\.id) == [saved.first?.id])
+        #expect(instructions.first?.segments.map(\.description) == ["Profile B revision 0"])
     }
 
     @Test func transformedCurrentRoundDoesNotReplaceCanonicalTranscript() async throws {
@@ -872,14 +890,14 @@ struct DynamicProfileTests {
         await #expect(throws: LifecycleFixtureError.self) {
             _ = try await session.respond(to: "Revert")
         }
-        #expect(session.transcript.isEmpty)
+        #expect(session.properties.history.isEmpty)
 
         state.useSecond.withLock { $0 = true }
         await #expect(throws: LifecycleFixtureError.self) {
             _ = try await session.streamResponse(to: "Preserve").collect()
         }
-        #expect(session.transcript.count == 1)
-        #expect(session.transcript.allSatisfy { if case .prompt = $0 { true } else { false } })
+        #expect(session.properties.history.count == 1)
+        #expect(session.properties.history.allSatisfy { if case .prompt = $0 { true } else { false } })
         #expect(session.transcriptErrorHandlingPolicy == .preserveTranscript)
     }
 
@@ -904,7 +922,7 @@ struct DynamicProfileTests {
         await #expect(throws: LanguageModelSession.DynamicProfileError.missingModel) {
             _ = try await session.resolvedRequestContext(including: [])
         }
-        #expect(Array(session.transcript) == [prompt])
+        #expect(Array(session.properties.history) == [prompt])
     }
 
     @Test(arguments: [false, true])

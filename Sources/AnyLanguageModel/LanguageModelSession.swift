@@ -116,6 +116,18 @@ public final class LanguageModelSession: @unchecked Sendable {
     private let dynamicProfileLock = NSLock()
     let profileLifecycle = ProfileLifecycle()
 
+    /// The instructions entry that a profile session's history started with, if any.
+    ///
+    /// A profile that sets no instructions uses these instructions.
+    private let profileBaseInstructions: Transcript.Instructions?
+
+    /// The ID of the instructions entry that a profile session records in its transcript.
+    private let profileInstructionsID: String
+
+    /// The ID of the text segment of the profile's instructions in that entry,
+    /// which stays the same so that unchanged instructions give an equal entry.
+    private let profileInstructionsSegmentID = UUID().uuidString
+
     /// Session-scoped values available to profiles and dynamic instructions.
     public let properties: SessionPropertyValues
 
@@ -302,6 +314,7 @@ public final class LanguageModelSession: @unchecked Sendable {
         let resolution = resolveRequestContext(additionalEntries: [], options: .init(), snapshot: snapshot)
         let version = commitHistoryEdits(resolution.editedHistory, ifUnchangedSince: snapshot)
         resolution.context.historyVersion.withLock { $0 = version }
+        recordProfileInstructions(of: resolution.context)
         return resolution.context
     }
 
@@ -458,6 +471,7 @@ public final class LanguageModelSession: @unchecked Sendable {
             version = committed
         }
         resolution.context.historyVersion.withLock { $0 = version }
+        recordProfileInstructions(of: resolution.context)
         return resolution.context
     }
 
@@ -485,6 +499,7 @@ public final class LanguageModelSession: @unchecked Sendable {
             throw DynamicProfileError.historyMutationWhileResolving
         }
         resolution.context.historyVersion.withLock { $0 = version }
+        recordProfileInstructions(of: resolution.context)
         return resolution.context
     }
 
@@ -623,11 +638,12 @@ public final class LanguageModelSession: @unchecked Sendable {
             }
             return (resolved, projected)
         }
+        let requestInstructions = profileRequestInstructions(resolved.instructions)
         var requestTranscript = Transcript(entries: projected)
-        if let currentInstructions = resolved.instructions {
-            requestTranscript = Transcript(
-                entries: [instructionsEntry(currentInstructions, tools: resolved.tools)] + projected
-            )
+        if requestInstructions != nil,
+            let entry = profileInstructionsEntry(instructions: resolved.instructions, tools: resolved.tools)
+        {
+            requestTranscript = Transcript(entries: [.instructions(entry)] + projected)
         }
 
         var resolvedOptions = options
@@ -649,7 +665,7 @@ public final class LanguageModelSession: @unchecked Sendable {
             : removingProtectedTranscriptEntries(from: canonical, protecting: protectedEntryKeys, in: original)
         let context = RequestContext(
             transcript: requestTranscript,
-            instructions: resolved.instructions,
+            instructions: requestInstructions,
             tools: resolved.tools,
             model: resolved.model ?? model,
             options: resolvedOptions,
@@ -726,12 +742,96 @@ public final class LanguageModelSession: @unchecked Sendable {
             throw DynamicProfileError.historyMutationWhileResolving
         }
         var requestTranscript = Transcript(entries: projected)
-        if let instructions = context.instructions {
-            requestTranscript = Transcript(
-                entries: [instructionsEntry(instructions, tools: context.tools)] + projected
-            )
+        if context.instructions != nil,
+            let entry = profileInstructionsEntry(instructions: profile.instructions, tools: context.tools)
+        {
+            requestTranscript = Transcript(entries: [.instructions(entry)] + projected)
         }
         return context.withRequestHistory(transcript: requestTranscript, canonicalTranscript: canonical)
+    }
+
+    /// Returns the instructions entry for a profile session's transcript,
+    /// or `nil` if the session has no instructions or tool definitions to record.
+    ///
+    /// The entry has the profile's instructions, or, if it sets none,
+    /// the segments of the base instructions from the session's initial history.
+    /// Its tool definitions are those of the profile's tools.
+    /// Like Foundation Models, the entry keeps one ID for the life of the session.
+    nonisolated private func profileInstructionsEntry(
+        instructions: Instructions?,
+        tools: [any Tool]
+    ) -> Transcript.Instructions? {
+        let toolDefinitions =
+            tools
+            .filter(\.includesSchemaInInstructions)
+            .map { Transcript.ToolDefinition(tool: $0) }
+        let segments: [Transcript.Segment]
+        if let instructions {
+            segments = [.text(.init(id: profileInstructionsSegmentID, content: instructions.description))]
+        } else if let profileBaseInstructions {
+            segments = profileBaseInstructions.segments
+        } else if !toolDefinitions.isEmpty {
+            segments = []
+        } else {
+            return nil
+        }
+        return Transcript.Instructions(id: profileInstructionsID, segments: segments, toolDefinitions: toolDefinitions)
+    }
+
+    /// Returns the instructions that a profile session sends with a request:
+    /// the profile's instructions, or, if it sets none,
+    /// the text of the base instructions from the session's initial history.
+    nonisolated private func profileRequestInstructions(_ instructions: Instructions?) -> Instructions? {
+        if let instructions { return instructions }
+        guard let profileBaseInstructions else { return nil }
+        let text = profileBaseInstructions.segments.compactMap { segment -> String? in
+            if case .text(let text) = segment { return text.content }
+            return nil
+        }
+        guard !text.isEmpty else { return nil }
+        return Instructions(content: text.joined(separator: "\n"))
+    }
+
+    /// Records the instructions entry for the profile that `context` resolved
+    /// at the start of a profile session's transcript.
+    ///
+    /// This doesn't change the history version,
+    /// because a profile's view of the history leaves out instructions entries
+    /// and history edits keep them.
+    nonisolated private func recordProfileInstructions(of context: RequestContext) {
+        guard let profile = context.profile else { return }
+        let entry = profileInstructionsEntry(instructions: profile.instructions, tools: context.tools)
+        setProfileInstructionsEntry(entry)
+    }
+
+    /// Evaluates a new profile session's body once
+    /// and records its instructions entry, as Foundation Models does.
+    ///
+    /// Neither the profile's actions nor its history transforms run,
+    /// and history edits that the body makes aren't kept.
+    nonisolated private func recordInitialProfileInstructions() {
+        guard let dynamicProfile else { return }
+        let history = properties.historyBinding(Array(transcript), isWritable: true)
+        let resolved = dynamicProfileLock.withLock {
+            SessionPropertyBinding.$values.withValue(properties) {
+                SessionPropertyBinding.$history.withValue(history) {
+                    dynamicProfile.resolveForRequest()
+                }
+            }
+        }
+        let entry = profileInstructionsEntry(instructions: resolved.instructions, tools: resolved.tools)
+        setProfileInstructionsEntry(entry)
+    }
+
+    nonisolated private func setProfileInstructionsEntry(_ entry: Transcript.Instructions?) {
+        let current = state.withLock { locked -> Transcript.Instructions? in
+            if case .instructions(let instructions)? = locked.transcript.first { return instructions }
+            return nil
+        }
+        guard current != entry else { return }
+        withTranscriptMutation {
+            state.withLock { $0.setLeadingInstructions(entry) }
+        }
     }
 
     nonisolated private func instructionsEntry(
@@ -1031,20 +1131,45 @@ public final class LanguageModelSession: @unchecked Sendable {
     /// The session can respond to overlapping requests,
     /// but it runs the profile's callbacks and lifecycle actions one at a time.
     ///
+    /// The transcript starts with an instructions entry for the active profile,
+    /// as in Foundation Models.
+    /// The initializer evaluates the profile's body once to create it,
+    /// without running the profile's actions or history transforms.
+    /// Before each model request, including the requests
+    /// that continue a response after tool calls,
+    /// the session updates this entry, which keeps its ID,
+    /// to the instructions and tool definitions of the profile that it resolved.
+    /// So the entry reflects changes to dynamic instructions
+    /// and a switch to a different profile after the next request starts.
+    /// Updating the entry doesn't count as a change to the session's history,
+    /// which ``SessionPropertyValues/history`` gives without instructions entries.
+    ///
     /// - Parameters:
     ///   - profile: The profile that sets the model, instructions, tools, options,
     ///     and callbacks for each request.
     ///   - history: The transcript entries to start the session with.
-    ///     The session ignores instructions entries,
-    ///     because the profile provides the instructions for each request.
+    ///     If the first entry is an instructions entry,
+    ///     the session keeps it as the base instructions:
+    ///     the profile's instructions entry takes its ID,
+    ///     and a profile that sets no instructions uses its text and segments.
+    ///     The session leaves out the other instructions entries.
     ///
     /// - Note: Foundation Models uses the system language model
     ///   when a profile sets no model.
     ///   AnyLanguageModel requires a model, as its other initializers do.
+    ///   Foundation Models also keeps instructions entries after the first one,
+    ///   and passes the instructions entry to history transforms;
+    ///   AnyLanguageModel doesn't.
     public convenience init(
         profile: sending some DynamicProfile,
         history: some Collection<Transcript.Entry> = []
     ) {
+        let baseInstructions: Transcript.Instructions? =
+            if case .instructions(let instructions)? = history.first {
+                instructions
+            } else {
+                nil
+            }
         let history = history.filter { entry in
             if case .instructions = entry { return false }
             return true
@@ -1055,8 +1180,10 @@ public final class LanguageModelSession: @unchecked Sendable {
             instructions: nil,
             transcript: Transcript(entries: history),
             dynamicInstructions: nil,
-            dynamicProfile: AnyDynamicProfile(profile)
+            dynamicProfile: AnyDynamicProfile(profile),
+            profileBaseInstructions: baseInstructions
         )
+        recordInitialProfileInstructions()
     }
 
     private init(
@@ -1065,12 +1192,15 @@ public final class LanguageModelSession: @unchecked Sendable {
         instructions: Instructions?,
         transcript: Transcript,
         dynamicInstructions: AnyDynamicInstructions? = nil,
-        dynamicProfile: AnyDynamicProfile? = nil
+        dynamicProfile: AnyDynamicProfile? = nil,
+        profileBaseInstructions: Transcript.Instructions? = nil
     ) {
         self.model = model
         self.tools = tools
         self.dynamicInstructions = dynamicInstructions
         self.dynamicProfile = dynamicProfile
+        self.profileBaseInstructions = profileBaseInstructions
+        self.profileInstructionsID = profileBaseInstructions?.id ?? UUID().uuidString
         let resolvedInstructions = instructions ?? Self.instructions(from: transcript)
         self.instructions = resolvedInstructions
 
@@ -3070,6 +3200,28 @@ private struct State: Equatable, Sendable {
         }
         transcript = Transcript(entries: Array(instructions) + history)
         return true
+    }
+
+    /// Replaces, adds, or removes the instructions entry at the start of the transcript
+    /// without changing ``historyVersion``.
+    ///
+    /// The history that profiles read and edit leaves out instructions entries,
+    /// and ``replaceHistory(with:ifVersion:)`` keeps them,
+    /// so a change to this entry can't conflict with a profile's history edit.
+    mutating func setLeadingInstructions(_ instructions: Transcript.Instructions?) {
+        let version = historyVersion
+        var entries = Array(transcript)
+        if case .instructions? = entries.first {
+            if let instructions {
+                entries[0] = .instructions(instructions)
+            } else {
+                entries.removeFirst()
+            }
+        } else if let instructions {
+            entries.insert(.instructions(instructions), at: 0)
+        }
+        transcript = Transcript(entries: entries)
+        historyVersion = version
     }
 
     /// Removes the entries that a rolled-back response appended,

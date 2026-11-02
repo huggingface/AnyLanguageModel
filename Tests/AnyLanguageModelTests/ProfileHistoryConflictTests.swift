@@ -343,6 +343,7 @@ private final class ConflictProbe: Sendable {
     private let pausedContinuation: AsyncStream<Void>.Continuation
     private let semaphore = DispatchSemaphore(value: 0)
     private let hasPaused = Locked(false)
+    private let hasSkippedInitialEvaluation = Locked(false)
 
     init(pausesAfter: String, edits: Bool) {
         self.pausesAfter = pausesAfter
@@ -351,8 +352,16 @@ private final class ConflictProbe: Sendable {
     }
 
     /// Returns `true` if the body paused and should now make its edit.
+    ///
+    /// The session evaluates the body once when it's created,
+    /// to record the profile's instructions;
+    /// the probe never pauses that evaluation.
     func pauseIfNeeded(history: [Transcript.Entry]) -> Bool {
-        guard let last = history.last, text(of: last) == pausesAfter else { return false }
+        let isInitialEvaluation = hasSkippedInitialEvaluation.withLock { hasSkipped in
+            defer { hasSkipped = true }
+            return !hasSkipped
+        }
+        guard !isInitialEvaluation, let last = history.last, text(of: last) == pausesAfter else { return false }
         let shouldPause = hasPaused.withLock { hasPaused in
             defer { hasPaused = true }
             return !hasPaused

@@ -64,7 +64,8 @@ struct ProfileCallbackSerializationTests {
         try await send("Outer", to: outer, streaming: streaming)
 
         #expect(responses.withLock { $0 } == ["response", "response"])
-        #expect(outer.transcript.count == 4)
+        #expect(outer.transcript.count == 5)
+        #expect(outer.properties.history.count == 4)
     }
 }
 

@@ -14,7 +14,12 @@ struct DynamicProfilePublicAPITests {
         let response = try await session.respond(to: "Hi")
 
         #expect(response.content == "Hello")
-        #expect(session.transcript.count == 2)
+        #expect(session.transcript.count == 3)
+        guard case .instructions(let instructions)? = session.transcript.first else {
+            Issue.record("Expected the transcript to start with the profile's instructions")
+            return
+        }
+        #expect(instructions.segments.map(\.description) == ["Public profile"])
     }
 
     @Test(arguments: [false, true])
@@ -38,7 +43,8 @@ struct DynamicProfilePublicAPITests {
 
         #expect(error?.localizedDescription.contains(".model(_:)") == true)
         #expect(events.values.isEmpty)
-        #expect(session.transcript.map(\.id) == [earlier.id])
+        #expect(session.properties.history.map(\.id) == [earlier.id])
+        #expect(session.transcript.count == 2)
         #expect(!session.isResponding)
     }
 }

@@ -178,7 +178,31 @@ import Testing
                     .model(model)
                     .modifier(CompatibilityProfileModifier(temperature: 0.5))
                 )
-                #expect(!session.isResponding)
+                // Creating a profile session records the profile's instructions in the transcript.
+                #expect(session.transcript.count == 1)
+                #expect(foundationModelsInstructionTexts(session.transcript) == [["Callbacks"]])
+                #expect(session.properties.history.isEmpty)
+
+                // A leading instructions entry in the history keeps its ID
+                // and takes the active profile's instructions.
+                let base = Transcript.Instructions(segments: [.text(.init(content: "Base"))], toolDefinitions: [])
+                let restored = LanguageModelSession(
+                    profile: CompatibilityConditionalProfile(model: model, includeDetail: false),
+                    history: [Transcript.Entry.instructions(base)]
+                )
+                #expect(restored.transcript.map(\.id) == [base.id])
+                #expect(foundationModelsInstructionTexts(restored.transcript) == [["Be brief."]])
+            }
+
+            @available(macOS 27.0, iOS 27.0, visionOS 27.0, *)
+            private func foundationModelsInstructionTexts(_ transcript: Transcript) -> [[String]] {
+                transcript.compactMap { entry -> [String]? in
+                    guard case .instructions(let instructions) = entry else { return nil }
+                    return instructions.segments.compactMap { segment -> String? in
+                        if case .text(let text) = segment { return text.content }
+                        return nil
+                    }
+                }
             }
 
             @available(macOS 27.0, iOS 27.0, visionOS 27.0, *)
