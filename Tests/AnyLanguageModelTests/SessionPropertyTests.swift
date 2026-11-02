@@ -9,6 +9,12 @@ extension SessionPropertyValues {
     @SessionPropertyEntry var optionalSelection: String? = nil
     @SessionPropertyEntry var items: [Int] = []
     @SessionPropertyEntry var mode: SessionPropertyMode = .first
+    @SessionPropertyEntry var counter = SessionPropertyCounter()
+    @SessionPropertyEntry var annotatedCounter: SessionPropertyCounter = .init()
+}
+
+final class SessionPropertyCounter: @unchecked Sendable {
+    var count = 0
 }
 
 enum SessionPropertyMode {
@@ -254,6 +260,35 @@ struct SessionPropertyTests {
         #expect(second.properties.revision == 0)
         #expect(second.transcript.isEmpty)
         let _: any Observable = first.properties
+    }
+
+    @Test func referenceTypeDefaultsAreDistinctBetweenSessions() {
+        let first = LanguageModelSession(model: SessionPropertyFixtureModel())
+        let second = LanguageModelSession(model: SessionPropertyFixtureModel())
+
+        first.properties.counter.count += 1
+        first.properties.annotatedCounter.count += 1
+
+        #expect(first.properties.counter === first.properties.counter)
+        #expect(first.properties.counter !== second.properties.counter)
+        #expect(first.properties.annotatedCounter !== second.properties.annotatedCounter)
+        #expect(first.properties.counter.count == 1)
+        #expect(second.properties.counter.count == 0)
+        #expect(second.properties.annotatedCounter.count == 0)
+    }
+
+    @Test func toolCallErrorsReportTheCallersTool() throws {
+        let session = LanguageModelSession(
+            model: SessionPropertyFixtureModel(),
+            tools: [PropertyBoundTool()]
+        )
+        let tool = try #require(session.resolvedRequestContext().toolsForExecution(in: session).first)
+        #expect(!(tool is PropertyBoundTool))
+
+        let error = LanguageModelSession.ToolCallError(tool: tool, underlyingError: CancellationError())
+
+        #expect(error.tool is PropertyBoundTool)
+        #expect(error.tool.name == "property")
     }
 
     @Test func replacingHistoryPreservesStaticInstructions() {

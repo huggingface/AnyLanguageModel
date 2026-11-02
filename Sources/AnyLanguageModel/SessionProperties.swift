@@ -67,6 +67,14 @@ public protocol SessionPropertyKey: SendableMetatype {
 public macro SessionPropertyEntry() =
     #externalMacro(module: "AnyLanguageModelMacros", type: "SessionPropertyEntryMacro")
 
+/// Makes a session property key's default value a computed property,
+/// so that each session gets its own value.
+///
+/// ``SessionPropertyEntry()`` applies this macro; don't use it directly.
+@attached(accessor)
+public macro __SessionPropertyEntryDefaultValue() =
+    #externalMacro(module: "AnyLanguageModelMacros", type: "SessionPropertyEntryDefaultValueMacro")
+
 /// Session-scoped storage shared by dynamic instructions and Tools.
 ///
 /// - Note: This API is exclusive to AnyLanguageModel on OS 26 and mirrors
@@ -195,7 +203,13 @@ extension Tool {
     }
 }
 
-private struct SessionPropertyTool<Wrapped: Tool>: Tool {
+/// A tool that runs another tool with a session's properties bound.
+protocol SessionPropertyBoundTool {
+    /// The tool as the caller gave it.
+    var unboundTool: any Tool { get }
+}
+
+private struct SessionPropertyTool<Wrapped: Tool>: Tool, SessionPropertyBoundTool {
     let wrapped: Wrapped
     let properties: SessionPropertyValues
     let history: Transcript.HistoryView
@@ -204,6 +218,7 @@ private struct SessionPropertyTool<Wrapped: Tool>: Tool {
     var description: String { wrapped.description }
     var parameters: GenerationSchema { wrapped.parameters }
     var includesSchemaInInstructions: Bool { wrapped.includesSchemaInInstructions }
+    var unboundTool: any Tool { wrapped }
 
     func call(arguments: Wrapped.Arguments) async throws -> Wrapped.Output {
         let history =
