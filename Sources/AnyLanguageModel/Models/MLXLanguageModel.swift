@@ -2004,39 +2004,6 @@ import Foundation
             ]
         }
     }
-
-    /// Builds a JSONSchema-informed prompt for structured output.
-    private func schemaPrompt(for schema: GenerationSchema) -> String {
-        let encoder = JSONEncoder()
-        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
-        guard
-            let data = try? encoder.encode(schema),
-            let jsonSchema = try? JSONDecoder().decode(JSONSchema.self, from: data),
-            let schemaJSON = String(data: data, encoding: .utf8)
-        else {
-            return schema.schemaPrompt()
-        }
-
-        var header = "Respond with valid JSON matching this \(jsonSchema.typeName) schema"
-        if let description = jsonSchema.description, !description.isEmpty {
-            header += " (\(description))"
-        }
-
-        if let constValue = jsonSchema.const,
-            let data = try? encoder.encode(constValue),
-            let constString = String(data: data, encoding: .utf8)
-        {
-            header += ". Expected value: \(constString)"
-        } else if let enumValues = jsonSchema.enum, !enumValues.isEmpty,
-            let data = try? encoder.encode(enumValues),
-            let enumString = String(data: data, encoding: .utf8)
-        {
-            header += ". Allowed values: \(enumString)"
-        }
-
-        return "\(header):\n\(schemaJSON)"
-    }
-
     // MARK: - Structured JSON Generation
 
     /// Errors that can occur when using MLXLanguageModel.
@@ -2074,7 +2041,7 @@ import Foundation
             requestContext: requestContext,
             fallbackPrompt: prompt.description
         )
-        let schemaPrompt = includeSchemaInPrompt ? schemaPrompt(for: schema) : nil
+        let schemaPrompt = includeSchemaInPrompt ? schema.schemaPrompt() : nil
         let chat = normalizeChatForStructuredGeneration(baseChat, schemaPrompt: schemaPrompt)
 
         let additionalContext = options[custom: MLXLanguageModel.self]?.additionalContextForUserInput

@@ -497,6 +497,7 @@ public struct OpenAILanguageModel: LanguageModel {
             return try await respondWithChatCompletions(
                 generating: type,
                 schema: schema,
+                includeSchemaInPrompt: includeSchemaInPrompt,
                 options: options,
                 session: session
             )
@@ -504,6 +505,7 @@ public struct OpenAILanguageModel: LanguageModel {
             return try await respondWithResponses(
                 generating: type,
                 schema: schema,
+                includeSchemaInPrompt: includeSchemaInPrompt,
                 options: options,
                 session: session
             )
@@ -513,11 +515,17 @@ public struct OpenAILanguageModel: LanguageModel {
     private func respondWithChatCompletions<Content>(
         generating type: Content.Type,
         schema: GenerationSchema,
+        includeSchemaInPrompt: Bool,
         options: GenerationOptions,
         session: LanguageModelSession
     ) async throws -> LanguageModelSession.Response<Content> where Content: Generable {
         // Structured outputs need an object root.
         let responseSchema = ProviderResponseSchema(schema, generating: type, wrapping: .nonObjectRoots)
+        let schemaInstructions = GenerationSchema.promptInstructions(
+            generating: type,
+            schema: responseSchema.schema,
+            includeSchemaInPrompt: includeSchemaInPrompt
+        )
         var entries: [Transcript.Entry] = []
         var usage = RequestsUsage()
         var text = ""
@@ -534,7 +542,9 @@ public struct OpenAILanguageModel: LanguageModel {
             let tools =
                 requestContext.tools.isEmpty
                 ? nil : requestContext.tools.map(convertToolToOpenAIFormat)
-            let messages = requestContext.transcript.toOpenAIMessages(host: baseURL.host) + inFlightMessages
+            let messages =
+                requestContext.transcript.saying(schemaInstructions).toOpenAIMessages(host: baseURL.host)
+                + inFlightMessages
             let params = try ChatCompletions.createRequestBody(
                 model: model,
                 messages: messages,
@@ -654,11 +664,17 @@ public struct OpenAILanguageModel: LanguageModel {
     private func respondWithResponses<Content>(
         generating type: Content.Type,
         schema: GenerationSchema,
+        includeSchemaInPrompt: Bool,
         options: GenerationOptions,
         session: LanguageModelSession
     ) async throws -> LanguageModelSession.Response<Content> where Content: Generable {
         // Structured outputs need an object root.
         let responseSchema = ProviderResponseSchema(schema, generating: type, wrapping: .nonObjectRoots)
+        let schemaInstructions = GenerationSchema.promptInstructions(
+            generating: type,
+            schema: responseSchema.schema,
+            includeSchemaInPrompt: includeSchemaInPrompt
+        )
         var entries: [Transcript.Entry] = []
         var usage = RequestsUsage()
         var text = ""
@@ -676,7 +692,9 @@ public struct OpenAILanguageModel: LanguageModel {
             let tools =
                 requestContext.tools.isEmpty
                 ? nil : requestContext.tools.map(convertToolToOpenAIFormat)
-            let messages = requestContext.transcript.toOpenAIMessages(host: baseURL.host) + inFlightMessages
+            let messages =
+                requestContext.transcript.saying(schemaInstructions).toOpenAIMessages(host: baseURL.host)
+                + inFlightMessages
             let params = try Responses.createRequestBody(
                 model: model,
                 messages: messages,
@@ -815,6 +833,11 @@ public struct OpenAILanguageModel: LanguageModel {
     ) -> sending LanguageModelSession.ResponseStream<Content> where Content: Generable {
         // Structured outputs need an object root.
         let responseSchema = ProviderResponseSchema(schema, generating: type, wrapping: .nonObjectRoots)
+        let schemaInstructions = GenerationSchema.promptInstructions(
+            generating: type,
+            schema: responseSchema.schema,
+            includeSchemaInPrompt: includeSchemaInPrompt
+        )
         let stream = AsyncThrowingStream<LanguageModelSession.ResponseStream<Content>.Snapshot, any Error> {
             continuation in
             let task = Task {
@@ -828,7 +851,9 @@ public struct OpenAILanguageModel: LanguageModel {
                         let tools =
                             requestContext.tools.isEmpty
                             ? nil : requestContext.tools.map(convertToolToOpenAIFormat)
-                        let messages = requestContext.transcript.toOpenAIMessages(host: baseURL.host) + inFlightMessages
+                        let messages =
+                            requestContext.transcript.saying(schemaInstructions).toOpenAIMessages(host: baseURL.host)
+                            + inFlightMessages
                         let params: JSONValue
                         let path: String
                         switch apiVariant {

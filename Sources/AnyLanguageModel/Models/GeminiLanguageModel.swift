@@ -249,6 +249,11 @@ public struct GeminiLanguageModel: LanguageModel {
         let effectiveJsonMode = customOptions?.jsonMode
         // Gemini's response schemas can be objects, primitives, or arrays, but not unions.
         let responseSchema = ProviderResponseSchema(schema, generating: type, wrapping: .unionRoots)
+        let schemaInstructions = GenerationSchema.promptInstructions(
+            generating: type,
+            schema: responseSchema.schema,
+            includeSchemaInPrompt: includeSchemaInPrompt
+        )
 
         let url =
             baseURL
@@ -273,7 +278,7 @@ public struct GeminiLanguageModel: LanguageModel {
                 from: requestContext.tools,
                 serverTools: effectiveServerTools
             )
-            var requestTranscript = requestContext.transcript
+            var requestTranscript = requestContext.transcript.saying(schemaInstructions)
             for entry in inFlightEntries {
                 requestTranscript.append(entry)
             }
@@ -426,6 +431,11 @@ public struct GeminiLanguageModel: LanguageModel {
         let effectiveJsonMode = customOptions?.jsonMode
         // Gemini's response schemas can be objects, primitives, or arrays, but not unions.
         let responseSchema = ProviderResponseSchema(schema, generating: type, wrapping: .unionRoots)
+        let schemaInstructions = GenerationSchema.promptInstructions(
+            generating: type,
+            schema: responseSchema.schema,
+            includeSchemaInPrompt: includeSchemaInPrompt
+        )
 
         var streamURL =
             baseURL
@@ -449,7 +459,7 @@ public struct GeminiLanguageModel: LanguageModel {
                             from: requestContext.tools,
                             serverTools: effectiveServerTools
                         )
-                        var requestTranscript = requestContext.transcript
+                        var requestTranscript = requestContext.transcript.saying(schemaInstructions)
                         for entry in inFlightEntries {
                             requestTranscript.append(entry)
                         }

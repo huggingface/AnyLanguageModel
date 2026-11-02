@@ -514,4 +514,79 @@ import Testing
         }
     }
 
+    @Generable
+    private struct SchemaPromptGreeting {
+        let text: String
+    }
+
+    /// The text of the user message that says `prompt`, in whichever shape the provider sends it.
+    func userMessage(saying prompt: String, in body: Any) -> String? {
+        if let message = body as? [String: Any], message["role"] as? String == "user",
+            let data = try? JSONSerialization.data(withJSONObject: message),
+            let text = String(data: data, encoding: .utf8), text.contains(prompt)
+        {
+            return text
+        }
+        let children: [Any] =
+            if let dictionary = body as? [String: Any] { Array(dictionary.values) } else { body as? [Any] ?? [] }
+        return children.lazy.compactMap { userMessage(saying: prompt, in: $0) }.first
+    }
+
+    extension ProviderSchemaResponseTests {
+        /// The body of the request the session sent, after answering `content`.
+        private func sentBody(
+            _ provider: Provider,
+            streaming: Bool,
+            content: String,
+            ask: (LanguageModelSession) async throws -> Void
+        ) async throws -> [String: Any] {
+            SchemaURLProtocol.reset()
+            defer { SchemaURLProtocol.reset() }
+            SchemaURLProtocol.enqueue(
+                json: try streaming ? provider.stream(text: content) : json(provider.response(text: content))
+            )
+            try await ask(provider.session())
+            let data = try #require(SchemaURLProtocol.recordedBodies.first)
+            return try #require(JSONSerialization.jsonObject(with: data) as? [String: Any])
+        }
+
+        /// A model whose server ignores the schema it's sent only knows what to write from the prompt.
+        @Test(arguments: Provider.allCases, [false, true])
+        func aStructuredRequestSaysItsSchema(_ provider: Provider, _ streaming: Bool) async throws {
+            let body = try await sentBody(provider, streaming: streaming, content: #"{"text":"Hi"}"#) { session in
+                let reply =
+                    try await streaming
+                    ? session.streamResponse(to: "Hello", generating: SchemaPromptGreeting.self).collect().content
+                    : session.respond(to: "Hello", generating: SchemaPromptGreeting.self).content
+                #expect(reply.text == "Hi")
+            }
+            // Said after what's asked, where a model still reads it after rounds of tool calls.
+            let message = try #require(userMessage(saying: "Hello", in: body))
+            let schema = try #require(message.range(of: "Respond with valid JSON matching this object schema"))
+            #expect(message.range(of: "Hello")!.upperBound <= schema.lowerBound)
+            #expect(message.contains("text"))
+            // The server is still asked for the schema, for those that enforce it.
+            _ = try provider.requestSchema(body)
+        }
+
+        @Test(arguments: Provider.allCases)
+        func aStructuredRequestLeavesItsSchemaOutWhenAskedTo(_ provider: Provider) async throws {
+            let body = try await sentBody(provider, streaming: false, content: #"{"text":"Hi"}"#) { session in
+                _ = try await session.respond(
+                    to: "Hello",
+                    generating: SchemaPromptGreeting.self,
+                    includeSchemaInPrompt: false
+                )
+            }
+            #expect(userMessage(saying: "Hello", in: body)?.contains("Respond with valid JSON") == false)
+        }
+
+        @Test(arguments: Provider.allCases)
+        func aTextRequestHasNoSchema(_ provider: Provider) async throws {
+            let body = try await sentBody(provider, streaming: false, content: "Hi") { session in
+                _ = try await session.respond(to: "Hello")
+            }
+            #expect(userMessage(saying: "Hello", in: body)?.contains("Respond with valid JSON") == false)
+        }
+    }
 #endif

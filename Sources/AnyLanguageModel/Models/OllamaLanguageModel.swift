@@ -154,7 +154,12 @@ public struct OllamaLanguageModel: LanguageModel {
         // Ollama has no tool-choice setting.
         let tools = options.toolsOffered(from: requestContext.tools)
         let ollamaTools = try tools.map(convertToolToOllamaFormat)
-        var messages = try requestContext.transcript.toOllamaMessages()
+        let schemaInstructions = GenerationSchema.promptInstructions(
+            generating: type,
+            schema: schema,
+            includeSchemaInPrompt: includeSchemaInPrompt
+        )
+        var messages = try requestContext.transcript.saying(schemaInstructions).toOllamaMessages()
         if messages.isEmpty {
             messages.append(.init(role: .user, content: prompt.description))
         }
@@ -278,7 +283,13 @@ public struct OllamaLanguageModel: LanguageModel {
             continuation in
             let task = Task {
                 do {
-                    let format = type == String.self ? nil : try JSONValue(convertSchemaToOllamaFormat(schema))
+                    let format: JSONValue? =
+                        type == String.self ? nil : try JSONValue(convertSchemaToOllamaFormat(schema))
+                    let schemaInstructions = GenerationSchema.promptInstructions(
+                        generating: type,
+                        schema: schema,
+                        includeSchemaInPrompt: includeSchemaInPrompt
+                    )
                     var inFlightMessages: [OllamaMessage] = []
                     var state = StreamingResponseState<Content>()
                     var toolRounds = ToolRoundLimit(provider: "Ollama", options: options)
@@ -288,7 +299,7 @@ public struct OllamaLanguageModel: LanguageModel {
                         // Ollama has no tool-choice setting.
                         let offeredTools = options.toolsOffered(from: requestContext.tools)
                         let tools = try offeredTools.map(convertToolToOllamaFormat)
-                        var messages = try requestContext.transcript.toOllamaMessages()
+                        var messages = try requestContext.transcript.saying(schemaInstructions).toOllamaMessages()
                         if messages.isEmpty {
                             messages.append(.init(role: .user, content: prompt.description))
                         }
