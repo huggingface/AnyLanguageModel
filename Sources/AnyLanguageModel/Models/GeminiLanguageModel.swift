@@ -823,6 +823,7 @@ private func toGeminiFunctionResponse(
     _ toolOutput: Transcript.ToolOutput
 ) throws -> GeminiFunctionResponse {
     var resultValues: [String] = []
+    var structuredValue: JSONValue?
     var parts: [GeminiPart] = []
 
     for segment in toolOutput.segments {
@@ -830,10 +831,10 @@ private func toGeminiFunctionResponse(
         case .text(let text):
             resultValues.append(text.content)
         case .structure(let structured):
-            let data = try JSONEncoder().encode(structured.content)
-            if let jsonString = String(data: data, encoding: .utf8) {
-                resultValues.append(jsonString)
-            }
+            // Send the content's plain JSON, not the `Codable` form of `GeneratedContent`.
+            let jsonString = structured.content.jsonString
+            resultValues.append(jsonString)
+            structuredValue = try? JSONDecoder().decode(JSONValue.self, from: Data(jsonString.utf8))
         case .image(let image):
             switch image.source {
             case .data(let data, let mimeType):
@@ -863,8 +864,14 @@ private func toGeminiFunctionResponse(
         }
     }
 
+    // Gemini requires `response` to be a JSON object,
+    // so the result goes under a `result` key, as Google's Python SDK does.
+    // An output with only structured content sends that content as a JSON value;
+    // any other output sends its parts as one string.
     var response: [String: JSONValue] = [:]
-    if !resultValues.isEmpty {
+    if resultValues.count == 1, let structuredValue {
+        response["result"] = structuredValue
+    } else if !resultValues.isEmpty {
         response["result"] = .string(resultValues.joined(separator: "\n"))
     }
     return GeminiFunctionResponse(
