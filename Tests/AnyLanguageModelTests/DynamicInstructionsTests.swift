@@ -1,7 +1,7 @@
 import Foundation
 import Testing
 
-@testable import AnyLanguageModel
+@_spi(Compatibility) @testable import AnyLanguageModel
 
 @Suite("Dynamic instructions")
 struct DynamicInstructionsTests {

@@ -323,6 +323,50 @@ import Testing
     }
 
     #if compiler(>=6.4)
+        @available(macOS 27.0, iOS 27.0, visionOS 27.0, *)
+        @Test(arguments: [false, true])
+        func ordinaryNativeToolImageSurvivesDeletionAndReplay(useDelegate: Bool) async throws {
+            let data = try onePixelPNG()
+            let url = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+                .appendingPathExtension("png")
+            try data.write(to: url)
+            defer { try? FileManager.default.removeItem(at: url) }
+            let tool = NativeImageOutputTool(imageURL: url)
+            let session = LanguageModelSession(model: SystemLanguageModel.default, tools: [tool])
+            if useDelegate { session.toolExecutionDelegate = ScriptedDelegate([.execute]) }
+            let record = ToolCallRecord()
+            try await ToolCallRecord.$current.withValue(record) {
+                _ = try await callTool(tool, with: GeneratedContent("image"), in: session)
+            }
+            try FileManager.default.removeItem(at: url)
+            let transcript = Transcript(entries: await record.entries)
+            let replay = try JSONDecoder().decode(Transcript.self, from: JSONEncoder().encode(transcript))
+            let outputs = replay.compactMap { entry -> Transcript.ToolOutput? in
+                if case .toolOutput(let output) = entry { return output }
+                return nil
+            }
+            let output = try #require(outputs.first)
+            #expect(output.segments.count == 2)
+            guard case .image(let image) = output.segments.last else {
+                Issue.record("Expected the native Tool's image, not its text description")
+                return
+            }
+            #expect(image.source == .data(data, mimeType: "image/png"))
+            _ = try output.segments.toFoundationModelsToolOutput()
+        }
+
+        private struct NativeImageOutputTool: Tool {
+            let imageURL: URL
+            let description = "Return an image"
+
+            func call(arguments: String) async throws -> Prompt {
+                Prompt {
+                    "Image output"
+                    Attachment(imageURL: imageURL)
+                }
+            }
+        }
+
         /// An image the delegate provides goes to Foundation Models as an attachment.
         @available(macOS 27.0, iOS 27.0, visionOS 27.0, *)
         @Test func providedImageIsAttached() async throws {
