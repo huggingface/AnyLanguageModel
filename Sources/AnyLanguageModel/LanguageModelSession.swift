@@ -757,11 +757,10 @@ public final class LanguageModelSession: @unchecked Sendable {
         currentRoundEntries: [Transcript.Entry]
     ) async throws {
         guard let profile = requestContext.profile else { return }
-        let history = profileHistory(
+        let binding = callbackHistoryBinding(
             requestContext: requestContext,
             currentRoundEntries: currentRoundEntries
         )
-        let binding = callbackHistoryBinding(history, requestContext: requestContext)
         try await withSessionProperties(history: binding) {
             for action in profile.onToolCall { try await action(call) }
         }
@@ -777,11 +776,10 @@ public final class LanguageModelSession: @unchecked Sendable {
         currentRoundEntries: [Transcript.Entry]
     ) async throws {
         guard let profile = requestContext.profile else { return }
-        let history = profileHistory(
+        let binding = callbackHistoryBinding(
             requestContext: requestContext,
             currentRoundEntries: currentRoundEntries
         )
-        let binding = callbackHistoryBinding(history, requestContext: requestContext)
         try await withSessionProperties(history: binding) {
             for action in profile.onToolOutput { try await action(call, output) }
         }
@@ -801,11 +799,10 @@ public final class LanguageModelSession: @unchecked Sendable {
         currentRoundEntries: [Transcript.Entry]
     ) async throws {
         guard let profile = requestContext.profile else { return }
-        let history = profileHistory(
+        let binding = callbackHistoryBinding(
             requestContext: requestContext,
             currentRoundEntries: currentRoundEntries
         )
-        let binding = callbackHistoryBinding(history, requestContext: requestContext)
         for entry in entries {
             switch entry {
             case .reasoning(let reasoning):
@@ -881,16 +878,22 @@ public final class LanguageModelSession: @unchecked Sendable {
     /// Returns a writable history binding for a profile callback in a request.
     ///
     /// The binding persists each edit only if the session history is still at
-    /// the version of the request's snapshot; see ``checkCallbackHistory(_:)``.
+    /// the version of the binding's snapshot; see ``checkCallbackHistory(_:)``.
+    /// It reads its snapshot and that version together,
+    /// so another callback's committed edit can't come between them.
     nonisolated private func callbackHistoryBinding(
-        _ history: (entries: [Transcript.Entry], protectedEntryKeys: Set<TranscriptEntryKey>),
-        requestContext: RequestContext
+        requestContext: RequestContext,
+        currentRoundEntries: [Transcript.Entry]
     ) -> SessionHistoryBinding {
-        properties.historyBinding(
+        let (history, version) = requestContext.historyVersion.withLock { version in
+            (profileHistory(requestContext: requestContext, currentRoundEntries: currentRoundEntries), version)
+        }
+        return properties.historyBinding(
             history.entries,
             isWritable: true,
             protecting: history.protectedEntryKeys,
             persistingAt: requestContext.historyVersion,
+            readAt: version,
             onChange: { updated in requestContext.callbackHistory.withLock { $0 = updated } }
         )
     }

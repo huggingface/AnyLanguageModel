@@ -187,6 +187,54 @@ struct ProfileHistoryConflictTests {
         #expect(texts(session.transcript) == ["Seed", "A", "B", "response"])
     }
 
+    // Two callbacks in one request can read the same snapshot;
+    // the later write must not undo the earlier one.
+    @Test func staleCallbackSnapshotDoesNotUndoAnotherCallbackEdit() async throws {
+        let gates = ConflictRequestGates()
+        let session = LanguageModelSession(
+            profile: LanguageModelSession.Profile { Instructions("Sibling callbacks") }
+                .model(ConflictModel())
+                .onToolCall { call in
+                    guard let properties = SessionPropertyBinding.values else {
+                        Issue.record("Expected session properties in the callback")
+                        return
+                    }
+                    let history = properties.history
+                    if call.id == "paused" {
+                        await gates.entered.open()
+                        await gates.release.wait()
+                    }
+                    let edit = Transcript.Entry.prompt(.init(segments: [.text(.init(content: call.id))]))
+                    properties.history = history + [edit]
+                },
+            history: [seed]
+        )
+        let context = try await session.resolvedRequestContext(including: [])
+        func call(_ id: String) -> Transcript.ToolCall {
+            Transcript.ToolCall(id: id, toolName: "fixture", arguments: .init(properties: [:]))
+        }
+
+        let paused = Task {
+            try await session.profileWillExecuteToolCall(
+                call("paused"),
+                requestContext: context,
+                currentRoundEntries: []
+            )
+        }
+        await gates.entered.wait()
+        try await session.profileWillExecuteToolCall(
+            call("first"),
+            requestContext: context,
+            currentRoundEntries: []
+        )
+        await gates.release.open()
+
+        await #expect(throws: LanguageModelSession.DynamicProfileError.historyMutationWhileRunningCallback) {
+            try await paused.value
+        }
+        #expect(texts(session.transcript) == ["Seed", "first"])
+    }
+
     @Test func conflictErrorsHaveMessages() {
         let resolving = LanguageModelSession.DynamicProfileError.historyMutationWhileResolving
         #expect(resolving.errorDescription?.contains("history changed") == true)
