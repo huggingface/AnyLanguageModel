@@ -93,8 +93,9 @@ func removingProtectedTranscriptEntries(
         by: originalItems.filter { durableKeys.contains($0.key) },
         excluding: protectedEntries
     )
+    let candidateSet = Set(candidates)
     return items.indices
-        .filter { !dropped.contains($0) && (!candidates.contains($0) || claimed.contains($0)) }
+        .filter { !dropped.contains($0) && (!candidateSet.contains($0) || claimed.contains($0)) }
         .map { items[$0].entry }
 }
 
@@ -144,8 +145,9 @@ func removingAppendedTranscriptEntries(
         by: originalItems.filter { !appended.keys.contains($0.key) },
         excluding: originalItems.filter { appended.keys.contains($0.key) }.map(\.entry)
     )
+    let candidateSet = Set(candidates)
     return items.indices
-        .filter { !candidates.contains($0) || claimed.contains($0) }
+        .filter { !candidateSet.contains($0) || claimed.contains($0) }
         .map { items[$0].entry }
 }
 
