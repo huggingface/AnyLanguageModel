@@ -497,6 +497,10 @@ extension LanguageModelSession.DynamicProfile {
     /// If the action throws, the request throws the error.
     /// When a profile has more than one `onPrompt` action, the outermost one runs first.
     ///
+    /// The action can't make a request on its own session,
+    /// directly or through a request on another session whose actions make one;
+    /// that request throws ``LanguageModelSession/DynamicProfileError/requestDuringLifecycleAction``.
+    ///
     /// - Parameter action: The action to run, which receives the prompt.
     /// - Returns: A profile with the action.
     public func onPrompt(
@@ -667,7 +671,8 @@ extension LanguageModelSession.DynamicProfile {
     /// before the actions of `onPrompt(perform:)`.
     /// When a profile has more than one `onActivate` action, the outermost one runs first.
     ///
-    /// The action can't make a request on its own session;
+    /// The action can't make a request on its own session,
+    /// directly or through a request on another session whose actions make one;
     /// that request throws ``LanguageModelSession/DynamicProfileError/requestDuringLifecycleAction``.
     ///
     /// - Parameter action: The action to run.
@@ -686,7 +691,8 @@ extension LanguageModelSession.DynamicProfile {
     /// It doesn't run when the session ends.
     /// When a profile has more than one `onDeactivate` action, the innermost one runs first.
     ///
-    /// The action can't make a request on its own session;
+    /// The action can't make a request on its own session,
+    /// directly or through a request on another session whose actions make one;
     /// that request throws ``LanguageModelSession/DynamicProfileError/requestDuringLifecycleAction``.
     ///
     /// - Parameter action: The action to run.
@@ -910,8 +916,12 @@ private func resolveDynamicProfile(
 }
 
 actor ProfileLifecycle {
-    /// The lifecycle whose preparation runs the current task's lifecycle actions, if any.
-    @TaskLocal private static var preparing: ObjectIdentifier?
+    /// The lifecycles whose preparations run the current task's lifecycle actions.
+    ///
+    /// A lifecycle action can make a request on another session,
+    /// whose lifecycle action can make a request on a third session, and so on.
+    /// Each preparation adds its lifecycle to the ones that it inherits.
+    @TaskLocal private static var preparing: Set<ObjectIdentifier> = []
 
     /// The gate that runs the session's profile callbacks and lifecycle actions one at a time.
     nonisolated let callbackGate = ProfileCallbackGate()
@@ -930,9 +940,10 @@ actor ProfileLifecycle {
         historyVersion: Locked<UInt64?>,
         protectedEntryKeys: Set<TranscriptEntryKey> = []
     ) async throws {
-        // A lifecycle action that awaits a request on the same session
+        // A lifecycle action that awaits a request on the same session,
+        // directly or through requests on other sessions,
         // would wait for its own preparation to finish.
-        guard Self.preparing != ObjectIdentifier(self) else {
+        guard !Self.preparing.contains(ObjectIdentifier(self)) else {
             throw LanguageModelSession.DynamicProfileError.requestDuringLifecycleAction
         }
         // Run no lifecycle action for a profile that can't make the request.
@@ -973,7 +984,7 @@ actor ProfileLifecycle {
             // Wait for the previous preparation without cancelling it.
             _ = try? await previous?.value
             try Task.checkCancellation()
-            try await Self.$preparing.withValue(ObjectIdentifier(self)) {
+            try await Self.$preparing.withValue(Self.preparing.union([ObjectIdentifier(self)])) {
                 try await self.performPreparation(
                     profile,
                     properties: properties,
@@ -1150,6 +1161,9 @@ extension LanguageModelSession {
         /// so a request that an `onActivate`, `onDeactivate`, or `onPrompt` action awaits
         /// would wait for that action to finish.
         /// The session throws this error from the nested request instead.
+        /// It also throws this error when the request comes through other sessions,
+        /// as when session A's action makes a request on session B,
+        /// and B's action makes a request on A.
         /// The session can detect only a request that the action makes
         /// in its own task or in a child or unstructured task of it,
         /// not one in a detached task.

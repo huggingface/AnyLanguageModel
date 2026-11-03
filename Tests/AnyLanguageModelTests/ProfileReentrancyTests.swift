@@ -29,11 +29,7 @@ struct ProfileReentrancyTests {
                 .model(ReentrancyModel())
                 .onActivate { await requestFromHook(.activate) }
                 .onPrompt { prompt in
-                    let text = prompt.segments.compactMap { segment -> String? in
-                        if case .text(let text) = segment { return text.content }
-                        return nil
-                    }
-                    guard text.joined() == "Outer" else { return }
+                    guard text(of: prompt) == "Outer" else { return }
                     await requestFromHook(.prompt)
                 }
         )
@@ -54,10 +50,74 @@ struct ProfileReentrancyTests {
         )
     }
 
+    // Session A's lifecycle action awaits a request on session B,
+    // whose lifecycle action awaits a request on session A.
+    // That request would wait for A's preparation, which waits for B,
+    // so it must get an error instead.
+    @Test(arguments: Hook.allCases, [false, true])
+    func lifecycleActionCycleAcrossSessionsFails(hook: Hook, streaming: Bool) async throws {
+        let sessions = Locked<[String: LanguageModelSession]>([:])
+        let nestedErrors = Locked<[any Error]>([])
+        @Sendable func request(_ prompt: String, on name: String) async {
+            guard let session = sessions.withLock({ $0[name] }) else { return }
+            do {
+                try await send(prompt, to: session, streaming: streaming)
+                if prompt == "Inner" { Issue.record("Expected the request on A to fail") }
+            } catch {
+                nestedErrors.withLock { $0.append(error) }
+            }
+        }
+        func makeSession(_ name: String, trigger: String, then next: (prompt: String, session: String))
+            -> LanguageModelSession
+        {
+            let fired = Locked(false)
+            @Sendable func fire(_ kind: Hook, prompt: String) async {
+                guard kind == hook, prompt == trigger else { return }
+                let isFirst = fired.withLock { fired in
+                    defer { fired = true }
+                    return !fired
+                }
+                guard isFirst else { return }
+                await request(next.prompt, on: next.session)
+            }
+            return LanguageModelSession(
+                profile: LanguageModelSession.Profile { Instructions(name) }
+                    .model(ReentrancyModel())
+                    .onActivate { await fire(.activate, prompt: trigger) }
+                    .onPrompt { prompt in await fire(.prompt, prompt: text(of: prompt)) }
+            )
+        }
+        let a = makeSession("A", trigger: "Outer", then: ("Middle", "B"))
+        let b = makeSession("B", trigger: "Middle", then: ("Inner", "A"))
+        sessions.withLock { $0 = ["A": a, "B": b] }
+        defer { sessions.withLock { $0 = [:] } }
+
+        let outcome = await outcome(within: 30) {
+            try await send("Outer", to: a, streaming: streaming)
+        }
+
+        let result = try #require(outcome, "The request on A didn't finish")
+        try result.get()
+        let errors = nestedErrors.withLock { $0 }
+        #expect(errors.count == 1)
+        #expect(
+            errors.first as? LanguageModelSession.DynamicProfileError
+                == .requestDuringLifecycleAction
+        )
+        #expect(b.properties.history.count == 2)
+    }
+
     @Test func requestDuringLifecycleActionHasAMessage() {
         let error = LanguageModelSession.DynamicProfileError.requestDuringLifecycleAction
         #expect(error.errorDescription?.contains("lifecycle action") == true)
     }
+}
+
+private func text(of prompt: Transcript.Prompt) -> String {
+    prompt.segments.compactMap { segment -> String? in
+        if case .text(let text) = segment { return text.content }
+        return nil
+    }.joined()
 }
 
 private func send(_ prompt: String, to session: LanguageModelSession, streaming: Bool) async throws {
