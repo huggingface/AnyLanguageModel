@@ -1030,8 +1030,8 @@ actor ProfileLifecycle {
     /// Each preparation adds itself to the running ones that it inherits.
     @TaskLocal private static var preparations: [Preparation] = []
 
-    /// The gate that runs the session's profile callbacks and lifecycle actions one at a time.
-    nonisolated let callbackGate = ProfileCallbackGate()
+    /// The serializer that runs the session's profile callbacks and lifecycle actions one at a time.
+    nonisolated let actionSerializer = ProfileActionSerializer()
 
     private var activeProfile: ResolvedDynamicProfile?
     private var pendingPreparation: (preparation: Preparation, task: Task<Void, any Error>)?
@@ -1069,9 +1069,9 @@ actor ProfileLifecycle {
                 preparation.endWait(for: previous.preparation)
             }
             try Task.checkCancellation()
-            // Wait for the gate after the previous preparation,
-            // which may need the gate to finish.
-            try await callbackGate.run {
+            // Wait for the permit after the previous preparation,
+            // which may need the permit to finish.
+            try await actionSerializer.run {
                 try await Self.$preparations.withValue(waiting + [preparation]) {
                     try await self.performPreparation(
                         profile,
@@ -1091,7 +1091,7 @@ actor ProfileLifecycle {
         // The preparation runs in an unstructured task so that it stays ordered
         // after its predecessor; forward the request's cancellation to it.
         // A callback that waits for it lets the preparation and other callbacks run.
-        try await ProfileCallbackGate.withPermitsReleased {
+        try await ProfileActionSerializer.withPermitsReleased {
             try await withTaskCancellationHandler {
                 try await task.value
             } onCancel: {

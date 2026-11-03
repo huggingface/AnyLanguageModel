@@ -857,7 +857,7 @@ public final class LanguageModelSession: @unchecked Sendable {
         currentRoundEntries: [Transcript.Entry]
     ) async throws {
         guard let profile = requestContext.profile else { return }
-        try await profileLifecycle.callbackGate.run {
+        try await profileLifecycle.actionSerializer.run {
             let binding = callbackHistoryBinding(
                 requestContext: requestContext,
                 currentRoundEntries: currentRoundEntries
@@ -878,7 +878,7 @@ public final class LanguageModelSession: @unchecked Sendable {
         currentRoundEntries: [Transcript.Entry]
     ) async throws {
         guard let profile = requestContext.profile else { return }
-        try await profileLifecycle.callbackGate.run {
+        try await profileLifecycle.actionSerializer.run {
             let binding = callbackHistoryBinding(
                 requestContext: requestContext,
                 currentRoundEntries: currentRoundEntries
@@ -903,7 +903,7 @@ public final class LanguageModelSession: @unchecked Sendable {
         currentRoundEntries: [Transcript.Entry]
     ) async throws {
         guard let profile = requestContext.profile else { return }
-        try await profileLifecycle.callbackGate.run {
+        try await profileLifecycle.actionSerializer.run {
             let binding = callbackHistoryBinding(
                 requestContext: requestContext,
                 currentRoundEntries: currentRoundEntries
@@ -1371,7 +1371,7 @@ public final class LanguageModelSession: @unchecked Sendable {
         do {
             // A profile callback that waits for this request
             // lets the request's callbacks, and other requests' callbacks, run until it ends.
-            let result = try await ProfileCallbackGate.withPermitsReleased {
+            let result = try await ProfileActionSerializer.withPermitsReleased {
                 try await operation(promptID)
             }
             endResponding()
@@ -2973,7 +2973,7 @@ extension LanguageModelSession.ResponseStream: AsyncSequence {
                 if var iterator = streamIterator {
                     // A profile callback that waits for the stream
                     // lets other callbacks, such as the stream's, run.
-                    let next = try await ProfileCallbackGate.withPermitsReleased {
+                    let next = try await ProfileActionSerializer.withPermitsReleased {
                         try await iterator.next()
                     }
                     if let value = next {
@@ -3003,7 +3003,7 @@ extension LanguageModelSession.ResponseStream: AsyncSequence {
             var last: Snapshot?
             // A profile callback that waits for the stream
             // lets other callbacks, such as the stream's, run.
-            try await ProfileCallbackGate.withPermitsReleased {
+            try await ProfileActionSerializer.withPermitsReleased {
                 for try await snapshot in streaming {
                     last = snapshot
                 }

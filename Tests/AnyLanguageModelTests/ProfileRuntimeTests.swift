@@ -300,7 +300,7 @@ struct DynamicProfileTests {
             )
         }
         // The second dispatch waits for the first callback to finish.
-        await session.profileLifecycle.callbackGate.waitUntilContended()
+        await session.profileLifecycle.actionSerializer.waitUntilContended()
         await probe.releaseFirstInvocation()
         try await first.value
         try await second.value

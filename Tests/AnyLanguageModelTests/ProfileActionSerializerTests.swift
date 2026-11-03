@@ -2,11 +2,11 @@ import Testing
 
 @testable import AnyLanguageModel
 
-@Suite("Profile callback serialization")
-struct ProfileCallbackSerializationTests {
+@Suite("Profile action serializer")
+struct ProfileActionSerializerTests {
     // The first request's callback waits until the second request
-    // either starts the same callback or waits for the session's callback gate.
-    // Without the gate, the second callback starts while the first still runs.
+    // either starts the same callback or waits for the session's permit.
+    // Without the permit, the second callback starts while the first still runs.
     @Test(arguments: [false, true])
     func overlappingRequestsRunAProfileCallbackOneAtATime(streaming: Bool) async throws {
         let probe = CallbackOverlapProbe()
@@ -21,9 +21,9 @@ struct ProfileCallbackSerializationTests {
         let first = Task { try await send("First", to: session, streaming: streaming) }
         await probe.waitUntilTheFirstCallbackStarts()
         let second = Task { try await send("Second", to: session, streaming: streaming) }
-        // This task doesn't finish if the second request never waits for the gate.
+        // This task doesn't finish if the second request never waits for the permit.
         Task {
-            await session.profileLifecycle.callbackGate.waitUntilContended()
+            await session.profileLifecycle.actionSerializer.waitUntilContended()
             eventContinuation.yield(.secondRequestWaits)
         }
 
@@ -109,7 +109,7 @@ struct ProfileCallbackSerializationTests {
         await probe.waitUntilTheFirstCallbackStarts()
         // This task doesn't finish if the follow-up request never waits for the permit.
         Task {
-            await outer.profileLifecycle.callbackGate.waitUntilContended()
+            await outer.profileLifecycle.actionSerializer.waitUntilContended()
             eventContinuation.yield(.secondRequestWaits)
         }
 
@@ -165,7 +165,7 @@ struct ProfileCallbackSerializationTests {
     }
 }
 
-extension ProfileCallbackSerializationTests {
+extension ProfileActionSerializerTests {
     // While a callback waits for a request on another session,
     // a callback of an unrelated request on its session runs.
     // The first callback continues only after the second one ends,
@@ -206,7 +206,7 @@ extension ProfileCallbackSerializationTests {
             for await _ in secondStarted { break }
             // The first callback's request ends, but the second callback still runs.
             await otherModel.release()
-            await session.profileLifecycle.callbackGate.waitUntilContended()
+            await session.profileLifecycle.actionSerializer.waitUntilContended()
             secondReleaseContinuation.yield()
             try await first.value
             try await second.value
@@ -221,17 +221,17 @@ extension ProfileCallbackSerializationTests {
     // without running its operation, whether it inherits the holder or not.
     @Test(.timeLimit(.minutes(1)), arguments: [false, true])
     func queuedCancellationPreservesExclusion(inherited: Bool) async throws {
-        let gate = ProfileCallbackGate()
+        let serializer = ProfileActionSerializer()
         let ran = Locked(false)
         let outcome = await outcome(within: 30) {
-            try await gate.run {
+            try await serializer.run {
                 let waiter: Task<Void, any Error>
                 if inherited {
-                    waiter = Task { try await gate.run { ran.withLock { $0 = true } } }
+                    waiter = Task { try await serializer.run { ran.withLock { $0 = true } } }
                 } else {
-                    waiter = Task.detached { try await gate.run { ran.withLock { $0 = true } } }
+                    waiter = Task.detached { try await serializer.run { ran.withLock { $0 = true } } }
                 }
-                await gate.waitUntilContended()
+                await serializer.waitUntilContended()
                 waiter.cancel()
                 switch await waiter.result {
                 case .success: Issue.record("The cancelled waiter ran")
@@ -239,7 +239,7 @@ extension ProfileCallbackSerializationTests {
                 }
                 #expect(!ran.withLock { $0 })
             }
-            try await gate.run { ran.withLock { $0 = true } }
+            try await serializer.run { ran.withLock { $0 = true } }
         }
 
         try #require(outcome, "The operations didn't finish").get()
@@ -267,7 +267,7 @@ extension ProfileCallbackSerializationTests {
                         var iterator = stream.makeAsyncIterator()
                         #expect(try await iterator.next() != nil)
                     }
-                    try await session.profileLifecycle.callbackGate.run {}
+                    try await session.profileLifecycle.actionSerializer.run {}
                 }
         )
         session.withLock { $0 = outer }
@@ -298,12 +298,12 @@ extension ProfileCallbackSerializationTests {
 
     private static func raceCancellationWithHandoff(_ handoff: Handoff, iterations: Int) async throws {
         for _ in 0 ..< iterations {
-            let gate = ProfileCallbackGate()
+            let serializer = ProfileActionSerializer()
             let active = Locked(false)
-            let tasks = try await gate.run {
+            let tasks = try await serializer.run {
                 active.withLock { $0 = true }
                 @Sendable func operation() async throws {
-                    try await gate.run {
+                    try await serializer.run {
                         active.withLock {
                             #expect(!$0)
                             $0 = true
@@ -313,14 +313,14 @@ extension ProfileCallbackSerializationTests {
                     }
                 }
                 let waiter = Task.detached { try await operation() }
-                await gate.waitUntilContended()
+                await serializer.waitUntilContended()
                 let cancellation = Task.detached {
                     await Task.yield()
                     waiter.cancel()
                 }
                 active.withLock { $0 = false }
                 if handoff == .releaseAndTakeBack {
-                    try await ProfileCallbackGate.withPermitsReleased { await Task.yield() }
+                    try await ProfileActionSerializer.withPermitsReleased { await Task.yield() }
                     active.withLock {
                         #expect(!$0)
                         $0 = true
@@ -331,7 +331,7 @@ extension ProfileCallbackSerializationTests {
             }
             _ = await tasks.0.result
             await tasks.1.value
-            try await gate.run { #expect(!active.withLock { $0 }) }
+            try await serializer.run { #expect(!active.withLock { $0 }) }
         }
     }
 }

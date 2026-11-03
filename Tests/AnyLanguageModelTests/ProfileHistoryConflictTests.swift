@@ -181,7 +181,7 @@ struct ProfileHistoryConflictTests {
         let request = Task { try await send("A", to: session, streaming: streaming) }
         await gates.entered.wait()
         let overlapping = Task { try await send("B", to: session, streaming: streaming) }
-        await session.profileLifecycle.callbackGate.waitUntilContended()
+        await session.profileLifecycle.actionSerializer.waitUntilContended()
         await gates.release.open()
 
         await #expect(throws: LanguageModelSession.DynamicProfileError.historyMutationWhileRunningCallback) {
@@ -234,7 +234,7 @@ struct ProfileHistoryConflictTests {
                 currentRoundEntries: []
             )
         }
-        await session.profileLifecycle.callbackGate.waitUntilContended()
+        await session.profileLifecycle.actionSerializer.waitUntilContended()
         await gates.release.open()
         try await paused.value
         try await second.value

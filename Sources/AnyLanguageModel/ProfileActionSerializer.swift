@@ -34,7 +34,7 @@
 /// Lifecycle actions also wait for the session's previous preparation,
 /// which the permit doesn't cover;
 /// ``ProfileLifecycle/Preparation`` detects cycles of those waits.
-final class ProfileCallbackGate: Sendable {
+final class ProfileActionSerializer: Sendable {
     private struct State {
         var isHeld = false
         var waiters: [(id: UInt64, continuation: CheckedContinuation<Void, any Error>)] = []
@@ -52,12 +52,12 @@ final class ProfileCallbackGate: Sendable {
     ///
     /// Throws `CancellationError` if the task is cancelled while it waits for the permit.
     func run<T: Sendable>(_ operation: @Sendable () async throws -> T) async throws -> T {
-        if let holder = Self.holders.last(where: { $0.gate === self }), holder.isHeldByCurrentTask {
+        if let holder = Self.holders.last(where: { $0.serializer === self }), holder.isHeldByCurrentTask {
             // The operation that holds the permit waits in this task for this one.
             return try await operation()
         }
         try await acquire(isCancellable: true)
-        let holder = Holder(gate: self)
+        let holder = Holder(serializer: self)
         defer {
             holder.end()
             release()
@@ -160,7 +160,7 @@ final class ProfileCallbackGate: Sendable {
             var hasPermit = true
         }
 
-        let gate: ProfileCallbackGate
+        let serializer: ProfileActionSerializer
         private let state = Locked(State())
 
         // The task that runs the operation.
@@ -169,8 +169,8 @@ final class ProfileCallbackGate: Sendable {
         // It's never used to act on the task.
         private let owner: UnsafeCurrentTask?
 
-        init(gate: ProfileCallbackGate) {
-            self.gate = gate
+        init(serializer: ProfileActionSerializer) {
+            self.serializer = serializer
             self.owner = withUnsafeCurrentTask { $0 }
         }
 
@@ -194,14 +194,14 @@ final class ProfileCallbackGate: Sendable {
                 state.hasPermit = false
                 return true
             }
-            if isReleased { gate.release() }
+            if isReleased { serializer.release() }
             return isReleased
         }
 
         /// Takes back the permit that ``releaseIfHeldByCurrentTask()`` released.
         func reacquire() async {
             // A wait that ignores cancellation doesn't throw.
-            try? await gate.acquire(isCancellable: false)
+            try? await serializer.acquire(isCancellable: false)
             state.withLock { $0.hasPermit = true }
         }
 
