@@ -3,99 +3,101 @@
 /// A profile stores each callback once, and every request of the session calls it.
 /// Overlapping requests would otherwise run the same closure at the same time,
 /// and the state that it captures would have a data race.
-/// Waiting tasks suspend in first-in, first-out order;
+///
+/// The session has one permit.
+/// An operation runs only while it holds the permit,
+/// and tasks that wait for the permit suspend in first-in, first-out order;
 /// none of them blocks a thread.
 ///
-/// Each operation holds a turn while it runs.
-/// An operation can make a request on the same session,
+/// An operation can make a request on any session,
 /// such as an `onResponse` callback that sends a follow-up prompt.
-/// Waiting for the gate there would wait for the operation itself.
-/// So an operation that starts in the task of a running operation
-/// doesn't wait for the gate; it runs in a turn nested in that operation's turn,
-/// because the task can run only one of them at a time.
+/// While the operation's task waits for a request or for a response stream
+/// (in ``withPermitsReleased(isolation:_:)``),
+/// it releases the permits that it holds,
+/// so the request's own operations and the operations of other requests can run.
+/// Before the task continues, it takes back each permit,
+/// after the operations that run in the meantime end or release it in turn.
+/// So, as with actor reentrancy, other operations can run
+/// while an operation waits for a request,
+/// but never at the same time as the operation's own code.
 ///
-/// An operation that starts in another task inherits the turn,
-/// but it can't tell whether the operation that holds the turn still runs.
-/// It runs only while the turn's task waits for a request
-/// or for a response stream, which lends the turn,
-/// and one at a time with the other operations that the turn's task lends it to.
-/// When the turn ends, the operation tries the turn that contains it,
-/// and then the gate.
-/// So a response stream that an operation consumes runs its callbacks,
-/// and a request that the operation starts in an unstructured task
-/// and doesn't wait for runs its callbacks later, without overlap.
-/// If an operation waits for a task that makes a request in another way,
-/// such as with `Task.value`, the request waits for the operation,
+/// An operation that starts in the task that holds the permit,
+/// outside such a wait, runs without waiting.
+/// An operation in another task, such as a child task or an unstructured task,
+/// waits for the permit.
+/// So a request that a callback starts in an unstructured task and doesn't wait for
+/// runs its callbacks after the callback returns or while it waits for a request.
+/// If an operation waits for another task that runs an operation of the same session,
+/// such as with `Task.value`, that task waits for the permit,
 /// and the operation never finishes.
-/// A request from a detached task doesn't inherit the turn;
-/// if the operation waits for that request, it never finishes either.
+///
+/// Lifecycle actions also wait for the session's previous preparation,
+/// which the permit doesn't cover;
+/// ``ProfileLifecycle/Preparation`` detects cycles of those waits.
 final class ProfileCallbackGate: Sendable {
     private struct State {
         var isHeld = false
         var waiters: [(id: UInt64, continuation: CheckedContinuation<Void, any Error>)] = []
         var nextWaiterID: UInt64 = 0
-        var turnWaiterCount = 0
         var contentionObservers: [CheckedContinuation<Void, Never>] = []
     }
 
-    /// The innermost turn of each gate that the current task holds or inherits.
-    @TaskLocal private static var turns: [ObjectIdentifier: ProfileCallbackTurn] = [:]
+    /// The holders of the operations that the current task runs,
+    /// or that the tasks that it inherits from run, innermost last.
+    @TaskLocal private static var holders: [Holder] = []
 
     private let state = Locked(State())
 
-    /// Runs `operation` when no other operation of the gate runs.
+    /// Runs `operation` while it holds the permit.
     ///
-    /// Throws `CancellationError` if the task is cancelled while it waits.
+    /// Throws `CancellationError` if the task is cancelled while it waits for the permit.
     func run<T: Sendable>(_ operation: @Sendable () async throws -> T) async throws -> T {
-        var turn = Self.turns[ObjectIdentifier(self)]
-        if let held = turn, held.isHeldByCurrentTask {
-            // The operation that holds the turn waits in this task for this one.
-            // Take back the turn from operations in other tasks while this one runs.
-            let wasLent = await held.reclaim()
-            do {
-                let result = try await hold(nestedIn: held, operation)
-                if wasLent { _ = held.lendIfHeldByCurrentTask() }
-                return result
-            } catch {
-                if wasLent { _ = held.lendIfHeldByCurrentTask() }
-                throw error
-            }
+        if let holder = Self.holders.last(where: { $0.gate === self }), holder.isHeldByCurrentTask {
+            // The operation that holds the permit waits in this task for this one.
+            return try await operation()
         }
-        while let inherited = turn {
-            if try await inherited.waitForLend() {
-                defer { inherited.endLentOperation() }
-                return try await hold(nestedIn: inherited, operation)
-            }
-            turn = inherited.parent
+        try await acquire(isCancellable: true)
+        let holder = Holder(gate: self)
+        defer {
+            holder.end()
+            release()
         }
-        try await acquire()
-        defer { release() }
-        return try await hold(nestedIn: nil, operation)
+        return try await Self.$holders.withValue(Self.holders.filter(\.isActive) + [holder]) {
+            try await operation()
+        }
     }
 
-    /// Lends the turns that the current task holds
-    /// to operations in other tasks while the task waits.
+    /// Releases the permits that the current task holds while `body` runs,
+    /// and takes them back before it returns or throws.
     ///
-    /// Call this before the task waits for a request or a response stream,
-    /// and pass the result to ``reclaim(_:)`` when the wait ends.
-    static func lendHeldTurns() -> [ProfileCallbackTurn] {
-        turns.values.filter { $0.lendIfHeldByCurrentTask() }
+    /// Call this where the task waits for a request or a response stream,
+    /// so that the operations that the request runs don't wait for the task.
+    /// Taking a permit back ignores cancellation,
+    /// because the operation that holds it continues after this returns.
+    static func withPermitsReleased<T>(
+        isolation: isolated (any Actor)? = #isolation,
+        _ body: () async throws -> T
+    ) async throws -> T {
+        let released = holders.filter { $0.releaseIfHeldByCurrentTask() }
+        guard !released.isEmpty else { return try await body() }
+        do {
+            let result = try await body()
+            for holder in released.reversed() { await holder.reacquire() }
+            return result
+        } catch {
+            for holder in released.reversed() { await holder.reacquire() }
+            throw error
+        }
     }
 
-    /// Takes back the turns that ``lendHeldTurns()`` lent,
-    /// after the operations that run in them finish.
-    static func reclaim(_ turns: [ProfileCallbackTurn]) async {
-        for turn in turns { _ = await turn.reclaim() }
-    }
-
-    /// Suspends until a task waits for the gate or for a turn of it.
+    /// Suspends until a task waits for the permit.
     ///
     /// Tests use this to tell that a second operation is waiting
-    /// for the one that holds the gate.
+    /// for the one that holds the permit.
     func waitUntilContended() async {
         await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
             let isContended = state.withLock { state in
-                guard state.waiters.isEmpty, state.turnWaiterCount == 0 else { return true }
+                guard state.waiters.isEmpty else { return true }
                 state.contentionObservers.append(continuation)
                 return false
             }
@@ -103,20 +105,7 @@ final class ProfileCallbackGate: Sendable {
         }
     }
 
-    private func hold<T: Sendable>(
-        nestedIn parent: ProfileCallbackTurn?,
-        _ operation: @Sendable () async throws -> T
-    ) async throws -> T {
-        let turn = ProfileCallbackTurn(gate: self, parent: parent)
-        defer { turn.end() }
-        var turns = Self.turns
-        turns[ObjectIdentifier(self)] = turn
-        return try await Self.$turns.withValue(turns) {
-            try await operation()
-        }
-    }
-
-    private func acquire() async throws {
+    private func acquire(isCancellable: Bool) async throws {
         let id = state.withLock { state in
             defer { state.nextWaiterID += 1 }
             return state.nextWaiterID
@@ -129,7 +118,7 @@ final class ProfileCallbackGate: Sendable {
                         state.isHeld = true
                         return .success(())
                     }
-                    if Task.isCancelled { return .failure(CancellationError()) }
+                    if isCancellable, Task.isCancelled { return .failure(CancellationError()) }
                     state.waiters.append((id, continuation))
                     observers = state.contentionObservers
                     state.contentionObservers = []
@@ -139,6 +128,7 @@ final class ProfileCallbackGate: Sendable {
                 if let outcome { continuation.resume(with: outcome) }
             }
         } onCancel: {
+            guard isCancellable else { return }
             let waiter = state.withLock { state -> CheckedContinuation<Void, any Error>? in
                 guard let index = state.waiters.firstIndex(where: { $0.id == id }) else { return nil }
                 return state.waiters.remove(at: index).continuation
@@ -147,7 +137,7 @@ final class ProfileCallbackGate: Sendable {
         }
     }
 
-    /// Passes the gate to the next waiting task, or opens it.
+    /// Passes the permit to the next waiting task, or makes it available.
     private func release() {
         let next = state.withLock { state -> CheckedContinuation<Void, any Error>? in
             guard !state.waiters.isEmpty else {
@@ -159,170 +149,65 @@ final class ProfileCallbackGate: Sendable {
         next?.resume()
     }
 
-    /// Records that a task waits for a turn of this gate.
-    fileprivate func beginTurnWait() {
-        let observers = state.withLock { state in
-            state.turnWaiterCount += 1
-            defer { state.contentionObservers = [] }
-            return state.contentionObservers
-        }
-        for observer in observers { observer.resume() }
-    }
-
-    /// Records that a task stopped waiting for a turn of this gate.
-    fileprivate func endTurnWait() {
-        state.withLock { $0.turnWaiterCount -= 1 }
-    }
-}
-
-/// One operation's hold on a ``ProfileCallbackGate``.
-///
-/// The task that runs the operation can lend the turn while it waits,
-/// so that operations in other tasks that inherit the turn
-/// run one at a time until the task takes the turn back.
-final class ProfileCallbackTurn: @unchecked Sendable {
-    private struct State {
-        var isActive = true
-        var isLent = false
-        var isRunningLentOperation = false
-        var waiters: [(id: UInt64, continuation: CheckedContinuation<Bool, any Error>)] = []
-        var nextWaiterID: UInt64 = 0
-        var reclaimer: CheckedContinuation<Void, Never>?
-    }
-
-    /// The turn that this turn is nested in, if any.
-    let parent: ProfileCallbackTurn?
-    private let gate: ProfileCallbackGate
-    private let state = Locked(State())
-
-    // The task that runs the operation.
-    // The turn compares it with the current task only while the turn is active,
-    // when that task still runs, so no other task can have its address.
-    // It's never used to act on the task.
-    private let owner: UnsafeCurrentTask?
-
-    fileprivate init(gate: ProfileCallbackGate, parent: ProfileCallbackTurn?) {
-        self.gate = gate
-        self.parent = parent
-        self.owner = withUnsafeCurrentTask { $0 }
-    }
-
-    /// Whether the turn is active and the current task runs its operation.
-    var isHeldByCurrentTask: Bool {
-        state.withLock { state in state.isActive && isOwnedByCurrentTask }
-    }
-
-    private var isOwnedByCurrentTask: Bool {
-        guard let owner else { return false }
-        return withUnsafeCurrentTask { $0 == owner }
-    }
-
-    /// Suspends until the turn's task lends the turn
-    /// and no other operation runs in it, and returns `true`;
-    /// or until the turn ends, and returns `false`.
+    /// One operation's claim on the permit.
     ///
-    /// After it returns `true`, call ``endLentOperation()`` when the operation finishes.
-    fileprivate func waitForLend() async throws -> Bool {
-        let id = state.withLock { state in
-            defer { state.nextWaiterID += 1 }
-            return state.nextWaiterID
+    /// The holder records the task that runs the operation,
+    /// so that only that task runs nested operations without waiting
+    /// and releases the permit while it waits.
+    private final class Holder: @unchecked Sendable {
+        private struct State {
+            var isActive = true
+            var hasPermit = true
         }
-        var isWaiting = false
-        defer { if isWaiting { gate.endTurnWait() } }
-        return try await withTaskCancellationHandler {
-            try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Bool, any Error>) in
-                let outcome: Result<Bool, CancellationError>? = state.withLock { state in
-                    guard state.isActive else { return .success(false) }
-                    if state.isLent, !state.isRunningLentOperation {
-                        state.isRunningLentOperation = true
-                        return .success(true)
-                    }
-                    if Task.isCancelled { return .failure(CancellationError()) }
-                    state.waiters.append((id, continuation))
-                    return nil
-                }
-                if let outcome {
-                    continuation.resume(with: outcome)
-                } else {
-                    isWaiting = true
-                    gate.beginTurnWait()
-                }
-            }
-        } onCancel: {
-            let waiter = state.withLock { state -> CheckedContinuation<Bool, any Error>? in
-                guard let index = state.waiters.firstIndex(where: { $0.id == id }) else { return nil }
-                return state.waiters.remove(at: index).continuation
-            }
-            waiter?.resume(throwing: CancellationError())
-        }
-    }
 
-    /// Ends an operation that ran in the lent turn,
-    /// and starts the next waiting one or lets the turn's task take the turn back.
-    fileprivate func endLentOperation() {
-        enum Next {
-            case waiter(CheckedContinuation<Bool, any Error>)
-            case reclaimer(CheckedContinuation<Void, Never>)
-        }
-        let next = state.withLock { state -> Next? in
-            state.isRunningLentOperation = false
-            if state.isLent, !state.waiters.isEmpty {
-                state.isRunningLentOperation = true
-                return .waiter(state.waiters.removeFirst().continuation)
-            }
-            if let reclaimer = state.reclaimer {
-                state.reclaimer = nil
-                return .reclaimer(reclaimer)
-            }
-            return nil
-        }
-        switch next {
-        case .waiter(let waiter): waiter.resume(returning: true)
-        case .reclaimer(let reclaimer): reclaimer.resume()
-        case nil: break
-        }
-    }
+        let gate: ProfileCallbackGate
+        private let state = Locked(State())
 
-    /// Lends the turn if the current task runs its operation
-    /// and the turn isn't lent already.
-    fileprivate func lendIfHeldByCurrentTask() -> Bool {
-        let (isLent, waiter) = state.withLock { state -> (Bool, CheckedContinuation<Bool, any Error>?) in
-            guard state.isActive, !state.isLent, isOwnedByCurrentTask else { return (false, nil) }
-            state.isLent = true
-            guard !state.isRunningLentOperation, !state.waiters.isEmpty else { return (true, nil) }
-            state.isRunningLentOperation = true
-            return (true, state.waiters.removeFirst().continuation)
-        }
-        waiter?.resume(returning: true)
-        return isLent
-    }
+        // The task that runs the operation.
+        // The holder compares it with the current task only while the holder is active,
+        // when that task still runs, so no other task can have its address.
+        // It's never used to act on the task.
+        private let owner: UnsafeCurrentTask?
 
-    /// Takes back the turn after the operation that runs in it, if any, finishes.
-    ///
-    /// Returns whether the turn was lent.
-    fileprivate func reclaim() async -> Bool {
-        var wasLent = false
-        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
-            let isDone = state.withLock { state in
-                wasLent = state.isLent
-                state.isLent = false
-                guard state.isRunningLentOperation else { return true }
-                state.reclaimer = continuation
-                return false
+        init(gate: ProfileCallbackGate) {
+            self.gate = gate
+            self.owner = withUnsafeCurrentTask { $0 }
+        }
+
+        /// Whether the operation still runs.
+        var isActive: Bool { state.withLock { $0.isActive } }
+
+        /// Whether the current task runs the operation and holds the permit for it.
+        var isHeldByCurrentTask: Bool {
+            state.withLock { state in state.isActive && state.hasPermit && isOwnedByCurrentTask }
+        }
+
+        private var isOwnedByCurrentTask: Bool {
+            guard let owner else { return false }
+            return withUnsafeCurrentTask { $0 == owner }
+        }
+
+        /// Releases the permit if the current task holds it for the operation.
+        func releaseIfHeldByCurrentTask() -> Bool {
+            let isReleased = state.withLock { state in
+                guard state.isActive, state.hasPermit, isOwnedByCurrentTask else { return false }
+                state.hasPermit = false
+                return true
             }
-            if isDone { continuation.resume() }
+            if isReleased { gate.release() }
+            return isReleased
         }
-        return wasLent
-    }
 
-    /// Ends the turn, and sends the operations that wait for it to the turn that contains it.
-    fileprivate func end() {
-        let waiters = state.withLock { state in
-            state.isActive = false
-            state.isLent = false
-            defer { state.waiters = [] }
-            return state.waiters
+        /// Takes back the permit that ``releaseIfHeldByCurrentTask()`` released.
+        func reacquire() async {
+            // A wait that ignores cancellation doesn't throw.
+            try? await gate.acquire(isCancellable: false)
+            state.withLock { $0.hasPermit = true }
         }
-        for waiter in waiters { waiter.continuation.resume(returning: false) }
+
+        /// Records that the operation ended.
+        func end() {
+            state.withLock { $0.isActive = false }
+        }
     }
 }

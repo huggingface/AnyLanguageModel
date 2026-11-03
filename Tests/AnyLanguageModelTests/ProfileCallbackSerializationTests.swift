@@ -39,7 +39,8 @@ struct ProfileCallbackSerializationTests {
     }
 
     // A callback that makes a request on its own session
-    // runs that request's callbacks in its own turn instead of waiting for itself.
+    // releases the session's permit while it waits,
+    // so that request's callbacks run instead of waiting for the callback.
     @Test(.timeLimit(.minutes(1)), arguments: [false, true])
     func callbackCanMakeARequestOnItsOwnSession(streaming: Bool) async throws {
         let session = Locked<LanguageModelSession?>(nil)
@@ -75,8 +76,8 @@ struct ProfileCallbackSerializationTests {
     // A callback that starts a request on its own session without awaiting it
     // keeps running while that request runs.
     // The first callback waits until the follow-up request
-    // either starts the same callback or waits for its turn.
-    // Without the turn, the follow-up callback starts while the first still runs.
+    // either starts the same callback or waits for the permit.
+    // Without the permit, the follow-up callback starts while the first still runs.
     @Test(.timeLimit(.minutes(1)), arguments: FollowUp.allCases, [false, true])
     func followUpRequestWaitsForTheCallbackThatStartsIt(followUp: FollowUp, streaming: Bool) async throws {
         let probe = CallbackOverlapProbe()
@@ -106,7 +107,7 @@ struct ProfileCallbackSerializationTests {
 
         let first = Task { try await send("First", to: outer, streaming: streaming) }
         await probe.waitUntilTheFirstCallbackStarts()
-        // This task doesn't finish if the follow-up request never waits for its turn.
+        // This task doesn't finish if the follow-up request never waits for the permit.
         Task {
             await outer.profileLifecycle.callbackGate.waitUntilContended()
             eventContinuation.yield(.secondRequestWaits)
@@ -161,6 +162,253 @@ struct ProfileCallbackSerializationTests {
         // Each callback awaits the request that it makes, so the callbacks nest.
         #expect(running.withLock { $0.maximum } == 3)
         #expect(outer.properties.history.count == 6)
+    }
+}
+
+extension ProfileCallbackSerializationTests {
+    // While a callback waits for a request on another session,
+    // a callback of an unrelated request on its session runs.
+    // The first callback continues only after the second one ends,
+    // so their code never runs at the same time.
+    @Test(.timeLimit(.minutes(1)), arguments: [false, true])
+    func unrelatedCallbackRunsWhileACallbackWaitsForARequest(streaming: Bool) async throws {
+        let events = Locked<[String]>([])
+        let (other, otherModel) = (Locked<LanguageModelSession?>(nil), HeldModel())
+        let (secondStarted, secondStartedContinuation) = AsyncStream<Void>.makeStream()
+        let (secondRelease, secondReleaseContinuation) = AsyncStream<Void>.makeStream()
+        let session = LanguageModelSession(
+            profile: LanguageModelSession.Profile { Instructions("Reentrant") }
+                .model(SerialModel())
+                .onResponse { _ in
+                    let isFirst = events.withLock { events in
+                        defer { events.append("start") }
+                        return !events.contains("start")
+                    }
+                    if isFirst {
+                        guard let other = other.withLock({ $0 }) else { return }
+                        events.withLock { $0.append("first waits") }
+                        try await send("Nested", to: other, streaming: streaming)
+                        events.withLock { $0.append("first continues") }
+                    } else {
+                        secondStartedContinuation.yield()
+                        for await _ in secondRelease { break }
+                        events.withLock { $0.append("second ends") }
+                    }
+                }
+        )
+        other.withLock { $0 = LanguageModelSession(model: otherModel) }
+        defer { other.withLock { $0 = nil } }
+
+        let outcome = await outcome(within: 30) {
+            let first = Task { try await send("First", to: session, streaming: streaming) }
+            await otherModel.waitUntilARequestStarts()
+            let second = Task { try await send("Second", to: session, streaming: streaming) }
+            for await _ in secondStarted { break }
+            // The first callback's request ends, but the second callback still runs.
+            await otherModel.release()
+            await session.profileLifecycle.callbackGate.waitUntilContended()
+            secondReleaseContinuation.yield()
+            try await first.value
+            try await second.value
+        }
+
+        try #require(outcome, "The requests didn't finish").get()
+
+        #expect(events.withLock { $0 } == ["start", "first waits", "start", "second ends", "first continues"])
+    }
+
+    // A cancelled task that waits for the permit throws `CancellationError`
+    // without running its operation, whether it inherits the holder or not.
+    @Test(.timeLimit(.minutes(1)), arguments: [false, true])
+    func queuedCancellationPreservesExclusion(inherited: Bool) async throws {
+        let gate = ProfileCallbackGate()
+        let ran = Locked(false)
+        let outcome = await outcome(within: 30) {
+            try await gate.run {
+                let waiter: Task<Void, any Error>
+                if inherited {
+                    waiter = Task { try await gate.run { ran.withLock { $0 = true } } }
+                } else {
+                    waiter = Task.detached { try await gate.run { ran.withLock { $0 = true } } }
+                }
+                await gate.waitUntilContended()
+                waiter.cancel()
+                switch await waiter.result {
+                case .success: Issue.record("The cancelled waiter ran")
+                case .failure(let error): #expect(error is CancellationError)
+                }
+                #expect(!ran.withLock { $0 })
+            }
+            try await gate.run { ran.withLock { $0 = true } }
+        }
+
+        try #require(outcome, "The operations didn't finish").get()
+        #expect(ran.withLock { $0 })
+    }
+
+    // A callback that consumes part of a stream and drops it
+    // holds the permit again when it continues,
+    // so a nested operation in its task runs without waiting.
+    @Test(.timeLimit(.minutes(1)))
+    func partialIterationTakesBackThePermitBeforeReturning() async throws {
+        let session = Locked<LanguageModelSession?>(nil)
+        let calls = Locked(0)
+        let outer = LanguageModelSession(
+            profile: LanguageModelSession.Profile { Instructions("Partial stream") }
+                .model(SerialModel())
+                .onResponse { _ in
+                    let isFirst = calls.withLock { calls in
+                        calls += 1
+                        return calls == 1
+                    }
+                    guard isFirst, let session = session.withLock({ $0 }) else { return }
+                    do {
+                        let stream = session.streamResponse(to: "Partly consumed")
+                        var iterator = stream.makeAsyncIterator()
+                        #expect(try await iterator.next() != nil)
+                    }
+                    try await session.profileLifecycle.callbackGate.run {}
+                }
+        )
+        session.withLock { $0 = outer }
+        defer { session.withLock { $0 = nil } }
+
+        let outcome = await outcome(within: 30) {
+            _ = try await outer.respond(to: "Outer")
+            _ = try await outer.respond(to: "After partial stream")
+        }
+
+        try #require(outcome, "The requests didn't finish").get()
+    }
+
+    enum Handoff: CaseIterable, Sendable {
+        case release, releaseAndTakeBack
+    }
+
+    // Cancelling a waiter while the permit passes to it
+    // never lets two operations run at the same time.
+    @Test(.timeLimit(.minutes(1)), arguments: Handoff.allCases)
+    func cancellationRacesWithHandoff(handoff: Handoff) async throws {
+        let outcome = await outcome(within: 30) {
+            try await Self.raceCancellationWithHandoff(handoff, iterations: 100)
+        }
+
+        try #require(outcome, "The operations didn't finish").get()
+    }
+
+    private static func raceCancellationWithHandoff(_ handoff: Handoff, iterations: Int) async throws {
+        for _ in 0 ..< iterations {
+            let gate = ProfileCallbackGate()
+            let active = Locked(false)
+            let tasks = try await gate.run {
+                active.withLock { $0 = true }
+                @Sendable func operation() async throws {
+                    try await gate.run {
+                        active.withLock {
+                            #expect(!$0)
+                            $0 = true
+                        }
+                        await Task.yield()
+                        active.withLock { $0 = false }
+                    }
+                }
+                let waiter = Task.detached { try await operation() }
+                await gate.waitUntilContended()
+                let cancellation = Task.detached {
+                    await Task.yield()
+                    waiter.cancel()
+                }
+                active.withLock { $0 = false }
+                if handoff == .releaseAndTakeBack {
+                    try await ProfileCallbackGate.withPermitsReleased { await Task.yield() }
+                    active.withLock {
+                        #expect(!$0)
+                        $0 = true
+                    }
+                    active.withLock { $0 = false }
+                }
+                return (waiter, cancellation)
+            }
+            _ = await tasks.0.result
+            await tasks.1.value
+            try await gate.run { #expect(!active.withLock { $0 }) }
+        }
+    }
+}
+
+/// Records when a ``HeldModel`` request starts, and holds it until the test releases it.
+private actor HeldModelState {
+    private var isReleased = false
+    private var releaseWaiters: [CheckedContinuation<Void, Never>] = []
+    private var hasStarted = false
+    private var startWaiters: [CheckedContinuation<Void, Never>] = []
+
+    func start() async {
+        hasStarted = true
+        for waiter in startWaiters { waiter.resume() }
+        startWaiters = []
+        guard !isReleased else { return }
+        await withCheckedContinuation { releaseWaiters.append($0) }
+    }
+
+    func waitUntilARequestStarts() async {
+        guard !hasStarted else { return }
+        await withCheckedContinuation { startWaiters.append($0) }
+    }
+
+    func release() {
+        isReleased = true
+        for waiter in releaseWaiters { waiter.resume() }
+        releaseWaiters = []
+    }
+}
+
+/// Answers each prompt with "response" after the test releases it.
+private struct HeldModel: LanguageModel {
+    typealias UnavailableReason = Never
+
+    let state = HeldModelState()
+
+    func waitUntilARequestStarts() async { await state.waitUntilARequestStarts() }
+    func release() async { await state.release() }
+
+    func respond<Content>(
+        within session: LanguageModelSession,
+        to prompt: Prompt,
+        generating type: Content.Type,
+        includeSchemaInPrompt: Bool,
+        options: GenerationOptions
+    ) async throws -> LanguageModelSession.Response<Content> where Content: Generable {
+        await state.start()
+        let raw = GeneratedContent("response")
+        return .init(content: try Content(raw), rawContent: raw, transcriptEntries: [])
+    }
+
+    func streamResponse<Content>(
+        within session: LanguageModelSession,
+        to prompt: Prompt,
+        generating type: Content.Type,
+        includeSchemaInPrompt: Bool,
+        options: GenerationOptions
+    ) -> sending LanguageModelSession.ResponseStream<Content> where Content: Generable {
+        let state = state
+        let stream = AsyncThrowingStream<LanguageModelSession.ResponseStream<Content>.Snapshot, any Error> {
+            continuation in
+            let task = Task {
+                await state.start()
+                do {
+                    let raw = GeneratedContent("response")
+                    continuation.yield(
+                        .init(content: try Content(raw).asPartiallyGenerated(), rawContent: raw, transcriptEntries: [])
+                    )
+                    continuation.finish()
+                } catch {
+                    continuation.finish(throwing: error)
+                }
+            }
+            continuation.onTermination = { _ in task.cancel() }
+        }
+        return .init(stream: stream)
     }
 }
 

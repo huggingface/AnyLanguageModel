@@ -1368,16 +1368,15 @@ public final class LanguageModelSession: @unchecked Sendable {
     ) async throws -> T {
         let promptID = UUID().uuidString
         beginResponding()
-        // A profile callback that waits for this request
-        // lets the session's other callbacks run until the request ends.
-        let lentTurns = ProfileCallbackGate.lendHeldTurns()
         do {
-            let result = try await operation(promptID)
-            await ProfileCallbackGate.reclaim(lentTurns)
+            // A profile callback that waits for this request
+            // lets the request's callbacks, and other requests' callbacks, run until it ends.
+            let result = try await ProfileCallbackGate.withPermitsReleased {
+                try await operation(promptID)
+            }
             endResponding()
             return result
         } catch {
-            await ProfileCallbackGate.reclaim(lentTurns)
             let policy: TranscriptErrorHandlingPolicy?
             if let prepared = profileTracker?.prepared {
                 policy = prepared.context.transcriptErrorHandlingPolicy
@@ -2973,16 +2972,10 @@ extension LanguageModelSession.ResponseStream: AsyncSequence {
             if useStream {
                 if var iterator = streamIterator {
                     // A profile callback that waits for the stream
-                    // lets the session's other callbacks, such as the stream's, run.
-                    let lentTurns = ProfileCallbackGate.lendHeldTurns()
-                    let next: Snapshot?
-                    do {
-                        next = try await iterator.next()
-                    } catch {
-                        await ProfileCallbackGate.reclaim(lentTurns)
-                        throw error
+                    // lets other callbacks, such as the stream's, run.
+                    let next = try await ProfileCallbackGate.withPermitsReleased {
+                        try await iterator.next()
                     }
-                    await ProfileCallbackGate.reclaim(lentTurns)
                     if let value = next {
                         // store back the advanced iterator
                         streamIterator = iterator
@@ -3009,17 +3002,12 @@ extension LanguageModelSession.ResponseStream: AsyncSequence {
         if let streaming {
             var last: Snapshot?
             // A profile callback that waits for the stream
-            // lets the session's other callbacks, such as the stream's, run.
-            let lentTurns = ProfileCallbackGate.lendHeldTurns()
-            do {
+            // lets other callbacks, such as the stream's, run.
+            try await ProfileCallbackGate.withPermitsReleased {
                 for try await snapshot in streaming {
                     last = snapshot
                 }
-            } catch {
-                await ProfileCallbackGate.reclaim(lentTurns)
-                throw error
             }
-            await ProfileCallbackGate.reclaim(lentTurns)
             // AsyncThrowingStream may end normally when its task is cancelled:
             // what came so far isn't the whole response.
             try Task.checkCancellation()

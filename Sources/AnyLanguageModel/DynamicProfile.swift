@@ -23,14 +23,18 @@ extension LanguageModelSession {
     /// A session runs its profile's callbacks and lifecycle actions one at a time,
     /// even when requests overlap,
     /// so the state that a callback captures needs no other protection.
-    /// A request that a callback makes on its own session
-    /// runs its callbacks while the first callback waits for it,
-    /// as when the callback awaits `respond(to:)` or consumes a response stream.
+    /// While a callback or lifecycle action waits for a request on any session,
+    /// as when it awaits `respond(to:)` or consumes a response stream,
+    /// the session runs other callbacks and lifecycle actions:
+    /// those of the request that it waits for, and those of unrelated requests.
+    /// The callback continues only after they end or wait in turn.
+    /// So, as with actor reentrancy, captured state can change across such a wait,
+    /// but two callbacks never run at the same time.
     /// A request that the callback makes in another task,
     /// such as an unstructured task that it doesn't wait for,
     /// runs its callbacks while the first callback waits for a request or a response stream,
     /// or after the first callback returns.
-    /// If the callback waits for that task to finish, it never finishes.
+    /// If the callback waits for that task to finish, as with `Task.value`, it never finishes.
     /// History transforms also run one at a time.
     ///
     /// - Note: This API is exclusive to AnyLanguageModel on OS 26.
@@ -922,12 +926,28 @@ private func resolveDynamicProfile(
 }
 
 actor ProfileLifecycle {
-    /// One run of a session's lifecycle actions for a request.
+    /// One queued or running preparation of a session's profile for a request,
+    /// which runs the profile's lifecycle actions.
     ///
     /// A task that the actions start inherits the preparation,
-    /// but the preparation stops counting when its actions end,
+    /// but the preparation stops counting when it ends,
     /// so that task's later requests don't fail.
+    ///
+    /// Preparations also record which preparations each one waits for:
+    /// its predecessor in the session's queue,
+    /// and the preparations of the requests that its lifecycle actions make.
+    /// A request whose preparation would close a cycle of these waits,
+    /// such as when session A's action waits for a request on session B
+    /// while B's action, from another request, waits for a request on A,
+    /// throws ``LanguageModelSession/DynamicProfileError/requestDuringLifecycleAction``
+    /// instead of waiting forever.
     final class Preparation: Sendable {
+        /// The preparations that each preparation waits for, by identifier.
+        ///
+        /// A preparation stays alive while a wait for it or by it is recorded,
+        /// so its identifier isn't reused for another one in that time.
+        private static let waits = Locked<[ObjectIdentifier: [ObjectIdentifier]]>([:])
+
         /// The lifecycle that runs the actions.
         let lifecycle: ObjectIdentifier
         private let state = Locked(true)
@@ -936,11 +956,71 @@ actor ProfileLifecycle {
             self.lifecycle = lifecycle
         }
 
-        /// Whether the lifecycle actions still run.
+        /// Whether the preparation is queued or runs its lifecycle actions.
         var isRunning: Bool { state.withLock { $0 } }
 
-        /// Records that the lifecycle actions ended.
+        /// Records that the preparation ended.
         func end() { state.withLock { $0 = false } }
+
+        /// Records that `waiting` wait for this preparation,
+        /// which waits for `predecessor`.
+        ///
+        /// Throws ``LanguageModelSession/DynamicProfileError/requestDuringLifecycleAction``
+        /// and records nothing if `predecessor` waits for any of `waiting`,
+        /// directly or through other preparations.
+        func beginWaits(by waiting: [Preparation], after predecessor: Preparation?) throws {
+            let waitingIDs = waiting.map(ObjectIdentifier.init)
+            let id = ObjectIdentifier(self)
+            try Self.waits.withLock { waits in
+                if let predecessor {
+                    let predecessorID = ObjectIdentifier(predecessor)
+                    if Self.path(in: waits, from: predecessorID, toAnyOf: Set(waitingIDs)) {
+                        throw LanguageModelSession.DynamicProfileError.requestDuringLifecycleAction
+                    }
+                    waits[id, default: []].append(predecessorID)
+                }
+                for waitingID in waitingIDs {
+                    waits[waitingID, default: []].append(id)
+                }
+            }
+        }
+
+        /// Records that this preparation no longer waits for `predecessor`.
+        func endWait(for predecessor: Preparation) {
+            Self.removeWait(by: ObjectIdentifier(self), for: ObjectIdentifier(predecessor))
+        }
+
+        /// Records that `waiting` no longer wait for this preparation.
+        func endWaits(by waiting: [Preparation]) {
+            for preparation in waiting {
+                Self.removeWait(by: ObjectIdentifier(preparation), for: ObjectIdentifier(self))
+            }
+        }
+
+        private static func removeWait(by waiting: ObjectIdentifier, for preparation: ObjectIdentifier) {
+            waits.withLock { waits in
+                guard var targets = waits[waiting],
+                    let index = targets.firstIndex(of: preparation)
+                else { return }
+                targets.remove(at: index)
+                waits[waiting] = targets.isEmpty ? nil : targets
+            }
+        }
+
+        private static func path(
+            in waits: [ObjectIdentifier: [ObjectIdentifier]],
+            from start: ObjectIdentifier,
+            toAnyOf targets: Set<ObjectIdentifier>
+        ) -> Bool {
+            var visited: Set<ObjectIdentifier> = []
+            var pending = [start]
+            while let next = pending.popLast() {
+                if targets.contains(next) { return true }
+                guard visited.insert(next).inserted else { continue }
+                pending.append(contentsOf: waits[next] ?? [])
+            }
+            return false
+        }
     }
 
     /// The preparations whose lifecycle actions run the current task's work.
@@ -954,8 +1034,7 @@ actor ProfileLifecycle {
     nonisolated let callbackGate = ProfileCallbackGate()
 
     private var activeProfile: ResolvedDynamicProfile?
-    private var pendingPreparation: (id: Int, task: Task<Void, any Error>)?
-    private var nextPreparationID = 0
+    private var pendingPreparation: (preparation: Preparation, task: Task<Void, any Error>)?
 
     func prepare(
         _ profile: ResolvedDynamicProfile,
@@ -970,76 +1049,54 @@ actor ProfileLifecycle {
         // A lifecycle action that awaits a request on the same session,
         // directly or through requests on other sessions,
         // would wait for its own preparation to finish.
-        guard !Self.preparations.contains(where: { $0.lifecycle == ObjectIdentifier(self) && $0.isRunning })
-        else {
+        let waiting = Self.preparations.filter(\.isRunning)
+        guard !waiting.contains(where: { $0.lifecycle == ObjectIdentifier(self) }) else {
             throw LanguageModelSession.DynamicProfileError.requestDuringLifecycleAction
         }
         // Run no lifecycle action for a profile that can't make the request.
         guard profile.model != nil else {
             throw LanguageModelSession.DynamicProfileError.missingModel
         }
-        // Wait for the gate before joining the queue of preparations,
-        // so that a queued preparation never waits for a gate
-        // that a request nested in another callback needs to finish.
-        try await callbackGate.run {
-            try await self.enqueuePreparation(
-                profile,
-                properties: properties,
-                history: history,
-                prompt: prompt,
-                callbackState: callbackState,
-                historyEdits: historyEdits,
-                historyVersion: historyVersion,
-                protectedEntryKeys: protectedEntryKeys
-            )
-        }
-    }
-
-    private func enqueuePreparation(
-        _ profile: ResolvedDynamicProfile,
-        properties: SessionPropertyValues,
-        history: [Transcript.Entry],
-        prompt: Transcript.Prompt?,
-        callbackState: ProfileCallbackState,
-        historyEdits: Locked<[Transcript.Entry]?>,
-        historyVersion: Locked<UInt64?>,
-        protectedEntryKeys: Set<TranscriptEntryKey>
-    ) async throws {
-        let previous = pendingPreparation?.task
-        nextPreparationID += 1
-        let id = nextPreparationID
+        let previous = pendingPreparation
+        let preparation = Preparation(lifecycle: ObjectIdentifier(self))
+        try preparation.beginWaits(by: waiting, after: previous?.preparation)
+        defer { preparation.endWaits(by: waiting) }
         let task = Task {
-            // Wait for the previous preparation without cancelling it.
-            _ = try? await previous?.value
-            try Task.checkCancellation()
-            let preparation = Preparation(lifecycle: ObjectIdentifier(self))
             defer { preparation.end() }
-            try await Self.$preparations.withValue(Self.preparations.filter(\.isRunning) + [preparation]) {
-                try await self.performPreparation(
-                    profile,
-                    properties: properties,
-                    history: history,
-                    prompt: prompt,
-                    callbackState: callbackState,
-                    historyEdits: historyEdits,
-                    historyVersion: historyVersion,
-                    protectedEntryKeys: protectedEntryKeys
-                )
+            if let previous {
+                // Wait for the previous preparation without cancelling it.
+                _ = try? await previous.task.value
+                preparation.endWait(for: previous.preparation)
+            }
+            try Task.checkCancellation()
+            // Wait for the gate after the previous preparation,
+            // which may need the gate to finish.
+            try await callbackGate.run {
+                try await Self.$preparations.withValue(waiting + [preparation]) {
+                    try await self.performPreparation(
+                        profile,
+                        properties: properties,
+                        history: history,
+                        prompt: prompt,
+                        callbackState: callbackState,
+                        historyEdits: historyEdits,
+                        historyVersion: historyVersion,
+                        protectedEntryKeys: protectedEntryKeys
+                    )
+                }
             }
         }
-        pendingPreparation = (id, task)
-        do {
-            // The preparation runs in an unstructured task so that it stays ordered
-            // after its predecessor; forward the request's cancellation to it.
+        pendingPreparation = (preparation, task)
+        defer { if pendingPreparation?.preparation === preparation { pendingPreparation = nil } }
+        // The preparation runs in an unstructured task so that it stays ordered
+        // after its predecessor; forward the request's cancellation to it.
+        // A callback that waits for it lets the preparation and other callbacks run.
+        try await ProfileCallbackGate.withPermitsReleased {
             try await withTaskCancellationHandler {
                 try await task.value
             } onCancel: {
                 task.cancel()
             }
-            if pendingPreparation?.id == id { pendingPreparation = nil }
-        } catch {
-            if pendingPreparation?.id == id { pendingPreparation = nil }
-            throw error
         }
     }
 
@@ -1185,15 +1242,19 @@ extension LanguageModelSession {
         /// and the request fails like a request whose callback throws.
         case historyMutationWhileRunningCallback
 
-        /// A profile's lifecycle action made a request on its own session.
+        /// A profile's lifecycle action made a request that would wait for the action.
         ///
         /// A session prepares one request's profile at a time,
-        /// so a request that an `onActivate`, `onDeactivate`, or `onPrompt` action awaits
-        /// would wait for that action to finish.
+        /// so a request on the same session that an `onActivate`, `onDeactivate`,
+        /// or `onPrompt` action awaits would wait for that action to finish.
         /// The session throws this error from the nested request instead.
-        /// It also throws this error when the request comes through other sessions,
+        /// It also throws this error when the request would wait for the action
+        /// through other sessions,
         /// as when session A's action makes a request on session B,
         /// and B's action makes a request on A.
+        /// When those actions run for separate requests,
+        /// the request that would complete the cycle throws this error,
+        /// and the other request continues.
         /// The session can detect only a request that the action makes
         /// in its own task or in a child or unstructured task of it,
         /// not one in a detached task.
@@ -1215,7 +1276,7 @@ extension LanguageModelSession {
                     "The session history changed before a dynamic profile callback edited it. The callback's edits weren't kept."
             case .requestDuringLifecycleAction:
                 return
-                    "A dynamic profile's lifecycle action made a request on its own session, which would wait for the action to finish."
+                    "A dynamic profile's lifecycle action made a request that would wait for the action to finish."
             }
         }
     }

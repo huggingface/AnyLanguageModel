@@ -148,6 +148,63 @@ struct ProfileReentrancyTests {
         #expect(b.properties.history.count == 2)
     }
 
+    // Session A's callback awaits a request on session B,
+    // while B's callback, from an unrelated request, awaits a request on A.
+    // Each callback releases its session's permit while it waits, so both requests finish.
+    // For lifecycle actions, each request waits for the other session's preparation,
+    // so the request that closes the cycle throws instead, and the other one finishes.
+    @Test(.timeLimit(.minutes(1)), arguments: [false, true], [false, true])
+    func independentCallbacksCanRequestEachOther(lifecycle: Bool, streaming: Bool) async throws {
+        let bothStarted = Barrier(count: 2)
+        let sessions = Locked<[String: LanguageModelSession]>([:])
+        let calls = Locked<Set<String>>([])
+        func makeSession(_ name: String, other: String) -> LanguageModelSession {
+            @Sendable func requestOther() async throws {
+                guard calls.withLock({ $0.insert(name).inserted }) else { return }
+                await bothStarted.arrive()
+                guard let session = sessions.withLock({ $0[other] }) else { return }
+                try await send("Nested from \(name)", to: session, streaming: streaming)
+            }
+            return LanguageModelSession(
+                profile: LanguageModelSession.Profile { Instructions(name) }
+                    .model(ReentrancyModel())
+                    .onPrompt { _ in
+                        if lifecycle { try await requestOther() }
+                    }
+                    .onResponse { _ in
+                        if !lifecycle { try await requestOther() }
+                    }
+            )
+        }
+        let a = makeSession("A", other: "B")
+        let b = makeSession("B", other: "A")
+        sessions.withLock { $0 = ["A": a, "B": b] }
+        defer { sessions.withLock { $0 = [:] } }
+
+        let outcome = await outcome(within: 30) {
+            let first = Task { try await send("Initial", to: a, streaming: streaming) }
+            let second = Task { try await send("Initial", to: b, streaming: streaming) }
+            return [await first.result, await second.result]
+        }
+
+        let results = try #require(try outcome?.get(), "The requests didn't finish")
+        let errors = results.compactMap { result -> (any Error)? in
+            if case .failure(let error) = result { return error }
+            return nil
+        }
+        if lifecycle {
+            #expect(errors.count == 1)
+            #expect(
+                errors.first as? LanguageModelSession.DynamicProfileError
+                    == .requestDuringLifecycleAction
+            )
+        } else {
+            #expect(errors.isEmpty)
+            #expect(a.properties.history.count == 4)
+            #expect(b.properties.history.count == 4)
+        }
+    }
+
     // A task that `onActivate` starts inherits the preparation of the action.
     // After the action ends, that task's request on the same session doesn't wait for it,
     // so the request must run instead of failing.
@@ -200,40 +257,23 @@ private func send(_ prompt: String, to session: LanguageModelSession, streaming:
     }
 }
 
-/// Returns the result of `operation`,
-/// or `nil` if it doesn't finish within `seconds`, as when it deadlocks.
-private func outcome(
-    within seconds: UInt64,
-    _ operation: @escaping @Sendable () async throws -> Void
-) async -> Result<Void, any Error>? {
-    let resumed = Locked(false)
-    let tasks = Locked<[Task<Void, Never>]>([])
-    let outcome = await withCheckedContinuation {
-        (continuation: CheckedContinuation<Result<Void, any Error>?, Never>) in
-        @Sendable func finish(_ outcome: Result<Void, any Error>?) {
-            let isFirst = resumed.withLock { resumed in
-                defer { resumed = true }
-                return !resumed
-            }
-            if isFirst { continuation.resume(returning: outcome) }
+/// Suspends each task that arrives until `count` tasks arrive.
+private actor Barrier {
+    private let count: Int
+    private var arrived = 0
+    private var waiters: [CheckedContinuation<Void, Never>] = []
+
+    init(count: Int) { self.count = count }
+
+    func arrive() async {
+        arrived += 1
+        if arrived >= count {
+            for waiter in waiters { waiter.resume() }
+            waiters = []
+            return
         }
-        let work = Task {
-            do {
-                try await operation()
-                finish(.success(()))
-            } catch {
-                finish(.failure(error))
-            }
-        }
-        let timeout = Task {
-            try? await Task.sleep(nanoseconds: seconds * 1_000_000_000)
-            finish(nil)
-        }
-        tasks.withLock { $0 = [work, timeout] }
+        await withCheckedContinuation { waiters.append($0) }
     }
-    // A deadlocked operation can't finish, so leave it; stop the timer.
-    tasks.withLock { $0 }.last?.cancel()
-    return outcome
 }
 
 /// Answers each prompt with "response".
