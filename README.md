@@ -740,6 +740,9 @@ By default, a model uses `makeDefaultTransport()`,
 which returns a `URLSession` with the default configuration.
 With the `AsyncHTTPClient` [trait](#package-traits),
 it returns AsyncHTTPClient's shared `HTTPClient` instead.
+On WASI, there's no default transport,
+so instead provide a remote model one of your own
+([see below](#transports-on-wasi)).
 `URLSession` and `HTTPClient` are both transports,
 so you can pass one that you configured:
 
@@ -871,6 +874,91 @@ and doesn't cause a crash.
 A custom transport decides when its timeout starts,
 so a request that waits for a free slot before it's sent
 doesn't use its time while it waits.
+
+#### Transports on WASI
+
+WASI has no `URLSession` or AsyncHTTPClient,
+so there's no default transport there:
+a remote model created without a `transport:`
+throws an `HTTPTransportError` when it sends a request.
+Instead, write a transport that sends requests through your host.
+For example, in a browser or on Cloudflare Workers,
+a transport can call JavaScript's `fetch`
+with [JavaScriptKit](https://github.com/swiftwasm/JavaScriptKit).
+This one reads each response whole rather than streaming it:
+
+```swift
+import AnyLanguageModel
+import Foundation
+import HTTPTypes
+import JavaScriptEventLoop
+import JavaScriptKit
+
+struct FetchTransport: HTTPTransport {
+    func send<Return>(
+        request: HTTPRequest,
+        body: Data?,
+        timeout: Duration?,
+        responseHandler: (HTTPResponse, HTTPResponseBody) async throws -> Return
+    ) async throws -> Return {
+        guard let url = request.url else {
+            throw HTTPTransportError(kind: .invalidRequest)
+        }
+
+        let headers = JSObject()
+
+        for field in request.headerFields {
+            headers[field.name.rawName] = .string(field.value)
+        }
+        
+        let options = JSObject()
+        options.method = .string(request.method.rawValue)
+        options.headers = .object(headers)
+       
+        if let body {
+            options.body = .string(String(decoding: body, as: UTF8.self))
+        }
+
+        let fetch = JSObject.global.fetch.function!
+        let response = try await JSPromise(fetch(url.absoluteString, options).object!)!.value.object!
+        let text = try await JSPromise(response.text!().object!)!.value.string!
+
+        var headerFields = HTTPFields()
+        let entries = JSObject.global.Object.function!.fromEntries!(response.headers)
+    
+        for (name, value) in [String: String].construct(from: entries) ?? [:] {
+            if let name = HTTPField.Name(name) {
+                headerFields.append(HTTPField(name: name, value: value))
+            }
+        }
+
+        let (chunks, continuation) = AsyncStream.makeStream(of: Data.self)
+       
+        continuation.yield(Data(text.utf8))
+        continuation.finish()
+       
+        let status = HTTPResponse.Status(code: Int(response.status.number!))
+       
+        return try await responseHandler(
+            HTTPResponse(status: status, headerFields: headerFields),
+            HTTPResponseBody(chunks)
+        )
+    }
+}
+
+JavaScriptEventLoop.installGlobalExecutor()
+
+let model = AnthropicLanguageModel(
+    apiKey: apiKey,
+    model: "claude-haiku-5-5",
+    transport: FetchTransport()
+)
+```
+
+Awaiting a `JSPromise` needs JavaScriptKit's event loop,
+so install it once when your program starts.
+To build for WASI,
+use the [Swift SDK for WebAssembly](https://www.swift.org/documentation/articles/wasm-getting-started.html).
 
 ## Differences from Foundation Models
 

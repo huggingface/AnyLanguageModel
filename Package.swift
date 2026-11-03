@@ -33,7 +33,7 @@ let package = Package(
         .package(url: "https://github.com/huggingface/swift-huggingface", from: "1.0.0"),
         .package(
             url: "https://github.com/mattt/EventSource",
-            from: "1.3.0",
+            from: "1.6.0",
             traits: [
                 .defaults,
                 .trait(name: "AsyncHTTPClient", condition: .when(traits: ["AsyncHTTPClient"])),
