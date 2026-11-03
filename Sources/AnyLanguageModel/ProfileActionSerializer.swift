@@ -28,8 +28,9 @@
 /// So a request that a callback starts in an unstructured task and doesn't wait for
 /// runs its callbacks after the callback returns or while it waits for a request.
 /// If an operation waits for another task that runs an operation of the same session,
-/// such as with `Task.value`, that task waits for the permit,
-/// and the operation never finishes.
+/// that task waits for the permit, and the operation never finishes.
+/// This includes a child task, from `async let` or a task group,
+/// and an unstructured or detached task that the operation awaits with `Task.value`.
 ///
 /// Lifecycle actions also wait for the session's previous preparation,
 /// which the permit doesn't cover;

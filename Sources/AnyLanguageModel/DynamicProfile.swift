@@ -34,7 +34,10 @@ extension LanguageModelSession {
     /// such as an unstructured task that it doesn't wait for,
     /// runs its callbacks while the first callback waits for a request or a response stream,
     /// or after the first callback returns.
-    /// If the callback waits for that task to finish, as with `Task.value`, it never finishes.
+    /// So a callback that waits for another task
+    /// that makes a request on the same session never finishes.
+    /// This includes a child task, from `async let` or a task group,
+    /// and an unstructured or detached task that the callback awaits with `Task.value`.
     /// History transforms also run one at a time.
     ///
     /// - Note: This API is exclusive to AnyLanguageModel on OS 26.
