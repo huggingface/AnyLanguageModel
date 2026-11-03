@@ -148,6 +148,37 @@ struct ProfileReentrancyTests {
         #expect(b.properties.history.count == 2)
     }
 
+    // A task that `onActivate` starts inherits the preparation of the action.
+    // After the action ends, that task's request on the same session doesn't wait for it,
+    // so the request must run instead of failing.
+    @Test(.timeLimit(.minutes(1)))
+    func inheritedPreparationExpiresAfterLifecycleAction() async throws {
+        let (release, releaseContinuation) = AsyncStream<Void>.makeStream()
+        let session = Locked<LanguageModelSession?>(nil)
+        let followUp = Locked<Task<Void, any Error>?>(nil)
+        let outer = LanguageModelSession(
+            profile: LanguageModelSession.Profile { Instructions("Deferred request") }
+                .model(ReentrancyModel())
+                .onActivate {
+                    let task = Task {
+                        for await _ in release { break }
+                        guard let session = session.withLock({ $0 }) else { return }
+                        _ = try await session.respond(to: "After activation")
+                    }
+                    followUp.withLock { $0 = task }
+                }
+        )
+        session.withLock { $0 = outer }
+        defer { session.withLock { $0 = nil } }
+
+        _ = try await outer.respond(to: "Initial")
+        releaseContinuation.yield()
+        releaseContinuation.finish()
+        let task = try #require(followUp.withLock { $0 })
+        try await task.value
+        #expect(outer.properties.history.count == 4)
+    }
+
     @Test func requestDuringLifecycleActionHasAMessage() {
         let error = LanguageModelSession.DynamicProfileError.requestDuringLifecycleAction
         #expect(error.errorDescription?.contains("lifecycle action") == true)

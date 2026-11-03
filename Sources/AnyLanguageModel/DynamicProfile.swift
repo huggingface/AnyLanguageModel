@@ -922,12 +922,33 @@ private func resolveDynamicProfile(
 }
 
 actor ProfileLifecycle {
-    /// The lifecycles whose preparations run the current task's lifecycle actions.
+    /// One run of a session's lifecycle actions for a request.
+    ///
+    /// A task that the actions start inherits the preparation,
+    /// but the preparation stops counting when its actions end,
+    /// so that task's later requests don't fail.
+    final class Preparation: Sendable {
+        /// The lifecycle that runs the actions.
+        let lifecycle: ObjectIdentifier
+        private let state = Locked(true)
+
+        init(lifecycle: ObjectIdentifier) {
+            self.lifecycle = lifecycle
+        }
+
+        /// Whether the lifecycle actions still run.
+        var isRunning: Bool { state.withLock { $0 } }
+
+        /// Records that the lifecycle actions ended.
+        func end() { state.withLock { $0 = false } }
+    }
+
+    /// The preparations whose lifecycle actions run the current task's work.
     ///
     /// A lifecycle action can make a request on another session,
     /// whose lifecycle action can make a request on a third session, and so on.
-    /// Each preparation adds its lifecycle to the ones that it inherits.
-    @TaskLocal private static var preparing: Set<ObjectIdentifier> = []
+    /// Each preparation adds itself to the running ones that it inherits.
+    @TaskLocal private static var preparations: [Preparation] = []
 
     /// The gate that runs the session's profile callbacks and lifecycle actions one at a time.
     nonisolated let callbackGate = ProfileCallbackGate()
@@ -949,7 +970,8 @@ actor ProfileLifecycle {
         // A lifecycle action that awaits a request on the same session,
         // directly or through requests on other sessions,
         // would wait for its own preparation to finish.
-        guard !Self.preparing.contains(ObjectIdentifier(self)) else {
+        guard !Self.preparations.contains(where: { $0.lifecycle == ObjectIdentifier(self) && $0.isRunning })
+        else {
             throw LanguageModelSession.DynamicProfileError.requestDuringLifecycleAction
         }
         // Run no lifecycle action for a profile that can't make the request.
@@ -990,7 +1012,9 @@ actor ProfileLifecycle {
             // Wait for the previous preparation without cancelling it.
             _ = try? await previous?.value
             try Task.checkCancellation()
-            try await Self.$preparing.withValue(Self.preparing.union([ObjectIdentifier(self)])) {
+            let preparation = Preparation(lifecycle: ObjectIdentifier(self))
+            defer { preparation.end() }
+            try await Self.$preparations.withValue(Self.preparations.filter(\.isRunning) + [preparation]) {
                 try await self.performPreparation(
                     profile,
                     properties: properties,
@@ -1173,6 +1197,9 @@ extension LanguageModelSession {
         /// The session can detect only a request that the action makes
         /// in its own task or in a child or unstructured task of it,
         /// not one in a detached task.
+        /// A request from a task that the action starts
+        /// throws this error only while the action runs;
+        /// after the action ends, the request runs normally.
         case requestDuringLifecycleAction
 
         /// A message that describes the error.
