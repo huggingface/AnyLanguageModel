@@ -67,6 +67,101 @@ struct ProfileCallbackSerializationTests {
         #expect(outer.transcript.count == 5)
         #expect(outer.properties.history.count == 4)
     }
+
+    enum FollowUp: CaseIterable, Sendable {
+        case respondInATask, streamInATask, unconsumedStream
+    }
+
+    // A callback that starts a request on its own session without awaiting it
+    // keeps running while that request runs.
+    // The first callback waits until the follow-up request
+    // either starts the same callback or waits for its turn.
+    // Without the turn, the follow-up callback starts while the first still runs.
+    @Test(.timeLimit(.minutes(1)), arguments: FollowUp.allCases, [false, true])
+    func followUpRequestWaitsForTheCallbackThatStartsIt(followUp: FollowUp, streaming: Bool) async throws {
+        let probe = CallbackOverlapProbe()
+        let session = Locked<LanguageModelSession?>(nil)
+        let followUpTask = Locked<Task<Void, any Error>?>(nil)
+        let pendingStream = Locked<LanguageModelSession.ResponseStream<String>?>(nil)
+        @Sendable func startFollowUp() {
+            guard let session = session.withLock({ $0 }) else { return }
+            switch followUp {
+            case .respondInATask:
+                followUpTask.withLock { $0 = Task { try await send("Follow-up", to: session, streaming: false) } }
+            case .streamInATask:
+                followUpTask.withLock { $0 = Task { try await send("Follow-up", to: session, streaming: true) } }
+            case .unconsumedStream:
+                pendingStream.withLock { $0 = session.streamResponse(to: "Follow-up") }
+            }
+        }
+        let outer = LanguageModelSession(
+            profile: LanguageModelSession.Profile { Instructions("Follow-up") }
+                .model(SerialModel())
+                .onResponse { await probe.callback(onFirstStart: startFollowUp) }
+        )
+        session.withLock { $0 = outer }
+        defer { session.withLock { $0 = nil } }
+        let (events, eventContinuation) = AsyncStream<OverlapEvent>.makeStream()
+        await probe.setEventContinuation(eventContinuation)
+
+        let first = Task { try await send("First", to: outer, streaming: streaming) }
+        await probe.waitUntilTheFirstCallbackStarts()
+        // This task doesn't finish if the follow-up request never waits for its turn.
+        Task {
+            await outer.profileLifecycle.callbackGate.waitUntilContended()
+            eventContinuation.yield(.secondRequestWaits)
+        }
+
+        var iterator = events.makeAsyncIterator()
+        let event = await iterator.next()
+        #expect(event == .secondRequestWaits)
+        await probe.releaseTheFirstCallback()
+        try await first.value
+        try await followUpTask.withLock({ $0 })?.value
+        if let stream = pendingStream.withLock({ $0 }) {
+            _ = try await stream.collect()
+        }
+
+        let counts = await probe.counts
+        #expect(counts == .init(calls: 2, maximumAtOnce: 1))
+        #expect(outer.properties.history.count == 4)
+    }
+
+    // A callback whose request on its own session makes another request
+    // gets both responses, whether each request streams or not.
+    @Test(.timeLimit(.minutes(1)), arguments: [false, true], [false, true])
+    func nestedCallbacksCanEachMakeARequest(outerStreaming: Bool, innerStreaming: Bool) async throws {
+        let session = Locked<LanguageModelSession?>(nil)
+        let calls = Locked(0)
+        let running = Locked((current: 0, maximum: 0))
+        @Sendable func followUp() async throws {
+            running.withLock {
+                $0.current += 1
+                $0.maximum = max($0.maximum, $0.current)
+            }
+            defer { running.withLock { $0.current -= 1 } }
+            let call = calls.withLock { calls in
+                calls += 1
+                return calls
+            }
+            guard call < 3, let session = session.withLock({ $0 }) else { return }
+            try await send("Nested \(call)", to: session, streaming: call == 1 ? innerStreaming : outerStreaming)
+        }
+        let outer = LanguageModelSession(
+            profile: LanguageModelSession.Profile { Instructions("Nested") }
+                .model(SerialModel())
+                .onResponse { _ in try await followUp() }
+        )
+        session.withLock { $0 = outer }
+        defer { session.withLock { $0 = nil } }
+
+        try await send("Outer", to: outer, streaming: outerStreaming)
+
+        #expect(calls.withLock { $0 } == 3)
+        // Each callback awaits the request that it makes, so the callbacks nest.
+        #expect(running.withLock { $0.maximum } == 3)
+        #expect(outer.properties.history.count == 6)
+    }
 }
 
 private enum OverlapEvent: Equatable, Sendable {
@@ -96,11 +191,12 @@ private actor CallbackOverlapProbe {
         events = continuation
     }
 
-    func callback() async {
+    func callback(onFirstStart: @Sendable () -> Void = {}) async {
         running += 1
         counts.calls += 1
         counts.maximumAtOnce = max(counts.maximumAtOnce, running)
         if counts.calls == 1 {
+            onFirstStart()
             firstStarted = true
             for waiter in firstStartedWaiters { waiter.resume() }
             firstStartedWaiters = []

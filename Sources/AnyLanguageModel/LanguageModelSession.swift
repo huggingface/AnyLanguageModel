@@ -1368,11 +1368,16 @@ public final class LanguageModelSession: @unchecked Sendable {
     ) async throws -> T {
         let promptID = UUID().uuidString
         beginResponding()
+        // A profile callback that waits for this request
+        // lets the session's other callbacks run until the request ends.
+        let lentTurns = ProfileCallbackGate.lendHeldTurns()
         do {
             let result = try await operation(promptID)
+            await ProfileCallbackGate.reclaim(lentTurns)
             endResponding()
             return result
         } catch {
+            await ProfileCallbackGate.reclaim(lentTurns)
             let policy: TranscriptErrorHandlingPolicy?
             if let prepared = profileTracker?.prepared {
                 policy = prepared.context.transcriptErrorHandlingPolicy
@@ -2967,7 +2972,18 @@ extension LanguageModelSession.ResponseStream: AsyncSequence {
         public mutating func next() async throws -> Snapshot? {
             if useStream {
                 if var iterator = streamIterator {
-                    if let value = try await iterator.next() {
+                    // A profile callback that waits for the stream
+                    // lets the session's other callbacks, such as the stream's, run.
+                    let lentTurns = ProfileCallbackGate.lendHeldTurns()
+                    let next: Snapshot?
+                    do {
+                        next = try await iterator.next()
+                    } catch {
+                        await ProfileCallbackGate.reclaim(lentTurns)
+                        throw error
+                    }
+                    await ProfileCallbackGate.reclaim(lentTurns)
+                    if let value = next {
                         // store back the advanced iterator
                         streamIterator = iterator
                         return value
@@ -2992,9 +3008,18 @@ extension LanguageModelSession.ResponseStream: AsyncSequence {
     nonisolated public func collect() async throws -> sending LanguageModelSession.Response<Content> {
         if let streaming {
             var last: Snapshot?
-            for try await snapshot in streaming {
-                last = snapshot
+            // A profile callback that waits for the stream
+            // lets the session's other callbacks, such as the stream's, run.
+            let lentTurns = ProfileCallbackGate.lendHeldTurns()
+            do {
+                for try await snapshot in streaming {
+                    last = snapshot
+                }
+            } catch {
+                await ProfileCallbackGate.reclaim(lentTurns)
+                throw error
             }
+            await ProfileCallbackGate.reclaim(lentTurns)
             // AsyncThrowingStream may end normally when its task is cancelled:
             // what came so far isn't the whole response.
             try Task.checkCancellation()

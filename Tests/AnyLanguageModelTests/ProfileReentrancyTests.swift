@@ -107,6 +107,47 @@ struct ProfileReentrancyTests {
         #expect(b.properties.history.count == 2)
     }
 
+    // Session A's callback awaits a request on session B,
+    // whose callback awaits a request on session A.
+    // Each callback waits for the request that it makes, so both finish.
+    @Test(arguments: [false, true], [false, true])
+    func callbacksOnTwoSessionsCanMakeRequestsOnEachOther(outerStreaming: Bool, innerStreaming: Bool) async throws {
+        let sessions = Locked<[String: LanguageModelSession]>([:])
+        let calls = Locked<[String]>([])
+        func makeSession(_ name: String, then next: String) -> LanguageModelSession {
+            LanguageModelSession(
+                profile: LanguageModelSession.Profile { Instructions(name) }
+                    .model(ReentrancyModel())
+                    .onResponse { _ in
+                        let isFirst = calls.withLock { calls in
+                            defer { calls.append(name) }
+                            return !calls.contains(name)
+                        }
+                        guard isFirst, let session = sessions.withLock({ $0[next] }) else { return }
+                        try await send(
+                            "From \(name)",
+                            to: session,
+                            streaming: name == "A" ? innerStreaming : outerStreaming
+                        )
+                    }
+            )
+        }
+        let a = makeSession("A", then: "B")
+        let b = makeSession("B", then: "A")
+        sessions.withLock { $0 = ["A": a, "B": b] }
+        defer { sessions.withLock { $0 = [:] } }
+
+        let outcome = await outcome(within: 30) {
+            try await send("Outer", to: a, streaming: outerStreaming)
+        }
+
+        let result = try #require(outcome, "The request on A didn't finish")
+        try result.get()
+        #expect(calls.withLock { $0 } == ["A", "B", "A"])
+        #expect(a.properties.history.count == 4)
+        #expect(b.properties.history.count == 2)
+    }
+
     @Test func requestDuringLifecycleActionHasAMessage() {
         let error = LanguageModelSession.DynamicProfileError.requestDuringLifecycleAction
         #expect(error.errorDescription?.contains("lifecycle action") == true)

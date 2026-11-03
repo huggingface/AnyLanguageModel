@@ -24,7 +24,13 @@ extension LanguageModelSession {
     /// even when requests overlap,
     /// so the state that a callback captures needs no other protection.
     /// A request that a callback makes on its own session
-    /// runs its callbacks while the first callback waits for it.
+    /// runs its callbacks while the first callback waits for it,
+    /// as when the callback awaits `respond(to:)` or consumes a response stream.
+    /// A request that the callback makes in another task,
+    /// such as an unstructured task that it doesn't wait for,
+    /// runs its callbacks while the first callback waits for a request or a response stream,
+    /// or after the first callback returns.
+    /// If the callback waits for that task to finish, it never finishes.
     /// History transforms also run one at a time.
     ///
     /// - Note: This API is exclusive to AnyLanguageModel on OS 26.
