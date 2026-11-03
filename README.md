@@ -919,9 +919,22 @@ struct FetchTransport: HTTPTransport {
             options.body = .string(String(decoding: body, as: UTF8.self))
         }
 
-        let fetch = JSObject.global.fetch.function!
-        let response = try await JSPromise(fetch(url.absoluteString, options).object!)!.value.object!
-        let text = try await JSPromise(response.text!().object!)!.value.string!
+        let controller = JSObject.global.AbortController.function!.new()
+        options.signal = controller.signal
+        // `JSObject` isn't `Sendable`, so the cancellation handler
+        // reaches the controller through a `JSRemote`.
+        let remoteController = JSRemote(controller)
+
+        let (response, text) = try await withTaskCancellationHandler {
+            let fetch = JSObject.global.fetch.function!
+            let response = try await JSPromise(fetch(url.absoluteString, options).object!)!.value.object!
+            let text = try await JSPromise(response.text!().object!)!.value.string!
+            return (response, text)
+        } onCancel: {
+            Task { await remoteController.withJSObject { _ = $0.abort!() } }
+        }
+
+        try Task.checkCancellation()
 
         var headerFields = HTTPFields()
         let entries = JSObject.global.Object.function!.fromEntries!(response.headers)
@@ -955,6 +968,8 @@ let model = AnthropicLanguageModel(
 )
 ```
 
+Cancelling the task that sends a request aborts the `fetch`,
+so `send` throws instead of waiting for the response.
 Awaiting a `JSPromise` needs JavaScriptKit's event loop,
 so install it once when your program starts.
 To build for WASI,
