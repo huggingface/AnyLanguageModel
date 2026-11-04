@@ -164,15 +164,23 @@ final class ProfileActionSerializer: Sendable {
         let serializer: ProfileActionSerializer
         private let state = Locked(State())
 
-        // The task that runs the operation.
-        // The holder compares it with the current task only while the holder is active,
-        // when that task still runs, so no other task can have its address.
-        // It's never used to act on the task.
-        private let owner: UnsafeCurrentTask?
+        // The hash value of the task that runs the operation.
+        // An `UnsafeCurrentTask` is valid only in the closure that receives it,
+        // so the holder keeps this value instead of the task,
+        // and it computes the current task's hash value in the same way to compare them.
+        // The holder compares them only while it is active,
+        // when the operation's task still runs, so no other task can have its address;
+        // two tasks that run at the same time have equal hash values
+        // only if the hashes of their different addresses collide.
+        private let owner: Int?
 
         init(serializer: ProfileActionSerializer) {
             self.serializer = serializer
-            self.owner = withUnsafeCurrentTask { $0 }
+            self.owner = Self.currentTaskHashValue
+        }
+
+        private static var currentTaskHashValue: Int? {
+            withUnsafeCurrentTask { $0?.hashValue }
         }
 
         /// Whether the operation still runs.
@@ -185,7 +193,7 @@ final class ProfileActionSerializer: Sendable {
 
         private var isOwnedByCurrentTask: Bool {
             guard let owner else { return false }
-            return withUnsafeCurrentTask { $0 == owner }
+            return Self.currentTaskHashValue == owner
         }
 
         /// Releases the permit if the current task holds it for the operation.
