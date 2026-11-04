@@ -45,6 +45,178 @@ import Testing
         }
     }
 
+    @available(macOS 27.0, iOS 27.0, visionOS 27.0, *)
+    private struct CompatibilityDynamicProfile: LanguageModelSession.DynamicProfile {
+        let model: any LanguageModel
+        @SessionProperty(\.compatibilityRevision) private var revision
+
+        var body: some LanguageModelSession.DynamicProfile {
+            Profile {
+                Instructions("Revision \(revision)")
+            }
+            .model(model)
+            .samplingMode(.greedy)
+            .temperature(0.2)
+            .maximumResponseTokens(32)
+            .reasoningLevel(.light)
+            .toolCallingMode(.allowed)
+            .historyTransform { $0 }
+            .transcriptErrorHandlingPolicy(nil)
+        }
+    }
+
+    @Test func anyLanguageModelNonSendableHistoryTransformCompatibility() {
+        let captured = NonSendableHistoryCapture()
+        let transform: ([Transcript.Entry]) -> [Transcript.Entry] = { entries in
+            captured.calls += 1
+            return entries
+        }
+        _ = LanguageModelSession.AnyDynamicProfile(
+            LanguageModelSession.Profile { Instructions("Projection") }
+                .historyTransform(transform)
+        )
+        #expect(captured.calls == 0)
+    }
+
+    private final class NonSendableHistoryCapture {
+        var calls = 0
+    }
+
+    @available(macOS 27.0, iOS 27.0, visionOS 27.0, *)
+    private struct CompatibilityCallbackProfile: LanguageModelSession.DynamicProfile {
+        let model: any LanguageModel
+
+        var body: some LanguageModelSession.DynamicProfile {
+            Profile {
+                Instructions("Callbacks")
+            }
+            .model(model)
+            .onPrompt { (_: Transcript.Prompt) in }
+            .onPrompt {}
+            .onResponse { (_: Transcript.Response) in }
+            .onResponse {}
+            .onReasoning { (_: Transcript.Reasoning) in }
+            .onReasoning {}
+            .onToolCall { (_: Transcript.ToolCall) in }
+            .onToolCall {}
+            .onToolOutput { (_: Transcript.ToolCall, _: Transcript.ToolOutput) in }
+            .onToolOutput {}
+            .onActivate {}
+            .onDeactivate {}
+        }
+    }
+
+    @available(macOS 27.0, iOS 27.0, visionOS 27.0, *)
+    private struct CompatibilityProfileModifier: LanguageModelSession.DynamicProfileModifier {
+        let temperature: Double
+
+        func body(content: Content) -> some DynamicProfile {
+            content
+                .temperature(temperature)
+                .onResponse {}
+        }
+    }
+
+    @available(macOS 27.0, iOS 27.0, visionOS 27.0, *)
+    private struct CompatibilityConditionalProfile: LanguageModelSession.DynamicProfile {
+        let model: any LanguageModel
+        let includeDetail: Bool
+
+        var body: some LanguageModelSession.DynamicProfile {
+            if includeDetail {
+                Profile {
+                    Instructions("Include useful detail.")
+                }
+                .model(model)
+            } else {
+                Profile {
+                    Instructions("Be brief.")
+                }
+                .model(model)
+                .modifier(CompatibilityProfileModifier(temperature: 0.3))
+            }
+        }
+    }
+
+    @available(macOS 27.0, iOS 27.0, visionOS 27.0, *)
+    private struct CompatibilityAvailabilityProfile: LanguageModelSession.DynamicProfile {
+        let model: any LanguageModel
+
+        var body: some LanguageModelSession.DynamicProfile {
+            if #available(macOS 28.0, iOS 28.0, visionOS 28.0, *) {
+                Profile {
+                    Instructions("Later releases")
+                }
+                .model(model)
+            } else {
+                Profile {
+                    Instructions("Earlier releases")
+                }
+                .model(model)
+            }
+        }
+    }
+
+    @available(macOS 27.0, iOS 27.0, tvOS 26.0, visionOS 27.0, *)
+    @Test func anyLanguageModelDynamicProfileCompatibility() {
+        let model = SystemLanguageModel.default
+        let session = LanguageModelSession(
+            profile: CompatibilityCallbackProfile(model: model),
+            history: [Transcript.Entry]()
+        )
+        _ = LanguageModelSession(profile: CompatibilityConditionalProfile(model: model, includeDetail: true))
+        _ = LanguageModelSession(profile: CompatibilityConditionalProfile(model: model, includeDetail: false))
+        _ = LanguageModelSession(profile: CompatibilityAvailabilityProfile(model: model))
+        _ = LanguageModelSession.AnyDynamicProfile(
+            LanguageModelSession.Profile {
+                Instructions("Custom modifier")
+            }
+            .model(model)
+            .modifier(CompatibilityProfileModifier(temperature: 0.5))
+        )
+        // Creating a profile session records the profile's instructions in the transcript.
+        #expect(session.transcript.count == 1)
+        #expect(anyLanguageModelInstructionTexts(session.transcript) == [["Callbacks"]])
+        #expect(session.properties.history.isEmpty)
+
+        // A leading instructions entry in the history keeps its ID
+        // and takes the active profile's instructions.
+        let base = Transcript.Instructions(segments: [.text(.init(content: "Base"))], toolDefinitions: [])
+        let restored = LanguageModelSession(
+            profile: CompatibilityConditionalProfile(model: model, includeDetail: false),
+            history: [Transcript.Entry.instructions(base)]
+        )
+        #expect(restored.transcript.map(\.id) == [base.id])
+        #expect(anyLanguageModelInstructionTexts(restored.transcript) == [["Be brief."]])
+    }
+
+    @available(macOS 27.0, iOS 27.0, tvOS 26.0, visionOS 27.0, *)
+    private func anyLanguageModelInstructionTexts(_ transcript: Transcript) -> [[String]] {
+        transcript.compactMap { entry -> [String]? in
+            guard case .instructions(let instructions) = entry else { return nil }
+            return instructions.segments.compactMap { segment -> String? in
+                if case .text(let text) = segment { return text.content }
+                return nil
+            }
+        }
+    }
+
+    @available(macOS 27.0, iOS 27.0, tvOS 26.0, visionOS 27.0, *)
+    @Test func anyLanguageModelNonSendableProfileCallbackCompatibility() {
+        // The callback takes the non-Sendable state that it captures,
+        // so this function can't use it again.
+        let captured = NonSendableCallbackCapture()
+        _ = LanguageModelSession.AnyDynamicProfile(
+            LanguageModelSession.Profile { Instructions("Callbacks") }
+                .model(SystemLanguageModel.default)
+                .onResponse { captured.calls += 1 }
+        )
+    }
+
+    private final class NonSendableCallbackCapture {
+        var calls = 0
+    }
+
     @available(macOS 26.0, iOS 26.0, tvOS 26.0, visionOS 26.0, *)
     @Test("AnyLanguageModel Drop-In Compatibility", .enabled(if: isSystemLanguageModelAvailable))
     func anyLanguageModelCompatibility() async throws {
@@ -62,6 +234,7 @@ import Testing
             )
             dynamicSession.properties.compatibilityRevision = 1
             _ = dynamicSession.properties.history
+            _ = LanguageModelSession.AnyDynamicProfile(CompatibilityDynamicProfile(model: model))
         }
 
         let options = GenerationOptions(temperature: 0.7)

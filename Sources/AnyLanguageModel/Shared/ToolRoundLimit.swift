@@ -8,13 +8,13 @@ import Foundation
 /// A round that repeats the previous one runs like any other:
 /// calling the same tool with the same arguments again can be what's asked,
 /// and the limit is what ends a loop.
-struct ToolRoundLimit {
+final class ToolRoundLimit: @unchecked Sendable {
     /// The provider name used in error messages.
     let provider: String
     /// The most rounds the response may take.
     let maximumRounds: Int
 
-    private var taken = 0
+    private let roundCount = Locked(0)
 
     init(provider: String, options: GenerationOptions) {
         self.provider = provider
@@ -27,14 +27,16 @@ struct ToolRoundLimit {
     ///   followed by its output.
     /// - Throws: ``LanguageModelSession/ToolRoundLimitExceeded`` with `completed`
     ///   when the round is past the most rounds the options allow.
-    mutating func record(completed: [Transcript.Entry]) throws {
-        taken += 1
-        if taken > maximumRounds {
-            throw LanguageModelSession.ToolRoundLimitExceeded(
-                limit: maximumRounds,
-                provider: provider,
-                transcriptEntries: ArraySlice(completed)
-            )
+    func record(completed: [Transcript.Entry]) throws {
+        try roundCount.withLock { rounds in
+            rounds += 1
+            if rounds > maximumRounds {
+                throw LanguageModelSession.ToolRoundLimitExceeded(
+                    limit: maximumRounds,
+                    provider: provider,
+                    transcriptEntries: ArraySlice(completed)
+                )
+            }
         }
     }
 }

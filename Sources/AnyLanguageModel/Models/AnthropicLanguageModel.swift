@@ -641,7 +641,7 @@ public struct AnthropicLanguageModel: LanguageModel {
                     )
                     var inFlightMessages: [AnthropicMessage] = []
                     var state = StreamingResponseState<Content>()
-                    var toolRounds = ToolRoundLimit(provider: "Anthropic", options: options)
+                    let toolRounds = ToolRoundLimit(provider: "Anthropic", options: options)
                     while true {
                         try Task.checkCancellation()
                         // The entries of the rounds that ran, before this round adds its reasoning.

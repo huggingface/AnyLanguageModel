@@ -75,7 +75,7 @@ public macro SessionPropertyEntry() =
 public macro __SessionPropertyEntryDefaultValue() =
     #externalMacro(module: "AnyLanguageModelMacros", type: "SessionPropertyEntryDefaultValueMacro")
 
-/// Session-scoped storage shared by dynamic instructions and Tools.
+/// Session-scoped storage shared by profiles, dynamic instructions, and tools.
 ///
 /// - Note: This API is exclusive to AnyLanguageModel on OS 26 and mirrors
 ///   Foundation Models 27.
@@ -83,33 +83,49 @@ public macro __SessionPropertyEntryDefaultValue() =
 public final class SessionPropertyValues: @unchecked Sendable {
     @ObservationIgnored private let sessionPropertyRegistrar = ObservationRegistrar()
     @ObservationIgnored private let customValues = Locked<[ObjectIdentifier: Any]>([:])
-    @ObservationIgnored private let historyGetter: @Sendable () -> Transcript.HistoryView
-    @ObservationIgnored private let historySetter: @Sendable (Transcript.HistoryView) -> Void
+    @ObservationIgnored private let historyGetter: @Sendable () -> [Transcript.Entry]
+    @ObservationIgnored private let historySetter: @Sendable ([Transcript.Entry]) -> Void
+    @ObservationIgnored private let historyReplacer: @Sendable ([Transcript.Entry], UInt64) -> UInt64?
 
+    /// Creates session properties backed by a session's history.
+    ///
+    /// `historyReplacer` replaces the history only if it's still at the given version,
+    /// and returns the new version, or `nil` if the history changed.
     init(
-        historyGetter: @escaping @Sendable () -> Transcript.HistoryView,
-        historySetter: @escaping @Sendable (Transcript.HistoryView) -> Void
+        historyGetter: @escaping @Sendable () -> [Transcript.Entry],
+        historySetter: @escaping @Sendable ([Transcript.Entry]) -> Void,
+        historyReplacer: @escaping @Sendable ([Transcript.Entry], UInt64) -> UInt64?
     ) {
         self.historyGetter = historyGetter
         self.historySetter = historySetter
+        self.historyReplacer = historyReplacer
     }
 
-    /// The session history without an instructions entry.
+    /// The canonical session history after dynamic instructions.
     public var history: Transcript.HistoryView {
         get {
             _accessSessionProperty(keyPath: \.history)
             if SessionPropertyBinding.values === self, let history = SessionPropertyBinding.history {
-                return history
+                return Transcript.HistoryView(history.entries)
             }
-            return historyGetter()
+            return Transcript.HistoryView(historyGetter())
         }
         set {
             _withSessionPropertyMutation(keyPath: \.history) {
-                precondition(
-                    SessionPropertyBinding.values !== self || SessionPropertyBinding.history == nil,
-                    "Session history is read-only while dynamic instructions or a Tool is active"
-                )
-                historySetter(newValue)
+                let newValue = Array(newValue).filter { entry in
+                    if case .instructions = entry { return false }
+                    return true
+                }
+                if SessionPropertyBinding.values === self, let history = SessionPropertyBinding.history {
+                    precondition(
+                        history.isWritable,
+                        "Session history is read-only while dynamic instructions or a Tool is active"
+                    )
+                    history.entries = newValue
+                    history.persist(history.entries)
+                } else {
+                    historySetter(newValue)
+                }
             }
         }
     }
@@ -131,6 +147,87 @@ public final class SessionPropertyValues: @unchecked Sendable {
                 values[ObjectIdentifier(key)] = newValue
             }
         }
+    }
+
+    /// Returns a history binding for a profile, dynamic instructions, or a Tool.
+    ///
+    /// The binding's entries reflect the version that `version` holds now.
+    /// See ``historyBinding(_:isWritable:protecting:persistingAt:readAt:onChange:)``.
+    func historyBinding(
+        _ entries: [Transcript.Entry],
+        isWritable: Bool,
+        protecting protectedEntryKeys: Set<TranscriptEntryKey> = [],
+        persistingAt version: Locked<UInt64?>? = nil,
+        onChange: (@Sendable ([Transcript.Entry]) -> Void)? = nil
+    ) -> SessionHistoryBinding {
+        historyBinding(
+            entries,
+            isWritable: isWritable,
+            protecting: protectedEntryKeys,
+            persistingAt: version,
+            readAt: version?.withLock { $0 },
+            onChange: onChange
+        )
+    }
+
+    /// Returns a history binding whose entries reflect the session history at `snapshotVersion`.
+    ///
+    /// A writable binding with a `version` persists each write right away,
+    /// but only if the session history is still at the version that the binding's entries reflect,
+    /// and `version`, which the request's bindings share, is still at that version too.
+    /// So a binding whose snapshot is older than another binding's committed write
+    /// can't undo that write.
+    /// A committed write moves `version` and the binding to the new history version,
+    /// and calls `onChange` while it holds `version`'s lock.
+    /// Otherwise, the write isn't kept, `version` becomes `nil`
+    /// so that later writes aren't kept either,
+    /// and ``SessionHistoryBinding/hasConflict`` becomes `true`.
+    /// A writable binding without a version keeps its writes to itself.
+    func historyBinding(
+        _ entries: [Transcript.Entry],
+        isWritable: Bool,
+        protecting protectedEntryKeys: Set<TranscriptEntryKey> = [],
+        persistingAt version: Locked<UInt64?>?,
+        readAt snapshotVersion: UInt64?,
+        onChange: (@Sendable ([Transcript.Entry]) -> Void)? = nil
+    ) -> SessionHistoryBinding {
+        let conflict = Locked(false)
+        let persist: (@Sendable ([Transcript.Entry]) -> Void)?
+        if isWritable, let version {
+            let snapshotVersion = Locked(snapshotVersion)
+            persist = { [historyReplacer] updated in
+                let durable = removingProtectedTranscriptEntries(
+                    from: updated,
+                    protecting: protectedEntryKeys,
+                    in: entries
+                )
+                let isCommitted = version.withLock { base in
+                    guard let expected = snapshotVersion.withLock({ $0 }),
+                        base == expected,
+                        let committed = historyReplacer(durable, expected)
+                    else {
+                        base = nil
+                        return false
+                    }
+                    base = committed
+                    snapshotVersion.withLock { $0 = committed }
+                    onChange?(updated)
+                    return true
+                }
+                if !isCommitted {
+                    conflict.withLock { $0 = true }
+                }
+            }
+        } else {
+            persist = nil
+        }
+        return SessionHistoryBinding(
+            entries,
+            isWritable: isWritable,
+            protectedEntryKeys: protectedEntryKeys,
+            conflict: conflict,
+            persist: persist
+        )
     }
 
     @_documentation(visibility: internal)
@@ -155,7 +252,63 @@ public final class SessionPropertyValues: @unchecked Sendable {
 
 enum SessionPropertyBinding {
     @TaskLocal static var values: SessionPropertyValues?
-    @TaskLocal static var history: Transcript.HistoryView?
+    @TaskLocal static var history: SessionHistoryBinding?
+}
+
+final class SessionHistoryBinding: @unchecked Sendable {
+    private let storage: Locked<[Transcript.Entry]>
+    let isWritable: Bool
+    private let protectedEntryKeys: Set<TranscriptEntryKey>
+    private let protectedEntries: [Transcript.Entry]
+    private let originalEntries: [Transcript.Entry]
+    private let conflict: Locked<Bool>
+    private let persistValue: (@Sendable ([Transcript.Entry]) -> Void)?
+
+    init(
+        _ entries: [Transcript.Entry],
+        isWritable: Bool,
+        protectedEntryKeys: Set<TranscriptEntryKey> = [],
+        conflict: Locked<Bool> = Locked(false),
+        persist: (@Sendable ([Transcript.Entry]) -> Void)? = nil
+    ) {
+        storage = Locked(
+            entries.filter { entry in
+                if case .instructions = entry { return false }
+                return true
+            }
+        )
+        self.isWritable = isWritable
+        self.protectedEntryKeys = protectedEntryKeys
+        self.originalEntries = entries
+        self.protectedEntries = keyedTranscriptEntries(entries).filter { protectedEntryKeys.contains($0.key) }.map(
+            \.entry
+        )
+        self.conflict = conflict
+        self.persistValue = persist
+    }
+
+    /// Whether the session history changed after the snapshot that this binding reflects,
+    /// so that a write wasn't kept.
+    var hasConflict: Bool { conflict.withLock { $0 } }
+
+    var entries: [Transcript.Entry] {
+        get { storage.withLock { $0 } }
+        set {
+            storage.withLock { current in
+                current =
+                    removingProtectedTranscriptEntries(
+                        from: newValue,
+                        protecting: protectedEntryKeys,
+                        in: originalEntries
+                    )
+                    + protectedEntries
+            }
+        }
+    }
+
+    func persist(_ entries: [Transcript.Entry]) {
+        persistValue?(entries)
+    }
 }
 
 extension LanguageModelSession {
@@ -172,7 +325,7 @@ extension LanguageModelSession {
             get {
                 guard let values = SessionPropertyBinding.values else {
                     preconditionFailure(
-                        "SessionProperty can only be accessed while dynamic instructions or a Tool is active"
+                        "SessionProperty can only be accessed while a session profile, dynamic instructions, or a Tool is active"
                     )
                 }
                 return values[keyPath: keyPath]
@@ -180,7 +333,7 @@ extension LanguageModelSession {
             nonmutating set {
                 guard let values = SessionPropertyBinding.values else {
                     preconditionFailure(
-                        "SessionProperty can only be accessed while dynamic instructions or a Tool is active"
+                        "SessionProperty can only be accessed while a session profile, dynamic instructions, or a Tool is active"
                     )
                 }
                 values[keyPath: keyPath] = newValue
@@ -198,7 +351,7 @@ extension DynamicInstructions {
 extension Tool {
     public typealias SessionProperty = LanguageModelSession.SessionProperty
 
-    func bindingSessionProperties(_ properties: SessionPropertyValues, history: Transcript.HistoryView) -> any Tool {
+    func bindingSessionProperties(_ properties: SessionPropertyValues, history: [Transcript.Entry]) -> any Tool {
         SessionPropertyTool(wrapped: self, properties: properties, history: history)
     }
 }
@@ -212,7 +365,7 @@ protocol SessionPropertyBoundTool {
 private struct SessionPropertyTool<Wrapped: Tool>: Tool, SessionPropertyBoundTool {
     let wrapped: Wrapped
     let properties: SessionPropertyValues
-    let history: Transcript.HistoryView
+    let history: [Transcript.Entry]
 
     var name: String { wrapped.name }
     var description: String { wrapped.description }
@@ -221,9 +374,10 @@ private struct SessionPropertyTool<Wrapped: Tool>: Tool, SessionPropertyBoundToo
     var unboundTool: any Tool { wrapped }
 
     func call(arguments: Wrapped.Arguments) async throws -> Wrapped.Output {
-        let history =
+        let entries =
             SessionPropertyBinding.values === properties
-            ? SessionPropertyBinding.history ?? history : history
+            ? SessionPropertyBinding.history?.entries ?? history : history
+        let history = SessionHistoryBinding(entries, isWritable: false)
         return try await SessionPropertyBinding.$values.withValue(properties) {
             try await SessionPropertyBinding.$history.withValue(history) {
                 try await wrapped.call(arguments: arguments)
