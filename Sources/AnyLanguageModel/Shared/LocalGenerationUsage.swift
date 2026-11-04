@@ -53,6 +53,25 @@ struct LocalGenerationTokenStream {
 }
 
 extension LanguageModel {
+    /// The content of a response that stops at a tool call
+    /// before the model writes an answer.
+    func stoppedResponseContent<Content: Generable>(
+        for type: Content.Type
+    ) throws -> (content: Content, rawContent: GeneratedContent) {
+        if type == String.self {
+            return ("" as! Content, GeneratedContent(""))
+        }
+        let emptyObject = GeneratedContent(properties: [:])
+        if let content = try? Content(emptyObject) {
+            return (content, emptyObject)
+        }
+        let nullContent = GeneratedContent(kind: .null)
+        if let content = try? Content(nullContent) {
+            return (content, nullContent)
+        }
+        throw GeneratedContentError.typeMismatch
+    }
+
     /// Constrained local generation produces one complete structured snapshot.
     func streamStructuredResponse<Content: Generable>(
         within session: LanguageModelSession,
