@@ -172,6 +172,8 @@ final class ProfileActionSerializer: Sendable {
         // when the operation's task still runs, so no other task can have its address;
         // two tasks that run at the same time have equal hash values
         // only if the hashes of their different addresses collide.
+        // TODO: Compare `Task.currentID` (SE-0553) instead,
+        // once the package requires a Swift version that has it.
         private let owner: Int?
 
         init(serializer: ProfileActionSerializer) {
