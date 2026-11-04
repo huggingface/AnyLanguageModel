@@ -925,9 +925,19 @@ struct FetchTransport: HTTPTransport {
         // reaches the controller through a `JSRemote`.
         let remoteController = JSRemote(controller)
 
+        // Abort the `fetch` if its response doesn't start within `timeout`.
+        let timer: JSValue? = timeout.map { timeout in
+            let (seconds, attoseconds) = timeout.components
+            let milliseconds = Double(seconds) * 1_000 + Double(attoseconds) / 1e15
+            return JSObject.global.setTimeout!(controller.abort.function!.bind!(controller), milliseconds)
+        }
+
         let (response, text) = try await withTaskCancellationHandler {
             let fetch = JSObject.global.fetch.function!
             let response = try await JSPromise(fetch(url.absoluteString, options).object!)!.value.object!
+            if let timer {
+                _ = JSObject.global.clearTimeout!(timer)
+            }
             let text = try await JSPromise(response.text!().object!)!.value.string!
             return (response, text)
         } onCancel: {
@@ -970,6 +980,7 @@ let model = AnthropicLanguageModel(
 
 Cancelling the task that sends a request aborts the `fetch`,
 so `send` throws instead of waiting for the response.
+So does a response that doesn't start within the request's `timeout`.
 Awaiting a `JSPromise` needs JavaScriptKit's event loop,
 so install it once when your program starts.
 To build for WASI,
