@@ -1,6 +1,8 @@
 import Foundation
 import HTTPTypes
-import HTTPTypesFoundation
+#if !os(WASI)
+    import HTTPTypesFoundation
+#endif
 import JSONSchema
 import OrderedCollections
 
