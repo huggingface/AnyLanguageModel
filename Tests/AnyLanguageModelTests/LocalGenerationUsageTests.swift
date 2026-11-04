@@ -163,10 +163,27 @@ struct LocalGenerationUsageTests {
         #expect(streamed.usage == model.usage)
         #expect(session.usage.totalTokenCount == 2 * model.usage.totalTokenCount)
     }
+
+    /// A structured response that called tools made a request for each round,
+    /// and a streamed one counts every round, as a response does.
+    @Test func structuredSnapshotCountsEveryRequest() async throws {
+        let model = LocalStructuredUsageModel(
+            earlier: LocalGenerationUsage(promptTokenCount: 30, generatedTokenCount: 5).value
+        )
+        let streamedSession = LanguageModelSession(model: model)
+        let streamed = try await streamedSession.streamResponse(to: "A number", generating: Int.self).collect()
+        let respondedSession = LanguageModelSession(model: model)
+        let response = try await respondedSession.respond(to: "A number", generating: Int.self)
+        #expect(streamed.usage == model.usage)
+        #expect(response.usage == model.usage)
+        #expect(respondedSession.usage.totalTokenCount == 48)
+        #expect(streamedSession.usage == respondedSession.usage)
+    }
 }
 
 private struct LocalStructuredUsageModel: LanguageModel {
     typealias UnavailableReason = Never
+    var earlier = LanguageModelSession.Usage.zero
     let usage = LocalGenerationUsage(promptTokenCount: 12, generatedTokenCount: 1).value
 
     func respond<Content: Generable>(
@@ -177,7 +194,12 @@ private struct LocalStructuredUsageModel: LanguageModel {
         options: GenerationOptions
     ) async throws -> LanguageModelSession.Response<Content> {
         let raw = GeneratedContent(7)
-        return .init(content: try Content(raw), rawContent: raw, transcriptEntries: [], usage: usage)
+        return .init(
+            content: try Content(raw),
+            rawContent: raw,
+            transcriptEntries: [],
+            requests: RequestsUsage(earlier: earlier, final: usage)
+        )
     }
 
     func streamResponse<Content: Generable>(

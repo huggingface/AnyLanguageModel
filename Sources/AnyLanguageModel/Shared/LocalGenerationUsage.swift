@@ -105,7 +105,7 @@ extension LanguageModel {
                                 content: response.content.asPartiallyGenerated(),
                                 rawContent: response.rawContent,
                                 transcriptEntries: response.transcriptEntries,
-                                usage: response.usage
+                                requests: response.requests
                             )
                         )
                         continuation.finish()
