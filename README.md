@@ -931,13 +931,18 @@ struct FetchTransport: HTTPTransport {
             let milliseconds = Double(seconds) * 1_000 + Double(attoseconds) / 1e15
             return JSObject.global.setTimeout!(controller.abort.function!.bind!(controller), milliseconds)
         }
+        func clearTimer() {
+            if let timer {
+                _ = JSObject.global.clearTimeout!(timer)
+            }
+        }
+        // Clear the timer when `fetch` fails or is cancelled, too.
+        defer { clearTimer() }
 
         let (response, text) = try await withTaskCancellationHandler {
             let fetch = JSObject.global.fetch.function!
             let response = try await JSPromise(fetch(url.absoluteString, options).object!)!.value.object!
-            if let timer {
-                _ = JSObject.global.clearTimeout!(timer)
-            }
+            clearTimer()
             let text = try await JSPromise(response.text!().object!)!.value.string!
             return (response, text)
         } onCancel: {
