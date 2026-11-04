@@ -119,6 +119,38 @@ struct ToolContinuationTests {
         #expect(remaining == (edited ? [previous[0], kept] : [previous[0]]))
     }
 
+    // A callback that inserts a round before an appended output gives the output that round's key.
+    // An unchanged appended output stays appended; an edited one belongs to the new round.
+    @Test(arguments: [false, true])
+    func rollbackRemovesAnUnchangedOutputThatACallbackMovedIntoANewRound(edited: Bool) {
+        let previous = Self.round("previous")
+        let current = Self.round("current")
+        let history = previous + current
+        let appended = AppendedTranscriptEntries(
+            keys: Set(keyedTranscriptEntries(history).suffix(current.count).map(\.key)),
+            history: history
+        )
+        let inserted = Self.round("inserted")[0]
+        let kept = edited ? Self.round("edited")[1] : current[1]
+        let remaining = removingAppendedTranscriptEntries(appended, from: previous + [current[0], inserted, kept])
+        #expect(remaining == previous + (edited ? [inserted, kept] : [inserted]))
+    }
+
+    // A later round's output that equals an appended output
+    // belongs to the later response while the appended output keeps its key.
+    @Test func rollbackKeepsALaterOutputThatEqualsAnAppendedOutput() {
+        let previous = Self.round("previous")
+        let current = Self.round("current")
+        let history = previous + current
+        let appended = AppendedTranscriptEntries(
+            keys: Set(keyedTranscriptEntries(history).suffix(current.count).map(\.key)),
+            history: history
+        )
+        let later = [Self.round("later")[0], current[1]]
+        let remaining = removingAppendedTranscriptEntries(appended, from: history + later)
+        #expect(remaining == previous + later)
+    }
+
     @Test func ordinaryContinuationKeepsTranscriptAndOpaqueMessages() {
         let previous = Self.round("previous")
         let current = Self.round("current")

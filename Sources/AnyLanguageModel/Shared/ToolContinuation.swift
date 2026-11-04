@@ -118,7 +118,11 @@ struct AppendedTranscriptEntries: Sendable {
 // that the history had before the append, or in no round, is still appended,
 // unless an earlier output with that key claims it.
 // An unchanged appended output is never claimed.
-// Outputs in later rounds belong to later responses and stay.
+// A callback can also insert a round before an appended output.
+// An unchanged copy of an appended output whose key is gone
+// that is now in a round the history didn't have is still appended;
+// each such output removes the first copy.
+// Other outputs in later rounds belong to later responses and stay.
 func removingAppendedTranscriptEntries(
     _ appended: AppendedTranscriptEntries,
     from entries: [Transcript.Entry]
@@ -126,15 +130,30 @@ func removingAppendedTranscriptEntries(
     guard !appended.isEmpty else { return entries }
     let originalItems = keyedTranscriptEntries(appended.history)
     var earlierRounds: Set<String?> = [nil]
+    var knownRounds: Set<String> = []
     var appendedCallIDs: Set<String> = []
     for item in originalItems {
+        if case .toolCalls(let calls) = item.entry { knownRounds.insert(calls.id) }
         if appended.keys.contains(item.key) {
             if case .toolOutput(_, let call) = item.key { appendedCallIDs.insert(call) }
         } else if case .toolCalls(let calls) = item.entry {
             earlierRounds.insert(calls.id)
         }
     }
-    let items = keyedTranscriptEntries(entries).filter { !appended.keys.contains($0.key) }
+    let keyedEntries = keyedTranscriptEntries(entries)
+    let remainingKeys = Set(keyedEntries.map(\.key))
+    var movedOutputs = originalItems.filter { item in
+        guard case .toolOutput = item.key else { return false }
+        return appended.keys.contains(item.key) && !remainingKeys.contains(item.key)
+    }.map(\.entry)
+    let items = keyedEntries.filter { item in
+        guard !appended.keys.contains(item.key) else { return false }
+        guard case .toolOutput(let round?, _) = item.key, !knownRounds.contains(round),
+            let index = movedOutputs.firstIndex(of: item.entry)
+        else { return true }
+        movedOutputs.remove(at: index)
+        return false
+    }
     let candidates = items.indices.filter { index in
         guard case .toolOutput(let round, let call) = items[index].key else { return false }
         return appendedCallIDs.contains(call) && earlierRounds.contains(round)
