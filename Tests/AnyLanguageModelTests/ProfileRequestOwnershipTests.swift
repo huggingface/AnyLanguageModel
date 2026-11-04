@@ -142,16 +142,20 @@ struct ProfileRequestOwnershipTests {
 
     @Test func cancellingAResponseCancelsItsPromptHook() async throws {
         let started = AsyncStream<Void>.makeStream()
+        let isHookCancelled = Locked(false)
         let session = LanguageModelSession(
             profile: LanguageModelSession.Profile { Instructions("Slow prompt hook") }
                 .model(OwnershipModel())
                 .onPrompt { _ in
                     started.continuation.yield()
-                    try await Task.sleep(for: .seconds(10))
+                    do {
+                        try await Task.sleep(for: .seconds(60))
+                    } catch {
+                        isHookCancelled.withLock { $0 = error is CancellationError }
+                        throw error
+                    }
                 }
         )
-        let clock = ContinuousClock()
-        let start = clock.now
 
         let response = Task { try await session.respond(to: "Cancel me") }
         var iterator = started.stream.makeAsyncIterator()
@@ -159,7 +163,7 @@ struct ProfileRequestOwnershipTests {
         response.cancel()
 
         await #expect(throws: CancellationError.self) { _ = try await response.value }
-        #expect(clock.now - start < .seconds(5))
+        #expect(isHookCancelled.withLock { $0 })
     }
 
     @Test func cancelledQueuedPreparationRunsNoPromptHook() async throws {
