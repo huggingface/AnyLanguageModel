@@ -205,15 +205,25 @@ final class RequestUsageChannel: Sendable {
 ///
 /// The session counts each snapshot of the stream through this.
 /// A stream that yields one complete snapshot
-/// adds the snapshot's requests through the same account before it yields the snapshot,
+/// prepays the snapshot's requests through the same account before it yields the snapshot,
 /// so the session counts each request once,
 /// whether or not the snapshot reaches it, and whatever relays it.
 final class CountedRequestsUsage: Sendable {
+    /// The requests that a snapshot reports and that the account counted before the snapshot.
+    final class Prepaid: Sendable {
+        /// The usage of the snapshot's final request.
+        let final: LanguageModelSession.Usage
+
+        fileprivate init(final: LanguageModelSession.Usage) {
+            self.final = final
+        }
+    }
+
     private struct State: Sendable {
-        /// The highest usage that the stream's snapshots reported.
+        /// The highest usage that the stream's own snapshots reported.
         var reported = LanguageModelSession.Usage.zero
-        /// Usage that was added and that no snapshot has reported yet.
-        var added = LanguageModelSession.Usage.zero
+        /// Prepaid requests whose snapshots the session hasn't read yet.
+        var pending: [Prepaid] = []
     }
 
     private let record: @Sendable (LanguageModelSession.Usage) -> Void
@@ -224,31 +234,38 @@ final class CountedRequestsUsage: Sendable {
         self.record = record
     }
 
-    /// Counts the usage of requests that completed,
-    /// whatever the stream's snapshots reported before,
-    /// so that a snapshot that reports them later adds nothing.
-    func add(_ usage: LanguageModelSession.Usage) {
-        state.withLock { $0.added.add(usage) }
-        record(usage)
+    /// Counts `requests` before the snapshot that reports them,
+    /// whatever the stream's other snapshots reported.
+    ///
+    /// - Returns: The token for the snapshot to carry,
+    ///   so that the session doesn't count its requests again.
+    func prepay(_ requests: RequestsUsage) -> Prepaid {
+        let prepaid = Prepaid(final: requests.final)
+        state.withLock { $0.pending.append(prepaid) }
+        record(requests.total)
+        return prepaid
     }
 
-    /// Counts the usage in a snapshot's `total` that isn't counted yet.
-    func count(_ total: LanguageModelSession.Usage) {
-        record(
-            state.withLock { state in
-                var increment = total.increment(since: &state.reported)
-                func settle(_ count: inout Int, _ added: inout Int) {
-                    let settled = min(count, added)
-                    count -= settled
-                    added -= settled
-                }
-                settle(&increment.input.totalTokenCount, &state.added.input.totalTokenCount)
-                settle(&increment.input.cachedTokenCount, &state.added.input.cachedTokenCount)
-                settle(&increment.output.totalTokenCount, &state.added.output.totalTokenCount)
-                settle(&increment.output.reasoningTokenCount, &state.added.output.reasoningTokenCount)
-                return increment
+    /// Counts the usage in a snapshot's `requests` that isn't counted yet.
+    ///
+    /// A snapshot that carries `prepaid` counts nothing.
+    /// So does a snapshot without it that reports only a pending prepaid request,
+    /// as when a model rebuilds a prepaid snapshot with the public initializer.
+    /// Other snapshots report the stream's own requests,
+    /// and count what they add to the highest usage that those reported.
+    func count(_ requests: RequestsUsage, prepaid: Prepaid?) {
+        let increment = state.withLock { state -> LanguageModelSession.Usage in
+            if let prepaid {
+                state.pending.removeAll { $0 === prepaid }
+                return .zero
             }
-        )
+            if let index = state.pending.firstIndex(where: { $0.final == requests.total }) {
+                state.pending.remove(at: index)
+                return .zero
+            }
+            return requests.total.increment(since: &state.reported)
+        }
+        record(increment)
     }
 }
 

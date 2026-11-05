@@ -121,8 +121,9 @@ extension LanguageModel {
     /// A response that returns after the consumer cancels
     /// yields a snapshot that `session` doesn't read,
     /// so in a stream that `session` makes,
-    /// its requests are added before the snapshot is yielded,
-    /// through the account where `session` counts the stream's snapshots.
+    /// its requests are prepaid before the snapshot is yielded,
+    /// through the account where `session` counts the stream's snapshots,
+    /// and the snapshot carries the token for them.
     /// Within a response that isn't streamed, such as one that collects this stream,
     /// each round is counted through that response's channel as the round completes.
     func streamStructuredResponse<Content: Generable>(
@@ -141,13 +142,14 @@ extension LanguageModel {
                         let response = try await RequestUsageChannel.$current.withValue(channel) {
                             try await generate()
                         }
-                        counted?.add(response.requests.total)
+                        let prepaid = counted?.prepay(response.requests)
                         continuation.yield(
                             .init(
                                 content: response.content.asPartiallyGenerated(),
                                 rawContent: response.rawContent,
                                 transcriptEntries: response.transcriptEntries,
-                                requests: response.requests
+                                requests: response.requests,
+                                prepaid: prepaid
                             )
                         )
                         continuation.finish()

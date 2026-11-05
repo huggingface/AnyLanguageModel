@@ -1431,7 +1431,7 @@ public final class LanguageModelSession: @unchecked Sendable {
                     do {
                         for try await snapshot in stream {
                             lastSnapshot = snapshot
-                            counted.count(snapshot.requests.total)
+                            counted.count(snapshot.requests, prepaid: snapshot.prepaid)
                             continuation.yield(snapshot)
                         }
 
@@ -2919,6 +2919,9 @@ extension LanguageModelSession {
             internal var requests: RequestsUsage
 
             internal var providerMetadata: [String: String]?
+
+            /// The token for this snapshot's requests, if its stream counted them before yielding it.
+            internal var prepaid: CountedRequestsUsage.Prepaid?
             /// Creates a snapshot from partially generated content and raw content.
             /// - Parameters:
             ///   - content: The partially generated content.
@@ -2952,13 +2955,15 @@ extension LanguageModelSession {
                 rawContent: GeneratedContent,
                 transcriptEntries: ArraySlice<Transcript.Entry> = [],
                 requests: RequestsUsage,
-                providerMetadata: [String: String]? = nil
+                providerMetadata: [String: String]? = nil,
+                prepaid: CountedRequestsUsage.Prepaid? = nil
             ) {
                 self.content = content
                 self.rawContent = rawContent
                 self.transcriptEntries = transcriptEntries
                 self.requests = requests
                 self.providerMetadata = providerMetadata
+                self.prepaid = prepaid
             }
         }
     }
