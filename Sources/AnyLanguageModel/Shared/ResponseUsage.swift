@@ -205,21 +205,50 @@ final class RequestUsageChannel: Sendable {
 ///
 /// The session counts each snapshot of the stream through this.
 /// A stream that yields one complete snapshot
-/// counts the snapshot's requests through the same account before it yields the snapshot,
+/// adds the snapshot's requests through the same account before it yields the snapshot,
 /// so the session counts each request once,
 /// whether or not the snapshot reaches it, and whatever relays it.
 final class CountedRequestsUsage: Sendable {
+    private struct State: Sendable {
+        /// The highest usage that the stream's snapshots reported.
+        var reported = LanguageModelSession.Usage.zero
+        /// Usage that was added and that no snapshot has reported yet.
+        var added = LanguageModelSession.Usage.zero
+    }
+
     private let record: @Sendable (LanguageModelSession.Usage) -> Void
-    private let counted = Locked(LanguageModelSession.Usage.zero)
+    private let state = Locked(State())
 
     /// An account that passes the usage that it hasn't counted yet to `record`.
     init(record: @escaping @Sendable (LanguageModelSession.Usage) -> Void) {
         self.record = record
     }
 
-    /// Counts the usage in `total` that isn't counted yet.
+    /// Counts the usage of requests that completed,
+    /// whatever the stream's snapshots reported before,
+    /// so that a snapshot that reports them later adds nothing.
+    func add(_ usage: LanguageModelSession.Usage) {
+        state.withLock { $0.added.add(usage) }
+        record(usage)
+    }
+
+    /// Counts the usage in a snapshot's `total` that isn't counted yet.
     func count(_ total: LanguageModelSession.Usage) {
-        record(counted.withLock { total.increment(since: &$0) })
+        record(
+            state.withLock { state in
+                var increment = total.increment(since: &state.reported)
+                func settle(_ count: inout Int, _ added: inout Int) {
+                    let settled = min(count, added)
+                    count -= settled
+                    added -= settled
+                }
+                settle(&increment.input.totalTokenCount, &state.added.input.totalTokenCount)
+                settle(&increment.input.cachedTokenCount, &state.added.input.cachedTokenCount)
+                settle(&increment.output.totalTokenCount, &state.added.output.totalTokenCount)
+                settle(&increment.output.reasoningTokenCount, &state.added.output.reasoningTokenCount)
+                return increment
+            }
+        )
     }
 }
 

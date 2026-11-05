@@ -121,7 +121,7 @@ extension LanguageModel {
     /// A response that returns after the consumer cancels
     /// yields a snapshot that `session` doesn't read,
     /// so in a stream that `session` makes,
-    /// its requests are counted before the snapshot is yielded,
+    /// its requests are added before the snapshot is yielded,
     /// through the account where `session` counts the stream's snapshots.
     /// Within a response that isn't streamed, such as one that collects this stream,
     /// each round is counted through that response's channel as the round completes.
@@ -141,7 +141,7 @@ extension LanguageModel {
                         let response = try await RequestUsageChannel.$current.withValue(channel) {
                             try await generate()
                         }
-                        counted?.count(response.requests.total)
+                        counted?.add(response.requests.total)
                         continuation.yield(
                             .init(
                                 content: response.content.asPartiallyGenerated(),
