@@ -616,6 +616,23 @@ import Testing
             #expect(last.lowercased().contains("red"))
         }
 
+        @Test func structuredResponseRejectsImagesBeforeCallingTools() async throws {
+            let weatherTool = spy(on: WeatherTool())
+            let transcript = Transcript(entries: [
+                .prompt(
+                    Transcript.Prompt(segments: [
+                        .text(.init(content: "Use getWeather to get the weather in the city in this image.")),
+                        .image(.init(data: Self.redSquarePNG, mimeType: "image/png")),
+                    ])
+                )
+            ])
+            let session = LanguageModelSession(model: model, tools: [weatherTool], transcript: transcript)
+            await #expect(throws: LlamaLanguageModelError.unsupportedFeature) {
+                _ = try await session.respond(to: "", generating: WeatherReport.self)
+            }
+            #expect(await weatherTool.calls.isEmpty)
+        }
+
         @Test func rejectsImagesWithoutProjector() async throws {
             let textOnlyModel = LlamaLanguageModel(
                 modelPath: ProcessInfo.processInfo.environment["LLAMA_VISION_MODEL_PATH"]!

@@ -845,7 +845,12 @@ import Foundation
             let runtimeOptions = resolvedOptions(from: options)
             let structuredOptions = resolvedStructuredOptions(from: options)
 
-            let imageMarker = mtmdContext != nil ? String(cString: mtmd_default_marker()) : nil
+            // Structured output does not go through the projector yet.
+            // Without an image marker, a prompt with an image throws
+            // before any generation or tool call,
+            // rather than answer about an image the model never saw.
+            let imageMarker =
+                type == String.self && mtmdContext != nil ? String(cString: mtmd_default_marker()) : nil
 
             let maxTokens = runtimeOptions.maximumResponseTokens ?? 100
             let outputFormat = currentToolCallFormat()
@@ -999,11 +1004,6 @@ import Foundation
                 images: &promptImages,
                 toolContext: toolContext
             )
-            // Structured output does not go through the projector yet; refuse rather
-            // than answer about an image the model never saw.
-            guard promptImages.isEmpty else {
-                throw LlamaLanguageModelError.unsupportedFeature
-            }
             let context = try makeFreshContext(options: runtimeOptions)
             defer { llama_free(context) }
             let (jsonString, structuredUsage) = try await generateStructuredJSON(
