@@ -130,6 +130,8 @@ struct RequestsUsage: Sendable, Equatable {
 ///
 /// The session sets one around each such response. What a tool or a stream asks of a model runs
 /// with none, so it's never counted for the response that called the tool or made the stream.
+/// A stream that the session makes runs with a channel that counts nothing that's reported,
+/// and that carries the account where the session counts the stream's snapshots.
 ///
 /// It's a task-local, so a model reaches it wherever it runs in the response's task, as when a
 /// model of another library wraps a built-in one and calls it. A `Task {}` made within the response
@@ -137,12 +139,24 @@ struct RequestsUsage: Sendable, Equatable {
 final class RequestUsageChannel: Sendable {
     @TaskLocal static var current: RequestUsageChannel?
 
-    private let record: @Sendable (LanguageModelSession.Usage) -> Void
+    private let record: (@Sendable (LanguageModelSession.Usage) -> Void)?
     private let reported = Locked(LanguageModelSession.Usage.zero)
+
+    /// Where the session counts the requests of the stream that it's making, if it's making one.
+    let streamedRequests: CountedRequestsUsage?
 
     /// A channel that passes each request's usage to `record` as it's reported.
     init(record: @escaping @Sendable (LanguageModelSession.Usage) -> Void) {
         self.record = record
+        self.streamedRequests = nil
+    }
+
+    /// A channel for a stream that the session makes,
+    /// which counts the stream's requests from its snapshots through `counted`
+    /// and ignores what's reported.
+    private init(streaming counted: CountedRequestsUsage) {
+        self.record = nil
+        self.streamedRequests = counted
     }
 
     /// Counts the usage of a request that completed, for the response being made, if any.
@@ -170,15 +184,88 @@ final class RequestUsageChannel: Sendable {
         try $current.withValue(nil, operation: operation)
     }
 
+    /// Makes a stream for a session, which counts the stream's requests through `counted`.
+    static func streaming<T>(_ counted: CountedRequestsUsage, _ operation: () throws -> T) rethrows -> T {
+        try $current.withValue(RequestUsageChannel(streaming: counted), operation: operation)
+    }
+
     /// Every request's usage reported so far, added up.
     var reportedUsage: LanguageModelSession.Usage {
         reported.withLock { $0 }
     }
 
     private func send(_ usage: LanguageModelSession.Usage) {
-        guard usage != .zero else { return }
+        guard usage != .zero, let record else { return }
         reported.withLock { $0.add(usage) }
         record(usage)
+    }
+}
+
+/// The usage of a streamed response's requests that its session counted.
+///
+/// The session counts each snapshot of the stream through this.
+/// A stream that yields one complete snapshot
+/// prepays the snapshot's requests through the same account before it yields the snapshot,
+/// so the session counts each request once,
+/// whether or not the snapshot reaches it, and whatever relays it.
+final class CountedRequestsUsage: Sendable {
+    /// The requests that a snapshot reports and that the account counted before the snapshot.
+    final class Prepaid: Sendable {
+        /// The usage of the snapshot's final request.
+        let final: LanguageModelSession.Usage
+
+        fileprivate init(final: LanguageModelSession.Usage) {
+            self.final = final
+        }
+    }
+
+    private struct State: Sendable {
+        /// The highest usage that the stream's own snapshots reported.
+        var reported = LanguageModelSession.Usage.zero
+        /// Prepaid requests whose snapshots the session hasn't read yet.
+        var pending: [Prepaid] = []
+    }
+
+    private let record: @Sendable (LanguageModelSession.Usage) -> Void
+    private let state = Locked(State())
+
+    /// An account that passes the usage that it hasn't counted yet to `record`.
+    init(record: @escaping @Sendable (LanguageModelSession.Usage) -> Void) {
+        self.record = record
+    }
+
+    /// Counts `requests` before the snapshot that reports them,
+    /// whatever the stream's other snapshots reported.
+    ///
+    /// - Returns: The token for the snapshot to carry,
+    ///   so that the session doesn't count its requests again.
+    func prepay(_ requests: RequestsUsage) -> Prepaid {
+        let prepaid = Prepaid(final: requests.final)
+        state.withLock { $0.pending.append(prepaid) }
+        record(requests.total)
+        return prepaid
+    }
+
+    /// Counts the usage in a snapshot's `requests` that isn't counted yet.
+    ///
+    /// A snapshot that carries `prepaid` counts nothing.
+    /// So does a snapshot without it that reports only a pending prepaid request,
+    /// as when a model rebuilds a prepaid snapshot with the public initializer.
+    /// Other snapshots report the stream's own requests,
+    /// and count what they add to the highest usage that those reported.
+    func count(_ requests: RequestsUsage, prepaid: Prepaid?) {
+        let increment = state.withLock { state -> LanguageModelSession.Usage in
+            if let prepaid {
+                state.pending.removeAll { $0 === prepaid }
+                return .zero
+            }
+            if let index = state.pending.firstIndex(where: { $0.final == requests.total }) {
+                state.pending.remove(at: index)
+                return .zero
+            }
+            return requests.total.increment(since: &state.reported)
+        }
+        record(increment)
     }
 }
 

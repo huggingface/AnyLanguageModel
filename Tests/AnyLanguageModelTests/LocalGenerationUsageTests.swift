@@ -238,6 +238,320 @@ struct LocalGenerationUsageTests {
         } catch is LocalFailingRoundModel.Failure {}
         #expect(session.usage == model.round)
     }
+
+    /// A structured response that reports its rounds as they complete
+    /// counts each request once, whether or not it's streamed.
+    @Test(arguments: [false, true])
+    func structuredRoundsReportedAsTheyCompleteCountOnce(_ streaming: Bool) async throws {
+        let model = LocalReportingRoundsModel()
+        let session = LanguageModelSession(model: model)
+        let usage =
+            try await streaming
+            ? session.streamResponse(to: "A number", generating: Int.self).collect().usage
+            : session.respond(to: "A number", generating: Int.self).usage
+        #expect(usage == model.second)
+        #expect(session.usage == model.total)
+    }
+
+    /// A consumer that cancels a structured stream while a round is still in progress
+    /// stops reading before the response returns or throws,
+    /// and the session still counts the round's request once.
+    @Test(arguments: [false, true])
+    func cancelledStructuredStreamCountsCompletedRounds(_ throwsCancellation: Bool) async throws {
+        let model = LocalCancelledRoundModel(throwsCancellation: throwsCancellation)
+        let session = LanguageModelSession(model: model)
+        let consumer = Task {
+            for try await _ in session.streamResponse(to: "Numbers", generating: [Int].self) {}
+        }
+        await model.reported.wait()
+        consumer.cancel()
+        _ = await consumer.result
+        model.release.open()
+        #expect(try await eventually(session.usage != .zero))
+        #expect(session.usage == model.round)
+    }
+
+    /// A snapshot that the stream yields
+    /// and that the consumer cancels before the session reads it
+    /// still counts its requests once.
+    @Test func structuredSnapshotCancelledBeforeTheSessionReadsItCountsOnce() async throws {
+        let model = LocalRelayedSnapshotModel()
+        let session = LanguageModelSession(model: model)
+        let consumer = Task {
+            for try await _ in session.streamResponse(to: "Numbers", generating: [Int].self) {}
+        }
+        await model.held.wait()
+        consumer.cancel()
+        _ = await consumer.result
+        model.release.open()
+        await model.relayed.wait()
+        #expect(try await eventually(session.usage != .zero))
+        #expect(session.usage == model.round)
+    }
+
+    /// A model that wraps a structured stream counts its request once,
+    /// whether its response collects the stream
+    /// or its stream rebuilds each snapshot with the public initializer.
+    @Test(arguments: [false, true])
+    func wrappedStructuredStreamCountsItsRequestOnce(_ streaming: Bool) async throws {
+        let model = LocalWrappingModel()
+        let session = LanguageModelSession(model: model)
+        let response =
+            try await streaming
+            ? session.streamResponse(to: "A number", generating: Int.self).collect()
+            : session.respond(to: "A number", generating: Int.self)
+        #expect(response.content == 7)
+        #expect(session.usage == model.inner.round)
+    }
+
+    /// A stream that reports an earlier request
+    /// and then relays a structured stream that completes a round and throws
+    /// counts both requests.
+    @Test func relayedStructuredStreamThatThrowsCountsEveryRequest() async throws {
+        let model = LocalPrefixedFailingModel()
+        let session = LanguageModelSession(model: model)
+        await #expect(throws: LocalFailingRoundModel.Failure.self) {
+            try await session.streamResponse(to: "A number", generating: Int.self).collect()
+        }
+        var total = model.earlier
+        total.add(model.child.round)
+        #expect(session.usage == total)
+    }
+
+    /// A stream that reports an earlier request
+    /// and then relays a structured stream that completes after the consumer cancels
+    /// counts both requests.
+    @Test func relayedStructuredStreamCompletedAfterCancellationCountsEveryRequest() async throws {
+        let model = LocalPrefixedCancelledModel()
+        let session = LanguageModelSession(model: model)
+        let received = Gate()
+        let consumer = Task {
+            for try await _ in session.streamResponse(to: "Numbers", generating: [Int].self) {
+                received.open()
+            }
+        }
+        await received.wait()
+        await model.child.reported.wait()
+        consumer.cancel()
+        _ = await consumer.result
+        model.child.release.open()
+        #expect(try await eventually(session.usage != model.earlier))
+        var total = model.earlier
+        total.add(model.child.round)
+        #expect(session.usage == total)
+    }
+
+    /// A stream whose own request reports usage before and after it relays a structured stream,
+    /// or after the structured stream completes,
+    /// counts the structured stream's request once and every increase of its own request.
+    @Test(arguments: [false, true])
+    func interleavedStructuredStreamCountsEveryRequestOnce(childFirst: Bool) async throws {
+        let model = LocalInterleavedModel(childFirst: childFirst)
+        let session = LanguageModelSession(model: model)
+        var received = 0
+        for try await _ in session.streamResponse(to: "A number", generating: Int.self) {
+            received += 1
+            if received == 1 { model.relayChild.open() }
+            if received == 2 { model.reportAgain.open() }
+        }
+        var total = childFirst ? model.first : model.second
+        total.add(model.child.round)
+        #expect(session.usage == total)
+    }
+}
+
+/// Waits for `condition` to become true, and returns false if it doesn't before `timeout`.
+private func eventually(
+    timeout: Duration = .seconds(2),
+    _ condition: @autoclosure () -> Bool
+) async throws -> Bool {
+    let deadline = ContinuousClock.now + timeout
+    while !condition() {
+        if ContinuousClock.now >= deadline { return false }
+        try await Task.sleep(for: .milliseconds(5))
+    }
+    return true
+}
+
+/// A one-time signal that a task waits for whether or not it's cancelled,
+/// as a delegate that answers after the consumer cancels does.
+private final class Gate: Sendable {
+    private struct State: Sendable {
+        var isOpen = false
+        var waiters: [CheckedContinuation<Void, Never>] = []
+    }
+    private let state = Locked(State())
+
+    func open() {
+        let waiters = state.withLock { state in
+            state.isOpen = true
+            defer { state.waiters = [] }
+            return state.waiters
+        }
+        for waiter in waiters { waiter.resume() }
+    }
+
+    func wait() async {
+        await withCheckedContinuation { continuation in
+            let isOpen = state.withLock { state in
+                if !state.isOpen { state.waiters.append(continuation) }
+                return state.isOpen
+            }
+            if isOpen { continuation.resume() }
+        }
+    }
+}
+
+/// A model that reports each of its two rounds as it completes, as MLX and llama.cpp do.
+private struct LocalReportingRoundsModel: LanguageModel {
+    typealias UnavailableReason = Never
+    let first = LocalGenerationUsage(promptTokenCount: 30, generatedTokenCount: 5).value
+    let second = LocalGenerationUsage(promptTokenCount: 40, generatedTokenCount: 2).value
+    var total: LanguageModelSession.Usage {
+        var total = first
+        total.add(second)
+        return total
+    }
+
+    func respond<Content: Generable>(
+        within session: LanguageModelSession,
+        to prompt: Prompt,
+        generating type: Content.Type,
+        includeSchemaInPrompt: Bool,
+        options: GenerationOptions
+    ) async throws -> LanguageModelSession.Response<Content> {
+        var requests = RequestsUsage()
+        requests.add(first)
+        requests.add(second)
+        let raw = GeneratedContent(7)
+        return .init(content: try Content(raw), rawContent: raw, transcriptEntries: [], requests: requests)
+    }
+
+    func streamResponse<Content: Generable>(
+        within session: LanguageModelSession,
+        to prompt: Prompt,
+        generating type: Content.Type,
+        includeSchemaInPrompt: Bool,
+        options: GenerationOptions
+    ) -> sending LanguageModelSession.ResponseStream<Content> {
+        streamStructuredResponse(
+            within: session,
+            to: prompt,
+            generating: type,
+            includeSchemaInPrompt: includeSchemaInPrompt,
+            options: options
+        )
+    }
+}
+
+/// A model whose first round completes and that then waits for `release`,
+/// as a tool loop waits for a delegate.
+/// It then stops with an empty response,
+/// or throws `CancellationError` when `throwsCancellation` is true.
+private struct LocalCancelledRoundModel: LanguageModel {
+    typealias UnavailableReason = Never
+    let throwsCancellation: Bool
+    let round = LocalGenerationUsage(promptTokenCount: 20, generatedTokenCount: 4).value
+    let reported = Gate()
+    let release = Gate()
+
+    func respond<Content: Generable>(
+        within session: LanguageModelSession,
+        to prompt: Prompt,
+        generating type: Content.Type,
+        includeSchemaInPrompt: Bool,
+        options: GenerationOptions
+    ) async throws -> LanguageModelSession.Response<Content> {
+        var requests = RequestsUsage()
+        requests.add(round)
+        reported.open()
+        await release.wait()
+        if throwsCancellation { throw CancellationError() }
+        return try stoppedResponse(
+            generating: type,
+            provider: "Local",
+            transcriptEntries: [],
+            requests: requests
+        )
+    }
+
+    func streamResponse<Content: Generable>(
+        within session: LanguageModelSession,
+        to prompt: Prompt,
+        generating type: Content.Type,
+        includeSchemaInPrompt: Bool,
+        options: GenerationOptions
+    ) -> sending LanguageModelSession.ResponseStream<Content> {
+        streamStructuredResponse(
+            within: session,
+            to: prompt,
+            generating: type,
+            includeSchemaInPrompt: includeSchemaInPrompt,
+            options: options
+        )
+    }
+}
+
+/// A model that relays the snapshot of a structured stream,
+/// holding it until `release` opens, so that the session doesn't read it before the consumer cancels.
+private struct LocalRelayedSnapshotModel: LanguageModel {
+    typealias UnavailableReason = Never
+    let round = LocalGenerationUsage(promptTokenCount: 20, generatedTokenCount: 4).value
+    let held = Gate()
+    let release = Gate()
+    let relayed = Gate()
+
+    func respond<Content: Generable>(
+        within session: LanguageModelSession,
+        to prompt: Prompt,
+        generating type: Content.Type,
+        includeSchemaInPrompt: Bool,
+        options: GenerationOptions
+    ) async throws -> LanguageModelSession.Response<Content> {
+        var requests = RequestsUsage()
+        requests.add(round)
+        return try stoppedResponse(
+            generating: type,
+            provider: "Local",
+            transcriptEntries: [],
+            requests: requests
+        )
+    }
+
+    func streamResponse<Content: Generable>(
+        within session: LanguageModelSession,
+        to prompt: Prompt,
+        generating type: Content.Type,
+        includeSchemaInPrompt: Bool,
+        options: GenerationOptions
+    ) -> sending LanguageModelSession.ResponseStream<Content> {
+        let upstream = streamStructuredResponse(
+            within: session,
+            to: prompt,
+            generating: type,
+            includeSchemaInPrompt: includeSchemaInPrompt,
+            options: options
+        )
+        let (held, release, relayed) = (held, release, relayed)
+        return .init(
+            stream: AsyncThrowingStream { continuation in
+                let task = Task {
+                    defer { relayed.open() }
+                    do {
+                        for try await snapshot in upstream {
+                            held.open()
+                            await release.wait()
+                            continuation.yield(snapshot)
+                        }
+                        continuation.finish()
+                    } catch {
+                        continuation.finish(throwing: error)
+                    }
+                }
+                continuation.onTermination = { _ in task.cancel() }
+            }
+        )
+    }
 }
 
 /// A model whose first round completes
@@ -310,6 +624,299 @@ private struct LocalStructuredUsageModel: LanguageModel {
             generating: type,
             includeSchemaInPrompt: includeSchemaInPrompt,
             options: options
+        )
+    }
+}
+
+/// A model whose structured response makes one request.
+private struct LocalSingleRoundModel: LanguageModel {
+    typealias UnavailableReason = Never
+    let round = LocalGenerationUsage(promptTokenCount: 20, generatedTokenCount: 4).value
+
+    func respond<Content: Generable>(
+        within session: LanguageModelSession,
+        to prompt: Prompt,
+        generating type: Content.Type,
+        includeSchemaInPrompt: Bool,
+        options: GenerationOptions
+    ) async throws -> LanguageModelSession.Response<Content> {
+        var requests = RequestsUsage()
+        requests.add(round)
+        let raw = GeneratedContent(7)
+        return .init(content: try Content(raw), rawContent: raw, transcriptEntries: [], requests: requests)
+    }
+
+    func streamResponse<Content: Generable>(
+        within session: LanguageModelSession,
+        to prompt: Prompt,
+        generating type: Content.Type,
+        includeSchemaInPrompt: Bool,
+        options: GenerationOptions
+    ) -> sending LanguageModelSession.ResponseStream<Content> {
+        streamStructuredResponse(
+            within: session,
+            to: prompt,
+            generating: type,
+            includeSchemaInPrompt: includeSchemaInPrompt,
+            options: options
+        )
+    }
+}
+
+/// A model of another library that wraps a local model:
+/// its response collects the local model's stream,
+/// and its stream rebuilds each snapshot with the public initializer.
+private struct LocalWrappingModel: LanguageModel {
+    typealias UnavailableReason = Never
+    let inner = LocalSingleRoundModel()
+
+    func respond<Content: Generable>(
+        within session: LanguageModelSession,
+        to prompt: Prompt,
+        generating type: Content.Type,
+        includeSchemaInPrompt: Bool,
+        options: GenerationOptions
+    ) async throws -> LanguageModelSession.Response<Content> {
+        try await inner.streamResponse(
+            within: session,
+            to: prompt,
+            generating: type,
+            includeSchemaInPrompt: includeSchemaInPrompt,
+            options: options
+        ).collect()
+    }
+
+    func streamResponse<Content: Generable>(
+        within session: LanguageModelSession,
+        to prompt: Prompt,
+        generating type: Content.Type,
+        includeSchemaInPrompt: Bool,
+        options: GenerationOptions
+    ) -> sending LanguageModelSession.ResponseStream<Content> {
+        let upstream = inner.streamResponse(
+            within: session,
+            to: prompt,
+            generating: type,
+            includeSchemaInPrompt: includeSchemaInPrompt,
+            options: options
+        )
+        return .init(
+            stream: AsyncThrowingStream { continuation in
+                let task = Task {
+                    do {
+                        for try await snapshot in upstream {
+                            continuation.yield(
+                                .init(content: snapshot.content, rawContent: snapshot.rawContent, usage: snapshot.usage)
+                            )
+                        }
+                        continuation.finish()
+                    } catch {
+                        continuation.finish(throwing: error)
+                    }
+                }
+                continuation.onTermination = { _ in task.cancel() }
+            }
+        )
+    }
+}
+
+/// A model whose stream yields a snapshot with the usage of an earlier request,
+/// then relays the stream of a local model whose round completes and whose response throws.
+private struct LocalPrefixedFailingModel: LanguageModel {
+    typealias UnavailableReason = Never
+    let earlier = LocalGenerationUsage(promptTokenCount: 30, generatedTokenCount: 5).value
+    let child = LocalFailingRoundModel()
+
+    func respond<Content: Generable>(
+        within session: LanguageModelSession,
+        to prompt: Prompt,
+        generating type: Content.Type,
+        includeSchemaInPrompt: Bool,
+        options: GenerationOptions
+    ) async throws -> LanguageModelSession.Response<Content> {
+        try await streamResponse(
+            within: session,
+            to: prompt,
+            generating: type,
+            includeSchemaInPrompt: includeSchemaInPrompt,
+            options: options
+        ).collect()
+    }
+
+    func streamResponse<Content: Generable>(
+        within session: LanguageModelSession,
+        to prompt: Prompt,
+        generating type: Content.Type,
+        includeSchemaInPrompt: Bool,
+        options: GenerationOptions
+    ) -> sending LanguageModelSession.ResponseStream<Content> {
+        let (earlier, child) = (earlier, child)
+        return .init(
+            stream: AsyncThrowingStream { continuation in
+                let task = Task {
+                    do {
+                        let raw = GeneratedContent(1)
+                        continuation.yield(
+                            .init(content: try Content(raw).asPartiallyGenerated(), rawContent: raw, usage: earlier)
+                        )
+                        let upstream = child.streamResponse(
+                            within: session,
+                            to: prompt,
+                            generating: type,
+                            includeSchemaInPrompt: includeSchemaInPrompt,
+                            options: options
+                        )
+                        for try await snapshot in upstream {
+                            continuation.yield(snapshot)
+                        }
+                        continuation.finish()
+                    } catch {
+                        continuation.finish(throwing: error)
+                    }
+                }
+                continuation.onTermination = { _ in task.cancel() }
+            }
+        )
+    }
+}
+
+/// A model whose stream yields a snapshot with the usage of an earlier request,
+/// then relays the stream of a local model whose round completes
+/// and whose response waits for `child.release` and then stops.
+private struct LocalPrefixedCancelledModel: LanguageModel {
+    typealias UnavailableReason = Never
+    let earlier = LocalGenerationUsage(promptTokenCount: 30, generatedTokenCount: 5).value
+    let child = LocalCancelledRoundModel(throwsCancellation: false)
+
+    func respond<Content: Generable>(
+        within session: LanguageModelSession,
+        to prompt: Prompt,
+        generating type: Content.Type,
+        includeSchemaInPrompt: Bool,
+        options: GenerationOptions
+    ) async throws -> LanguageModelSession.Response<Content> {
+        try await streamResponse(
+            within: session,
+            to: prompt,
+            generating: type,
+            includeSchemaInPrompt: includeSchemaInPrompt,
+            options: options
+        ).collect()
+    }
+
+    func streamResponse<Content: Generable>(
+        within session: LanguageModelSession,
+        to prompt: Prompt,
+        generating type: Content.Type,
+        includeSchemaInPrompt: Bool,
+        options: GenerationOptions
+    ) -> sending LanguageModelSession.ResponseStream<Content> {
+        let (earlier, child) = (earlier, child)
+        return .init(
+            stream: AsyncThrowingStream { continuation in
+                let task = Task {
+                    do {
+                        let raw = GeneratedContent(kind: .array([]))
+                        continuation.yield(
+                            .init(content: try Content(raw).asPartiallyGenerated(), rawContent: raw, usage: earlier)
+                        )
+                        let upstream = child.streamResponse(
+                            within: session,
+                            to: prompt,
+                            generating: type,
+                            includeSchemaInPrompt: includeSchemaInPrompt,
+                            options: options
+                        )
+                        for try await snapshot in upstream {
+                            continuation.yield(snapshot)
+                        }
+                        continuation.finish()
+                    } catch {
+                        continuation.finish(throwing: error)
+                    }
+                }
+                continuation.onTermination = { _ in task.cancel() }
+            }
+        )
+    }
+}
+
+/// A model whose own request reports usage in snapshots
+/// around the snapshot of a local model's structured stream.
+///
+/// When `childFirst` is false, it reports `first`, waits for `relayChild`,
+/// relays the structured stream, waits for `reportAgain`, and then reports `second`,
+/// which includes `first`.
+/// When `childFirst` is true, the structured stream completes before the model reports `first`,
+/// and the model then relays the structured snapshot.
+private struct LocalInterleavedModel: LanguageModel {
+    typealias UnavailableReason = Never
+    let childFirst: Bool
+    let first = LocalGenerationUsage(promptTokenCount: 30, generatedTokenCount: 5).value
+    let second = LocalGenerationUsage(promptTokenCount: 40, generatedTokenCount: 7).value
+    let child = LocalSingleRoundModel()
+    let relayChild = Gate()
+    let reportAgain = Gate()
+
+    func respond<Content: Generable>(
+        within session: LanguageModelSession,
+        to prompt: Prompt,
+        generating type: Content.Type,
+        includeSchemaInPrompt: Bool,
+        options: GenerationOptions
+    ) async throws -> LanguageModelSession.Response<Content> {
+        try await streamResponse(
+            within: session,
+            to: prompt,
+            generating: type,
+            includeSchemaInPrompt: includeSchemaInPrompt,
+            options: options
+        ).collect()
+    }
+
+    func streamResponse<Content: Generable>(
+        within session: LanguageModelSession,
+        to prompt: Prompt,
+        generating type: Content.Type,
+        includeSchemaInPrompt: Bool,
+        options: GenerationOptions
+    ) -> sending LanguageModelSession.ResponseStream<Content> {
+        let model = self
+        return .init(
+            stream: AsyncThrowingStream { continuation in
+                let task = Task {
+                    do {
+                        let raw = GeneratedContent(1)
+                        let content = try Content(raw).asPartiallyGenerated()
+                        func report(_ usage: LanguageModelSession.Usage) {
+                            continuation.yield(.init(content: content, rawContent: raw, usage: usage))
+                        }
+                        let upstream = model.child.streamResponse(
+                            within: session,
+                            to: prompt,
+                            generating: type,
+                            includeSchemaInPrompt: includeSchemaInPrompt,
+                            options: options
+                        )
+                        if model.childFirst {
+                            var snapshots: [LanguageModelSession.ResponseStream<Content>.Snapshot] = []
+                            for try await snapshot in upstream { snapshots.append(snapshot) }
+                            report(model.first)
+                            for snapshot in snapshots { continuation.yield(snapshot) }
+                        } else {
+                            report(model.first)
+                            await model.relayChild.wait()
+                            for try await snapshot in upstream { continuation.yield(snapshot) }
+                            await model.reportAgain.wait()
+                            report(model.second)
+                        }
+                        continuation.finish()
+                    } catch {
+                        continuation.finish(throwing: error)
+                    }
+                }
+                continuation.onTermination = { _ in task.cancel() }
+            }
         )
     }
 }
