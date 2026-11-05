@@ -247,7 +247,9 @@ public final class LanguageModelSession: @unchecked Sendable {
                 profile: profile,
                 canonicalTranscript: canonicalTranscript,
                 pendingEntryKeys: pendingEntryKeys,
-                callbackState: context.callbackState
+                callbackState: context.callbackState,
+                callbackHistory: callbackHistory,
+                historyVersion: historyVersion
             )
         }
 
