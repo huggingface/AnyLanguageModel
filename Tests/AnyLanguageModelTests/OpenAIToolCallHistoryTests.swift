@@ -52,6 +52,121 @@ import Testing
             return input.filter { $0["type"] as? String == "function_call" }.compactMap { $0["arguments"] as? String }
         }
 
+        /// A reply that is a `Greeting`, as each API variant sends it.
+        private func greetingReply(_ variant: OpenAILanguageModel.APIVariant) -> String {
+            variant == .chatCompletions
+                ? #"{"id": "chatcmpl-1", "object": "chat.completion", "created": 0, "model": "test", "choices": [{"index": 0, "finish_reason": "stop", "message": {"role": "assistant", "content": "{\"text\": \"Hi\"}"}}]}"#
+                : #"{"id": "resp-1", "object": "response", "created_at": 0, "model": "test", "status": "completed", "output": [{"type": "message", "id": "msg-1", "role": "assistant", "status": "completed", "content": [{"type": "output_text", "text": "{\"text\": \"Hi\"}", "annotations": []}]}]}"#
+        }
+
+        /// The system text a request sends: its system message, or the Responses API's instructions.
+        private func systemText(in body: Data) throws -> String? {
+            let json = try #require(try JSONSerialization.jsonObject(with: body) as? [String: Any])
+            if let instructions = json["instructions"] as? String { return instructions }
+            guard let messages = json["messages"] as? [[String: Any]],
+                let system = messages.first(where: { $0["role"] as? String == "system" })
+            else { return nil }
+            if let text = system["content"] as? String { return text }
+            let blocks = system["content"] as? [[String: Any]] ?? []
+            return blocks.compactMap { $0["text"] as? String }.joined(separator: "\n")
+        }
+
+        /// The schema is said after what's asked, in the prompt's own message.
+        private func expectSchemaAfterPrompt(in body: Data) throws {
+            let message = try #require(userMessage(saying: "Hello", in: try JSONSerialization.jsonObject(with: body)))
+            let schema = try #require(message.range(of: "Respond with valid JSON matching this object schema"))
+            #expect(message.range(of: "Hello")!.upperBound <= schema.lowerBound)
+        }
+
+        @Test(arguments: [OpenAILanguageModel.APIVariant.chatCompletions, .responses])
+        func aStructuredRequestSaysItsSchema(variant: OpenAILanguageModel.APIVariant) async throws {
+            ToolCallHistoryURLProtocol.reset(responses: [greetingReply(variant)])
+            let model = OpenAILanguageModel(
+                apiKey: "test",
+                model: "test",
+                apiVariant: variant,
+                transport: ToolCallHistoryURLProtocol.makeSession()
+            )
+            let session = LanguageModelSession(model: model, instructions: "Be brief.")
+            let reply = try await session.respond(to: "Hello", generating: Greeting.self)
+
+            #expect(reply.content.text == "Hi")
+            let body = try #require(ToolCallHistoryURLProtocol.recordedBodies.last)
+            #expect(try systemText(in: body) == "Be brief.")
+            try expectSchemaAfterPrompt(in: body)
+        }
+
+        @Test(arguments: [OpenAILanguageModel.APIVariant.chatCompletions, .responses])
+        func aStructuredRequestWithoutInstructionsSaysItsSchemaAfterThePrompt(
+            variant: OpenAILanguageModel.APIVariant
+        ) async throws {
+            ToolCallHistoryURLProtocol.reset(responses: [greetingReply(variant)])
+            let model = OpenAILanguageModel(
+                apiKey: "test",
+                model: "test",
+                apiVariant: variant,
+                transport: ToolCallHistoryURLProtocol.makeSession()
+            )
+            _ = try await LanguageModelSession(model: model).respond(to: "Hello", generating: Greeting.self)
+
+            let body = try #require(ToolCallHistoryURLProtocol.recordedBodies.last)
+            #expect(try systemText(in: body) == nil)
+            try expectSchemaAfterPrompt(in: body)
+        }
+
+        @Test(arguments: [OpenAILanguageModel.APIVariant.chatCompletions, .responses])
+        func aStructuredRequestLeavesTheSchemaOutWhenAskedTo(variant: OpenAILanguageModel.APIVariant) async throws {
+            ToolCallHistoryURLProtocol.reset(responses: [greetingReply(variant)])
+            let model = OpenAILanguageModel(
+                apiKey: "test",
+                model: "test",
+                apiVariant: variant,
+                transport: ToolCallHistoryURLProtocol.makeSession()
+            )
+            let session = LanguageModelSession(model: model, instructions: "Be brief.")
+            _ = try await session.respond(to: "Hello", generating: Greeting.self, includeSchemaInPrompt: false)
+
+            let body = try #require(ToolCallHistoryURLProtocol.recordedBodies.last)
+            #expect(try systemText(in: body) == "Be brief.")
+            let json = try JSONSerialization.jsonObject(with: body)
+            #expect(userMessage(saying: "Hello", in: json)?.contains("Respond with valid JSON") == false)
+        }
+
+        @Test(arguments: [OpenAILanguageModel.APIVariant.chatCompletions, .responses])
+        func aTextRequestHasNoSchemaInItsPrompt(variant: OpenAILanguageModel.APIVariant) async throws {
+            ToolCallHistoryURLProtocol.reset(
+                responses: [variant == .chatCompletions ? chatCompletion : responsesResponse])
+            let model = OpenAILanguageModel(
+                apiKey: "test",
+                model: "test",
+                apiVariant: variant,
+                transport: ToolCallHistoryURLProtocol.makeSession()
+            )
+            _ = try await LanguageModelSession(model: model, instructions: "Be brief.").respond(to: "Hello")
+
+            let body = try #require(ToolCallHistoryURLProtocol.recordedBodies.last)
+            #expect(try systemText(in: body) == "Be brief.")
+            let json = try JSONSerialization.jsonObject(with: body)
+            #expect(userMessage(saying: "Hello", in: json)?.contains("Respond with valid JSON") == false)
+        }
+
+        @Test func aStructuredStreamSaysItsSchema() async throws {
+            ToolCallHistoryURLProtocol.reset(responses: [textStream(#"{\"text\": \"Hi\"}"#)])
+            let model = OpenAILanguageModel(
+                apiKey: "test",
+                model: "test",
+                apiVariant: .chatCompletions,
+                transport: ToolCallHistoryURLProtocol.makeSession()
+            )
+            let session = LanguageModelSession(model: model, instructions: "Be brief.")
+            let reply = try await session.streamResponse(to: "Hello", generating: Greeting.self).collect()
+
+            #expect(reply.content.text == "Hi")
+            let body = try #require(ToolCallHistoryURLProtocol.recordedBodies.last)
+            #expect(try systemText(in: body) == "Be brief.")
+            try expectSchemaAfterPrompt(in: body)
+        }
+
         @Test(arguments: [OpenAILanguageModel.APIVariant.chatCompletions, .responses])
         func replayedToolCallArgumentsArePlainJSON(variant: OpenAILanguageModel.APIVariant) async throws {
             ToolCallHistoryURLProtocol.reset(
@@ -116,6 +231,32 @@ import Testing
             let json = try #require(try JSONSerialization.jsonObject(with: body) as? [String: Any])
             let messages = try #require(json["messages"] as? [[String: Any]])
             return try #require(messages.first { $0["tool_calls"] != nil })
+        }
+
+        /// After its tools have answered, a model still reads the schema next to what was asked.
+        @Test(arguments: [false, true])
+        func theSchemaIsStillSaidAfterAToolRound(streaming: Bool) async throws {
+            let reply = #"{\"text\": \"Sunny\"}"#
+            ToolCallHistoryURLProtocol.reset(
+                responses: streaming
+                    ? [toolCallStream(content: ""), textStream(reply)]
+                    : [toolCallCompletion(content: ""), completion(reply)]
+            )
+            let model = OpenAILanguageModel(
+                apiKey: "test",
+                model: "test",
+                transport: ToolCallHistoryURLProtocol.makeSession()
+            )
+            let session = LanguageModelSession(model: model, tools: [ReorderedWeatherTool()])
+            let greeting =
+                try await streaming
+                ? session.streamResponse(to: "Hello", generating: Greeting.self).collect().content
+                : session.respond(to: "Hello", generating: Greeting.self).content
+
+            #expect(greeting.text == "Sunny")
+            let bodies = ToolCallHistoryURLProtocol.recordedBodies
+            try #require(bodies.count == 2)
+            try expectSchemaAfterPrompt(in: bodies[1])
         }
 
         @Test(arguments: [false, true], ["", "Let me check."])
@@ -467,6 +608,11 @@ import Testing
 
     /// A `URLProtocol` with its own queue of JSON responses,
     /// so this suite doesn't share state with suites that run in parallel.
+    @Generable
+    private struct Greeting {
+        let text: String
+    }
+
     private final class ToolCallHistoryURLProtocol: URLProtocol {
         private struct State: Sendable {
             var pending: [String] = []

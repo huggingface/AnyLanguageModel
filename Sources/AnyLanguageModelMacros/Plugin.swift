@@ -7,5 +7,6 @@ struct AnyLanguageModelMacrosPlugin: CompilerPlugin {
         GenerableMacro.self,
         GuideMacro.self,
         SessionPropertyEntryMacro.self,
+        SessionPropertyEntryDefaultValueMacro.self,
     ]
 }
