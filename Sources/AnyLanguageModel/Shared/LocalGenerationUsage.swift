@@ -84,6 +84,10 @@ extension LanguageModel {
         if let content = try? Content(nullContent) {
             return response(content, nullContent)
         }
+        let emptyArray = GeneratedContent(kind: .array([]))
+        if let content = try? Content(emptyArray) {
+            return response(content, emptyArray)
+        }
         throw LanguageModelSession.ToolExecutionStopped(
             provider: provider,
             transcriptEntries: ArraySlice(transcriptEntries)

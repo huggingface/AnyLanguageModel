@@ -200,6 +200,16 @@ struct LocalGenerationUsageTests {
         #expect(text.content.isEmpty)
         #expect(Array(text.transcriptEntries) == entries)
 
+        let reports = try model.stoppedResponse(
+            generating: [WeatherReport].self,
+            provider: "Local",
+            transcriptEntries: entries,
+            requests: RequestsUsage()
+        )
+        #expect(reports.content.isEmpty)
+        #expect(reports.rawContent == GeneratedContent(kind: .array([])))
+        #expect(Array(reports.transcriptEntries) == entries)
+
         #expect {
             _ = try model.stoppedResponse(
                 generating: WeatherReport.self,
