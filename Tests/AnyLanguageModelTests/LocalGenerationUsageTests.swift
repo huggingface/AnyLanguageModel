@@ -239,6 +239,57 @@ struct LocalGenerationUsageTests {
         #expect(session.usage == model.round)
     }
 
+    /// Usage describes only its public fields, whether or not it carries a prepaid token,
+    /// as usage in Foundation Models does.
+    @Test(arguments: [false, true])
+    func usageDescriptionsOmitThePrepaidToken(carriesToken: Bool) throws {
+        var usage = LanguageModelSession.Usage(
+            input: .init(totalTokenCount: 20, cachedTokenCount: 1),
+            output: .init(totalTokenCount: 4, reasoningTokenCount: 2),
+            metadata: ["k": "v"]
+        )
+        if carriesToken {
+            let account = CountedRequestsUsage { _ in }
+            usage.prepaid = account.prepay(RequestsUsage(final: usage))
+            try #require(usage.prepaid != nil)
+        }
+
+        let fields = """
+            (input: AnyLanguageModel.LanguageModelSession.Usage.Input(totalTokenCount: 20, cachedTokenCount: 1), \
+            output: AnyLanguageModel.LanguageModelSession.Usage.Output(totalTokenCount: 4, reasoningTokenCount: 2), \
+            metadata: ["k": GeneratedContent(string("v"))])
+            """
+        #expect(String(describing: usage) == "Usage" + fields)
+        #expect("\(usage)" == "Usage" + fields)
+        #expect(String(reflecting: usage) == "AnyLanguageModel.LanguageModelSession.Usage" + fields)
+
+        var dumped = ""
+        dump(usage, to: &dumped)
+        #expect(
+            dumped == """
+                ▿ AnyLanguageModel.LanguageModelSession.Usage
+                  ▿ input: AnyLanguageModel.LanguageModelSession.Usage.Input
+                    - totalTokenCount: 20
+                    - cachedTokenCount: 1
+                  ▿ output: AnyLanguageModel.LanguageModelSession.Usage.Output
+                    - totalTokenCount: 4
+                    - reasoningTokenCount: 2
+                  ▿ metadata: 1 key/value pair
+                    ▿ (2 elements)
+                      - key: "k"
+                      ▿ value: GeneratedContent(string("v"))
+                        - id: nil
+                        ▿ kind: AnyLanguageModel.GeneratedContent.Kind.string
+                          - string: "v"
+
+                """
+        )
+
+        let mirror = Mirror(reflecting: usage)
+        #expect(mirror.children.map(\.label) == ["input", "output", "metadata"])
+        #expect(mirror.displayStyle == .struct)
+    }
+
     /// A structured response that reports its rounds as they complete
     /// counts each request once, whether or not it's streamed.
     @Test(arguments: [false, true])
