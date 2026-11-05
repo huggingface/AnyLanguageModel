@@ -1413,7 +1413,8 @@ public final class LanguageModelSession: @unchecked Sendable {
     nonisolated private func wrapStream<Content>(
         _ upstream: sending ResponseStream<Content>,
         promptEntry: Transcript.Entry,
-        profileTracker: PreparedProfileRequestTracker? = nil
+        profileTracker: PreparedProfileRequestTracker? = nil,
+        counted: CountedRequestsUsage
     ) -> ResponseStream<Content> where Content: Generable, Content.PartiallyGenerated: Sendable {
         let session = self
         let relay = AsyncThrowingStream<ResponseStream<Content>.Snapshot, any Error> { continuation in
@@ -1426,16 +1427,11 @@ public final class LanguageModelSession: @unchecked Sendable {
                     defer { session.responseRelays.withLock { _ = $0.removeValue(forKey: relayID) } }
                     session.beginResponding()
                     var lastSnapshot: ResponseStream<Content>.Snapshot?
-                    var accountedUsage = Usage.zero
                     var committedEntries = AppendedTranscriptEntries.none
                     do {
                         for try await snapshot in stream {
                             lastSnapshot = snapshot
-                            if let counted = snapshot.countedRequests {
-                                counted.count(snapshot.requests.total)
-                            } else {
-                                session.recordUsage(snapshot.requests.total.increment(since: &accountedUsage))
-                            }
+                            counted.count(snapshot.requests.total)
                             continuation.yield(snapshot)
                         }
 
@@ -1952,6 +1948,7 @@ public final class LanguageModelSession: @unchecked Sendable {
             return ResponseStream(stream: AsyncThrowingStream { $0.finish(throwing: error) })
         }
 
+        let counted = CountedRequestsUsage { [self] in recordUsage($0) }
         let upstream: ResponseStream<Content>
         let profileTracker: PreparedProfileRequestTracker?
         if dynamicProfile != nil {
@@ -1964,11 +1961,12 @@ public final class LanguageModelSession: @unchecked Sendable {
                 type: type,
                 includeSchemaInPrompt: includeSchemaInPrompt,
                 options: options,
-                tracker: tracker
+                tracker: tracker,
+                counted: counted
             )
         } else {
             profileTracker = nil
-            upstream = RequestUsageChannel.outside {
+            upstream = RequestUsageChannel.streaming(counted) {
                 model.streamResponse(
                     within: self,
                     to: prompt,
@@ -1981,7 +1979,8 @@ public final class LanguageModelSession: @unchecked Sendable {
         return wrapStream(
             upstream,
             promptEntry: promptEntry,
-            profileTracker: profileTracker
+            profileTracker: profileTracker,
+            counted: counted
         )
     }
 
@@ -1992,14 +1991,16 @@ public final class LanguageModelSession: @unchecked Sendable {
         type: Content.Type,
         includeSchemaInPrompt: Bool,
         options: GenerationOptions,
-        tracker: PreparedProfileRequestTracker
+        tracker: PreparedProfileRequestTracker,
+        counted: CountedRequestsUsage
     ) -> ResponseStream<Content> where Content: Generable {
         profileDispatchedStream(
             requestPrompt: requestPrompt,
             initialContext: initialContext,
             includeSchemaInPrompt: includeSchemaInPrompt,
             options: options,
-            tracker: tracker
+            tracker: tracker,
+            counted: counted
         ) {
             model,
             resolvedOptions,
@@ -2021,6 +2022,7 @@ public final class LanguageModelSession: @unchecked Sendable {
         includeSchemaInPrompt: Bool,
         options: GenerationOptions,
         tracker: PreparedProfileRequestTracker,
+        counted: CountedRequestsUsage,
         generate:
             @Sendable @escaping (
                 any LanguageModel,
@@ -2028,7 +2030,7 @@ public final class LanguageModelSession: @unchecked Sendable {
                 ContextOptions
             ) -> ResponseStream<Content>
     ) -> ResponseStream<Content> where Content: Generable {
-        let stream = RequestUsageChannel.outside {
+        let stream = RequestUsageChannel.streaming(counted) {
             AsyncThrowingStream<ResponseStream<Content>.Snapshot, any Error> { continuation in
                 let task = Task {
                     do {
@@ -2243,6 +2245,7 @@ extension LanguageModelSession {
             return ResponseStream(stream: AsyncThrowingStream { $0.finish(throwing: error) })
         }
 
+        let counted = CountedRequestsUsage { [self] in recordUsage($0) }
         let upstream: ResponseStream<GeneratedContent>
         let profileTracker: PreparedProfileRequestTracker?
         if dynamicProfile != nil {
@@ -2253,7 +2256,8 @@ extension LanguageModelSession {
                 initialContext: initialContext,
                 includeSchemaInPrompt: includeSchemaInPrompt,
                 options: options,
-                tracker: tracker
+                tracker: tracker,
+                counted: counted
             ) {
                 model,
                 resolvedOptions,
@@ -2269,7 +2273,7 @@ extension LanguageModelSession {
             }
         } else {
             profileTracker = nil
-            upstream = RequestUsageChannel.outside {
+            upstream = RequestUsageChannel.streaming(counted) {
                 model.streamResponse(
                     within: self,
                     to: prompt,
@@ -2282,7 +2286,8 @@ extension LanguageModelSession {
         return wrapStream(
             upstream,
             promptEntry: promptEntry,
-            profileTracker: profileTracker
+            profileTracker: profileTracker,
+            counted: counted
         )
     }
 
@@ -2618,6 +2623,7 @@ extension LanguageModelSession {
         // Extract text content for the Prompt parameter
         let textPrompt = Prompt(prompt)
 
+        let counted = CountedRequestsUsage { [self] in recordUsage($0) }
         let upstream: ResponseStream<Content>
         let profileTracker: PreparedProfileRequestTracker?
         if dynamicProfile != nil {
@@ -2628,7 +2634,8 @@ extension LanguageModelSession {
                 initialContext: initialContext,
                 includeSchemaInPrompt: includeSchemaInPrompt,
                 options: options,
-                tracker: tracker
+                tracker: tracker,
+                counted: counted
             ) {
                 model,
                 resolvedOptions,
@@ -2644,7 +2651,7 @@ extension LanguageModelSession {
             }
         } else {
             profileTracker = nil
-            upstream = RequestUsageChannel.outside {
+            upstream = RequestUsageChannel.streaming(counted) {
                 model.streamResponse(
                     within: self,
                     to: textPrompt,
@@ -2657,7 +2664,8 @@ extension LanguageModelSession {
         return wrapStream(
             upstream,
             promptEntry: promptEntry,
-            profileTracker: profileTracker
+            profileTracker: profileTracker,
+            counted: counted
         )
     }
 }
@@ -2911,10 +2919,6 @@ extension LanguageModelSession {
             internal var requests: RequestsUsage
 
             internal var providerMetadata: [String: String]?
-
-            /// Where the stream counted this snapshot's requests, if it did.
-            internal var countedRequests: CountedRequestsUsage?
-
             /// Creates a snapshot from partially generated content and raw content.
             /// - Parameters:
             ///   - content: The partially generated content.
@@ -2948,15 +2952,13 @@ extension LanguageModelSession {
                 rawContent: GeneratedContent,
                 transcriptEntries: ArraySlice<Transcript.Entry> = [],
                 requests: RequestsUsage,
-                providerMetadata: [String: String]? = nil,
-                countedRequests: CountedRequestsUsage? = nil
+                providerMetadata: [String: String]? = nil
             ) {
                 self.content = content
                 self.rawContent = rawContent
                 self.transcriptEntries = transcriptEntries
                 self.requests = requests
                 self.providerMetadata = providerMetadata
-                self.countedRequests = countedRequests
             }
         }
     }

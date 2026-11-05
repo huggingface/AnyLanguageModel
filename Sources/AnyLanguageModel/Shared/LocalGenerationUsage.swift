@@ -120,34 +120,43 @@ extension LanguageModel {
     /// so the requests of the rounds that it completed are counted for `session` instead.
     /// A response that returns after the consumer cancels
     /// yields a snapshot that `session` doesn't read,
-    /// so its requests are counted before the snapshot is yielded,
-    /// through an account that the snapshot shares with `session`.
+    /// so in a stream that `session` makes,
+    /// its requests are counted before the snapshot is yielded,
+    /// through the account where `session` counts the stream's snapshots.
+    /// Within a response that isn't streamed, such as one that collects this stream,
+    /// each round is counted through that response's channel as the round completes.
     func streamStructuredResponse<Content: Generable>(
         within session: LanguageModelSession,
         generate: @escaping @Sendable () async throws -> LanguageModelSession.Response<Content>
     ) -> LanguageModelSession.ResponseStream<Content> {
         .init(
             stream: AsyncThrowingStream { continuation in
+                let enclosing = RequestUsageChannel.current
+                let counted = enclosing?.streamedRequests
                 let task = Task {
-                    let channel = RequestUsageChannel { _ in }
-                    let counted = CountedRequestsUsage { session.recordUsage($0) }
+                    let channel =
+                        enclosing.flatMap { $0.streamedRequests == nil ? $0 : nil }
+                        ?? RequestUsageChannel { _ in }
                     do {
                         let response = try await RequestUsageChannel.$current.withValue(channel) {
                             try await generate()
                         }
-                        counted.count(response.requests.total)
+                        counted?.count(response.requests.total)
                         continuation.yield(
                             .init(
                                 content: response.content.asPartiallyGenerated(),
                                 rawContent: response.rawContent,
                                 transcriptEntries: response.transcriptEntries,
-                                requests: response.requests,
-                                countedRequests: counted
+                                requests: response.requests
                             )
                         )
                         continuation.finish()
                     } catch {
-                        session.recordUsage(channel.reportedUsage)
+                        if let counted {
+                            counted.count(channel.reportedUsage)
+                        } else if channel !== enclosing {
+                            session.recordUsage(channel.reportedUsage)
+                        }
                         continuation.finish(throwing: error)
                     }
                 }

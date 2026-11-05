@@ -130,6 +130,8 @@ struct RequestsUsage: Sendable, Equatable {
 ///
 /// The session sets one around each such response. What a tool or a stream asks of a model runs
 /// with none, so it's never counted for the response that called the tool or made the stream.
+/// A stream that the session makes runs with a channel that counts nothing that's reported,
+/// and that carries the account where the session counts the stream's snapshots.
 ///
 /// It's a task-local, so a model reaches it wherever it runs in the response's task, as when a
 /// model of another library wraps a built-in one and calls it. A `Task {}` made within the response
@@ -137,12 +139,24 @@ struct RequestsUsage: Sendable, Equatable {
 final class RequestUsageChannel: Sendable {
     @TaskLocal static var current: RequestUsageChannel?
 
-    private let record: @Sendable (LanguageModelSession.Usage) -> Void
+    private let record: (@Sendable (LanguageModelSession.Usage) -> Void)?
     private let reported = Locked(LanguageModelSession.Usage.zero)
+
+    /// Where the session counts the requests of the stream that it's making, if it's making one.
+    let streamedRequests: CountedRequestsUsage?
 
     /// A channel that passes each request's usage to `record` as it's reported.
     init(record: @escaping @Sendable (LanguageModelSession.Usage) -> Void) {
         self.record = record
+        self.streamedRequests = nil
+    }
+
+    /// A channel for a stream that the session makes,
+    /// which counts the stream's requests from its snapshots through `counted`
+    /// and ignores what's reported.
+    private init(streaming counted: CountedRequestsUsage) {
+        self.record = nil
+        self.streamedRequests = counted
     }
 
     /// Counts the usage of a request that completed, for the response being made, if any.
@@ -170,13 +184,18 @@ final class RequestUsageChannel: Sendable {
         try $current.withValue(nil, operation: operation)
     }
 
+    /// Makes a stream for a session, which counts the stream's requests through `counted`.
+    static func streaming<T>(_ counted: CountedRequestsUsage, _ operation: () throws -> T) rethrows -> T {
+        try $current.withValue(RequestUsageChannel(streaming: counted), operation: operation)
+    }
+
     /// Every request's usage reported so far, added up.
     var reportedUsage: LanguageModelSession.Usage {
         reported.withLock { $0 }
     }
 
     private func send(_ usage: LanguageModelSession.Usage) {
-        guard usage != .zero else { return }
+        guard usage != .zero, let record else { return }
         reported.withLock { $0.add(usage) }
         record(usage)
     }
@@ -184,11 +203,11 @@ final class RequestUsageChannel: Sendable {
 
 /// The usage of a streamed response's requests that its session counted.
 ///
+/// The session counts each snapshot of the stream through this.
 /// A stream that yields one complete snapshot
-/// counts the snapshot's requests through this before it yields the snapshot,
-/// and the session counts them through the same account when it reads the snapshot,
+/// counts the snapshot's requests through the same account before it yields the snapshot,
 /// so the session counts each request once,
-/// whether or not the snapshot reaches it.
+/// whether or not the snapshot reaches it, and whatever relays it.
 final class CountedRequestsUsage: Sendable {
     private let record: @Sendable (LanguageModelSession.Usage) -> Void
     private let counted = Locked(LanguageModelSession.Usage.zero)
