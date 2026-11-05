@@ -221,6 +221,19 @@ struct LocalGenerationUsageTests {
             guard let stopped = error as? LanguageModelSession.ToolExecutionStopped else { return false }
             return stopped.provider == "Local" && Array(stopped.transcriptEntries) == entries
         }
+
+        func expectStopped<Content: Generable>(_ type: Content.Type) {
+            #expect(throws: LanguageModelSession.ToolExecutionStopped.self) {
+                _ = try model.stoppedResponse(
+                    generating: type,
+                    provider: "Local",
+                    transcriptEntries: entries,
+                    requests: RequestsUsage()
+                )
+            }
+        }
+        expectStopped(Int.self)
+        expectStopped(Bool.self)
     }
 
     /// A streamed structured response that throws after a completed round yields no snapshot,

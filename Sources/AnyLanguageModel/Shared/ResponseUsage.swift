@@ -248,16 +248,23 @@ final class CountedRequestsUsage: Sendable {
 
     /// Counts the usage in a snapshot's `requests` that isn't counted yet.
     ///
-    /// A snapshot that carries `prepaid` counts nothing.
-    /// So does a snapshot without it that reports only a pending prepaid request,
+    /// A snapshot that carries `prepaid` counts only what `unprepaidUsage` adds
+    /// to the highest usage that the stream's own snapshots reported.
+    /// That's the usage of the requests that it reports besides the prepaid ones,
+    /// from models that handed off to the prepaid stream.
+    /// A snapshot without `prepaid` that reports only a pending prepaid request counts nothing,
     /// as when a model rebuilds a prepaid snapshot with the public initializer.
     /// Other snapshots report the stream's own requests,
     /// and count what they add to the highest usage that those reported.
-    func count(_ requests: RequestsUsage, prepaid: Prepaid?) {
+    func count(
+        _ requests: RequestsUsage,
+        prepaid: Prepaid?,
+        unprepaidUsage: LanguageModelSession.Usage = .zero
+    ) {
         let increment = state.withLock { state -> LanguageModelSession.Usage in
             if let prepaid {
                 state.pending.removeAll { $0 === prepaid }
-                return .zero
+                return unprepaidUsage.increment(since: &state.reported)
             }
             if let index = state.pending.firstIndex(where: { $0.final == requests.total }) {
                 state.pending.remove(at: index)

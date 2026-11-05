@@ -532,11 +532,6 @@ public struct OpenResponsesLanguageModel: LanguageModel, ProfileRequestIdentifie
         let url = baseURL.appendingPathComponent("responses")
         // Open Responses follows OpenAI's structured outputs, which need an object root.
         let responseSchema = ProviderResponseSchema(schema, generating: type, wrapping: .nonObjectRoots)
-        let schemaInstructions = GenerationSchema.promptInstructions(
-            generating: type,
-            schema: responseSchema.schema,
-            includeSchemaInPrompt: includeSchemaInPrompt
-        )
         let stream = AsyncThrowingStream<LanguageModelSession.ResponseStream<Content>.Snapshot, any Error> {
             continuation in
             let task = Task {
@@ -565,6 +560,12 @@ public struct OpenResponsesLanguageModel: LanguageModel, ProfileRequestIdentifie
                             continuation.finish()
                             return
                         }
+                        let schemaInstructions = session.schemaInstructions(
+                            for: requestContext,
+                            generating: type,
+                            schema: responseSchema.schema,
+                            includeSchemaInPrompt: includeSchemaInPrompt
+                        )
                         let tools: [OpenResponsesTool]? =
                             requestContext.tools.isEmpty
                             ? nil : requestContext.tools.map(convertToolToOpenResponsesFormat)
@@ -635,7 +636,7 @@ public struct OpenResponsesLanguageModel: LanguageModel, ProfileRequestIdentifie
                         switch resolution {
                         case .stop:
                             state.entries.append(.toolCalls(callsEntry))
-                            continuation.yield(try state.stoppedSnapshot())
+                            continuation.yield(try state.stoppedSnapshot(provider: "Open Responses"))
                             continuation.finish()
                             return
                         case .invocations(let invocations):
@@ -676,11 +677,6 @@ public struct OpenResponsesLanguageModel: LanguageModel, ProfileRequestIdentifie
     ) async throws -> LanguageModelSession.Response<Content> where Content: Generable {
         // Open Responses follows OpenAI's structured outputs, which need an object root.
         let responseSchema = ProviderResponseSchema(schema, generating: type, wrapping: .nonObjectRoots)
-        let schemaInstructions = GenerationSchema.promptInstructions(
-            generating: type,
-            schema: responseSchema.schema,
-            includeSchemaInPrompt: includeSchemaInPrompt
-        )
         var entries: [Transcript.Entry] = []
         var usage = RequestsUsage()
         var text = ""
@@ -709,6 +705,12 @@ public struct OpenResponsesLanguageModel: LanguageModel, ProfileRequestIdentifie
             ) {
                 return continuation
             }
+            let schemaInstructions = session.schemaInstructions(
+                for: requestContext,
+                generating: type,
+                schema: responseSchema.schema,
+                includeSchemaInPrompt: includeSchemaInPrompt
+            )
             let tools: [OpenResponsesTool]? =
                 requestContext.tools.isEmpty
                 ? nil : requestContext.tools.map(convertToolToOpenResponsesFormat)
@@ -757,11 +759,10 @@ public struct OpenResponsesLanguageModel: LanguageModel, ProfileRequestIdentifie
                     if !calls.isEmpty {
                         entries.append(.toolCalls(callsEntry))
                     }
-                    let empty = try emptyResponseContent(for: type)
-                    return LanguageModelSession.Response(
-                        content: empty.content,
-                        rawContent: empty.rawContent,
-                        transcriptEntries: ArraySlice(entries),
+                    return try stoppedResponse(
+                        generating: type,
+                        provider: "Open Responses",
+                        transcriptEntries: entries,
                         requests: usage
                     )
                 case .invocations(let invocations):
@@ -809,16 +810,6 @@ public struct OpenResponsesLanguageModel: LanguageModel, ProfileRequestIdentifie
         throw OpenResponsesLanguageModelError.noResponseGenerated
     }
 
-    /// Produces empty content and raw content for the given type (used when tool execution stops the response).
-    private func emptyResponseContent<Content: Generable>(for type: Content.Type) throws -> (
-        content: Content, rawContent: GeneratedContent
-    ) {
-        if type == String.self {
-            return ("" as! Content, GeneratedContent(""))
-        }
-        let raw = GeneratedContent(properties: [:])
-        return (try type.init(raw), raw)
-    }
 }
 
 // MARK: - API Request / Response

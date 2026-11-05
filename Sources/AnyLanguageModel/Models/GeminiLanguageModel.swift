@@ -247,11 +247,6 @@ public struct GeminiLanguageModel: LanguageModel, ProfileRequestIdentifiedLangua
     ) async throws -> LanguageModelSession.Response<Content> where Content: Generable {
         // Gemini's response schemas can be objects, primitives, or arrays, but not unions.
         let responseSchema = ProviderResponseSchema(schema, generating: type, wrapping: .unionRoots)
-        let schemaInstructions = GenerationSchema.promptInstructions(
-            generating: type,
-            schema: responseSchema.schema,
-            includeSchemaInPrompt: includeSchemaInPrompt
-        )
 
         let url =
             baseURL
@@ -286,6 +281,12 @@ public struct GeminiLanguageModel: LanguageModel, ProfileRequestIdentifiedLangua
             ) {
                 return continuation
             }
+            let schemaInstructions = session.schemaInstructions(
+                for: requestContext,
+                generating: type,
+                schema: responseSchema.schema,
+                includeSchemaInPrompt: includeSchemaInPrompt
+            )
             let customOptions = requestContext.options[custom: GeminiLanguageModel.self]
             let effectiveThinking = customOptions?.thinking ?? .disabled
             let effectiveServerTools = customOptions?.serverTools ?? []
@@ -344,11 +345,10 @@ public struct GeminiLanguageModel: LanguageModel, ProfileRequestIdentifiedLangua
                 switch resolution {
                 case .stop:
                     entries.append(.toolCalls(callsEntry))
-                    let empty = try emptyResponseContent(for: type)
-                    return LanguageModelSession.Response(
-                        content: empty.content,
-                        rawContent: empty.rawContent,
-                        transcriptEntries: ArraySlice(entries),
+                    return try stoppedResponse(
+                        generating: type,
+                        provider: "Gemini",
+                        transcriptEntries: entries,
                         requests: usage
                     )
                 case .invocations(let invocations):
@@ -433,11 +433,6 @@ public struct GeminiLanguageModel: LanguageModel, ProfileRequestIdentifiedLangua
     ) -> sending LanguageModelSession.ResponseStream<Content> where Content: Generable {
         // Gemini's response schemas can be objects, primitives, or arrays, but not unions.
         let responseSchema = ProviderResponseSchema(schema, generating: type, wrapping: .unionRoots)
-        let schemaInstructions = GenerationSchema.promptInstructions(
-            generating: type,
-            schema: responseSchema.schema,
-            includeSchemaInPrompt: includeSchemaInPrompt
-        )
 
         var streamURL =
             baseURL
@@ -474,6 +469,12 @@ public struct GeminiLanguageModel: LanguageModel, ProfileRequestIdentifiedLangua
                             continuation.finish()
                             return
                         }
+                        let schemaInstructions = session.schemaInstructions(
+                            for: requestContext,
+                            generating: type,
+                            schema: responseSchema.schema,
+                            includeSchemaInPrompt: includeSchemaInPrompt
+                        )
                         let customOptions = requestContext.options[custom: GeminiLanguageModel.self]
                         let effectiveThinking = customOptions?.thinking ?? .disabled
                         let effectiveServerTools = customOptions?.serverTools ?? []
@@ -542,7 +543,7 @@ public struct GeminiLanguageModel: LanguageModel, ProfileRequestIdentifiedLangua
                         switch resolution {
                         case .stop:
                             state.entries.append(.toolCalls(callsEntry))
-                            continuation.yield(try state.stoppedSnapshot())
+                            continuation.yield(try state.stoppedSnapshot(provider: "Gemini"))
                             continuation.finish()
                             return
                         case .invocations(let invocations):
@@ -766,25 +767,6 @@ private func textPartsText(_ parts: [GeminiPart]?) -> String {
         default: return nil
         }
     }.joined() ?? ""
-}
-
-private func emptyResponseContent<Content: Generable>(
-    for type: Content.Type
-) throws -> (content: Content, rawContent: GeneratedContent) {
-    if type == String.self {
-        let raw = GeneratedContent("")
-        return ("" as! Content, raw)
-    }
-
-    let rawEmpty = GeneratedContent(properties: [:])
-    do {
-        let content = try type.init(rawEmpty)
-        return (content, rawEmpty)
-    } catch {
-        let rawNull = try GeneratedContent(json: "null")
-        let content = try type.init(rawNull)
-        return (content, rawNull)
-    }
 }
 
 private func toGeminiFunctionResponse(

@@ -51,6 +51,17 @@ import Testing
                 }
             }
 
+            /// The provider name in tool errors, such as `ToolRoundLimitExceeded`.
+            var name: String {
+                switch self {
+                case .chat, .responses: "OpenAI"
+                case .openResponses: "Open Responses"
+                case .anthropic: "Anthropic"
+                case .gemini: "Gemini"
+                case .ollama: "Ollama"
+                }
+            }
+
             func makeSession(
                 tools: [any Tool] = [],
                 transcript: Transcript = .init(),
@@ -955,32 +966,104 @@ import Testing
             #expect(!session.isResponding)
         }
 
-        @Test(arguments: Provider.allCases)
-        func stoppedStreamedToolsWithoutEmptyObjectContent(_ provider: Provider) async throws {
+        /// A stopped array response ends with an empty array,
+        /// in a stream and from `respond` alike.
+        @Test(arguments: Provider.allCases, [false, true])
+        func stoppedArrayResponseIsEmpty(_ provider: Provider, _ streaming: Bool) async throws {
             UsageURLProtocol.reset()
-            UsageURLProtocol.enqueue(json: try provider.toolStream())
+            UsageURLProtocol.enqueue(
+                json: streaming
+                    ? try provider.toolStream()
+                    : try Self.json(provider.response(text: "", counts: provider.counts, tool: true))
+            )
             let tool = RecordingWeatherTool()
             let session = provider.makeSession(tools: [tool])
             session.toolExecutionDelegate = StopDelegate()
-            var snapshots: [LanguageModelSession.ResponseStream<Int>.Snapshot] = []
-            for try await snapshot in session.streamResponse(to: "Weather?", generating: Int.self) {
-                snapshots.append(snapshot)
-            }
-            let last = try #require(snapshots.last)
-            let content: Int = last.content
-            #expect(content == 0)
-            #expect(last.transcriptEntries.count == 1)
-            #expect(last.usage == provider.expected)
-            #expect(session.transcript.count == 3)
-
-            UsageURLProtocol.enqueue(json: try provider.toolStream())
-            let arraySession = provider.makeSession(tools: [tool])
-            arraySession.toolExecutionDelegate = StopDelegate()
-            let response = try await arraySession.streamResponse(to: "Weather?", generating: [String].self).collect()
+            let response =
+                try await streaming
+                ? session.streamResponse(to: "Weather?", generating: [String].self).collect()
+                : session.respond(to: "Weather?", generating: [String].self)
             #expect(response.content.isEmpty)
+            #expect(response.rawContent.kind == .array([]))
             #expect(response.transcriptEntries.count == 1)
+            #expect(response.usage == provider.expected)
+            #expect(session.transcript.count == 3)
             #expect(tool.cities.withLock { $0.isEmpty })
-            #expect(UsageURLProtocol.recordedBodies.count == 2)
+            #expect(UsageURLProtocol.recordedBodies.count == 1)
+        }
+
+        /// A stopped number or Boolean response throws,
+        /// because zero or `false` would look like the model's answer.
+        @Test(arguments: Provider.allCases, [false, true])
+        func stoppedScalarResponseThrows(_ provider: Provider, _ streaming: Bool) async throws {
+            func expectStopped<Content: Generable>(_ type: Content.Type) async throws {
+                UsageURLProtocol.reset()
+                UsageURLProtocol.enqueue(
+                    json: streaming
+                        ? try provider.toolStream()
+                        : try Self.json(provider.response(text: "", counts: provider.counts, tool: true))
+                )
+                let session = provider.makeSession(tools: [RecordingWeatherTool()])
+                session.toolExecutionDelegate = StopDelegate()
+                let error = await #expect(throws: LanguageModelSession.ToolExecutionStopped.self) {
+                    if streaming {
+                        _ = try await session.streamResponse(to: "Weather?", generating: type).collect()
+                    } else {
+                        _ = try await session.respond(to: "Weather?", generating: type)
+                    }
+                }
+                #expect(error?.provider == provider.name)
+                #expect(error?.transcriptEntries.count == 1)
+                #expect(session.transcript.count == 1)
+                #expect(session.usage == provider.expected)
+            }
+            try await expectStopped(Int.self)
+            try await expectStopped(Bool.self)
+        }
+
+        /// A response that stops in a later round and throws counts every round's request once,
+        /// whether or not snapshots already reported some of them.
+        @Test(arguments: Provider.allCases, [false, true])
+        func stoppedResponseAfterCompletedRoundCountsEveryRequest(
+            _ provider: Provider,
+            _ streaming: Bool
+        ) async throws {
+            // Without a dynamic profile, Anthropic's `respond` makes one request.
+            if provider == .anthropic && !streaming { return }
+            func expectStopped<Content: Generable>(_ type: Content.Type) async throws {
+                UsageURLProtocol.reset()
+                for _ in 0 ..< 2 {
+                    UsageURLProtocol.enqueue(
+                        json: streaming
+                            ? try provider.toolStream()
+                            : try Self.json(provider.response(text: "", counts: provider.counts, tool: true))
+                    )
+                }
+                let tool = RecordingWeatherTool()
+                let session = provider.makeSession(tools: [tool])
+                session.toolExecutionDelegate = StopSecondRoundDelegate()
+                let error = await #expect(throws: LanguageModelSession.ToolExecutionStopped.self) {
+                    if streaming {
+                        _ = try await session.streamResponse(to: "Weather?", generating: type).collect()
+                    } else {
+                        _ = try await session.respond(to: "Weather?", generating: type)
+                    }
+                }
+                #expect(error?.transcriptEntries.count == 3)
+                #expect(tool.cities.withLock { $0 } == ["Paris"])
+                #expect(UsageURLProtocol.recordedBodies.count == 2)
+                #expect(session.transcript.count == 1)
+                #expect(session.usage == Self.usage(of: provider, requests: 2))
+                #expect(!session.isResponding)
+            }
+            try await expectStopped(Int.self)
+            try await expectStopped(Bool.self)
+            try await expectStopped(Forecast.self)
+        }
+
+        @Test(arguments: Provider.allCases, [false, true])
+        func stoppedResponseAfterModelHandoff(_ provider: Provider, _ streaming: Bool) async throws {
+            try await providerModelHandoffStopKeepsEveryRound(provider, streaming)
         }
 
         @Test(arguments: Provider.allCases)
@@ -1001,7 +1084,10 @@ import Testing
             // The round's usage arrives in snapshots without content before the stream throws.
             #expect(!skies.isEmpty)
             #expect(skies.allSatisfy { $0 == nil })
-            #expect(thrownError as? GeneratedContentError == .typeMismatch)
+            let stopped = try #require(thrownError as? LanguageModelSession.ToolExecutionStopped)
+            #expect(stopped.provider == provider.name)
+            #expect(stopped.transcriptEntries.count == 1)
+            #expect(session.usage == provider.expected)
         }
 
         @Test func openResponsesToolHistoryUsesTopLevelFunctionCallItems() async throws {
@@ -1465,6 +1551,21 @@ import Testing
             { .stop }
         }
 
+        /// Runs the first tool call and stops the next one.
+        struct StopSecondRoundDelegate: ToolExecutionDelegate {
+            let calls = Locked(0)
+
+            func toolCallDecision(for toolCall: Transcript.ToolCall, in session: LanguageModelSession) async
+                -> ToolExecutionDecision
+            {
+                let call = calls.withLock { calls in
+                    calls += 1
+                    return calls
+                }
+                return call == 1 ? .execute : .stop
+            }
+        }
+
         @Test(arguments: Provider.allCases)
         func stoppedToolCallsPreserveUsage(_ provider: Provider) async throws {
             UsageURLProtocol.reset()
@@ -1475,6 +1576,41 @@ import Testing
             #expect(response.content.isEmpty)
             #expect(response.usage == provider.expected)
             #expect(UsageURLProtocol.recordedBodies.count == 1)
+        }
+
+        /// A stopped response whose type has required properties can't be empty,
+        /// so it throws with the tool calls that the delegate stopped.
+        @Test(arguments: Provider.allCases, [false, true])
+        func stoppedStructuredResponseThrows(_ provider: Provider, _ streaming: Bool) async throws {
+            UsageURLProtocol.reset()
+            UsageURLProtocol.enqueue(
+                json: streaming
+                    ? try provider.toolStream()
+                    : try Self.json(provider.response(text: "", counts: provider.counts, tool: true))
+            )
+            let tool = RecordingWeatherTool()
+            let session = provider.makeSession(tools: [tool])
+            session.toolExecutionDelegate = StopDelegate()
+            let error = await #expect(throws: LanguageModelSession.ToolExecutionStopped.self) {
+                if streaming {
+                    _ = try await session.streamResponse(to: "Weather?", generating: WeatherReport.self).collect()
+                } else {
+                    _ = try await session.respond(to: "Weather?", generating: WeatherReport.self)
+                }
+            }
+            #expect(error?.provider == provider.name)
+            let entries = error?.transcriptEntries ?? []
+            let calls = entries.flatMap { entry -> [Transcript.ToolCall] in
+                if case .toolCalls(let calls) = entry { Array(calls) } else { [] }
+            }
+            #expect(calls.map(\.toolName) == ["getWeather"])
+            #expect(!entries.contains { if case .toolOutput = $0 { true } else { false } })
+            #expect(tool.cities.withLock { $0.isEmpty })
+            #expect(UsageURLProtocol.recordedBodies.count == 1)
+            // The session keeps only the prompt.
+            #expect(session.transcript.count == 1)
+            #expect(session.usage == provider.expected)
+            #expect(!session.isResponding)
         }
     }
     extension ProviderUsageTests {

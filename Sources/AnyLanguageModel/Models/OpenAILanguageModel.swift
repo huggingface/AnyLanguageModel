@@ -527,11 +527,6 @@ public struct OpenAILanguageModel: LanguageModel, ProfileRequestIdentifiedLangua
     ) async throws -> LanguageModelSession.Response<Content> where Content: Generable {
         // Structured outputs need an object root.
         let responseSchema = ProviderResponseSchema(schema, generating: type, wrapping: .nonObjectRoots)
-        let schemaInstructions = GenerationSchema.promptInstructions(
-            generating: type,
-            schema: responseSchema.schema,
-            includeSchemaInPrompt: includeSchemaInPrompt
-        )
         var entries: [Transcript.Entry] = []
         var usage = RequestsUsage()
         var text = ""
@@ -561,6 +556,12 @@ public struct OpenAILanguageModel: LanguageModel, ProfileRequestIdentifiedLangua
             ) {
                 return continuation
             }
+            let schemaInstructions = session.schemaInstructions(
+                for: requestContext,
+                generating: type,
+                schema: responseSchema.schema,
+                includeSchemaInPrompt: includeSchemaInPrompt
+            )
             let tools =
                 requestContext.tools.isEmpty
                 ? nil : requestContext.tools.map(convertToolToOpenAIFormat)
@@ -630,11 +631,10 @@ public struct OpenAILanguageModel: LanguageModel, ProfileRequestIdentifiedLangua
                     if !calls.isEmpty {
                         entries.append(.toolCalls(callsEntry))
                     }
-                    let empty = try emptyResponseContent(for: type)
-                    return LanguageModelSession.Response(
-                        content: empty.content,
-                        rawContent: empty.rawContent,
-                        transcriptEntries: ArraySlice(entries),
+                    return try stoppedResponse(
+                        generating: type,
+                        provider: "OpenAI",
+                        transcriptEntries: entries,
                         requests: usage
                     )
                 case .invocations(let invocations):
@@ -695,11 +695,6 @@ public struct OpenAILanguageModel: LanguageModel, ProfileRequestIdentifiedLangua
     ) async throws -> LanguageModelSession.Response<Content> where Content: Generable {
         // Structured outputs need an object root.
         let responseSchema = ProviderResponseSchema(schema, generating: type, wrapping: .nonObjectRoots)
-        let schemaInstructions = GenerationSchema.promptInstructions(
-            generating: type,
-            schema: responseSchema.schema,
-            includeSchemaInPrompt: includeSchemaInPrompt
-        )
         var entries: [Transcript.Entry] = []
         var usage = RequestsUsage()
         var text = ""
@@ -730,6 +725,12 @@ public struct OpenAILanguageModel: LanguageModel, ProfileRequestIdentifiedLangua
             ) {
                 return continuation
             }
+            let schemaInstructions = session.schemaInstructions(
+                for: requestContext,
+                generating: type,
+                schema: responseSchema.schema,
+                includeSchemaInPrompt: includeSchemaInPrompt
+            )
             let tools =
                 requestContext.tools.isEmpty
                 ? nil : requestContext.tools.map(convertToolToOpenAIFormat)
@@ -779,11 +780,10 @@ public struct OpenAILanguageModel: LanguageModel, ProfileRequestIdentifiedLangua
                     if !calls.isEmpty {
                         entries.append(.toolCalls(callsEntry))
                     }
-                    let empty = try emptyResponseContent(for: type)
-                    return LanguageModelSession.Response(
-                        content: empty.content,
-                        rawContent: empty.rawContent,
-                        transcriptEntries: ArraySlice(entries),
+                    return try stoppedResponse(
+                        generating: type,
+                        provider: "OpenAI",
+                        transcriptEntries: entries,
                         requests: usage
                     )
                 case .invocations(let invocations):
@@ -879,11 +879,6 @@ public struct OpenAILanguageModel: LanguageModel, ProfileRequestIdentifiedLangua
     ) -> sending LanguageModelSession.ResponseStream<Content> where Content: Generable {
         // Structured outputs need an object root.
         let responseSchema = ProviderResponseSchema(schema, generating: type, wrapping: .nonObjectRoots)
-        let schemaInstructions = GenerationSchema.promptInstructions(
-            generating: type,
-            schema: responseSchema.schema,
-            includeSchemaInPrompt: includeSchemaInPrompt
-        )
         let stream = AsyncThrowingStream<LanguageModelSession.ResponseStream<Content>.Snapshot, any Error> {
             continuation in
             let task = Task {
@@ -912,6 +907,12 @@ public struct OpenAILanguageModel: LanguageModel, ProfileRequestIdentifiedLangua
                             continuation.finish()
                             return
                         }
+                        let schemaInstructions = session.schemaInstructions(
+                            for: requestContext,
+                            generating: type,
+                            schema: responseSchema.schema,
+                            includeSchemaInPrompt: includeSchemaInPrompt
+                        )
                         let tools =
                             requestContext.tools.isEmpty
                             ? nil : requestContext.tools.map(convertToolToOpenAIFormat)
@@ -1054,7 +1055,7 @@ public struct OpenAILanguageModel: LanguageModel, ProfileRequestIdentifiedLangua
                         switch resolution {
                         case .stop:
                             state.entries.append(.toolCalls(callsEntry))
-                            continuation.yield(try state.stoppedSnapshot())
+                            continuation.yield(try state.stoppedSnapshot(provider: "OpenAI"))
                             continuation.finish()
                             return
                         case .invocations(let invocations):
@@ -2173,19 +2174,6 @@ private func convertToolToOpenAIFormat(_ tool: any Tool) -> OpenAITool {
         rawParameters: rawParameters
     )
     return OpenAITool(type: "function", function: fn)
-}
-
-private func emptyResponseContent<Content: Generable>(
-    for type: Content.Type
-) throws -> (content: Content, rawContent: GeneratedContent) {
-    if type == String.self {
-        let raw = GeneratedContent("")
-        return ("" as! Content, raw)
-    }
-
-    let raw = GeneratedContent(properties: [:])
-    let content = try type.init(raw)
-    return (content, raw)
 }
 
 private func toGeneratedContent(_ jsonString: String?) throws -> GeneratedContent {

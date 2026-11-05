@@ -1433,7 +1433,11 @@ public final class LanguageModelSession: @unchecked Sendable {
                     do {
                         for try await snapshot in stream {
                             lastSnapshot = snapshot
-                            counted.count(snapshot.requests, prepaid: snapshot.prepaid)
+                            counted.count(
+                                snapshot.requests,
+                                prepaid: snapshot.prepaid,
+                                unprepaidUsage: snapshot.unprepaidUsage
+                            )
                             continuation.yield(snapshot)
                         }
 
@@ -1509,6 +1513,9 @@ public final class LanguageModelSession: @unchecked Sendable {
                         session.endResponding()
                         continuation.finish()
                     } catch {
+                        if let stopped = error as? ToolExecutionStopped {
+                            counted.count(stopped.requests, prepaid: nil)
+                        }
                         session.withTranscriptMutation {
                             session.state.withLock { state in
                                 state.removeEntries(committedEntries)
@@ -2924,6 +2931,11 @@ extension LanguageModelSession {
 
             /// The token for this snapshot's requests, if its stream counted them before yielding it.
             internal var prepaid: CountedRequestsUsage.Prepaid?
+
+            /// The usage in `requests` that `prepaid` doesn't cover,
+            /// from models that handed off to the stream that prepaid.
+            internal var unprepaidUsage: Usage
+
             /// Creates a snapshot from partially generated content and raw content.
             /// - Parameters:
             ///   - content: The partially generated content.
@@ -2958,7 +2970,8 @@ extension LanguageModelSession {
                 transcriptEntries: ArraySlice<Transcript.Entry> = [],
                 requests: RequestsUsage,
                 providerMetadata: [String: String]? = nil,
-                prepaid: CountedRequestsUsage.Prepaid? = nil
+                prepaid: CountedRequestsUsage.Prepaid? = nil,
+                unprepaidUsage: Usage = .zero
             ) {
                 self.content = content
                 self.rawContent = rawContent
@@ -2966,6 +2979,7 @@ extension LanguageModelSession {
                 self.requests = requests
                 self.providerMetadata = providerMetadata
                 self.prepaid = prepaid
+                self.unprepaidUsage = unprepaidUsage
             }
         }
     }
