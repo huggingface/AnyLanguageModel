@@ -505,7 +505,7 @@ import Testing
             #expect(response.content.answer == "Hello")
         }
 
-        @Test(arguments: [Provider.chat, .responses, .openResponses, .gemini])
+        @Test(arguments: [Provider.chat, .responses, .openResponses, .anthropic, .gemini])
         func toolRoundsKeepEarlierText(_ provider: Provider) async throws {
             UsageURLProtocol.reset()
             UsageURLProtocol.enqueue(json: try Self.json(provider.response(text: "Checking. ", tool: true)))
@@ -548,9 +548,7 @@ import Testing
             UsageURLProtocol.enqueue(
                 json: try streaming ? provider.toolStream() : Self.json(provider.response(text: "", tool: true))
             )
-            if streaming || provider == .gemini {
-                UsageURLProtocol.enqueue(json: try streaming ? provider.stream() : Self.json(provider.response()))
-            }
+            UsageURLProtocol.enqueue(json: try streaming ? provider.stream() : Self.json(provider.response()))
             UsageURLProtocol.enqueue(json: try Self.json(provider.response()))
             let url = FileManager.default.temporaryDirectory
                 .appendingPathComponent(UUID().uuidString)
@@ -570,7 +568,7 @@ import Testing
             let restored = provider.makeSession(transcript: try JSONDecoder().decode(Transcript.self, from: archived))
             _ = try await restored.respond(to: "Review the image")
 
-            #expect(UsageURLProtocol.recordedBodies.count == (streaming || provider == .gemini ? 3 : 2))
+            #expect(UsageURLProtocol.recordedBodies.count == 3)
             for body in UsageURLProtocol.recordedBodies.dropFirst() {
                 let request = try JSONDecoder().decode([String: JSONValue].self, from: body)
                 if provider == .gemini {
@@ -672,9 +670,7 @@ import Testing
             UsageURLProtocol.enqueue(
                 json: try streaming ? provider.toolStream() : Self.json(provider.response(text: "", tool: true))
             )
-            if streaming || provider == .gemini {
-                UsageURLProtocol.enqueue(json: try streaming ? provider.stream() : Self.json(provider.response()))
-            }
+            UsageURLProtocol.enqueue(json: try streaming ? provider.stream() : Self.json(provider.response()))
             if streaming {
                 _ = try await session.streamResponse(to: "Weather?").collect()
             } else {
@@ -690,7 +686,7 @@ import Testing
             } else {
                 _ = try await restored.respond(to: "Review the image")
             }
-            #expect(UsageURLProtocol.recordedBodies.count == (streaming || provider == .gemini ? 3 : 2))
+            #expect(UsageURLProtocol.recordedBodies.count == 3)
             for body in UsageURLProtocol.recordedBodies.dropFirst() {
                 try expectToolImage(in: body, provider: provider, texts: expectedTexts, mimeType: expectedMIME)
             }
@@ -1028,8 +1024,6 @@ import Testing
             _ provider: Provider,
             _ streaming: Bool
         ) async throws {
-            // Without a dynamic profile, Anthropic's `respond` makes one request.
-            if provider == .anthropic && !streaming { return }
             func expectStopped<Content: Generable>(_ type: Content.Type) async throws {
                 UsageURLProtocol.reset()
                 for _ in 0 ..< 2 {
@@ -1423,7 +1417,7 @@ import Testing
             #expect(!session.isResponding)
         }
 
-        @Test(arguments: [Provider.chat, .responses, .openResponses, .gemini])
+        @Test(arguments: [Provider.chat, .responses, .openResponses, .anthropic, .gemini])
         func toolRoundsStopAtLimit(_ provider: Provider) async throws {
             UsageURLProtocol.reset()
             var options = GenerationOptions()
@@ -1487,7 +1481,7 @@ import Testing
             #expect(UsageURLProtocol.recordedBodies.count == 3)
         }
 
-        @Test(arguments: [Provider.chat, .responses, .openResponses, .gemini])
+        @Test(arguments: [Provider.chat, .responses, .openResponses, .anthropic, .gemini])
         func repeatedToolRoundRuns(_ provider: Provider) async throws {
             UsageURLProtocol.reset()
             UsageURLProtocol.enqueue(json: try Self.json(provider.response(text: "", tool: true)))
@@ -1513,7 +1507,7 @@ import Testing
 
         /// As in Foundation Models, a response reports its final request's usage,
         /// and the session counts every request.
-        @Test(arguments: [Provider.chat, .responses, .openResponses, .gemini])
+        @Test(arguments: [Provider.chat, .responses, .openResponses, .anthropic, .gemini])
         func toolRoundsReportTheFinalRequest(_ provider: Provider) async throws {
             UsageURLProtocol.reset()
             UsageURLProtocol.enqueue(
@@ -1532,7 +1526,7 @@ import Testing
         }
 
         /// The final request's usage is its own, even when it reports none and an earlier one did.
-        @Test(arguments: [Provider.chat, .responses, .openResponses, .gemini])
+        @Test(arguments: [Provider.chat, .responses, .openResponses, .anthropic, .gemini])
         func finalRequestWithoutUsageReportsNone(_ provider: Provider) async throws {
             UsageURLProtocol.reset()
             UsageURLProtocol.enqueue(

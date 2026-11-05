@@ -580,28 +580,26 @@ public struct AnthropicLanguageModel: LanguageModel, ProfileRequestIdentifiedLan
                     for invocation in invocations {
                         entries.append(.toolOutput(invocation.output))
                     }
-                    if requestContext.hasDynamicProfile {
-                        inFlightMessages.append(.init(role: .assistant, content: message.content))
-                        let results: [AnthropicContent] = try invocations.map { invocation in
-                            .toolResult(
-                                .init(
-                                    toolUseId: invocation.call.id,
-                                    content: try convertSegmentsToAnthropicContent(
-                                        invocation.output.segments,
-                                        isToolOutput: true
-                                    )
+                    inFlightMessages.append(.init(role: .assistant, content: message.content))
+                    let results: [AnthropicContent] = try invocations.map { invocation in
+                        .toolResult(
+                            .init(
+                                toolUseId: invocation.call.id,
+                                content: try convertSegmentsToAnthropicContent(
+                                    invocation.output.segments,
+                                    isToolOutput: true
                                 )
                             )
-                        }
-                        inFlightMessages.append(.init(role: .user, content: results))
-                        if type == String.self {
-                            earlierText += message.content.compactMap { block -> String? in
-                                if case .text(let text) = block { return text.text }
-                                return nil
-                            }.joined()
-                        }
-                        continue
+                        )
                     }
+                    inFlightMessages.append(.init(role: .user, content: results))
+                    if type == String.self {
+                        earlierText += message.content.compactMap { block -> String? in
+                            if case .text(let text) = block { return text.text }
+                            return nil
+                        }.joined()
+                    }
+                    continue
                 }
             }
 

@@ -91,18 +91,7 @@ import Testing
 
         @Test(arguments: [Provider.anthropic], [false, true])
         func anthropicOrdinaryToolLoop(_ provider: Provider, _ streaming: Bool) async throws {
-            if streaming {
-                try await ordinaryWrapperKeepsTheProviderToolLoop(provider, streaming)
-            } else {
-                UsageURLProtocol.reset()
-                UsageURLProtocol.enqueue(json: try Self.json(provider.response(text: "", tool: true)))
-                let session = provider.makeSession(tools: [WeatherTool()])
-                let response = try await session.respond(to: "Weather?")
-                #expect(response.content.isEmpty)
-                #expect(UsageURLProtocol.recordedBodies.count == 1)
-                #expect(response.transcriptEntries.count == 2)
-                #expect(session.transcript.count == 4)
-            }
+            try await ordinaryWrapperKeepsTheProviderToolLoop(provider, streaming)
         }
     }
 #endif
