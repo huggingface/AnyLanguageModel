@@ -527,11 +527,6 @@ public struct OpenAILanguageModel: LanguageModel, ProfileRequestIdentifiedLangua
     ) async throws -> LanguageModelSession.Response<Content> where Content: Generable {
         // Structured outputs need an object root.
         let responseSchema = ProviderResponseSchema(schema, generating: type, wrapping: .nonObjectRoots)
-        let schemaInstructions = GenerationSchema.promptInstructions(
-            generating: type,
-            schema: responseSchema.schema,
-            includeSchemaInPrompt: includeSchemaInPrompt
-        )
         var entries: [Transcript.Entry] = []
         var usage = RequestsUsage()
         var text = ""
@@ -561,6 +556,12 @@ public struct OpenAILanguageModel: LanguageModel, ProfileRequestIdentifiedLangua
             ) {
                 return continuation
             }
+            let schemaInstructions = session.schemaInstructions(
+                for: requestContext,
+                generating: type,
+                schema: responseSchema.schema,
+                includeSchemaInPrompt: includeSchemaInPrompt
+            )
             let tools =
                 requestContext.tools.isEmpty
                 ? nil : requestContext.tools.map(convertToolToOpenAIFormat)
@@ -695,11 +696,6 @@ public struct OpenAILanguageModel: LanguageModel, ProfileRequestIdentifiedLangua
     ) async throws -> LanguageModelSession.Response<Content> where Content: Generable {
         // Structured outputs need an object root.
         let responseSchema = ProviderResponseSchema(schema, generating: type, wrapping: .nonObjectRoots)
-        let schemaInstructions = GenerationSchema.promptInstructions(
-            generating: type,
-            schema: responseSchema.schema,
-            includeSchemaInPrompt: includeSchemaInPrompt
-        )
         var entries: [Transcript.Entry] = []
         var usage = RequestsUsage()
         var text = ""
@@ -730,6 +726,12 @@ public struct OpenAILanguageModel: LanguageModel, ProfileRequestIdentifiedLangua
             ) {
                 return continuation
             }
+            let schemaInstructions = session.schemaInstructions(
+                for: requestContext,
+                generating: type,
+                schema: responseSchema.schema,
+                includeSchemaInPrompt: includeSchemaInPrompt
+            )
             let tools =
                 requestContext.tools.isEmpty
                 ? nil : requestContext.tools.map(convertToolToOpenAIFormat)
@@ -879,11 +881,6 @@ public struct OpenAILanguageModel: LanguageModel, ProfileRequestIdentifiedLangua
     ) -> sending LanguageModelSession.ResponseStream<Content> where Content: Generable {
         // Structured outputs need an object root.
         let responseSchema = ProviderResponseSchema(schema, generating: type, wrapping: .nonObjectRoots)
-        let schemaInstructions = GenerationSchema.promptInstructions(
-            generating: type,
-            schema: responseSchema.schema,
-            includeSchemaInPrompt: includeSchemaInPrompt
-        )
         let stream = AsyncThrowingStream<LanguageModelSession.ResponseStream<Content>.Snapshot, any Error> {
             continuation in
             let task = Task {
@@ -912,6 +909,12 @@ public struct OpenAILanguageModel: LanguageModel, ProfileRequestIdentifiedLangua
                             continuation.finish()
                             return
                         }
+                        let schemaInstructions = session.schemaInstructions(
+                            for: requestContext,
+                            generating: type,
+                            schema: responseSchema.schema,
+                            includeSchemaInPrompt: includeSchemaInPrompt
+                        )
                         let tools =
                             requestContext.tools.isEmpty
                             ? nil : requestContext.tools.map(convertToolToOpenAIFormat)

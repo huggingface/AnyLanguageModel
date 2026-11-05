@@ -488,11 +488,6 @@ public struct AnthropicLanguageModel: LanguageModel, ProfileRequestIdentifiedLan
         let url = baseURL.appendingPathComponent("v1/messages")
         let headers = buildHeaders()
         let responseSchema = type == String.self ? nil : try convertSchemaToAnthropicFormat(schema)
-        let schemaInstructions = GenerationSchema.promptInstructions(
-            generating: type,
-            schema: schema,
-            includeSchemaInPrompt: includeSchemaInPrompt
-        )
         var entries: [Transcript.Entry] = []
         var usage = RequestsUsage()
         var earlierText = ""
@@ -518,6 +513,12 @@ public struct AnthropicLanguageModel: LanguageModel, ProfileRequestIdentifiedLan
             ) {
                 return continuation
             }
+            let schemaInstructions = session.schemaInstructions(
+                for: requestContext,
+                generating: type,
+                schema: schema,
+                includeSchemaInPrompt: includeSchemaInPrompt
+            )
             let anthropicTools: [AnthropicTool] = try requestContext.tools.map {
                 try convertToolToAnthropicFormat($0)
             }
@@ -680,11 +681,6 @@ public struct AnthropicLanguageModel: LanguageModel, ProfileRequestIdentifiedLan
                     let headers = buildHeaders()
                     let responseSchema =
                         type == String.self ? nil : try convertSchemaToAnthropicFormat(schema)
-                    let schemaInstructions = GenerationSchema.promptInstructions(
-                        generating: type,
-                        schema: schema,
-                        includeSchemaInPrompt: includeSchemaInPrompt
-                    )
                     var inFlightMessages: [AnthropicMessage] = []
                     var state = StreamingResponseState<Content>()
                     let toolRounds = session.toolRoundLimit(for: "Anthropic", options: options)
@@ -710,6 +706,12 @@ public struct AnthropicLanguageModel: LanguageModel, ProfileRequestIdentifiedLan
                             continuation.finish()
                             return
                         }
+                        let schemaInstructions = session.schemaInstructions(
+                            for: requestContext,
+                            generating: type,
+                            schema: schema,
+                            includeSchemaInPrompt: includeSchemaInPrompt
+                        )
                         let anthropicTools: [AnthropicTool] = try requestContext.tools.map {
                             try convertToolToAnthropicFormat($0)
                         }
