@@ -97,7 +97,7 @@ Add this package to your `Package.swift`:
 
 ```swift
 dependencies: [
-    .package(url: "https://github.com/huggingface/AnyLanguageModel", from: "1.1.0")
+    .package(url: "https://github.com/huggingface/AnyLanguageModel", from: "1.1.1")
 ]
 ```
 
@@ -128,7 +128,7 @@ To enable specific traits, specify them in your package's dependencies:
 dependencies: [
     .package(
         url: "https://github.com/huggingface/AnyLanguageModel.git",
-        from: "1.1.0",
+        from: "1.1.1",
         traits: ["CoreML", "MLX"] // Enable CoreML and MLX support
     )
 ]
@@ -145,12 +145,12 @@ dependencies: [
 > dependencies: [
 >     .package(
 >         url: "https://github.com/huggingface/AnyLanguageModel.git",
->         from: "1.1.0",
+>         from: "1.1.1",
 >         traits: ["CoreML", "MLX", "Llama"]
 >     ),
->     .package(url: "https://github.com/huggingface/swift-transformers", from: "1.0.0"), // CoreML
->     .package(url: "https://github.com/ml-explore/mlx-swift-lm", from: "2.25.5"),       // MLX
->     .package(url: "https://github.com/mattt/llama.swift", from: "2.0.0"),              // Llama
+>     .package(url: "https://github.com/huggingface/swift-transformers", from: "1.0.0"),           // CoreML
+>     .package(url: "https://github.com/ml-explore/mlx-swift-lm", .upToNextMinor(from: "3.32.3")), // MLX
+>     .package(url: "https://github.com/mattt/llama.swift", .upToNextMajor(from: "2.10549.0")),    // Llama
 > ]
 > ```
 >
@@ -752,6 +752,9 @@ By default, a model uses `makeDefaultTransport()`,
 which returns a `URLSession` with the default configuration.
 With the `AsyncHTTPClient` [trait](#package-traits),
 it returns AsyncHTTPClient's shared `HTTPClient` instead.
+On WASI, there's no default transport,
+so instead provide a remote model one of your own
+([see below](#transports-on-wasi)).
 `URLSession` and `HTTPClient` are both transports,
 so you can pass one that you configured:
 
@@ -851,6 +854,9 @@ When the provider answers with an error status,
 the model throws an `HTTPTransportError`
 with the response's status, headers, and body,
 so you can read a header such as `Retry-After`.
+Known provider error events in an HTTP 200 SSE stream also terminate the stream.
+They throw `HTTPTransportError` with `kind == .providerError`,
+the successful HTTP response, and the failed event's JSON data in `body`.
 Network failures throw the transport's own error,
 such as `URLError` or AsyncHTTPClient's `HTTPClientError`.
 
@@ -883,6 +889,122 @@ and doesn't cause a crash.
 A custom transport decides when its timeout starts,
 so a request that waits for a free slot before it's sent
 doesn't use its time while it waits.
+
+#### Transports on WASI
+
+WASI has no `URLSession` or AsyncHTTPClient,
+so there's no default transport there:
+a remote model created without a `transport:`
+throws an `HTTPTransportError` when it sends a request.
+Instead, write a transport that sends requests through your host.
+For example, in a browser or on Cloudflare Workers,
+a transport can call JavaScript's `fetch`
+with [JavaScriptKit](https://github.com/swiftwasm/JavaScriptKit).
+This one reads each response whole rather than streaming it:
+
+```swift
+import AnyLanguageModel
+import Foundation
+import HTTPTypes
+import JavaScriptEventLoop
+import JavaScriptKit
+
+struct FetchTransport: HTTPTransport {
+    func send<Return>(
+        request: HTTPRequest,
+        body: Data?,
+        timeout: Duration?,
+        responseHandler: (HTTPResponse, HTTPResponseBody) async throws -> Return
+    ) async throws -> Return {
+        guard let url = request.url else {
+            throw HTTPTransportError(kind: .invalidRequest)
+        }
+
+        let headers = JSObject()
+
+        for field in request.headerFields {
+            headers[field.name.rawName] = .string(field.value)
+        }
+        
+        let options = JSObject()
+        options.method = .string(request.method.rawValue)
+        options.headers = .object(headers)
+       
+        if let body {
+            options.body = .string(String(decoding: body, as: UTF8.self))
+        }
+
+        let controller = JSObject.global.AbortController.function!.new()
+        options.signal = controller.signal
+        // `JSObject` isn't `Sendable`, so the cancellation handler
+        // reaches the controller through a `JSRemote`.
+        let remoteController = JSRemote(controller)
+
+        // Abort the `fetch` if its response doesn't start within `timeout`.
+        let timer: JSValue? = timeout.map { timeout in
+            let (seconds, attoseconds) = timeout.components
+            let milliseconds = Double(seconds) * 1_000 + Double(attoseconds) / 1e15
+            return JSObject.global.setTimeout!(controller.abort.function!.bind!(controller), milliseconds)
+        }
+        func clearTimer() {
+            if let timer {
+                _ = JSObject.global.clearTimeout!(timer)
+            }
+        }
+        // Clear the timer when `fetch` fails or is cancelled, too.
+        defer { clearTimer() }
+
+        let (response, text) = try await withTaskCancellationHandler {
+            let fetch = JSObject.global.fetch.function!
+            let response = try await JSPromise(fetch(url.absoluteString, options).object!)!.value.object!
+            clearTimer()
+            let text = try await JSPromise(response.text!().object!)!.value.string!
+            return (response, text)
+        } onCancel: {
+            Task { await remoteController.withJSObject { _ = $0.abort!() } }
+        }
+
+        try Task.checkCancellation()
+
+        var headerFields = HTTPFields()
+        let entries = JSObject.global.Object.function!.fromEntries!(response.headers)
+    
+        for (name, value) in [String: String].construct(from: entries) ?? [:] {
+            if let name = HTTPField.Name(name) {
+                headerFields.append(HTTPField(name: name, value: value))
+            }
+        }
+
+        let (chunks, continuation) = AsyncStream.makeStream(of: Data.self)
+       
+        continuation.yield(Data(text.utf8))
+        continuation.finish()
+       
+        let status = HTTPResponse.Status(code: Int(response.status.number!))
+       
+        return try await responseHandler(
+            HTTPResponse(status: status, headerFields: headerFields),
+            HTTPResponseBody(chunks)
+        )
+    }
+}
+
+JavaScriptEventLoop.installGlobalExecutor()
+
+let model = AnthropicLanguageModel(
+    apiKey: apiKey,
+    model: "claude-haiku-5-5",
+    transport: FetchTransport()
+)
+```
+
+Cancelling the task that sends a request aborts the `fetch`,
+so `send` throws instead of waiting for the response.
+So does a response that doesn't start within the request's `timeout`.
+Awaiting a `JSPromise` needs JavaScriptKit's event loop,
+so install it once when your program starts.
+To build for WASI,
+use the [Swift SDK for WebAssembly](https://www.swift.org/documentation/articles/wasm-getting-started.html).
 
 ## Differences from Foundation Models
 
@@ -1053,7 +1175,7 @@ Enable the trait in Package.swift:
 ```swift
 .package(
     url: "https://github.com/huggingface/AnyLanguageModel.git",
-    from: "1.1.0",
+    from: "1.1.1",
     traits: ["CoreML"]
 )
 ```
@@ -1150,7 +1272,7 @@ Enable the trait in Package.swift:
 ```swift
 .package(
     url: "https://github.com/huggingface/AnyLanguageModel.git",
-    from: "1.1.0",
+    from: "1.1.1",
     traits: ["MLX"]
 )
 ```
@@ -1174,7 +1296,7 @@ Enable the trait in Package.swift:
 ```swift
 .package(
     url: "https://github.com/huggingface/AnyLanguageModel.git",
-    from: "1.1.0",
+    from: "1.1.1",
     traits: ["Llama"]
 )
 ```
@@ -1542,11 +1664,15 @@ swift test --traits CoreML,Llama
 > + .default(enabledTraits: ["MLX"]),
 > ```
 > 
+> The `-skipMacroValidation` flag allows the `MLXHuggingFaceMacros` macro
+> to run without prior approval in Xcode.
+>
 > Pass environment variables with `TEST_RUNNER_` prefix:
 >
 > ```bash
 > export TEST_RUNNER_HF_TOKEN=your_huggingface_token
 > xcodebuild test \
+>   -skipMacroValidation \
 >   -scheme AnyLanguageModel \
 >   -destination 'platform=macOS' \
 >   -only-testing:AnyLanguageModelTests/MLXLanguageModelTests

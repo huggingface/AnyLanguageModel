@@ -92,3 +92,36 @@ extension ToolExecutionDelegate {
         in session: LanguageModelSession
     ) async {}
 }
+
+extension LanguageModelSession {
+    /// A response that a ``ToolExecutionDelegate`` stopped
+    /// before the model generated a value of the response's type.
+    ///
+    /// When a delegate returns ``ToolExecutionDecision/stop``,
+    /// a response that generates a `String`,
+    /// or a type that can be empty,
+    /// ends with an empty value and the tool calls that stopped it.
+    /// A type with required properties can't be empty,
+    /// so the response throws this error instead.
+    ///
+    /// The rounds that ran are in `transcriptEntries`,
+    /// each tool call followed by its output,
+    /// and then the tool calls that the delegate stopped, without output.
+    /// As with any error, the session keeps only the prompt,
+    /// so a caller can add these entries to the transcript and continue from there.
+    ///
+    /// - Note: This API is exclusive to AnyLanguageModel.
+    public struct ToolExecutionStopped: Error, CustomStringConvertible, Sendable {
+        /// The provider whose response a delegate stopped.
+        public let provider: String
+
+        /// The rounds that ran, each tool call followed by its output,
+        /// and then the tool calls that the delegate stopped.
+        public let transcriptEntries: ArraySlice<Transcript.Entry>
+
+        public var description: String {
+            "A tool execution delegate stopped the \(provider) response "
+                + "before the model generated a value of the response type."
+        }
+    }
+}

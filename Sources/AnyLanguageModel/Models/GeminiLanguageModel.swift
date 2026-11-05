@@ -1,7 +1,9 @@
 import EventSource
 import Foundation
 import HTTPTypes
-import HTTPTypesFoundation
+#if !os(WASI)
+    import HTTPTypesFoundation
+#endif
 import JSONSchema
 import OrderedCollections
 
@@ -245,6 +247,12 @@ public struct GeminiLanguageModel: LanguageModel, ProfileRequestIdentifiedLangua
     ) async throws -> LanguageModelSession.Response<Content> where Content: Generable {
         // Gemini's response schemas can be objects, primitives, or arrays, but not unions.
         let responseSchema = ProviderResponseSchema(schema, generating: type, wrapping: .unionRoots)
+        let schemaInstructions = GenerationSchema.promptInstructions(
+            generating: type,
+            schema: responseSchema.schema,
+            includeSchemaInPrompt: includeSchemaInPrompt
+        )
+
         let url =
             baseURL
             .appendingPathComponent(apiVersion)
@@ -252,6 +260,7 @@ public struct GeminiLanguageModel: LanguageModel, ProfileRequestIdentifiedLangua
         let headers = buildHeaders()
 
         // The entries this call adds, which is what the response reports.
+        // They preserve tool rounds while each iteration rebuilds the request from a fresh context.
         var entries: [Transcript.Entry] = []
         var usage = RequestsUsage()
         // The text of earlier tool rounds, which string responses include.
@@ -261,7 +270,7 @@ public struct GeminiLanguageModel: LanguageModel, ProfileRequestIdentifiedLangua
         // Multi-turn conversation loop for tool calling
         while true {
             let requestContext = try await session.resolvedRequestContext(
-                including: entries,
+                including: session.usesDynamicProfile ? entries : [],
                 options: options
             )
             if let continuation = try await session.profileContinuationResponse(
@@ -286,7 +295,11 @@ public struct GeminiLanguageModel: LanguageModel, ProfileRequestIdentifiedLangua
                 serverTools: effectiveServerTools
             )
             let params = try createGenerateContentParams(
-                contents: try requestContext.transcript.toGeminiContent(),
+                contents: try geminiContents(
+                    from: requestContext,
+                    saying: schemaInstructions,
+                    continuing: entries
+                ),
                 tools: geminiTools,
                 generating: type,
                 schema: responseSchema.schema,
@@ -329,10 +342,8 @@ public struct GeminiLanguageModel: LanguageModel, ProfileRequestIdentifiedLangua
                     session: session
                 )
                 switch resolution {
-                case .stop(let calls):
-                    if !calls.isEmpty {
-                        entries.append(.toolCalls(callsEntry))
-                    }
+                case .stop:
+                    entries.append(.toolCalls(callsEntry))
                     let empty = try emptyResponseContent(for: type)
                     return LanguageModelSession.Response(
                         content: empty.content,
@@ -341,14 +352,9 @@ public struct GeminiLanguageModel: LanguageModel, ProfileRequestIdentifiedLangua
                         requests: usage
                     )
                 case .invocations(let invocations):
-                    if !invocations.isEmpty {
-                        let calls = Transcript.Entry.toolCalls(callsEntry)
-                        entries.append(calls)
-
-                        for invocation in invocations {
-                            let output = Transcript.Entry.toolOutput(invocation.output)
-                            entries.append(output)
-                        }
+                    entries.append(.toolCalls(callsEntry))
+                    for invocation in invocations {
+                        entries.append(.toolOutput(invocation.output))
                     }
 
                     if type == String.self { earlierText += textPartsText(firstCandidate.content.parts) }
@@ -427,6 +433,12 @@ public struct GeminiLanguageModel: LanguageModel, ProfileRequestIdentifiedLangua
     ) -> sending LanguageModelSession.ResponseStream<Content> where Content: Generable {
         // Gemini's response schemas can be objects, primitives, or arrays, but not unions.
         let responseSchema = ProviderResponseSchema(schema, generating: type, wrapping: .unionRoots)
+        let schemaInstructions = GenerationSchema.promptInstructions(
+            generating: type,
+            schema: responseSchema.schema,
+            includeSchemaInPrompt: includeSchemaInPrompt
+        )
+
         var streamURL =
             baseURL
             .appendingPathComponent(apiVersion)
@@ -444,7 +456,7 @@ public struct GeminiLanguageModel: LanguageModel, ProfileRequestIdentifiedLangua
                     while true {
                         try Task.checkCancellation()
                         let requestContext = try await session.resolvedRequestContext(
-                            including: state.entries,
+                            including: session.usesDynamicProfile ? state.entries : [],
                             options: options
                         )
                         if let handoff = session.profileContinuationStream(
@@ -471,7 +483,11 @@ public struct GeminiLanguageModel: LanguageModel, ProfileRequestIdentifiedLangua
                             serverTools: effectiveServerTools
                         )
                         let params = try createGenerateContentParams(
-                            contents: try requestContext.transcript.toGeminiContent(),
+                            contents: try geminiContents(
+                                from: requestContext,
+                                saying: schemaInstructions,
+                                continuing: state.entries
+                            ),
                             tools: geminiTools,
                             generating: type,
                             schema: responseSchema.schema,
@@ -530,11 +546,9 @@ public struct GeminiLanguageModel: LanguageModel, ProfileRequestIdentifiedLangua
                             continuation.finish()
                             return
                         case .invocations(let invocations):
-                            let calls = Transcript.Entry.toolCalls(callsEntry)
-                            state.entries.append(calls)
+                            state.entries.append(.toolCalls(callsEntry))
                             for invocation in invocations {
-                                let output = Transcript.Entry.toolOutput(invocation.output)
-                                state.entries.append(output)
+                                state.entries.append(.toolOutput(invocation.output))
                             }
                         }
                         if let snapshot = state.snapshot() { continuation.yield(snapshot) }
@@ -679,6 +693,25 @@ private func createGenerateContentParams<Content: Generable>(
     return params
 }
 
+/// The contents of one request: the context's transcript with the schema text after its prompt,
+/// followed by the response's earlier tool rounds.
+///
+/// A profile's context already has those rounds, and its projection is authoritative:
+/// the profile may have removed or reordered them.
+private func geminiContents(
+    from requestContext: LanguageModelSession.RequestContext,
+    saying schemaInstructions: String?,
+    continuing entries: [Transcript.Entry]
+) throws -> [GeminiContent] {
+    var transcript = requestContext.transcript.saying(schemaInstructions)
+    if !requestContext.hasDynamicProfile {
+        for entry in entries {
+            transcript.append(entry)
+        }
+    }
+    return try transcript.toGeminiContent()
+}
+
 private struct ToolInvocationResult {
     let call: Transcript.ToolCall
     let output: Transcript.ToolOutput
@@ -758,6 +791,7 @@ private func toGeminiFunctionResponse(
     _ toolOutput: Transcript.ToolOutput
 ) throws -> GeminiFunctionResponse {
     var resultValues: [String] = []
+    var structuredValue: JSONValue?
     var parts: [GeminiPart] = []
 
     for segment in toolOutput.segments {
@@ -765,10 +799,10 @@ private func toGeminiFunctionResponse(
         case .text(let text):
             resultValues.append(text.content)
         case .structure(let structured):
-            let data = try JSONEncoder().encode(structured.content)
-            if let jsonString = String(data: data, encoding: .utf8) {
-                resultValues.append(jsonString)
-            }
+            // Send the content's plain JSON, not the `Codable` form of `GeneratedContent`.
+            let jsonString = structured.content.jsonString
+            resultValues.append(jsonString)
+            structuredValue = try? JSONDecoder().decode(JSONValue.self, from: Data(jsonString.utf8))
         case .image(let image):
             switch image.source {
             case .data(let data, let mimeType):
@@ -798,8 +832,14 @@ private func toGeminiFunctionResponse(
         }
     }
 
+    // Gemini requires `response` to be a JSON object,
+    // so the result goes under a `result` key, as Google's Python SDK does.
+    // An output with only structured content sends that content as a JSON value;
+    // any other output sends its parts as one string.
     var response: [String: JSONValue] = [:]
-    if !resultValues.isEmpty {
+    if resultValues.count == 1, let structuredValue {
+        response["result"] = structuredValue
+    } else if !resultValues.isEmpty {
         response["result"] = .string(resultValues.joined(separator: "\n"))
     }
     return GeminiFunctionResponse(

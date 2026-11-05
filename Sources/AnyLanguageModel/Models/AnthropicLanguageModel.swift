@@ -1,7 +1,9 @@
 import EventSource
 import Foundation
 import HTTPTypes
-import HTTPTypesFoundation
+#if !os(WASI)
+    import HTTPTypesFoundation
+#endif
 import JSONSchema
 import OrderedCollections
 
@@ -492,10 +494,15 @@ public struct AnthropicLanguageModel: LanguageModel {
         }
 
         let responseSchema = type == String.self ? nil : try convertSchemaToAnthropicFormat(schema)
+        let schemaInstructions = GenerationSchema.promptInstructions(
+            generating: type,
+            schema: schema,
+            includeSchemaInPrompt: includeSchemaInPrompt
+        )
         let params = try createMessageParams(
             model: model,
             system: nil,
-            messages: try requestContext.transcript.toAnthropicMessages(),
+            messages: try requestContext.transcript.saying(schemaInstructions).toAnthropicMessages(),
             tools: anthropicTools.isEmpty ? nil : anthropicTools,
             responseSchema: responseSchema,
             options: options
@@ -629,6 +636,11 @@ public struct AnthropicLanguageModel: LanguageModel {
                     let headers = buildHeaders()
                     let responseSchema =
                         type == String.self ? nil : try convertSchemaToAnthropicFormat(schema)
+                    let schemaInstructions = GenerationSchema.promptInstructions(
+                        generating: type,
+                        schema: schema,
+                        includeSchemaInPrompt: includeSchemaInPrompt
+                    )
                     var inFlightMessages: [AnthropicMessage] = []
                     var state = StreamingResponseState<Content>()
                     let toolRounds = ToolRoundLimit(provider: "Anthropic", options: options)
@@ -640,7 +652,9 @@ public struct AnthropicLanguageModel: LanguageModel {
                         let anthropicTools: [AnthropicTool] = try requestContext.tools.map {
                             try convertToolToAnthropicFormat($0)
                         }
-                        let messages = try requestContext.transcript.toAnthropicMessages() + inFlightMessages
+                        let messages =
+                            try requestContext.transcript.saying(schemaInstructions).toAnthropicMessages()
+                            + inFlightMessages
                         var params = try createMessageParams(
                             model: model,
                             system: nil,
