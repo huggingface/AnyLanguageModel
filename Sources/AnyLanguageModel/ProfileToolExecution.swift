@@ -15,6 +15,23 @@ enum ProfileToolResolution: Sendable {
 }
 
 extension LanguageModelSession {
+    /// The schema text for one request, under the setting that `requestContext` resolved.
+    func schemaInstructions<Content: Generable>(
+        for requestContext: RequestContext,
+        generating type: Content.Type,
+        schema: GenerationSchema,
+        includeSchemaInPrompt: Bool
+    ) -> String? {
+        GenerationSchema.promptInstructions(
+            generating: type,
+            schema: schema,
+            includeSchemaInPrompt: profileIncludeSchemaInPrompt(
+                for: requestContext,
+                callSiteValue: includeSchemaInPrompt
+            )
+        )
+    }
+
     func profileContinuationResponse<Content: Generable>(
         ifSelectedModelDiffersFrom currentModelIdentity: UUID,
         requestContext: RequestContext,
@@ -129,6 +146,8 @@ extension LanguageModelSession {
                     for try await snapshot in upstream {
                         var earlierUsage = prefixUsage
                         earlierUsage.add(snapshot.requests.earlier)
+                        var unprepaidUsage = prefixUsage
+                        unprepaidUsage.add(snapshot.unprepaidUsage)
                         var content = snapshot.content
                         var rawContent = snapshot.rawContent
                         if type == String.self, case .string(let suffix) = snapshot.rawContent.kind {
@@ -142,7 +161,9 @@ extension LanguageModelSession {
                                 rawContent: rawContent,
                                 transcriptEntries: ArraySlice(prefixEntries + snapshot.transcriptEntries),
                                 requests: RequestsUsage(earlier: earlierUsage, final: snapshot.requests.final),
-                                providerMetadata: snapshot.providerMetadata
+                                providerMetadata: snapshot.providerMetadata,
+                                prepaid: snapshot.prepaid,
+                                unprepaidUsage: unprepaidUsage
                             )
                         )
                     }

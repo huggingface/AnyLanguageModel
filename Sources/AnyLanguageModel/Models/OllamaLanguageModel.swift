@@ -152,11 +152,6 @@ public struct OllamaLanguageModel: LanguageModel, ProfileRequestIdentifiedLangua
             ollamaFormat = try JSONValue(schema)
         }
 
-        let schemaInstructions = GenerationSchema.promptInstructions(
-            generating: type,
-            schema: schema,
-            includeSchemaInPrompt: includeSchemaInPrompt
-        )
         let url = baseURL.appendingPathComponent("api/chat")
         var entries: [Transcript.Entry] = []
         var usage = RequestsUsage()
@@ -182,6 +177,12 @@ public struct OllamaLanguageModel: LanguageModel, ProfileRequestIdentifiedLangua
             ) {
                 return continuation
             }
+            let schemaInstructions = session.schemaInstructions(
+                for: requestContext,
+                generating: type,
+                schema: schema,
+                includeSchemaInPrompt: includeSchemaInPrompt
+            )
             let ollamaTools = try requestContext.options.toolsOffered(from: requestContext.tools).map(
                 convertToolToOllamaFormat
             )
@@ -334,11 +335,6 @@ public struct OllamaLanguageModel: LanguageModel, ProfileRequestIdentifiedLangua
                 do {
                     let format: JSONValue? =
                         type == String.self ? nil : try JSONValue(convertSchemaToOllamaFormat(schema))
-                    let schemaInstructions = GenerationSchema.promptInstructions(
-                        generating: type,
-                        schema: schema,
-                        includeSchemaInPrompt: includeSchemaInPrompt
-                    )
                     var inFlightMessages: [OllamaMessage] = []
                     var state = StreamingResponseState<Content>()
                     let toolRounds = session.toolRoundLimit(for: "Ollama", options: options)
@@ -363,6 +359,12 @@ public struct OllamaLanguageModel: LanguageModel, ProfileRequestIdentifiedLangua
                             continuation.finish()
                             return
                         }
+                        let schemaInstructions = session.schemaInstructions(
+                            for: requestContext,
+                            generating: type,
+                            schema: schema,
+                            includeSchemaInPrompt: includeSchemaInPrompt
+                        )
                         let tools = try requestContext.options.toolsOffered(from: requestContext.tools).map(
                             convertToolToOllamaFormat
                         )

@@ -247,11 +247,6 @@ public struct GeminiLanguageModel: LanguageModel, ProfileRequestIdentifiedLangua
     ) async throws -> LanguageModelSession.Response<Content> where Content: Generable {
         // Gemini's response schemas can be objects, primitives, or arrays, but not unions.
         let responseSchema = ProviderResponseSchema(schema, generating: type, wrapping: .unionRoots)
-        let schemaInstructions = GenerationSchema.promptInstructions(
-            generating: type,
-            schema: responseSchema.schema,
-            includeSchemaInPrompt: includeSchemaInPrompt
-        )
 
         let url =
             baseURL
@@ -286,6 +281,12 @@ public struct GeminiLanguageModel: LanguageModel, ProfileRequestIdentifiedLangua
             ) {
                 return continuation
             }
+            let schemaInstructions = session.schemaInstructions(
+                for: requestContext,
+                generating: type,
+                schema: responseSchema.schema,
+                includeSchemaInPrompt: includeSchemaInPrompt
+            )
             let customOptions = requestContext.options[custom: GeminiLanguageModel.self]
             let effectiveThinking = customOptions?.thinking ?? .disabled
             let effectiveServerTools = customOptions?.serverTools ?? []
@@ -433,11 +434,6 @@ public struct GeminiLanguageModel: LanguageModel, ProfileRequestIdentifiedLangua
     ) -> sending LanguageModelSession.ResponseStream<Content> where Content: Generable {
         // Gemini's response schemas can be objects, primitives, or arrays, but not unions.
         let responseSchema = ProviderResponseSchema(schema, generating: type, wrapping: .unionRoots)
-        let schemaInstructions = GenerationSchema.promptInstructions(
-            generating: type,
-            schema: responseSchema.schema,
-            includeSchemaInPrompt: includeSchemaInPrompt
-        )
 
         var streamURL =
             baseURL
@@ -474,6 +470,12 @@ public struct GeminiLanguageModel: LanguageModel, ProfileRequestIdentifiedLangua
                             continuation.finish()
                             return
                         }
+                        let schemaInstructions = session.schemaInstructions(
+                            for: requestContext,
+                            generating: type,
+                            schema: responseSchema.schema,
+                            includeSchemaInPrompt: includeSchemaInPrompt
+                        )
                         let customOptions = requestContext.options[custom: GeminiLanguageModel.self]
                         let effectiveThinking = customOptions?.thinking ?? .disabled
                         let effectiveServerTools = customOptions?.serverTools ?? []
