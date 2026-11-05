@@ -1,7 +1,9 @@
 import EventSource
 import Foundation
 import HTTPTypes
-import HTTPTypesFoundation
+#if !os(WASI)
+    import HTTPTypesFoundation
+#endif
 import JSONSchema
 import OrderedCollections
 
@@ -486,6 +488,11 @@ public struct AnthropicLanguageModel: LanguageModel, ProfileRequestIdentifiedLan
         let url = baseURL.appendingPathComponent("v1/messages")
         let headers = buildHeaders()
         let responseSchema = type == String.self ? nil : try convertSchemaToAnthropicFormat(schema)
+        let schemaInstructions = GenerationSchema.promptInstructions(
+            generating: type,
+            schema: schema,
+            includeSchemaInPrompt: includeSchemaInPrompt
+        )
         var entries: [Transcript.Entry] = []
         var usage = RequestsUsage()
         var earlierText = ""
@@ -518,7 +525,7 @@ public struct AnthropicLanguageModel: LanguageModel, ProfileRequestIdentifiedLan
                 model: model,
                 system: nil,
                 messages: try anthropicMessages(
-                    from: requestContext.transcript,
+                    from: requestContext.transcript.saying(schemaInstructions),
                     replacing: entries,
                     with: inFlightMessages,
                     hasDynamicProfile: requestContext.hasDynamicProfile
@@ -673,6 +680,11 @@ public struct AnthropicLanguageModel: LanguageModel, ProfileRequestIdentifiedLan
                     let headers = buildHeaders()
                     let responseSchema =
                         type == String.self ? nil : try convertSchemaToAnthropicFormat(schema)
+                    let schemaInstructions = GenerationSchema.promptInstructions(
+                        generating: type,
+                        schema: schema,
+                        includeSchemaInPrompt: includeSchemaInPrompt
+                    )
                     var inFlightMessages: [AnthropicMessage] = []
                     var state = StreamingResponseState<Content>()
                     let toolRounds = session.toolRoundLimit(for: "Anthropic", options: options)
@@ -702,7 +714,7 @@ public struct AnthropicLanguageModel: LanguageModel, ProfileRequestIdentifiedLan
                             try convertToolToAnthropicFormat($0)
                         }
                         let messages = try anthropicMessages(
-                            from: requestContext.transcript,
+                            from: requestContext.transcript.saying(schemaInstructions),
                             replacing: state.entries,
                             with: inFlightMessages,
                             hasDynamicProfile: requestContext.hasDynamicProfile

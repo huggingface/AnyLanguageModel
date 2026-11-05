@@ -40,6 +40,117 @@ struct ToolContinuationTests {
         #expect(session.properties.history.isEmpty)
     }
 
+    // Without its parent, the pending output's round-scoped key
+    // is the same as the durable output's.
+    @Test(arguments: [false, true])
+    func removingPendingParentDoesNotCommitItsOutputWithAReusedCallID(sameResult: Bool) async throws {
+        let previous = Self.round("previous")
+        let current = Self.round(sameResult ? "previous" : "current")
+        let session = LanguageModelSession(
+            profile: LanguageModelSession.Profile { Instructions("History") }
+                .model(MockLanguageModel())
+                .historyTransform { entries in
+                    let properties = SessionPropertyBinding.values!
+                    properties.history.removeAll { $0.id == current[0].id }
+                    return entries
+                },
+            history: previous
+        )
+        _ = try await session.resolvedRequestContext(including: current)
+        #expect(Array(session.properties.history) == previous)
+    }
+
+    // Removing the durable output and the pending parent
+    // gives the pending output the durable output's key.
+    @Test(arguments: [false, true])
+    func removingDurableOutputAndPendingParentDoesNotCommitThePendingOutput(edited: Bool) async throws {
+        let previous = Self.round("previous")
+        let current = Self.round("current")
+        let kept = edited ? Self.round("edited")[1] : current[1]
+        let visible = Locked<[Transcript.Entry]>([])
+        let session = LanguageModelSession(
+            profile: LanguageModelSession.Profile { Instructions("History") }
+                .model(MockLanguageModel())
+                .historyTransform { entries in
+                    let properties = SessionPropertyBinding.values!
+                    properties.history = Transcript.HistoryView([previous[0], kept])
+                    visible.withLock { $0 = Array(properties.history) }
+                    return entries
+                },
+            history: previous
+        )
+        _ = try await session.resolvedRequestContext(including: current)
+        let durable = edited ? [previous[0], kept] : [previous[0]]
+        #expect(visible.withLock { $0 } == durable + current)
+        #expect(Array(session.properties.history) == durable)
+    }
+
+    // A round that a write adds owns its outputs, even with a pending output's call ID,
+    // but an unchanged copy of the pending output in it stays pending.
+    @Test(arguments: [false, true])
+    func newRoundKeepsItsOutputWithAPendingCallID(copiesPendingOutput: Bool) async throws {
+        let current = Self.round("current")
+        let added = Self.round("added")
+        let addedRound = [added[0], copiesPendingOutput ? current[1] : added[1]]
+        let session = LanguageModelSession(
+            profile: LanguageModelSession.Profile { Instructions("History") }
+                .model(MockLanguageModel())
+                .historyTransform { entries in
+                    let properties = SessionPropertyBinding.values!
+                    properties.history.append(contentsOf: addedRound)
+                    return entries
+                }
+        )
+        _ = try await session.resolvedRequestContext(including: current)
+        #expect(Array(session.properties.history) == (copiesPendingOutput ? [added[0]] : added))
+    }
+
+    @Test(arguments: [false, true])
+    func rollbackRemovesAnUnchangedOutputThatTookADurableOutputsKey(edited: Bool) {
+        let previous = Self.round("previous")
+        let current = Self.round("current")
+        let history = previous + current
+        let appended = AppendedTranscriptEntries(
+            keys: Set(keyedTranscriptEntries(history).suffix(current.count).map(\.key)),
+            history: history
+        )
+        let kept = edited ? Self.round("edited")[1] : current[1]
+        let remaining = removingAppendedTranscriptEntries(appended, from: [previous[0], kept])
+        #expect(remaining == (edited ? [previous[0], kept] : [previous[0]]))
+    }
+
+    // A callback that inserts a round before an appended output gives the output that round's key.
+    // An unchanged appended output stays appended; an edited one belongs to the new round.
+    @Test(arguments: [false, true])
+    func rollbackRemovesAnUnchangedOutputThatACallbackMovedIntoANewRound(edited: Bool) {
+        let previous = Self.round("previous")
+        let current = Self.round("current")
+        let history = previous + current
+        let appended = AppendedTranscriptEntries(
+            keys: Set(keyedTranscriptEntries(history).suffix(current.count).map(\.key)),
+            history: history
+        )
+        let inserted = Self.round("inserted")[0]
+        let kept = edited ? Self.round("edited")[1] : current[1]
+        let remaining = removingAppendedTranscriptEntries(appended, from: previous + [current[0], inserted, kept])
+        #expect(remaining == previous + (edited ? [inserted, kept] : [inserted]))
+    }
+
+    // A later round's output that equals an appended output
+    // belongs to the later response while the appended output keeps its key.
+    @Test func rollbackKeepsALaterOutputThatEqualsAnAppendedOutput() {
+        let previous = Self.round("previous")
+        let current = Self.round("current")
+        let history = previous + current
+        let appended = AppendedTranscriptEntries(
+            keys: Set(keyedTranscriptEntries(history).suffix(current.count).map(\.key)),
+            history: history
+        )
+        let later = [Self.round("later")[0], current[1]]
+        let remaining = removingAppendedTranscriptEntries(appended, from: history + later)
+        #expect(remaining == previous + later)
+    }
+
     @Test func ordinaryContinuationKeepsTranscriptAndOpaqueMessages() {
         let previous = Self.round("previous")
         let current = Self.round("current")
@@ -100,6 +211,27 @@ struct ToolContinuationTests {
         #expect(Array(session.properties.history) == previous)
     }
 
+    // A tool round resolves the request's context again with its pending entries,
+    // and the callbacks of the new context can still edit the history.
+    @Test func toolOutputCallbackKeepsItsEditAfterTheContextResolvesAgain() async throws {
+        let call = Transcript.ToolCall(id: "call_0", toolName: "fixture", arguments: .init(properties: [:]))
+        let output = Transcript.ToolOutput(
+            id: call.id,
+            toolName: call.toolName,
+            segments: [.text(.init(content: "pending"))]
+        )
+        let added = Transcript.Entry.prompt(.init(segments: [.text(.init(content: "Added"))]))
+        let session = LanguageModelSession(
+            profile: LanguageModelSession.Profile { Instructions("History") }
+                .model(ToolRoundCallbackModel(call: call, output: output))
+                .onToolOutput { _, _ in
+                    SessionPropertyBinding.values!.history.append(added)
+                }
+        )
+        _ = try await session.respond(to: "Use the tool")
+        #expect(session.transcript.contains(added))
+    }
+
     private static func round(_ result: String) -> [Transcript.Entry] {
         let call = Transcript.ToolCall(id: "call_0", toolName: "fixture", arguments: .init(properties: [:]))
         return [
@@ -124,5 +256,42 @@ private struct OfferedToolProbe: Tool {
     func call(arguments: String) async throws -> String {
         calls.withLock { $0 += 1 }
         return "executed"
+    }
+}
+
+/// Runs one tool round through the profile callbacks, as a provider's tool loop does.
+private struct ToolRoundCallbackModel: LanguageModel {
+    typealias UnavailableReason = Never
+    var availability: Availability<Never> { .available }
+    let call: Transcript.ToolCall
+    let output: Transcript.ToolOutput
+
+    func respond<Content>(
+        within session: LanguageModelSession,
+        to prompt: Prompt,
+        generating type: Content.Type,
+        includeSchemaInPrompt: Bool,
+        options: GenerationOptions
+    ) async throws -> LanguageModelSession.Response<Content> where Content: Generable {
+        let round: [Transcript.Entry] = [.toolCalls(.init([call])), .toolOutput(output)]
+        let context = try await session.resolvedRequestContext(including: round)
+        try await session.profileDidProduceToolOutput(
+            for: call,
+            output: output,
+            requestContext: context,
+            currentRoundEntries: round
+        )
+        let raw = GeneratedContent("response")
+        return .init(content: try Content(raw), rawContent: raw, transcriptEntries: [])
+    }
+
+    func streamResponse<Content>(
+        within session: LanguageModelSession,
+        to prompt: Prompt,
+        generating type: Content.Type,
+        includeSchemaInPrompt: Bool,
+        options: GenerationOptions
+    ) -> sending LanguageModelSession.ResponseStream<Content> where Content: Generable {
+        fatalError("ToolRoundCallbackModel only supports nonstreaming tests")
     }
 }

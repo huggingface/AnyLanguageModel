@@ -114,7 +114,19 @@ public final class LanguageModelSession: @unchecked Sendable {
     private let dynamicProfile: AnyDynamicProfile?
     private let dynamicInstructionsLock = NSLock()
     private let dynamicProfileLock = NSLock()
-    private let profileLifecycle = ProfileLifecycle()
+    let profileLifecycle = ProfileLifecycle()
+
+    /// The instructions entry that a profile session's history started with, if any.
+    ///
+    /// A profile that sets no instructions uses these instructions.
+    private let profileBaseInstructions: Transcript.Instructions?
+
+    /// The ID of the instructions entry that a profile session records in its transcript.
+    private let profileInstructionsID: String
+
+    /// The ID of the text segment of the profile's instructions in that entry,
+    /// which stays the same so that unchanged instructions give an equal entry.
+    private let profileInstructionsSegmentID = UUID().uuidString
 
     /// Session-scoped values available to profiles and dynamic instructions.
     public let properties: SessionPropertyValues
@@ -185,7 +197,11 @@ public final class LanguageModelSession: @unchecked Sendable {
         fileprivate let canonicalTranscript: [Transcript.Entry]
         fileprivate let pendingEntryKeys: Set<TranscriptEntryKey>
         fileprivate let callbackState: ProfileCallbackState
-        fileprivate let callbackHistory = Locked<[Transcript.Entry]?>(nil)
+        fileprivate let callbackHistory: Locked<[Transcript.Entry]?>
+        /// The session history version that the request's durable history reflects,
+        /// or `nil` if the session history changed after the request's snapshot.
+        /// Profile callbacks keep their history edits only at this version.
+        fileprivate let historyVersion: Locked<UInt64?>
 
         var hasDynamicProfile: Bool { profile != nil }
 
@@ -200,7 +216,9 @@ public final class LanguageModelSession: @unchecked Sendable {
             profile: ResolvedDynamicProfile? = nil,
             canonicalTranscript: [Transcript.Entry]? = nil,
             pendingEntryKeys: Set<TranscriptEntryKey> = [],
-            callbackState: ProfileCallbackState = ProfileCallbackState()
+            callbackState: ProfileCallbackState = ProfileCallbackState(),
+            callbackHistory: Locked<[Transcript.Entry]?> = Locked(nil),
+            historyVersion: Locked<UInt64?> = Locked(nil)
         ) {
             self.transcript = transcript
             self.instructions = instructions
@@ -213,6 +231,8 @@ public final class LanguageModelSession: @unchecked Sendable {
             self.canonicalTranscript = canonicalTranscript ?? Array(transcript)
             self.pendingEntryKeys = pendingEntryKeys
             self.callbackState = callbackState
+            self.callbackHistory = callbackHistory
+            self.historyVersion = historyVersion
         }
 
         fileprivate func sharingCallbackState(with context: RequestContext) -> RequestContext {
@@ -227,11 +247,37 @@ public final class LanguageModelSession: @unchecked Sendable {
                 profile: profile,
                 canonicalTranscript: canonicalTranscript,
                 pendingEntryKeys: pendingEntryKeys,
-                callbackState: context.callbackState
+                callbackState: context.callbackState,
+                callbackHistory: callbackHistory,
+                historyVersion: historyVersion
             )
         }
 
-        fileprivate func withCanonicalTranscript(_ entries: [Transcript.Entry]) -> RequestContext {
+        fileprivate func withRequestHistory(
+            transcript: Transcript,
+            canonicalTranscript: [Transcript.Entry]
+        ) -> RequestContext {
+            RequestContext(
+                transcript: transcript,
+                instructions: instructions,
+                tools: tools,
+                model: model,
+                options: options,
+                contextOptions: contextOptions,
+                transcriptErrorHandlingPolicy: transcriptErrorHandlingPolicy,
+                profile: profile,
+                canonicalTranscript: canonicalTranscript,
+                pendingEntryKeys: pendingEntryKeys,
+                callbackState: callbackState,
+                callbackHistory: callbackHistory,
+                historyVersion: historyVersion
+            )
+        }
+
+        fileprivate func withCanonicalTranscript(
+            _ entries: [Transcript.Entry],
+            version: UInt64
+        ) -> RequestContext {
             RequestContext(
                 transcript: transcript,
                 instructions: instructions,
@@ -242,7 +288,8 @@ public final class LanguageModelSession: @unchecked Sendable {
                 transcriptErrorHandlingPolicy: transcriptErrorHandlingPolicy,
                 profile: profile,
                 canonicalTranscript: entries,
-                callbackState: callbackState
+                callbackState: callbackState,
+                historyVersion: Locked(version)
             )
         }
     }
@@ -250,6 +297,9 @@ public final class LanguageModelSession: @unchecked Sendable {
     /// Returns the transcript, instructions, and tools for the next model request.
     ///
     /// Profile resolution may mutate session properties and canonical history.
+    /// The profile's history edits replace the session history
+    /// only if the history didn't change while the profile ran;
+    /// otherwise, they apply only to the returned context.
     ///
     /// - Note: This API is exclusive to AnyLanguageModel
     ///   and using it means your code is no longer drop-in compatible
@@ -262,7 +312,12 @@ public final class LanguageModelSession: @unchecked Sendable {
         {
             return prepared.context
         }
-        return resolveRequestContext(additionalEntries: [], options: .init())
+        let snapshot = historySnapshot()
+        let resolution = resolveRequestContext(additionalEntries: [], options: .init(), snapshot: snapshot)
+        let version = commitHistoryEdits(resolution.editedHistory, ifUnchangedSince: snapshot)
+        resolution.context.historyVersion.withLock { $0 = version }
+        recordProfileInstructions(of: resolution.context)
+        return resolution.context
     }
 
     nonisolated func toolRoundLimit(for provider: String, options: GenerationOptions) -> ToolRoundLimit {
@@ -301,6 +356,10 @@ public final class LanguageModelSession: @unchecked Sendable {
     /// round but not yet committed to the durable Session transcript. A profile's
     /// history transform sees those entries before selecting the request projection.
     ///
+    /// If the session history changes while the profile runs,
+    /// this throws ``DynamicProfileError/historyMutationWhileResolving``
+    /// without keeping the profile's history edits.
+    ///
     /// - Note: This overload is exclusive to AnyLanguageModel. Compatibility
     ///   executors use it to preserve Foundation Models 27 request timing while
     ///   AnyLanguageModel still exposes its legacy model interface.
@@ -325,7 +384,7 @@ public final class LanguageModelSession: @unchecked Sendable {
             } else {
                 additionalEntries
             }
-        var context = resolveRequestContext(
+        var context = try resolveCommittingHistoryEdits(
             additionalEntries: pendingEntries,
             options: callSiteOptions
         )
@@ -348,8 +407,10 @@ public final class LanguageModelSession: @unchecked Sendable {
                     }.first,
                 callbackState: context.callbackState,
                 historyEdits: context.callbackHistory,
+                historyVersion: context.historyVersion,
                 protectedEntryKeys: context.pendingEntryKeys
             )
+            context = try applyingLifecycleHistoryEdits(to: context)
         }
         if let prepared, prepared.session === self {
             prepared.context = context
@@ -357,11 +418,148 @@ public final class LanguageModelSession: @unchecked Sendable {
         return context
     }
 
-    nonisolated private func resolveRequestContext(
+    /// Appends the prompt for a new request and returns the request context
+    /// for its first model request.
+    ///
+    /// With a dynamic profile, this resolves the profile once,
+    /// against one snapshot of the history plus the new prompt,
+    /// before the prompt is appended and before any profile action runs.
+    /// If the profile sets no model, it throws, and the profile's history edits
+    /// aren't kept.
+    /// If the profile made no history edit, it appends the prompt.
+    /// Otherwise, it replaces the history with the edited history,
+    /// which includes the prompt,
+    /// only if the history didn't change since the snapshot.
+    /// Overlapping requests and direct `properties.history` writes can change it;
+    /// in that case, it throws ``DynamicProfileError/historyMutationWhileResolving``
+    /// and commits neither the prompt nor the edits.
+    /// The first model request uses the returned context,
+    /// so the profile body and its instructions run once for that request.
+    nonisolated private func appendPrompt(
+        _ promptEntry: Transcript.Entry,
+        options: GenerationOptions
+    ) throws -> RequestContext? {
+        guard dynamicProfile != nil else {
+            withTranscriptMutation {
+                state.withLock { $0.transcript.append(promptEntry) }
+            }
+            return nil
+        }
+        let snapshot = historySnapshot()
+        let resolution = resolveRequestContext(
+            additionalEntries: [],
+            options: options,
+            uncommittedPrompt: promptEntry,
+            snapshot: snapshot
+        )
+        if resolution.context.profile?.model == nil {
+            throw DynamicProfileError.missingModel
+        }
+        let version: UInt64?
+        if resolution.editedHistory == nil {
+            // The context reflects the snapshot plus the prompt,
+            // so its callbacks can keep edits only if nothing came between.
+            version = withTranscriptMutation {
+                state.withLock { locked in
+                    let isCurrent = locked.historyVersion == snapshot.version
+                    locked.transcript.append(promptEntry)
+                    return isCurrent ? locked.historyVersion : nil
+                }
+            }
+        } else {
+            guard let committed = commitHistoryEdits(resolution.editedHistory, ifUnchangedSince: snapshot) else {
+                throw DynamicProfileError.historyMutationWhileResolving
+            }
+            version = committed
+        }
+        resolution.context.historyVersion.withLock { $0 = version }
+        recordProfileInstructions(of: resolution.context)
+        return resolution.context
+    }
+
+    /// Resolves the request context and commits the profile's history edits.
+    ///
+    /// If the profile sets no model,
+    /// this throws ``DynamicProfileError/missingModel`` without keeping the edits.
+    /// If the history changed while the profile ran,
+    /// this throws ``DynamicProfileError/historyMutationWhileResolving``
+    /// without keeping the edits or running the profile again.
+    nonisolated private func resolveCommittingHistoryEdits(
         additionalEntries: [Transcript.Entry],
         options: GenerationOptions
-    ) -> RequestContext {
-        let committed = Array(transcript)
+    ) throws -> RequestContext {
+        let snapshot = historySnapshot()
+        let resolution = resolveRequestContext(
+            additionalEntries: additionalEntries,
+            options: options,
+            snapshot: snapshot
+        )
+        if let profile = resolution.context.profile, profile.model == nil {
+            throw DynamicProfileError.missingModel
+        }
+        guard let version = commitHistoryEdits(resolution.editedHistory, ifUnchangedSince: snapshot) else {
+            throw DynamicProfileError.historyMutationWhileResolving
+        }
+        resolution.context.historyVersion.withLock { $0 = version }
+        recordProfileInstructions(of: resolution.context)
+        return resolution.context
+    }
+
+    /// The current history version, which changes whenever the transcript changes.
+    nonisolated var historyVersion: UInt64 {
+        state.withLock { $0.historyVersion }
+    }
+
+    /// Reads the session transcript and its version together.
+    nonisolated private func historySnapshot() -> HistorySnapshot {
+        state.withLock { HistorySnapshot($0) }
+    }
+
+    /// Replaces the session history with a profile's edited history
+    /// if no other mutation happened since the snapshot that the profile read.
+    ///
+    /// Returns the history version that the profile's view of the history reflects:
+    /// the snapshot's version when there is no edit,
+    /// or the new version when the edit is committed.
+    /// Returns `nil` when the history changed, in which case the edit isn't kept.
+    nonisolated private func commitHistoryEdits(
+        _ editedHistory: [Transcript.Entry]?,
+        ifUnchangedSince snapshot: HistorySnapshot
+    ) -> UInt64? {
+        guard let editedHistory else { return snapshot.version }
+        return replaceHistory(with: editedHistory, ifVersion: snapshot.version)
+    }
+
+    /// Replaces the history after the instructions if the transcript is still at `version`,
+    /// and returns the new version, or `nil` without a change if the transcript changed.
+    nonisolated private func replaceHistory(
+        with history: [Transcript.Entry],
+        ifVersion version: UInt64
+    ) -> UInt64? {
+        let isCurrent = state.withLock { $0.historyVersion == version }
+        guard isCurrent else { return nil }
+        return withTranscriptMutation {
+            state.withLock { locked in
+                locked.replaceHistory(with: history, ifVersion: version) ? locked.historyVersion : nil
+            }
+        }
+    }
+
+    /// Resolves the request context against a history snapshot.
+    ///
+    /// The profile's history edits stay in the returned context;
+    /// `editedHistory` is the durable history to commit, without pending entries,
+    /// or `nil` if the profile made no edit.
+    /// The caller commits it with ``commitHistoryEdits(_:ifUnchangedSince:)``,
+    /// so an edit never replaces history that changed after the snapshot.
+    /// A prompt that isn't appended yet resolves as if it were committed.
+    nonisolated private func resolveRequestContext(
+        additionalEntries: [Transcript.Entry],
+        options: GenerationOptions,
+        uncommittedPrompt: Transcript.Entry? = nil,
+        snapshot: HistorySnapshot
+    ) -> (context: RequestContext, editedHistory: [Transcript.Entry]?) {
+        let committed = snapshot.entries + (uncommittedPrompt.map { [$0] } ?? [])
         var entryKeys = Set(keyedTranscriptEntries(committed).map(\.key))
         let pending = keyedTranscriptEntries(additionalEntries)
             .filter { entryKeys.insert($0.key).inserted }
@@ -370,7 +568,7 @@ public final class LanguageModelSession: @unchecked Sendable {
         let sessionErrorPolicy = transcriptErrorHandlingPolicy
         guard let dynamicProfile else {
             guard let dynamicInstructions else {
-                return RequestContext(
+                let context = RequestContext(
                     transcript: Transcript(entries: canonical),
                     instructions: instructions,
                     tools: tools,
@@ -380,6 +578,7 @@ public final class LanguageModelSession: @unchecked Sendable {
                     canonicalTranscript: canonical,
                     pendingEntryKeys: protectedEntryKeys
                 )
+                return (context, nil)
             }
 
             // Dynamic instructions are request-only. Their body can observe
@@ -398,7 +597,7 @@ public final class LanguageModelSession: @unchecked Sendable {
                     entries: [instructionsEntry(currentInstructions, tools: resolved.tools)] + canonical
                 )
             }
-            return RequestContext(
+            let context = RequestContext(
                 transcript: requestTranscript,
                 instructions: resolved.instructions,
                 tools: resolved.tools,
@@ -408,40 +607,45 @@ public final class LanguageModelSession: @unchecked Sendable {
                 canonicalTranscript: canonical,
                 pendingEntryKeys: protectedEntryKeys
             )
+            return (context, nil)
         }
 
+        // The bindings don't persist edits as the profile makes them;
+        // the caller commits the final edit against the snapshot's version.
+        let original = canonical
         let history = properties.historyBinding(
             canonical,
             isWritable: true,
             protecting: protectedEntryKeys
         )
-        let resolved = dynamicProfileLock.withLock {
-            SessionPropertyBinding.$values.withValue(properties) {
+        let unedited = history.entries
+        // History transforms can capture the same non-Sendable state as the profile body,
+        // so they run under the same lock.
+        let (resolved, projected) = dynamicProfileLock.withLock {
+            let resolved = SessionPropertyBinding.$values.withValue(properties) {
                 SessionPropertyBinding.$history.withValue(history) {
                     dynamicProfile.resolveForRequest()
                 }
             }
-        }
-        canonical = history.entries
-        var projected = canonical
-        for transform in resolved.historyTransforms {
-            let transformHistory = properties.historyBinding(
-                canonical,
-                isWritable: true,
-                protecting: protectedEntryKeys
-            )
-            projected = SessionPropertyBinding.$values.withValue(properties) {
-                SessionPropertyBinding.$history.withValue(transformHistory) {
-                    transform(projected)
-                }
+            let projected: [Transcript.Entry]
+            (canonical, projected) = applyingHistoryTransforms(
+                resolved.historyTransforms,
+                to: history.entries
+            ) { entries in
+                properties.historyBinding(
+                    entries,
+                    isWritable: true,
+                    protecting: protectedEntryKeys
+                )
             }
-            canonical = transformHistory.entries
+            return (resolved, projected)
         }
+        let requestInstructions = profileRequestInstructions(resolved.instructions)
         var requestTranscript = Transcript(entries: projected)
-        if let currentInstructions = resolved.instructions {
-            requestTranscript = Transcript(
-                entries: [instructionsEntry(currentInstructions, tools: resolved.tools)] + projected
-            )
+        if requestInstructions != nil,
+            let entry = profileInstructionsEntry(instructions: resolved.instructions, tools: resolved.tools)
+        {
+            requestTranscript = Transcript(entries: [.instructions(entry)] + projected)
         }
 
         var resolvedOptions = options
@@ -457,9 +661,13 @@ public final class LanguageModelSession: @unchecked Sendable {
         if resolvedOptions.toolCallingMode == nil, resolved.hasToolCallingMode {
             resolvedOptions.toolCallingMode = resolved.toolCallingMode
         }
-        return RequestContext(
+        let editedHistory =
+            canonical == unedited
+            ? nil
+            : removingProtectedTranscriptEntries(from: canonical, protecting: protectedEntryKeys, in: original)
+        let context = RequestContext(
             transcript: requestTranscript,
-            instructions: resolved.instructions,
+            instructions: requestInstructions,
             tools: resolved.tools,
             model: resolved.model ?? model,
             options: resolvedOptions,
@@ -474,6 +682,158 @@ public final class LanguageModelSession: @unchecked Sendable {
             canonicalTranscript: canonical,
             pendingEntryKeys: protectedEntryKeys
         )
+        return (context, editedHistory)
+    }
+
+    /// Applies a profile's history transforms in order.
+    ///
+    /// Each transform runs with a history binding from `binding`,
+    /// so it can edit the canonical history as well as return a projection.
+    /// Returns the edited canonical history and the request projection.
+    /// Call this while holding `dynamicProfileLock`.
+    nonisolated private func applyingHistoryTransforms(
+        _ transforms: [([Transcript.Entry]) -> [Transcript.Entry]],
+        to entries: [Transcript.Entry],
+        binding: ([Transcript.Entry]) -> SessionHistoryBinding
+    ) -> (canonical: [Transcript.Entry], projected: [Transcript.Entry]) {
+        var canonical = entries
+        var projected = entries
+        for transform in transforms {
+            let transformHistory = binding(canonical)
+            projected = SessionPropertyBinding.$values.withValue(properties) {
+                SessionPropertyBinding.$history.withValue(transformHistory) {
+                    transform(projected)
+                }
+            }
+            canonical = transformHistory.entries
+        }
+        return (canonical, projected)
+    }
+
+    /// Returns the request context with its request transcript projected again
+    /// from the history that the profile's lifecycle actions edited.
+    ///
+    /// The profile body doesn't run again; its history transforms do,
+    /// and their history edits persist like a lifecycle action's edits.
+    /// If the session history changed since the request's snapshot,
+    /// this throws ``DynamicProfileError/historyMutationWhileResolving``
+    /// without keeping the transforms' edits.
+    /// Returns `context` unchanged when no lifecycle action edited the history.
+    nonisolated private func applyingLifecycleHistoryEdits(to context: RequestContext) throws -> RequestContext {
+        guard let profile = context.profile,
+            let edited = context.callbackHistory.withLock({ $0 }),
+            edited != context.canonicalTranscript
+        else {
+            return context
+        }
+        var bindings: [SessionHistoryBinding] = []
+        let (canonical, projected) = dynamicProfileLock.withLock {
+            applyingHistoryTransforms(profile.historyTransforms, to: edited) { entries in
+                let binding = properties.historyBinding(
+                    entries,
+                    isWritable: true,
+                    protecting: context.pendingEntryKeys,
+                    persistingAt: context.historyVersion,
+                    onChange: { updated in context.callbackHistory.withLock { $0 = updated } }
+                )
+                bindings.append(binding)
+                return binding
+            }
+        }
+        if bindings.contains(where: \.hasConflict) {
+            throw DynamicProfileError.historyMutationWhileResolving
+        }
+        var requestTranscript = Transcript(entries: projected)
+        if context.instructions != nil,
+            let entry = profileInstructionsEntry(instructions: profile.instructions, tools: context.tools)
+        {
+            requestTranscript = Transcript(entries: [.instructions(entry)] + projected)
+        }
+        return context.withRequestHistory(transcript: requestTranscript, canonicalTranscript: canonical)
+    }
+
+    /// Returns the instructions entry for a profile session's transcript,
+    /// or `nil` if the session has no instructions or tool definitions to record.
+    ///
+    /// The entry has the profile's instructions, or, if it sets none,
+    /// the segments of the base instructions from the session's initial history.
+    /// Its tool definitions are those of the profile's tools.
+    /// Like Foundation Models, the entry keeps one ID for the life of the session.
+    nonisolated private func profileInstructionsEntry(
+        instructions: Instructions?,
+        tools: [any Tool]
+    ) -> Transcript.Instructions? {
+        let toolDefinitions =
+            tools
+            .filter(\.includesSchemaInInstructions)
+            .map { Transcript.ToolDefinition(tool: $0) }
+        let segments: [Transcript.Segment]
+        if let instructions {
+            segments = [.text(.init(id: profileInstructionsSegmentID, content: instructions.description))]
+        } else if let profileBaseInstructions {
+            segments = profileBaseInstructions.segments
+        } else if !toolDefinitions.isEmpty {
+            segments = []
+        } else {
+            return nil
+        }
+        return Transcript.Instructions(id: profileInstructionsID, segments: segments, toolDefinitions: toolDefinitions)
+    }
+
+    /// Returns the instructions that a profile session sends with a request:
+    /// the profile's instructions, or, if it sets none,
+    /// the text of the base instructions from the session's initial history.
+    nonisolated private func profileRequestInstructions(_ instructions: Instructions?) -> Instructions? {
+        if let instructions { return instructions }
+        guard let profileBaseInstructions else { return nil }
+        let text = profileBaseInstructions.segments.compactMap { segment -> String? in
+            if case .text(let text) = segment { return text.content }
+            return nil
+        }
+        guard !text.isEmpty else { return nil }
+        return Instructions(content: text.joined(separator: "\n"))
+    }
+
+    /// Records the instructions entry for the profile that `context` resolved
+    /// at the start of a profile session's transcript.
+    ///
+    /// This doesn't change the history version,
+    /// because a profile's view of the history leaves out instructions entries
+    /// and history edits keep them.
+    nonisolated private func recordProfileInstructions(of context: RequestContext) {
+        guard let profile = context.profile else { return }
+        let entry = profileInstructionsEntry(instructions: profile.instructions, tools: context.tools)
+        setProfileInstructionsEntry(entry)
+    }
+
+    /// Evaluates a new profile session's body once
+    /// and records its instructions entry, as Foundation Models does.
+    ///
+    /// Neither the profile's actions nor its history transforms run,
+    /// and history edits that the body makes aren't kept.
+    nonisolated private func recordInitialProfileInstructions() {
+        guard let dynamicProfile else { return }
+        let history = properties.historyBinding(Array(transcript), isWritable: true)
+        let resolved = dynamicProfileLock.withLock {
+            SessionPropertyBinding.$values.withValue(properties) {
+                SessionPropertyBinding.$history.withValue(history) {
+                    dynamicProfile.resolveForRequest()
+                }
+            }
+        }
+        let entry = profileInstructionsEntry(instructions: resolved.instructions, tools: resolved.tools)
+        setProfileInstructionsEntry(entry)
+    }
+
+    nonisolated private func setProfileInstructionsEntry(_ entry: Transcript.Instructions?) {
+        let current = state.withLock { locked -> Transcript.Instructions? in
+            if case .instructions(let instructions)? = locked.transcript.first { return instructions }
+            return nil
+        }
+        guard current != entry else { return }
+        withTranscriptMutation {
+            state.withLock { $0.setLeadingInstructions(entry) }
+        }
     }
 
     nonisolated private func instructionsEntry(
@@ -499,17 +859,15 @@ public final class LanguageModelSession: @unchecked Sendable {
         currentRoundEntries: [Transcript.Entry]
     ) async throws {
         guard let profile = requestContext.profile else { return }
-        let history = profileHistory(
-            requestContext: requestContext,
-            currentRoundEntries: currentRoundEntries
-        )
-        try await withSessionProperties(
-            history: history.entries,
-            isHistoryWritable: true,
-            protectedEntryKeys: history.protectedEntryKeys,
-            onHistoryChange: { updated in requestContext.callbackHistory.withLock { $0 = updated } }
-        ) {
-            for action in profile.onToolCall { try await action(call) }
+        try await profileLifecycle.actionSerializer.run {
+            let binding = callbackHistoryBinding(
+                requestContext: requestContext,
+                currentRoundEntries: currentRoundEntries
+            )
+            try await withSessionProperties(history: binding) {
+                for action in profile.onToolCall { try await action(call) }
+            }
+            try checkCallbackHistory(binding)
         }
     }
 
@@ -522,17 +880,15 @@ public final class LanguageModelSession: @unchecked Sendable {
         currentRoundEntries: [Transcript.Entry]
     ) async throws {
         guard let profile = requestContext.profile else { return }
-        let history = profileHistory(
-            requestContext: requestContext,
-            currentRoundEntries: currentRoundEntries
-        )
-        try await withSessionProperties(
-            history: history.entries,
-            isHistoryWritable: true,
-            protectedEntryKeys: history.protectedEntryKeys,
-            onHistoryChange: { updated in requestContext.callbackHistory.withLock { $0 = updated } }
-        ) {
-            for action in profile.onToolOutput { try await action(call, output) }
+        try await profileLifecycle.actionSerializer.run {
+            let binding = callbackHistoryBinding(
+                requestContext: requestContext,
+                currentRoundEntries: currentRoundEntries
+            )
+            try await withSessionProperties(history: binding) {
+                for action in profile.onToolOutput { try await action(call, output) }
+            }
+            try checkCallbackHistory(binding)
         }
     }
 
@@ -549,40 +905,38 @@ public final class LanguageModelSession: @unchecked Sendable {
         currentRoundEntries: [Transcript.Entry]
     ) async throws {
         guard let profile = requestContext.profile else { return }
-        let history = profileHistory(
-            requestContext: requestContext,
-            currentRoundEntries: currentRoundEntries
-        )
-        let binding = properties.historyBinding(
-            history.entries,
-            isWritable: true,
-            protecting: history.protectedEntryKeys,
-            onChange: { updated in requestContext.callbackHistory.withLock { $0 = updated } }
-        )
-        for entry in entries {
-            switch entry {
-            case .reasoning(let reasoning):
-                guard requestContext.callbackState.reserve(entry.id) else { continue }
-                do {
-                    try await withSessionProperties(history: binding) {
-                        for action in profile.onReasoning { try await action(reasoning) }
+        try await profileLifecycle.actionSerializer.run {
+            let binding = callbackHistoryBinding(
+                requestContext: requestContext,
+                currentRoundEntries: currentRoundEntries
+            )
+            for entry in entries {
+                switch entry {
+                case .reasoning(let reasoning):
+                    guard requestContext.callbackState.reserve(entry.id) else { continue }
+                    do {
+                        try await withSessionProperties(history: binding) {
+                            for action in profile.onReasoning { try await action(reasoning) }
+                        }
+                        try checkCallbackHistory(binding)
+                    } catch {
+                        requestContext.callbackState.release(entry.id)
+                        throw error
                     }
-                } catch {
-                    requestContext.callbackState.release(entry.id)
-                    throw error
-                }
-            case .response(let response):
-                guard requestContext.callbackState.reserve(entry.id) else { continue }
-                do {
-                    try await withSessionProperties(history: binding) {
-                        for action in profile.onResponse { try await action(response) }
+                case .response(let response):
+                    guard requestContext.callbackState.reserve(entry.id) else { continue }
+                    do {
+                        try await withSessionProperties(history: binding) {
+                            for action in profile.onResponse { try await action(response) }
+                        }
+                        try checkCallbackHistory(binding)
+                    } catch {
+                        requestContext.callbackState.release(entry.id)
+                        throw error
                     }
-                } catch {
-                    requestContext.callbackState.release(entry.id)
-                    throw error
+                default:
+                    continue
                 }
-            default:
-                continue
             }
         }
     }
@@ -600,11 +954,12 @@ public final class LanguageModelSession: @unchecked Sendable {
             requestContext: requestContext,
             currentRoundEntries: currentRoundEntries
         )
-        return try await withSessionProperties(
-            history: history.entries,
-            isHistoryWritable: false,
-            protectedEntryKeys: history.protectedEntryKeys
-        ) {
+        let binding = properties.historyBinding(
+            history.entries,
+            isWritable: false,
+            protecting: history.protectedEntryKeys
+        )
+        return try await withSessionProperties(history: binding) {
             try await operation()
         }
     }
@@ -628,20 +983,35 @@ public final class LanguageModelSession: @unchecked Sendable {
         )
     }
 
-    nonisolated private func withSessionProperties<Result: Sendable>(
-        history: [Transcript.Entry],
-        isHistoryWritable: Bool,
-        protectedEntryKeys: Set<TranscriptEntryKey> = [],
-        onHistoryChange: (@Sendable ([Transcript.Entry]) -> Void)? = nil,
-        operation: @Sendable () async throws -> Result
-    ) async rethrows -> Result {
-        let history = properties.historyBinding(
-            history,
-            isWritable: isHistoryWritable,
-            protecting: protectedEntryKeys,
-            onChange: onHistoryChange
+    /// Returns a writable history binding for a profile callback in a request.
+    ///
+    /// The binding persists each edit only if the session history is still at
+    /// the version of the binding's snapshot; see ``checkCallbackHistory(_:)``.
+    /// It reads its snapshot and that version together,
+    /// so another callback's committed edit can't come between them.
+    nonisolated private func callbackHistoryBinding(
+        requestContext: RequestContext,
+        currentRoundEntries: [Transcript.Entry]
+    ) -> SessionHistoryBinding {
+        let (history, version) = requestContext.historyVersion.withLock { version in
+            (profileHistory(requestContext: requestContext, currentRoundEntries: currentRoundEntries), version)
+        }
+        return properties.historyBinding(
+            history.entries,
+            isWritable: true,
+            protecting: history.protectedEntryKeys,
+            persistingAt: requestContext.historyVersion,
+            readAt: version,
+            onChange: { updated in requestContext.callbackHistory.withLock { $0 = updated } }
         )
-        return try await withSessionProperties(history: history, operation: operation)
+    }
+
+    /// Throws if a callback's history edit wasn't kept
+    /// because the session history changed after the request's snapshot.
+    nonisolated private func checkCallbackHistory(_ binding: SessionHistoryBinding) throws {
+        if binding.hasConflict {
+            throw DynamicProfileError.historyMutationWhileRunningCallback
+        }
     }
 
     nonisolated private func withSessionProperties<Result: Sendable>(
@@ -754,11 +1124,54 @@ public final class LanguageModelSession: @unchecked Sendable {
 
     /// Creates a session whose active model, instructions, Tools, and request
     /// projection are resolved before every model request.
-    @_spi(Compatibility)
+    ///
+    /// The profile must set a model with `.model(_:)`.
+    /// Each request checks this before it appends the prompt to the transcript
+    /// and before it runs the profile's `onActivate` or `onPrompt` actions,
+    /// and throws ``DynamicProfileError/missingModel`` if the profile sets no model.
+    ///
+    /// The session can respond to overlapping requests,
+    /// but it runs the profile's callbacks and lifecycle actions one at a time.
+    ///
+    /// The transcript starts with an instructions entry for the active profile,
+    /// as in Foundation Models.
+    /// The initializer evaluates the profile's body once to create it,
+    /// without running the profile's actions or history transforms.
+    /// Before each model request, including the requests
+    /// that continue a response after tool calls,
+    /// the session updates this entry, which keeps its ID,
+    /// to the instructions and tool definitions of the profile that it resolved.
+    /// So the entry reflects changes to dynamic instructions
+    /// and a switch to a different profile after the next request starts.
+    /// Updating the entry doesn't count as a change to the session's history,
+    /// which ``SessionPropertyValues/history`` gives without instructions entries.
+    ///
+    /// - Parameters:
+    ///   - profile: The profile that sets the model, instructions, tools, options,
+    ///     and callbacks for each request.
+    ///   - history: The transcript entries to start the session with.
+    ///     If the first entry is an instructions entry,
+    ///     the session keeps it as the base instructions:
+    ///     the profile's instructions entry takes its ID,
+    ///     and a profile that sets no instructions uses its text and segments.
+    ///     The session leaves out the other instructions entries.
+    ///
+    /// - Note: Foundation Models uses the system language model
+    ///   when a profile sets no model.
+    ///   AnyLanguageModel requires a model, as its other initializers do.
+    ///   Foundation Models also keeps instructions entries after the first one,
+    ///   and passes the instructions entry to history transforms;
+    ///   AnyLanguageModel doesn't.
     public convenience init(
         profile: sending some DynamicProfile,
         history: some Collection<Transcript.Entry> = []
     ) {
+        let baseInstructions: Transcript.Instructions? =
+            if case .instructions(let instructions)? = history.first {
+                instructions
+            } else {
+                nil
+            }
         let history = history.filter { entry in
             if case .instructions = entry { return false }
             return true
@@ -769,8 +1182,10 @@ public final class LanguageModelSession: @unchecked Sendable {
             instructions: nil,
             transcript: Transcript(entries: history),
             dynamicInstructions: nil,
-            dynamicProfile: AnyDynamicProfile(profile)
+            dynamicProfile: AnyDynamicProfile(profile),
+            profileBaseInstructions: baseInstructions
         )
+        recordInitialProfileInstructions()
     }
 
     private init(
@@ -779,12 +1194,15 @@ public final class LanguageModelSession: @unchecked Sendable {
         instructions: Instructions?,
         transcript: Transcript,
         dynamicInstructions: AnyDynamicInstructions? = nil,
-        dynamicProfile: AnyDynamicProfile? = nil
+        dynamicProfile: AnyDynamicProfile? = nil,
+        profileBaseInstructions: Transcript.Instructions? = nil
     ) {
         self.model = model
         self.tools = tools
         self.dynamicInstructions = dynamicInstructions
         self.dynamicProfile = dynamicProfile
+        self.profileBaseInstructions = profileBaseInstructions
+        self.profileInstructionsID = profileBaseInstructions?.id ?? UUID().uuidString
         let resolvedInstructions = instructions ?? Self.instructions(from: transcript)
         self.instructions = resolvedInstructions
 
@@ -826,7 +1244,17 @@ public final class LanguageModelSession: @unchecked Sendable {
                 locked.transcript = Transcript(entries: Array(instructions) + history)
             }
         }
+        let replaceHistory: @Sendable ([Transcript.Entry], UInt64) -> UInt64? = { history, version in
+            let history = history.filter { entry in
+                if case .instructions = entry { return false }
+                return true
+            }
+            return state.withLock { locked in
+                locked.replaceHistory(with: history, ifVersion: version) ? locked.historyVersion : nil
+            }
+        }
         let observedHistorySetter = Locked<(@Sendable ([Transcript.Entry]) -> Void)?>(nil)
+        let observedHistoryReplacer = Locked<(@Sendable ([Transcript.Entry], UInt64) -> UInt64?)?>(nil)
         self.properties = SessionPropertyValues(
             historyGetter: {
                 state.withLock { locked in
@@ -842,8 +1270,22 @@ public final class LanguageModelSession: @unchecked Sendable {
                 } else {
                     setHistory(history)
                 }
+            },
+            historyReplacer: { history, version in
+                if let replacer = observedHistoryReplacer.withLock({ $0 }) {
+                    return replacer(history, version)
+                }
+                return replaceHistory(history, version)
             }
         )
+        observedHistoryReplacer.withLock { replacer in
+            replacer = { [weak self] history, version in
+                guard let self else { return replaceHistory(history, version) }
+                return self.withMutation(keyPath: \.transcript) {
+                    replaceHistory(history, version)
+                }
+            }
+        }
         observedHistorySetter.withLock { setter in
             setter = { [weak self] history in
                 guard let self else {
@@ -872,7 +1314,7 @@ public final class LanguageModelSession: @unchecked Sendable {
         model.prewarm(for: self, promptPrefix: promptPrefix)
     }
 
-    nonisolated private func recordUsage(_ usage: Usage) {
+    nonisolated func recordUsage(_ usage: Usage) {
         guard usage != .zero else { return }
         withMutation(keyPath: \.usage) {
             state.withLock { $0.usage.add(usage) }
@@ -929,7 +1371,11 @@ public final class LanguageModelSession: @unchecked Sendable {
         let promptID = UUID().uuidString
         beginResponding()
         do {
-            let result = try await operation(promptID)
+            // A profile callback that waits for this request
+            // lets the request's callbacks, and other requests' callbacks, run until it ends.
+            let result = try await ProfileActionSerializer.withPermitsReleased {
+                try await operation(promptID)
+            }
             endResponding()
             return result
         } catch {
@@ -969,7 +1415,8 @@ public final class LanguageModelSession: @unchecked Sendable {
     nonisolated private func wrapStream<Content>(
         _ upstream: sending ResponseStream<Content>,
         promptEntry: Transcript.Entry,
-        profileTracker: PreparedProfileRequestTracker? = nil
+        profileTracker: PreparedProfileRequestTracker? = nil,
+        counted: CountedRequestsUsage
     ) -> ResponseStream<Content> where Content: Generable, Content.PartiallyGenerated: Sendable {
         let session = self
         let relay = AsyncThrowingStream<ResponseStream<Content>.Snapshot, any Error> { continuation in
@@ -982,12 +1429,11 @@ public final class LanguageModelSession: @unchecked Sendable {
                     defer { session.responseRelays.withLock { _ = $0.removeValue(forKey: relayID) } }
                     session.beginResponding()
                     var lastSnapshot: ResponseStream<Content>.Snapshot?
-                    var accountedUsage = Usage.zero
-                    var committedEntryIDs: Set<String> = []
+                    var committedEntries = AppendedTranscriptEntries.none
                     do {
                         for try await snapshot in stream {
                             lastSnapshot = snapshot
-                            session.recordUsage(snapshot.requests.total.increment(since: &accountedUsage))
+                            counted.count(snapshot.requests, prepaid: snapshot.prepaid)
                             continuation.yield(snapshot)
                         }
 
@@ -1035,21 +1481,24 @@ public final class LanguageModelSession: @unchecked Sendable {
                                 providerMetadata: lastSnapshot.providerMetadata
                             )
                         )
-                        let committed = session.withTranscriptMutation {
+                        var committed: HistorySnapshot?
+                        committedEntries = session.withTranscriptMutation {
                             session.state.withLock { state in
                                 guard state.transcript.contains(where: { $0.id == promptEntry.id }) else {
-                                    return false
+                                    return .none
                                 }
-                                state.transcript.append(contentsOf: lastSnapshot.transcriptEntries)
-                                state.transcript.append(responseEntry)
-                                return true
+                                let appended = state.appendResponse(
+                                    Array(lastSnapshot.transcriptEntries) + [responseEntry]
+                                )
+                                committed = HistorySnapshot(state)
+                                return appended
                             }
                         }
-                        if committed {
-                            committedEntryIDs = Set(lastSnapshot.transcriptEntries.map(\.id) + [responseEntry.id])
-                        }
-                        if committed, let prepared = profileTracker?.prepared {
-                            let context = prepared.context.withCanonicalTranscript(Array(session.transcript))
+                        if !committedEntries.isEmpty, let prepared = profileTracker?.prepared, let committed {
+                            let context = prepared.context.withCanonicalTranscript(
+                                committed.entries,
+                                version: committed.version
+                            )
                             try await session.profileDidProduceEntries(
                                 Array(lastSnapshot.transcriptEntries) + [responseEntry],
                                 requestContext: context,
@@ -1062,13 +1511,7 @@ public final class LanguageModelSession: @unchecked Sendable {
                     } catch {
                         session.withTranscriptMutation {
                             session.state.withLock { state in
-                                if !committedEntryIDs.isEmpty {
-                                    state.transcript = Transcript(
-                                        entries: state.transcript.filter {
-                                            !committedEntryIDs.contains($0.id)
-                                        }
-                                    )
-                                }
+                                state.removeEntries(committedEntries)
                                 guard state.transcript.contains(where: { $0.id == promptEntry.id }) else { return }
                                 let policy: TranscriptErrorHandlingPolicy?
                                 if let prepared = profileTracker?.prepared {
@@ -1196,6 +1639,22 @@ public final class LanguageModelSession: @unchecked Sendable {
             metadata.merge(other.metadata) { _, latest in latest }
         }
 
+        /// The counts of `self` that aren't in `other`, which `self` adds up with others.
+        /// A count `other` reports past `self`'s, read later, is none.
+        func subtracting(_ other: Self) -> Self {
+            Self(
+                input: .init(
+                    totalTokenCount: max(0, input.totalTokenCount - other.input.totalTokenCount),
+                    cachedTokenCount: max(0, input.cachedTokenCount - other.input.cachedTokenCount)
+                ),
+                output: .init(
+                    totalTokenCount: max(0, output.totalTokenCount - other.output.totalTokenCount),
+                    reasoningTokenCount: max(0, output.reasoningTokenCount - other.output.reasoningTokenCount)
+                ),
+                metadata: metadata
+            )
+        }
+
         /// Returns counts not yet accounted for in this stream,
         /// retaining the highest reported count for each field
         /// and returning only new or changed metadata keys.
@@ -1306,9 +1765,10 @@ public final class LanguageModelSession: @unchecked Sendable {
             responseFormat: type == String.self ? nil : .init(type: type),
             options: options,
             profileTracker: profileTracker
-        ) { requestPrompt in
+        ) { requestPrompt, initialContext in
             try await profiledResponse(
                 prompt: requestPrompt,
+                initialContext: initialContext,
                 includeSchemaInPrompt: includeSchemaInPrompt,
                 options: options,
                 tracker: profileTracker
@@ -1330,6 +1790,7 @@ public final class LanguageModelSession: @unchecked Sendable {
 
     nonisolated private func profiledResponse<Content>(
         prompt: Transcript.Prompt,
+        initialContext: RequestContext?,
         includeSchemaInPrompt: Bool,
         options: GenerationOptions,
         tracker: PreparedProfileRequestTracker?,
@@ -1345,7 +1806,7 @@ public final class LanguageModelSession: @unchecked Sendable {
                 prepared: nil
             )
         }
-        let context = resolveRequestContext(additionalEntries: [], options: options)
+        let context = try initialContext ?? resolveCommittingHistoryEdits(additionalEntries: [], options: options)
         let prepared = PreparedProfileRequest(
             session: self,
             context: context,
@@ -1362,8 +1823,10 @@ public final class LanguageModelSession: @unchecked Sendable {
                     history: context.canonicalTranscript,
                     prompt: prepared.prompt,
                     callbackState: context.callbackState,
-                    historyEdits: context.callbackHistory
+                    historyEdits: context.callbackHistory,
+                    historyVersion: context.historyVersion
                 )
+                prepared.context = try applyingLifecycleHistoryEdits(to: context)
             }
             return try await countingRequests {
                 try await generate(context.model, context.options, context.contextOptions)
@@ -1377,7 +1840,7 @@ public final class LanguageModelSession: @unchecked Sendable {
         responseFormat: Transcript.ResponseFormat?,
         options: GenerationOptions,
         profileTracker: PreparedProfileRequestTracker?,
-        generate: (Transcript.Prompt) async throws -> ProfiledModelResponse<Content>
+        generate: (Transcript.Prompt, RequestContext?) async throws -> ProfiledModelResponse<Content>
     ) async throws -> Response<Content> {
         try await wrapRespond(profileTracker: profileTracker) { promptID in
             // Add prompt to transcript
@@ -1388,11 +1851,9 @@ public final class LanguageModelSession: @unchecked Sendable {
                 responseFormat: responseFormat
             )
             let promptEntry = Transcript.Entry.prompt(requestPrompt)
-            withTranscriptMutation {
-                state.withLock { $0.transcript.append(promptEntry) }
-            }
+            let initialContext = try appendPrompt(promptEntry, options: options)
 
-            let profiled = try await generate(requestPrompt)
+            let profiled = try await generate(requestPrompt, initialContext)
             let response = Self.representingNilExplicitly(
                 in: profiled.response,
                 responseFormat: responseFormat
@@ -1431,17 +1892,21 @@ public final class LanguageModelSession: @unchecked Sendable {
         promptID: String,
         prepared: PreparedProfileRequest?
     ) async throws where Content: Generable {
-        let committed = withTranscriptMutation {
+        var committed: HistorySnapshot?
+        let committedEntries = withTranscriptMutation {
             state.withLock { lockedState in
-                guard lockedState.transcript.contains(where: { $0.id == promptID }) else { return false }
-                lockedState.transcript.append(contentsOf: response.transcriptEntries)
-                lockedState.transcript.append(responseEntry)
-                return true
+                guard lockedState.transcript.contains(where: { $0.id == promptID }) else {
+                    return AppendedTranscriptEntries.none
+                }
+                let appended = lockedState.appendResponse(Array(response.transcriptEntries) + [responseEntry])
+                committed = HistorySnapshot(lockedState)
+                return appended
             }
         }
 
-        guard committed, let prepared else { return }
-        let context = prepared.context.withCanonicalTranscript(Array(transcript))
+        guard !committedEntries.isEmpty, let prepared, let committed else { return }
+        // Response callbacks see the history right after the commit.
+        let context = prepared.context.withCanonicalTranscript(committed.entries, version: committed.version)
         do {
             try await profileDidProduceEntries(
                 Array(response.transcriptEntries) + [responseEntry],
@@ -1450,13 +1915,8 @@ public final class LanguageModelSession: @unchecked Sendable {
             )
             lastResponseModel.withLock { $0 = prepared.context.model }
         } catch {
-            let ids = Set(response.transcriptEntries.map(\.id) + [responseEntry.id])
             withTranscriptMutation {
-                state.withLock { lockedState in
-                    lockedState.transcript = Transcript(
-                        entries: lockedState.transcript.filter { !ids.contains($0.id) }
-                    )
-                }
+                state.withLock { $0.removeEntries(committedEntries) }
             }
             throw error
         }
@@ -1483,10 +1943,14 @@ public final class LanguageModelSession: @unchecked Sendable {
             responseFormat: type == String.self ? nil : .init(type: type)
         )
         let promptEntry = Transcript.Entry.prompt(requestPrompt)
-        withTranscriptMutation {
-            state.withLock { $0.transcript.append(promptEntry) }
+        let initialContext: RequestContext?
+        do {
+            initialContext = try appendPrompt(promptEntry, options: options)
+        } catch {
+            return ResponseStream(stream: AsyncThrowingStream { $0.finish(throwing: error) })
         }
 
+        let counted = CountedRequestsUsage { [self] in recordUsage($0) }
         let upstream: ResponseStream<Content>
         let profileTracker: PreparedProfileRequestTracker?
         if dynamicProfile != nil {
@@ -1495,14 +1959,16 @@ public final class LanguageModelSession: @unchecked Sendable {
             upstream = profileDispatchedStream(
                 prompt: prompt,
                 requestPrompt: requestPrompt,
+                initialContext: initialContext,
                 type: type,
                 includeSchemaInPrompt: includeSchemaInPrompt,
                 options: options,
-                tracker: tracker
+                tracker: tracker,
+                counted: counted
             )
         } else {
             profileTracker = nil
-            upstream = RequestUsageChannel.outside {
+            upstream = RequestUsageChannel.streaming(counted) {
                 model.streamResponse(
                     within: self,
                     to: prompt,
@@ -1515,23 +1981,28 @@ public final class LanguageModelSession: @unchecked Sendable {
         return wrapStream(
             upstream,
             promptEntry: promptEntry,
-            profileTracker: profileTracker
+            profileTracker: profileTracker,
+            counted: counted
         )
     }
 
     nonisolated private func profileDispatchedStream<Content>(
         prompt: Prompt,
         requestPrompt: Transcript.Prompt,
+        initialContext: RequestContext?,
         type: Content.Type,
         includeSchemaInPrompt: Bool,
         options: GenerationOptions,
-        tracker: PreparedProfileRequestTracker
+        tracker: PreparedProfileRequestTracker,
+        counted: CountedRequestsUsage
     ) -> ResponseStream<Content> where Content: Generable {
         profileDispatchedStream(
             requestPrompt: requestPrompt,
+            initialContext: initialContext,
             includeSchemaInPrompt: includeSchemaInPrompt,
             options: options,
-            tracker: tracker
+            tracker: tracker,
+            counted: counted
         ) {
             model,
             resolvedOptions,
@@ -1549,9 +2020,11 @@ public final class LanguageModelSession: @unchecked Sendable {
 
     nonisolated private func profileDispatchedStream<Content>(
         requestPrompt: Transcript.Prompt,
+        initialContext: RequestContext?,
         includeSchemaInPrompt: Bool,
         options: GenerationOptions,
         tracker: PreparedProfileRequestTracker,
+        counted: CountedRequestsUsage,
         generate:
             @Sendable @escaping (
                 any LanguageModel,
@@ -1559,14 +2032,16 @@ public final class LanguageModelSession: @unchecked Sendable {
                 ContextOptions
             ) -> ResponseStream<Content>
     ) -> ResponseStream<Content> where Content: Generable {
-        let stream = RequestUsageChannel.outside {
+        let stream = RequestUsageChannel.streaming(counted) {
             AsyncThrowingStream<ResponseStream<Content>.Snapshot, any Error> { continuation in
                 let task = Task {
                     do {
-                        let context = self.resolveRequestContext(
-                            additionalEntries: [],
-                            options: options
-                        )
+                        let context =
+                            try initialContext
+                            ?? self.resolveCommittingHistoryEdits(
+                                additionalEntries: [],
+                                options: options
+                            )
                         let prepared = PreparedProfileRequest(
                             session: self,
                             context: context,
@@ -1583,8 +2058,10 @@ public final class LanguageModelSession: @unchecked Sendable {
                                     history: context.canonicalTranscript,
                                     prompt: prepared.prompt,
                                     callbackState: context.callbackState,
-                                    historyEdits: context.callbackHistory
+                                    historyEdits: context.callbackHistory,
+                                    historyVersion: context.historyVersion
                                 )
+                                prepared.context = try self.applyingLifecycleHistoryEdits(to: context)
                             }
                             let upstream = generate(
                                 context.model,
@@ -1684,9 +2161,10 @@ extension LanguageModelSession {
             responseFormat: .init(schema: schema),
             options: options,
             profileTracker: profileTracker
-        ) { requestPrompt in
+        ) { requestPrompt, initialContext in
             try await profiledResponse(
                 prompt: requestPrompt,
+                initialContext: initialContext,
                 includeSchemaInPrompt: includeSchemaInPrompt,
                 options: options,
                 tracker: profileTracker
@@ -1762,10 +2240,14 @@ extension LanguageModelSession {
             responseFormat: .init(schema: schema)
         )
         let promptEntry = Transcript.Entry.prompt(requestPrompt)
-        withTranscriptMutation {
-            state.withLock { $0.transcript.append(promptEntry) }
+        let initialContext: RequestContext?
+        do {
+            initialContext = try appendPrompt(promptEntry, options: options)
+        } catch {
+            return ResponseStream(stream: AsyncThrowingStream { $0.finish(throwing: error) })
         }
 
+        let counted = CountedRequestsUsage { [self] in recordUsage($0) }
         let upstream: ResponseStream<GeneratedContent>
         let profileTracker: PreparedProfileRequestTracker?
         if dynamicProfile != nil {
@@ -1773,9 +2255,11 @@ extension LanguageModelSession {
             profileTracker = tracker
             upstream = profileDispatchedStream(
                 requestPrompt: requestPrompt,
+                initialContext: initialContext,
                 includeSchemaInPrompt: includeSchemaInPrompt,
                 options: options,
-                tracker: tracker
+                tracker: tracker,
+                counted: counted
             ) {
                 model,
                 resolvedOptions,
@@ -1791,7 +2275,7 @@ extension LanguageModelSession {
             }
         } else {
             profileTracker = nil
-            upstream = RequestUsageChannel.outside {
+            upstream = RequestUsageChannel.streaming(counted) {
                 model.streamResponse(
                     within: self,
                     to: prompt,
@@ -1804,7 +2288,8 @@ extension LanguageModelSession {
         return wrapStream(
             upstream,
             promptEntry: promptEntry,
-            profileTracker: profileTracker
+            profileTracker: profileTracker,
+            counted: counted
         )
     }
 
@@ -1991,15 +2476,14 @@ extension LanguageModelSession {
                 responseFormat: type == String.self ? nil : .init(type: type)
             )
             let promptEntry = Transcript.Entry.prompt(requestPrompt)
-            withTranscriptMutation {
-                state.withLock { $0.transcript.append(promptEntry) }
-            }
+            let initialContext = try appendPrompt(promptEntry, options: options)
 
             // Extract text content for the Prompt parameter
             let textPrompt = Prompt(prompt)
 
             let profiled = try await profiledResponse(
                 prompt: requestPrompt,
+                initialContext: initialContext,
                 includeSchemaInPrompt: includeSchemaInPrompt,
                 options: options,
                 tracker: profileTracker
@@ -2131,13 +2615,17 @@ extension LanguageModelSession {
             responseFormat: type == String.self ? nil : .init(type: type)
         )
         let promptEntry = Transcript.Entry.prompt(requestPrompt)
-        withTranscriptMutation {
-            state.withLock { $0.transcript.append(promptEntry) }
+        let initialContext: RequestContext?
+        do {
+            initialContext = try appendPrompt(promptEntry, options: options)
+        } catch {
+            return ResponseStream(stream: AsyncThrowingStream { $0.finish(throwing: error) })
         }
 
         // Extract text content for the Prompt parameter
         let textPrompt = Prompt(prompt)
 
+        let counted = CountedRequestsUsage { [self] in recordUsage($0) }
         let upstream: ResponseStream<Content>
         let profileTracker: PreparedProfileRequestTracker?
         if dynamicProfile != nil {
@@ -2145,9 +2633,11 @@ extension LanguageModelSession {
             profileTracker = tracker
             upstream = profileDispatchedStream(
                 requestPrompt: requestPrompt,
+                initialContext: initialContext,
                 includeSchemaInPrompt: includeSchemaInPrompt,
                 options: options,
-                tracker: tracker
+                tracker: tracker,
+                counted: counted
             ) {
                 model,
                 resolvedOptions,
@@ -2163,7 +2653,7 @@ extension LanguageModelSession {
             }
         } else {
             profileTracker = nil
-            upstream = RequestUsageChannel.outside {
+            upstream = RequestUsageChannel.streaming(counted) {
                 model.streamResponse(
                     within: self,
                     to: textPrompt,
@@ -2176,7 +2666,8 @@ extension LanguageModelSession {
         return wrapStream(
             upstream,
             promptEntry: promptEntry,
-            profileTracker: profileTracker
+            profileTracker: profileTracker,
+            counted: counted
         )
     }
 }
@@ -2338,7 +2829,9 @@ extension LanguageModelSession {
         public var underlyingError: any Error
 
         public init(tool: any Tool, underlyingError: any Error) {
-            self.tool = tool
+            // Providers run tools with the session's properties bound;
+            // report the tool that the caller gave instead.
+            self.tool = (tool as? any SessionPropertyBoundTool)?.unboundTool ?? tool
             self.underlyingError = underlyingError
         }
 
@@ -2429,6 +2922,8 @@ extension LanguageModelSession {
 
             internal var providerMetadata: [String: String]?
 
+            /// The token for this snapshot's requests, if its stream counted them before yielding it.
+            internal var prepaid: CountedRequestsUsage.Prepaid?
             /// Creates a snapshot from partially generated content and raw content.
             /// - Parameters:
             ///   - content: The partially generated content.
@@ -2462,13 +2957,15 @@ extension LanguageModelSession {
                 rawContent: GeneratedContent,
                 transcriptEntries: ArraySlice<Transcript.Entry> = [],
                 requests: RequestsUsage,
-                providerMetadata: [String: String]? = nil
+                providerMetadata: [String: String]? = nil,
+                prepaid: CountedRequestsUsage.Prepaid? = nil
             ) {
                 self.content = content
                 self.rawContent = rawContent
                 self.transcriptEntries = transcriptEntries
                 self.requests = requests
                 self.providerMetadata = providerMetadata
+                self.prepaid = prepaid
             }
         }
     }
@@ -2492,7 +2989,12 @@ extension LanguageModelSession.ResponseStream: AsyncSequence {
         public mutating func next() async throws -> Snapshot? {
             if useStream {
                 if var iterator = streamIterator {
-                    if let value = try await iterator.next() {
+                    // A profile callback that waits for the stream
+                    // lets other callbacks, such as the stream's, run.
+                    let next = try await ProfileActionSerializer.withPermitsReleased {
+                        try await iterator.next()
+                    }
+                    if let value = next {
                         // store back the advanced iterator
                         streamIterator = iterator
                         return value
@@ -2517,8 +3019,12 @@ extension LanguageModelSession.ResponseStream: AsyncSequence {
     nonisolated public func collect() async throws -> sending LanguageModelSession.Response<Content> {
         if let streaming {
             var last: Snapshot?
-            for try await snapshot in streaming {
-                last = snapshot
+            // A profile callback that waits for the stream
+            // lets other callbacks, such as the stream's, run.
+            try await ProfileActionSerializer.withPermitsReleased {
+                for try await snapshot in streaming {
+                    last = snapshot
+                }
             }
             // AsyncThrowingStream may end normally when its task is cancelled:
             // what came so far isn't the whole response.
@@ -2655,8 +3161,32 @@ private enum ProfileRequestBinding {
 
 // MARK: -
 
+/// A session transcript and the history version that it was read at.
+private struct HistorySnapshot: Sendable {
+    let entries: [Transcript.Entry]
+    let version: UInt64
+
+    /// Reads the snapshot from the state; call this while holding the state lock.
+    init(_ state: State) {
+        entries = Array(state.transcript)
+        version = state.historyVersion
+    }
+}
+
 private struct State: Equatable, Sendable {
-    var transcript: Transcript
+    /// The session transcript.
+    /// Every change to it, including appends, response commits, rollbacks,
+    /// and direct history writes, increments ``historyVersion``.
+    var transcript: Transcript {
+        didSet { historyVersion &+= 1 }
+    }
+
+    /// A counter that changes whenever the transcript changes.
+    ///
+    /// Profile resolution runs outside the state lock,
+    /// so it reads this with its history snapshot,
+    /// and it replaces the history only if the counter hasn't changed.
+    private(set) var historyVersion: UInt64 = 0
     var transcriptErrorHandlingPolicy: TranscriptErrorHandlingPolicy?
     var usage = LanguageModelSession.Usage.zero
 
@@ -2673,5 +3203,62 @@ private struct State: Equatable, Sendable {
 
     mutating func endResponding() {
         count = max(0, count - 1)
+    }
+
+    /// Appends a response's entries and returns what it appended, for a rollback.
+    ///
+    /// Providers can reuse a call ID, such as `call_0`, in later responses,
+    /// so a key scopes each Tool output to its round.
+    mutating func appendResponse(_ entries: [Transcript.Entry]) -> AppendedTranscriptEntries {
+        let start = transcript.count
+        transcript.append(contentsOf: entries)
+        let history = Array(transcript)
+        return AppendedTranscriptEntries(
+            keys: Set(keyedTranscriptEntries(history).dropFirst(start).map(\.key)),
+            history: history
+        )
+    }
+
+    /// Replaces the history after the instructions
+    /// if the transcript is still at `version`.
+    ///
+    /// Returns `false`, without a change, if the transcript changed since then.
+    mutating func replaceHistory(with history: [Transcript.Entry], ifVersion version: UInt64) -> Bool {
+        guard historyVersion == version else { return false }
+        let instructions = transcript.prefix {
+            if case .instructions = $0 { return true }
+            return false
+        }
+        transcript = Transcript(entries: Array(instructions) + history)
+        return true
+    }
+
+    /// Replaces, adds, or removes the instructions entry at the start of the transcript
+    /// without changing ``historyVersion``.
+    ///
+    /// The history that profiles read and edit leaves out instructions entries,
+    /// and ``replaceHistory(with:ifVersion:)`` keeps them,
+    /// so a change to this entry can't conflict with a profile's history edit.
+    mutating func setLeadingInstructions(_ instructions: Transcript.Instructions?) {
+        let version = historyVersion
+        var entries = Array(transcript)
+        if case .instructions? = entries.first {
+            if let instructions {
+                entries[0] = .instructions(instructions)
+            } else {
+                entries.removeFirst()
+            }
+        } else if let instructions {
+            entries.insert(.instructions(instructions), at: 0)
+        }
+        transcript = Transcript(entries: entries)
+        historyVersion = version
+    }
+
+    /// Removes the entries that a rolled-back response appended,
+    /// keeping earlier entries with the same IDs.
+    mutating func removeEntries(_ appended: AppendedTranscriptEntries) {
+        guard !appended.isEmpty else { return }
+        transcript = Transcript(entries: removingAppendedTranscriptEntries(appended, from: Array(transcript)))
     }
 }

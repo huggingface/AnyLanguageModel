@@ -28,6 +28,87 @@ import Testing
             #expect(messages.map { $0["content"] as? String } == ["Be brief.", "Hello", "Hi", "Again"])
         }
 
+        @Test func aStructuredRequestSaysItsSchemaAfterThePrompt() async throws {
+            OllamaHistoryURLProtocol.reset(responses: [response(#"{\"text\": \"Hi\"}"#)])
+
+            let model = OllamaLanguageModel(model: "test", session: OllamaHistoryURLProtocol.makeSession())
+            let session = LanguageModelSession(model: model, instructions: "Be brief.")
+            let reply = try await session.respond(to: "Hello", generating: Greeting.self)
+
+            #expect(reply.content.text == "Hi")
+            let json = try Self.lastBody()
+            let messages = try #require(json["messages"] as? [[String: Any]])
+            #expect(messages.map { $0["role"] as? String } == ["system", "user"])
+            #expect(messages.first?["content"] as? String == "Be brief.")
+            let prompt = try #require(messages.last?["content"] as? String)
+            #expect(prompt.hasPrefix("Hello\nRespond with valid JSON matching this object schema"))
+            #expect(prompt.contains(#""text""#))
+            // The server is still asked for the schema too, for runners that enforce it.
+            #expect(json["format"] != nil)
+        }
+
+        @Test func aStructuredRequestWithoutInstructionsSaysItsSchemaAfterThePrompt() async throws {
+            OllamaHistoryURLProtocol.reset(responses: [response(#"{\"text\": \"Hi\"}"#)])
+
+            let model = OllamaLanguageModel(model: "test", session: OllamaHistoryURLProtocol.makeSession())
+            let session = LanguageModelSession(model: model)
+            _ = try await session.respond(to: "Hello", generating: Greeting.self)
+
+            let messages = try #require(try Self.lastBody()["messages"] as? [[String: Any]])
+            #expect(messages.map { $0["role"] as? String } == ["user"])
+            let prompt = try #require(messages.first?["content"] as? String)
+            #expect(prompt.hasPrefix("Hello\nRespond with valid JSON matching this object schema"))
+        }
+
+        @Test func aStructuredStreamSaysItsSchemaAfterThePrompt() async throws {
+            // A stream is one JSON object a line.
+            OllamaHistoryURLProtocol.reset(responses: [
+                #"{"model": "test", "created_at": "2026-10-03T00:00:00.000Z", "message": {"role": "assistant", "content": "{\"text\": \"Hi\"}"}, "done": true}"#
+                    + "\n"
+            ])
+
+            let model = OllamaLanguageModel(model: "test", session: OllamaHistoryURLProtocol.makeSession())
+            let session = LanguageModelSession(model: model, instructions: "Be brief.")
+            let reply = try await session.streamResponse(to: "Hello", generating: Greeting.self).collect()
+
+            #expect(reply.content.text == "Hi")
+            let messages = try #require(try Self.lastBody()["messages"] as? [[String: Any]])
+            #expect(messages.first?["content"] as? String == "Be brief.")
+            let prompt = try #require(messages.last?["content"] as? String)
+            #expect(prompt.hasPrefix("Hello\nRespond with valid JSON matching this object schema"))
+        }
+
+        @Test func aStructuredRequestLeavesTheSchemaOutWhenAskedTo() async throws {
+            OllamaHistoryURLProtocol.reset(responses: [response(#"{\"text\": \"Hi\"}"#)])
+
+            let model = OllamaLanguageModel(model: "test", session: OllamaHistoryURLProtocol.makeSession())
+            let session = LanguageModelSession(model: model, instructions: "Be brief.")
+            _ = try await session.respond(to: "Hello", generating: Greeting.self, includeSchemaInPrompt: false)
+
+            let json = try Self.lastBody()
+            let messages = try #require(json["messages"] as? [[String: Any]])
+            #expect(messages.map { $0["content"] as? String } == ["Be brief.", "Hello"])
+            #expect(json["format"] != nil)
+        }
+
+        @Test func aTextRequestHasNoSchemaInItsPrompt() async throws {
+            OllamaHistoryURLProtocol.reset(responses: [response("Hi")])
+
+            let model = OllamaLanguageModel(model: "test", session: OllamaHistoryURLProtocol.makeSession())
+            let session = LanguageModelSession(model: model, instructions: "Be brief.")
+            _ = try await session.respond(to: "Hello")
+
+            let json = try Self.lastBody()
+            let messages = try #require(json["messages"] as? [[String: Any]])
+            #expect(messages.map { $0["content"] as? String } == ["Be brief.", "Hello"])
+            #expect(json["format"] == nil)
+        }
+
+        private static func lastBody() throws -> [String: Any] {
+            let body = try #require(OllamaHistoryURLProtocol.recordedBodies.last)
+            return try #require(try JSONSerialization.jsonObject(with: body) as? [String: Any])
+        }
+
         @Test func anErrorReplyIsThrownWithOllamasMessage() async throws {
             OllamaHistoryURLProtocol.reset(responses: [#"{"error": "model requires more system memory"}"#])
 
@@ -39,6 +120,11 @@ import Testing
                 String(describing: error).contains("model requires more system memory")
             }
         }
+    }
+
+    @Generable
+    private struct Greeting {
+        let text: String
     }
 
     /// A `URLProtocol` with its own queue of JSON responses,
