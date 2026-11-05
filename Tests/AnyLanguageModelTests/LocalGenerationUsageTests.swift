@@ -340,6 +340,24 @@ struct LocalGenerationUsageTests {
         total.add(model.child.round)
         #expect(session.usage == total)
     }
+
+    /// A stream whose own request reports usage before and after it relays a structured stream,
+    /// or after the structured stream completes,
+    /// counts the structured stream's request once and every increase of its own request.
+    @Test(arguments: [false, true])
+    func interleavedStructuredStreamCountsEveryRequestOnce(childFirst: Bool) async throws {
+        let model = LocalInterleavedModel(childFirst: childFirst)
+        let session = LanguageModelSession(model: model)
+        var received = 0
+        for try await _ in session.streamResponse(to: "A number", generating: Int.self) {
+            received += 1
+            if received == 1 { model.relayChild.open() }
+            if received == 2 { model.reportAgain.open() }
+        }
+        var total = childFirst ? model.first : model.second
+        total.add(model.child.round)
+        #expect(session.usage == total)
+    }
 }
 
 /// Waits for `condition` to become true, and returns false if it doesn't before `timeout`.
@@ -811,6 +829,86 @@ private struct LocalPrefixedCancelledModel: LanguageModel {
                         )
                         for try await snapshot in upstream {
                             continuation.yield(snapshot)
+                        }
+                        continuation.finish()
+                    } catch {
+                        continuation.finish(throwing: error)
+                    }
+                }
+                continuation.onTermination = { _ in task.cancel() }
+            }
+        )
+    }
+}
+
+/// A model whose own request reports usage in snapshots
+/// around the snapshot of a local model's structured stream.
+///
+/// When `childFirst` is false, it reports `first`, waits for `relayChild`,
+/// relays the structured stream, waits for `reportAgain`, and then reports `second`,
+/// which includes `first`.
+/// When `childFirst` is true, the structured stream completes before the model reports `first`,
+/// and the model then relays the structured snapshot.
+private struct LocalInterleavedModel: LanguageModel {
+    typealias UnavailableReason = Never
+    let childFirst: Bool
+    let first = LocalGenerationUsage(promptTokenCount: 30, generatedTokenCount: 5).value
+    let second = LocalGenerationUsage(promptTokenCount: 40, generatedTokenCount: 7).value
+    let child = LocalSingleRoundModel()
+    let relayChild = Gate()
+    let reportAgain = Gate()
+
+    func respond<Content: Generable>(
+        within session: LanguageModelSession,
+        to prompt: Prompt,
+        generating type: Content.Type,
+        includeSchemaInPrompt: Bool,
+        options: GenerationOptions
+    ) async throws -> LanguageModelSession.Response<Content> {
+        try await streamResponse(
+            within: session,
+            to: prompt,
+            generating: type,
+            includeSchemaInPrompt: includeSchemaInPrompt,
+            options: options
+        ).collect()
+    }
+
+    func streamResponse<Content: Generable>(
+        within session: LanguageModelSession,
+        to prompt: Prompt,
+        generating type: Content.Type,
+        includeSchemaInPrompt: Bool,
+        options: GenerationOptions
+    ) -> sending LanguageModelSession.ResponseStream<Content> {
+        let model = self
+        return .init(
+            stream: AsyncThrowingStream { continuation in
+                let task = Task {
+                    do {
+                        let raw = GeneratedContent(1)
+                        let content = try Content(raw).asPartiallyGenerated()
+                        func report(_ usage: LanguageModelSession.Usage) {
+                            continuation.yield(.init(content: content, rawContent: raw, usage: usage))
+                        }
+                        let upstream = model.child.streamResponse(
+                            within: session,
+                            to: prompt,
+                            generating: type,
+                            includeSchemaInPrompt: includeSchemaInPrompt,
+                            options: options
+                        )
+                        if model.childFirst {
+                            var snapshots: [LanguageModelSession.ResponseStream<Content>.Snapshot] = []
+                            for try await snapshot in upstream { snapshots.append(snapshot) }
+                            report(model.first)
+                            for snapshot in snapshots { continuation.yield(snapshot) }
+                        } else {
+                            report(model.first)
+                            await model.relayChild.wait()
+                            for try await snapshot in upstream { continuation.yield(snapshot) }
+                            await model.reportAgain.wait()
+                            report(model.second)
                         }
                         continuation.finish()
                     } catch {
