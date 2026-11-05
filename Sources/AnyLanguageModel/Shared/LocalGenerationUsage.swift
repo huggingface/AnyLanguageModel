@@ -152,9 +152,10 @@ extension LanguageModel {
                         )
                         continuation.finish()
                     } catch {
-                        if let counted {
-                            counted.count(channel.reportedUsage)
-                        } else if channel !== enclosing {
+                        // No snapshot reports these requests,
+                        // so they're added to what the session counted,
+                        // whatever the stream's earlier snapshots reported.
+                        if channel !== enclosing {
                             session.recordUsage(channel.reportedUsage)
                         }
                         continuation.finish(throwing: error)
