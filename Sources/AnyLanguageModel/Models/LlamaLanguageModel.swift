@@ -855,6 +855,7 @@ import Foundation
             var usage = RequestsUsage()
             var pendingEntries: [Transcript.Entry] = []
             var requestContext: LanguageModelSession.RequestContext
+            var offeredTools = false
 
             // A structured response runs the same tool loop as a text response.
             // When the model answers without calling a tool,
@@ -869,6 +870,7 @@ import Foundation
                 if type != String.self, tools.isEmpty {
                     break generationLoop
                 }
+                offeredTools = true
                 let toolContext = try makeToolPromptContext(
                     tools: tools,
                     pendingEntries: pendingEntries
@@ -980,9 +982,14 @@ import Foundation
                 )
             }
 
-            // Without tools to offer, the context only replays
-            // the tool calls and outputs from this response.
-            let toolContext = try makeToolPromptContext(tools: [], pendingEntries: pendingEntries)
+            // After a tool loop, the context replays the tool calls and outputs
+            // from the transcript and this response, without offering the tools.
+            // Without tools, structured generation leaves tool entries out, as before.
+            var toolContext: LlamaToolPromptContext?
+            if offeredTools {
+                toolContext = try LlamaToolPromptContext(format: currentToolCallFormat(), tools: [])
+                toolContext?.pendingEntries = pendingEntries
+            }
             var promptImages: [Data] = []
             let fullPrompt = try formatPrompt(
                 requestContext: requestContext,

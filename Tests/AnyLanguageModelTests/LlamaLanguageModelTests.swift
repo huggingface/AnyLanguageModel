@@ -439,6 +439,46 @@ import Testing
             #expect(response.content.temperatureFahrenheit == 72)
         }
 
+        @Test func structuredResponseWithToolsUsesEarlierToolOutput() async throws {
+            let weatherTool = spy(on: WeatherTool())
+            let call = Transcript.ToolCall(
+                id: "call-1",
+                toolName: weatherTool.name,
+                arguments: try GeneratedContent(json: #"{"city":"Paris"}"#)
+            )
+            // Only the earlier tool output has the temperature;
+            // the earlier answer doesn't repeat it.
+            let transcript = Transcript(entries: [
+                .instructions(
+                    .init(
+                        segments: [.text(.init(content: "You are a helpful assistant."))],
+                        toolDefinitions: []
+                    )
+                ),
+                .prompt(.init(segments: [.text(.init(content: "Look up the weather in Paris."))])),
+                .toolCalls(.init([call])),
+                .toolOutput(
+                    .init(
+                        id: call.id,
+                        toolName: call.toolName,
+                        segments: [.text(.init(content: "The weather in Paris is cloudy and 58°F / 14°C"))]
+                    )
+                ),
+                .response(.init(assetIDs: [], segments: [.text(.init(content: "I looked up the weather in Paris."))])),
+            ])
+            let session = LanguageModelSession(model: model, tools: [weatherTool], transcript: transcript)
+
+            let response = try await session.respond(
+                to: "Report the weather in Paris that you already looked up. Don't call a tool. /no_think",
+                generating: WeatherReport.self,
+                options: GenerationOptions(sampling: .greedy, maximumResponseTokens: 512)
+            )
+            attachResponse(response)
+
+            #expect(await weatherTool.calls.isEmpty)
+            #expect(response.content.temperatureFahrenheit == 58)
+        }
+
         @Test func structuredGenerationBasicStruct() async throws {
             let session = LanguageModelSession(
                 model: model,
