@@ -120,50 +120,6 @@ import Testing
             _ = FoundationModelsDynamicInstructionsAdapter(session: session).body
             #expect(evaluations.withLock { $0 } == 2)
         }
-
-        @Test func nativeProfileConstructionUsesOneContextForHistoryAndInstructions() throws {
-            guard #available(macOS 27.0, iOS 27.0, visionOS 27.0, *) else { return }
-            let evaluations = Locked(0)
-            let session = AnyLanguageModel.LanguageModelSession(
-                profile: AnyLanguageModel.LanguageModelSession.Profile {
-                    CountingProjectionInstructions(evaluations: evaluations)
-                }
-                .model(MockLanguageModel())
-            )
-            // Creating a profile session evaluates the profile once to record its instructions.
-            #expect(evaluations.withLock { $0 } == 1)
-            _ = try makeFoundationModelsRequest(
-                model: FoundationModels.SystemLanguageModel.default,
-                session: session,
-                prompt: AnyLanguageModel.Prompt("Current"),
-                fmPrompt: FoundationModels.Prompt("Current")
-            )
-            #expect(evaluations.withLock { $0 } == 2)
-        }
-
-        @Test func nativeProfileInitialContextSurvivesDetachedEvaluationWithoutFreezingLaterRequests() async {
-            guard #available(macOS 27.0, iOS 27.0, visionOS 27.0, *) else { return }
-            let evaluations = Locked(0)
-            let session = AnyLanguageModel.LanguageModelSession(
-                profile: AnyLanguageModel.LanguageModelSession.Profile {
-                    CountingProjectionInstructions(evaluations: evaluations)
-                }
-                .model(MockLanguageModel())
-            )
-            // Creating a profile session evaluates the profile once to record its instructions.
-            #expect(evaluations.withLock { $0 } == 1)
-            let initialContext = session.resolvedRequestContext()
-            #expect(evaluations.withLock { $0 } == 2)
-            let adapter = FoundationModelsDynamicInstructionsAdapter(session: session, initialContext: initialContext)
-            await Task.detached {
-                #expect(AnyLanguageModel.SessionPropertyBinding.values == nil)
-                _ = adapter.body
-            }.value
-            #expect(evaluations.withLock { $0 } == 2)
-
-            await Task.detached { _ = adapter.body }.value
-            #expect(evaluations.withLock { $0 } == 3)
-        }
     }
 
     /// How a history transform rewrites a prompt, which decides the IDs that its entry keeps.

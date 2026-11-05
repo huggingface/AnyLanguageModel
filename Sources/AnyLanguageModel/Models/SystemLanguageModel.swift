@@ -387,24 +387,19 @@
     }
 
     #if compiler(>=6.4) && !os(tvOS)
-        /// Dynamic instructions that reuse the initial request context and
-        /// resolve the session again for native continuations.
+        /// Dynamic instructions that read an AnyLanguageModel session's request context
+        /// each time Foundation Models evaluates them.
+        ///
+        /// Ordinary dynamic instructions resolve again on each evaluation.
+        /// During a profile session's request, every evaluation returns the context
+        /// that was prepared for that request,
+        /// including the evaluation before the continuation after a tool call.
         @available(macOS 27.0, iOS 27.0, visionOS 27.0, watchOS 27.0, *)
-        struct FoundationModelsDynamicInstructionsAdapter: FoundationModels.DynamicInstructions, Sendable {
+        struct FoundationModelsDynamicInstructionsAdapter: FoundationModels.DynamicInstructions {
             let session: LanguageModelSession
-            private let initialContext: Locked<LanguageModelSession.RequestContext?>
-
-            init(session: LanguageModelSession, initialContext: LanguageModelSession.RequestContext? = nil) {
-                self.session = session
-                self.initialContext = Locked(initialContext)
-            }
 
             var body: some FoundationModels.DynamicInstructions {
-                let requestContext =
-                    initialContext.withLock { context in
-                        defer { context = nil }
-                        return context
-                    } ?? session.resolvedRequestContext()
+                let requestContext = session.resolvedRequestContext()
                 if let instructions = requestContext.instructions {
                     instructions.toFoundationModels()
                 }
@@ -450,11 +445,12 @@
             fmPrompt: FoundationModels.Prompt
         ) throws -> FoundationModelsRequest {
             if session.usesDynamicInstructions {
-                let initialContext = session.usesDynamicProfile ? session.resolvedRequestContext() : nil
+                // Only a profile can project history, so ordinary dynamic instructions
+                // aren't evaluated here.
                 let (history, requestPrompt) =
-                    if let initialContext {
+                    if session.usesDynamicProfile {
                         try fmProjectedHistoryAndPrompt(
-                            initialContext.transcript,
+                            session.resolvedRequestContext().transcript,
                             canonical: session.transcript,
                             prompt: prompt,
                             fmPrompt: fmPrompt
@@ -473,10 +469,7 @@
                 return FoundationModelsRequest(
                     session: FoundationModels.LanguageModelSession(
                         model: model,
-                        dynamicInstructions: FoundationModelsDynamicInstructionsAdapter(
-                            session: session,
-                            initialContext: initialContext
-                        ),
+                        dynamicInstructions: FoundationModelsDynamicInstructionsAdapter(session: session),
                         history: fmHistory
                     ),
                     prompt: requestPrompt
