@@ -202,11 +202,11 @@ public struct OllamaLanguageModel: LanguageModel {
                 if !calls.isEmpty {
                     entries.append(.toolCalls(Transcript.ToolCalls(calls)))
                 }
-                return LanguageModelSession.Response(
-                    content: "" as! Content,
-                    rawContent: GeneratedContent(""),
-                    transcriptEntries: ArraySlice(entries),
-                    usage: usage
+                return try stoppedResponse(
+                    generating: type,
+                    provider: "Ollama",
+                    transcriptEntries: entries,
+                    requests: RequestsUsage(final: usage)
                 )
             case .invocations(let invocations):
                 if !invocations.isEmpty {
@@ -356,7 +356,7 @@ public struct OllamaLanguageModel: LanguageModel {
                         ) {
                         case .stop(let calls):
                             state.entries.append(.toolCalls(Transcript.ToolCalls(calls)))
-                            continuation.yield(try state.stoppedSnapshot())
+                            continuation.yield(try state.stoppedSnapshot(provider: "Ollama"))
                             continuation.finish()
                             return
                         case .invocations(let invocations):

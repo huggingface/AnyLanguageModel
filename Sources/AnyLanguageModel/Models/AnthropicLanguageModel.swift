@@ -542,12 +542,11 @@ public struct AnthropicLanguageModel: LanguageModel {
                 if !calls.isEmpty {
                     entries.append(.toolCalls(Transcript.ToolCalls(calls)))
                 }
-                let empty = try emptyResponseContent(for: type)
-                return LanguageModelSession.Response(
-                    content: empty.content,
-                    rawContent: empty.rawContent,
-                    transcriptEntries: ArraySlice(entries),
-                    usage: usage
+                return try stoppedResponse(
+                    generating: type,
+                    provider: "Anthropic",
+                    transcriptEntries: entries,
+                    requests: RequestsUsage(final: usage)
                 )
             case .invocations(let invocations):
                 if !invocations.isEmpty {
@@ -761,7 +760,7 @@ public struct AnthropicLanguageModel: LanguageModel {
                         ) {
                         case .stop(let calls):
                             state.entries.append(.toolCalls(Transcript.ToolCalls(calls)))
-                            continuation.yield(try state.stoppedSnapshot())
+                            continuation.yield(try state.stoppedSnapshot(provider: "Anthropic"))
                             continuation.finish()
                             return
                         case .invocations(let invocations):
@@ -969,27 +968,6 @@ private struct ToolInvocationResult {
 private enum ToolResolutionOutcome {
     case stop(calls: [Transcript.ToolCall])
     case invocations([ToolInvocationResult])
-}
-
-private func emptyResponseContent<Content: Generable>(
-    for type: Content.Type
-) throws -> (content: Content, rawContent: GeneratedContent) {
-    if type == String.self {
-        let raw = GeneratedContent("")
-        return ("" as! Content, raw)
-    }
-
-    let emptyObject = GeneratedContent(properties: [:])
-    if let content = try? Content(emptyObject) {
-        return (content, emptyObject)
-    }
-
-    let nullContent = GeneratedContent(kind: .null)
-    if let content = try? Content(nullContent) {
-        return (content, nullContent)
-    }
-
-    throw GeneratedContentError.typeMismatch
 }
 
 private func partialSnapshot<Content: Generable>(

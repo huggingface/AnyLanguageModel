@@ -55,7 +55,9 @@ struct StreamingResponseState<Content: Generable> {
     /// an empty object, an empty array, `null`, and then zero or `false` for scalar types.
     /// The value must decode as the complete content type, not only its partial form,
     /// so that `collect()` accepts the snapshot.
-    func stoppedSnapshot() throws -> LanguageModelSession.ResponseStream<Content>.Snapshot {
+    /// A type with required properties accepts none of these,
+    /// so this throws ``LanguageModelSession/ToolExecutionStopped`` with the entries instead.
+    func stoppedSnapshot(provider: String) throws -> LanguageModelSession.ResponseStream<Content>.Snapshot {
         if let snapshot = snapshot(), (try? Content(snapshot.rawContent)) != nil { return snapshot }
         let candidates: [GeneratedContent.Kind] = [
             .structure(properties: [:], orderedKeys: []), .array([]), .null, .number(0), .bool(false),
@@ -70,7 +72,10 @@ struct StreamingResponseState<Content: Generable> {
                 requests: requests
             )
         }
-        throw GeneratedContentError.typeMismatch
+        throw LanguageModelSession.ToolExecutionStopped(
+            provider: provider,
+            transcriptEntries: ArraySlice(entries)
+        )
     }
 
     mutating func beginNextRound() {
