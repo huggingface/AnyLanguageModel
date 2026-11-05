@@ -65,6 +65,57 @@ struct DynamicProfileBuilderTests {
         #expect(recorder.entryIDs == history.map(\.id))
     }
 
+    // When a value modifier repeats, the innermost one sets the value.
+    @Test func repeatedValueModifiersKeepTheInnermostValue() {
+        let profile = LanguageModelSession.AnyDynamicProfile(
+            LanguageModelSession.Profile { Instructions("Repeated") }
+                .model(MockLanguageModel.fixed("inner"))
+                .temperature(0.1)
+                .samplingMode(.greedy)
+                .maximumResponseTokens(16)
+                .reasoningLevel(.light)
+                .toolCallingMode(.allowed)
+                .transcriptErrorHandlingPolicy(.revertTranscript)
+                .model(MockLanguageModel.fixed("outer"))
+                .temperature(0.9)
+                .samplingMode(.random(top: 4))
+                .maximumResponseTokens(64)
+                .reasoningLevel(.deep)
+                .toolCallingMode(.disallowed)
+                .transcriptErrorHandlingPolicy(.preserveTranscript)
+        ).resolveForRequest()
+        #expect(profile.temperature == 0.1)
+        #expect(profile.samplingMode == .greedy)
+        #expect(profile.maximumResponseTokens == 16)
+        #expect(profile.reasoningLevel == .light)
+        #expect(profile.toolCallingMode == .allowed)
+        #expect(profile.transcriptErrorHandlingPolicy == .revertTranscript)
+    }
+
+    // A request uses the innermost model and option values,
+    // and a non-nil option that the caller passes overrides the profile's value.
+    @Test func requestUsesTheInnermostModelAndCallSiteOptionsOverrideTheProfile() async throws {
+        let inner = MockLanguageModel.fixed("inner")
+        let session = LanguageModelSession(
+            profile: LanguageModelSession.Profile { Instructions("Repeated") }
+                .model(inner)
+                .temperature(0.1)
+                .maximumResponseTokens(16)
+                .model(MockLanguageModel.fixed("outer"))
+                .temperature(0.9)
+                .maximumResponseTokens(64)
+        )
+
+        let first = try await session.respond(to: "Hello")
+        let second = try await session.respond(to: "Again", options: GenerationOptions(temperature: 0.5))
+
+        #expect(first.content == "inner")
+        #expect(second.content == "inner")
+        let options = inner.requests.withLock { $0.map(\.options) }
+        #expect(options.map(\.temperature) == [0.1, 0.5])
+        #expect(options.map(\.maximumResponseTokens) == [16, 16])
+    }
+
     @Test func historyTransformsAndCallbacksKeepCompositionOrder() async throws {
         let events = Locked<[String]>([])
         let profile = LanguageModelSession.AnyDynamicProfile(

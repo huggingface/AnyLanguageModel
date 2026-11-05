@@ -1,7 +1,7 @@
 import Foundation
 import Testing
 
-@testable import AnyLanguageModel
+@_spi(Compatibility) @testable import AnyLanguageModel
 
 /// How a session counts the requests of a response it doesn't stream: each as the model reports it,
 /// and what the model didn't report from the response.

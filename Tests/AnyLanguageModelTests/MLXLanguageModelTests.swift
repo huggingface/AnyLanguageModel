@@ -54,6 +54,7 @@ import Testing
 
             let session = LanguageModelSession(model: model)
             let response = try await session.respond(to: "Say hello", options: boundedOptions)
+            attachResponse(response)
             #expect(!response.content.isEmpty)
 
             #expect(model.availability == .available)
@@ -64,6 +65,7 @@ import Testing
             let session = LanguageModelSession(model: model)
 
             let response = try await session.respond(to: "Say hello", options: boundedOptions)
+            attachResponse(response)
             #expect(!response.content.isEmpty)
         }
 
@@ -107,6 +109,7 @@ import Testing
             // evaluating the prompt in two chunks changes logits slightly,
             // which can change greedy output after several tokens.
             let response = try await session.respond(to: "Name three primary colors.", options: options)
+            attachResponse(response)
             #expect(response.usage.input.cachedTokenCount > 0)
             #expect(!response.content.isEmpty)
         }
@@ -116,8 +119,10 @@ import Testing
             let model = MLXLanguageModel(modelId: "mlx-community/Qwen3-VL-2B-Instruct-4bit")
             let options = GenerationOptions(sampling: .greedy, maximumResponseTokens: 8)
             let session = LanguageModelSession(model: model)
-            _ = try await session.respond(to: "Name three primary colors.", options: options)
+            let first = try await session.respond(to: "Name three primary colors.", options: options)
+            attachResponse(first, "first")
             let response = try await session.respond(to: "Which of those is your favorite?", options: options)
+            attachResponse(response)
             #expect(response.usage.input.cachedTokenCount > 0)
             #expect(!response.content.isEmpty)
         }
@@ -131,6 +136,7 @@ import Testing
             )
             await model.prewarmSessionCache(for: session)
             let response = try await session.respond(to: "Name three primary colors.", options: options)
+            attachResponse(response)
             #expect(response.usage.input.cachedTokenCount > 0)
             #expect(!response.content.isEmpty)
         }
@@ -139,12 +145,14 @@ import Testing
             let options = GenerationOptions(sampling: .greedy, maximumResponseTokens: 8)
             let session = LanguageModelSession(model: model)
             let first = try await session.respond(to: "Say hello.", options: options)
+            attachResponse(first, "first")
             #expect(first.usage.input.totalTokenCount > 0)
             #expect(first.usage.input.cachedTokenCount == 0)
             #expect(first.usage.output.totalTokenCount > 0)
             #expect(first.usage.output.totalTokenCount <= 8)
 
             let second = try await session.respond(to: "Say goodbye.", options: options)
+            attachResponse(second, "second")
             #expect(second.usage.input.cachedTokenCount == first.usage.input.totalTokenCount)
             #expect(second.usage.input.totalTokenCount > second.usage.input.cachedTokenCount)
             #expect(session.usage.totalTokenCount == first.usage.totalTokenCount + second.usage.totalTokenCount)
@@ -168,13 +176,16 @@ import Testing
             // so it should match a fresh session with the same history.
             let options = GenerationOptions(sampling: .greedy, maximumResponseTokens: 48)
             let session = LanguageModelSession(model: model)
-            _ = try await session.respond(to: "Name three primary colors.", options: options)
+            let first = try await session.respond(to: "Name three primary colors.", options: options)
+            attachResponse(first, "first")
             let history = session.transcript
             let reused = try await session.respond(to: "Which of those is your favorite?", options: options)
+            attachResponse(reused, "reused")
             #expect(reused.usage.input.cachedTokenCount > 0)
 
             let fresh = try await LanguageModelSession(model: model, transcript: history)
                 .respond(to: "Which of those is your favorite?", options: options)
+            attachResponse(fresh, "fresh")
             #expect(fresh.usage.input.cachedTokenCount == 0)
             #expect(reused.content == fresh.content)
         }
@@ -186,6 +197,7 @@ import Testing
                 generating: Bool.self,
                 options: options
             )
+            attachResponse(response)
             let session = LanguageModelSession(model: model)
             let streamed = try await session.streamResponse(
                 to: "Return true.",
@@ -205,6 +217,7 @@ import Testing
                 includeSchemaInPrompt: false,
                 options: options
             )
+            attachResponse(withoutSchema, "withoutSchema")
             #expect(response.usage.input.totalTokenCount > withoutSchema.usage.input.totalTokenCount)
         }
 
@@ -217,6 +230,7 @@ import Testing
             let stopped = LanguageModelSession(model: model, tools: [WeatherTool()])
             stopped.toolExecutionDelegate = UsageStopDelegate()
             let response = try await stopped.respond(to: prompt, options: options)
+            attachResponse(response)
             #expect(response.transcriptEntries.contains { if case .toolCalls = $0 { true } else { false } })
             #expect(response.usage.input.totalTokenCount > 0)
             #expect(response.usage.output.totalTokenCount > 0)
@@ -229,22 +243,28 @@ import Testing
 
             let completed = LanguageModelSession(model: model, tools: [WeatherTool()])
             var reportedRounds: [LanguageModelSession.Usage] = []
+            var lastSnapshot: LanguageModelSession.ResponseStream<String>.Snapshot?
             for try await snapshot in completed.streamResponse(to: prompt, options: options) {
                 if snapshot.usage != .zero, snapshot.usage != reportedRounds.last {
                     reportedRounds.append(snapshot.usage)
                 }
+                lastSnapshot = snapshot
             }
+            // A snapshot reports its latest request's usage, and the session counts every request.
             #expect(reportedRounds.count == 2)
             #expect(reportedRounds.first == response.usage)
-            let total = try #require(reportedRounds.last)
-            #expect(total.input.totalTokenCount > response.usage.input.totalTokenCount)
-            #expect(total.output.totalTokenCount > response.usage.output.totalTokenCount)
+            let final = try #require(reportedRounds.last)
+            var total = response.usage
+            total.add(final)
+            #expect(lastSnapshot?.requests.total == total)
             #expect(completed.usage == total)
             let fullResponse = try await LanguageModelSession(model: model, tools: [WeatherTool()]).respond(
                 to: prompt,
                 options: options
             )
-            #expect(fullResponse.usage == total)
+            attachResponse(fullResponse, "fullResponse")
+            #expect(fullResponse.usage == final)
+            #expect(fullResponse.requests.total == total)
 
             let failing = LanguageModelSession(model: model, tools: [UsageFailingWeatherTool()])
             await #expect(throws: LanguageModelSession.ToolCallError.self) {
@@ -271,12 +291,14 @@ import Testing
         @Test func multiTurnSameSession() async throws {
             let session = LanguageModelSession(model: model)
             let first = try await session.respond(to: "Say hello in one sentence.", options: boundedOptions)
+            attachResponse(first, "first")
             #expect(!first.content.isEmpty)
 
             let second = try await session.respond(
                 to: "Now answer with one more short sentence.",
                 options: boundedOptions
             )
+            attachResponse(second, "second")
             #expect(!second.content.isEmpty)
         }
 
@@ -318,6 +340,7 @@ import Testing
                 to: "Tell me a fact",
                 options: options
             )
+            attachResponse(response)
             #expect(!response.content.isEmpty)
         }
 
@@ -333,6 +356,7 @@ import Testing
                 to: "How's the weather in San Francisco?",
                 options: GenerationOptions(sampling: .greedy, maximumResponseTokens: 512)
             )
+            attachResponse(response)
 
             var foundToolOutput = false
             for case let .toolOutput(toolOutput) in response.transcriptEntries {
@@ -343,7 +367,9 @@ import Testing
             #expect(foundToolOutput)
             #expect(response.usage.input.totalTokenCount > 0)
             #expect(response.usage.output.totalTokenCount > 0)
-            #expect(session.usage == response.usage)
+            // The response reports its final request's usage, and the session counts every request.
+            #expect(session.usage == response.requests.total)
+            #expect(session.usage.input.totalTokenCount > response.usage.input.totalTokenCount)
 
             let calls = await weatherTool.calls
             #expect(calls.count >= 1)
@@ -394,7 +420,91 @@ import Testing
             #expect(foundToolOutput)
             #expect((lastSnapshot?.usage.input.totalTokenCount ?? 0) > 0)
             #expect((lastSnapshot?.usage.output.totalTokenCount ?? 0) > 0)
-            #expect(session.usage == lastSnapshot?.usage)
+            // The snapshot reports its latest request's usage, and the session counts every request.
+            #expect(session.usage == lastSnapshot?.requests.total)
+            #expect(session.usage.input.totalTokenCount > (lastSnapshot?.usage.input.totalTokenCount ?? 0))
+        }
+
+        @Test(arguments: [false, true])
+        func structuredResponseWithTools(_ streaming: Bool) async throws {
+            let weatherTool = spy(on: WeatherTool())
+            let session = LanguageModelSession(
+                model: model,
+                tools: [weatherTool],
+                instructions: "You are a helpful assistant. Use available tools when needed."
+            )
+            let prompt = "How's the weather in San Francisco?"
+            let options = GenerationOptions(sampling: .greedy, maximumResponseTokens: 512)
+
+            let response =
+                try await streaming
+                ? session.streamResponse(to: prompt, generating: WeatherReport.self, options: options).collect()
+                : session.respond(to: prompt, generating: WeatherReport.self, options: options)
+            attachResponse(response)
+
+            let calls = await weatherTool.calls
+            #expect(calls.count >= 1)
+            #expect(response.transcriptEntries.contains { if case .toolOutput = $0 { true } else { false } })
+            // The temperature comes only from the tool's output.
+            #expect(response.content.temperatureFahrenheit == 72)
+        }
+
+        @Test(arguments: [false, true])
+        func structuredResponseStoppedByDelegate(_ streaming: Bool) async throws {
+            let weatherTool = spy(on: WeatherTool())
+            let session = LanguageModelSession(
+                model: model,
+                tools: [weatherTool],
+                instructions: "You are a helpful assistant. Use available tools when needed."
+            )
+            session.toolExecutionDelegate = StopToolExecutionDelegate()
+            let prompt = "How's the weather in San Francisco?"
+            let options = GenerationOptions(sampling: .greedy, maximumResponseTokens: 512)
+
+            do {
+                _ =
+                    try await streaming
+                    ? session.streamResponse(to: prompt, generating: WeatherReport.self, options: options).collect()
+                    : session.respond(to: prompt, generating: WeatherReport.self, options: options)
+                Issue.record("Expected LanguageModelSession.ToolExecutionStopped")
+            } catch let error as LanguageModelSession.ToolExecutionStopped {
+                #expect(error.provider == "MLX")
+                let calls = error.transcriptEntries.flatMap { entry -> [Transcript.ToolCall] in
+                    if case .toolCalls(let calls) = entry { Array(calls) } else { [] }
+                }
+                #expect(calls.contains { $0.toolName == weatherTool.name })
+                #expect(!error.transcriptEntries.contains { if case .toolOutput = $0 { true } else { false } })
+            }
+            #expect(await weatherTool.calls.isEmpty)
+            // The session keeps only the prompt.
+            #expect(session.transcript.count == 2)
+        }
+
+        /// An array can be empty, so a stopped response of an array type
+        /// ends with an empty array and the tool calls that the delegate stopped.
+        @Test(arguments: [false, true])
+        func arrayResponseStoppedByDelegate(_ streaming: Bool) async throws {
+            let weatherTool = spy(on: WeatherTool())
+            let session = LanguageModelSession(
+                model: model,
+                tools: [weatherTool],
+                instructions: "You are a helpful assistant. Use available tools when needed."
+            )
+            session.toolExecutionDelegate = StopToolExecutionDelegate()
+            let prompt = "How's the weather in San Francisco?"
+            let options = GenerationOptions(sampling: .greedy, maximumResponseTokens: 512)
+
+            let response =
+                try await streaming
+                ? session.streamResponse(to: prompt, generating: [WeatherReport].self, options: options).collect()
+                : session.respond(to: prompt, generating: [WeatherReport].self, options: options)
+            #expect(response.content.isEmpty)
+            let calls = response.transcriptEntries.flatMap { entry -> [Transcript.ToolCall] in
+                if case .toolCalls(let calls) = entry { Array(calls) } else { [] }
+            }
+            #expect(calls.contains { $0.toolName == weatherTool.name })
+            #expect(!response.transcriptEntries.contains { if case .toolOutput = $0 { true } else { false } })
+            #expect(await weatherTool.calls.isEmpty)
         }
 
         @Test func multimodalWithImageURL() async throws {
@@ -412,6 +522,7 @@ import Testing
             mlxOptions.userInputProcessing = .resize(to: CGSize(width: 512, height: 512))
             options[custom: MLXLanguageModel.self] = mlxOptions
             let response = try await session.respond(to: "", options: options)
+            attachResponse(response)
             #expect(!response.content.isEmpty)
         }
 
@@ -430,6 +541,7 @@ import Testing
             mlxOptions.userInputProcessing = .resize(to: CGSize(width: 512, height: 512))
             options[custom: MLXLanguageModel.self] = mlxOptions
             let response = try await session.respond(to: "", options: options)
+            attachResponse(response)
             #expect(!response.content.isEmpty)
         }
 
@@ -442,6 +554,7 @@ import Testing
                 to: "Generate a greeting message that says hello",
                 generating: SimpleString.self
             )
+            attachResponse(response)
             #expect(!response.content.message.isEmpty)
         }
 
@@ -454,6 +567,7 @@ import Testing
                 to: "Generate a count value of 42",
                 generating: SimpleInt.self
             )
+            attachResponse(response)
             #expect(response.content.count >= 0)
         }
 
@@ -466,6 +580,7 @@ import Testing
                 to: "Generate a temperature value of 72.5 degrees",
                 generating: SimpleDouble.self
             )
+            attachResponse(response)
             #expect(!response.content.temperature.isNaN)
         }
 
@@ -478,6 +593,7 @@ import Testing
                 to: "Generate a boolean value: true",
                 generating: SimpleBool.self
             )
+            attachResponse(response)
             #expect(response.content.value == true)
             let jsonData = response.rawContent.jsonString.data(using: .utf8)
             #expect(jsonData != nil)
@@ -498,6 +614,7 @@ import Testing
                 to: "Generate a person named Alex with nickname 'Lex'. Nickname may be omitted if unsure.",
                 generating: OptionalFields.self
             )
+            attachResponse(response)
             #expect(!response.content.name.isEmpty)
             if let nickname = response.content.nickname {
                 #expect(!nickname.isEmpty)
@@ -513,6 +630,7 @@ import Testing
                 to: "Generate a high priority value",
                 generating: Priority.self
             )
+            attachResponse(response)
             #expect([Priority.low, Priority.medium, Priority.high].contains(response.content))
         }
 
@@ -535,6 +653,7 @@ import Testing
                 to: "Say hello",
                 options: options
             )
+            attachResponse(response)
             #expect(!response.content.isEmpty)
         }
 
@@ -562,6 +681,7 @@ import Testing
             await MLXLanguageModel.removeAllFromCache()
             let session = LanguageModelSession(model: model)
             let response = try await session.respond(to: "Say hello after cache clear", options: boundedOptions)
+            attachResponse(response)
             #expect(!response.content.isEmpty)
         }
     }
@@ -620,6 +740,45 @@ import Testing
                 #expect(messages[index + 1]["name"] as? String == "getWeather")
                 #expect(messages[index + 1]["content"] as? String == result)
             }
+        }
+
+        @Test func toolOutputImagesBecomePlaceholders() throws {
+            let image = Transcript.Segment.image(.init(data: Data([0x89]), mimeType: "image/png"))
+            let outputs: [[Transcript.Segment]] = [
+                [.text(.init(content: "before")), image, .text(.init(content: "after"))],
+                [image],
+            ]
+            var entries: [Transcript.Entry] = [
+                .prompt(Transcript.Prompt(segments: [.text(.init(content: "Show me Paris and Tokyo."))])),
+                .toolCalls(
+                    Transcript.ToolCalls([
+                        Transcript.ToolCall(
+                            id: "call_1",
+                            toolName: "getPhoto",
+                            arguments: try GeneratedContent(json: #"{"city":"Paris"}"#)
+                        ),
+                        Transcript.ToolCall(
+                            id: "call_2",
+                            toolName: "getPhoto",
+                            arguments: try GeneratedContent(json: #"{"city":"Tokyo"}"#)
+                        ),
+                    ])
+                ),
+            ]
+            for (index, segments) in outputs.enumerated() {
+                entries.append(
+                    .toolOutput(
+                        Transcript.ToolOutput(id: "call_\(index + 1)", toolName: "getPhoto", segments: segments)
+                    )
+                )
+            }
+            let session = LanguageModelSession(model: MockLanguageModel(), transcript: Transcript(entries: entries))
+
+            let chat = convertTranscriptToMLXChat(requestContext: session.resolvedRequestContext(), fallbackPrompt: "")
+            let messages = DefaultMessageGenerator().generate(messages: chat)
+
+            let results = messages.filter { $0["role"] as? String == "tool" }.map { $0["content"] as? String }
+            #expect(results == ["before\n<image>\nafter", "<image>"])
         }
     }
 #endif  // MLX

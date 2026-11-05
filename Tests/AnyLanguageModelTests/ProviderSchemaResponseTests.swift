@@ -366,6 +366,57 @@ import Testing
         }
     }
 
+    extension ProviderSchemaResponseTests {
+        @Generable struct Address: Equatable { var street: String; var unit: String? }
+        @Generable struct Contact { var name: String; var address: Address; var previous: [Address]; var step: Step }
+
+        /// OpenAI's strict mode requires every property of every object in `required`,
+        /// so an optional property of a nested object, of an array's objects,
+        /// or of an enumeration case is required and allows `null`.
+        @Test(arguments: [Provider.chat, .responses, .openResponses])
+        func strictModeRequiresNestedOptionalProperties(_ provider: Provider) async throws {
+            SchemaURLProtocol.reset()
+            defer { SchemaURLProtocol.reset() }
+            let content = """
+                {"name":"Ada","address":{"street":"Main","unit":null},\
+                "previous":[{"street":"Old","unit":"2"}],"step":{"type":"note","value":null}}
+                """
+            SchemaURLProtocol.enqueue(json: try json(provider.response(text: content)))
+            let response = try await provider.session().respond(
+                to: "Contact",
+                generating: Contact.self,
+                includeSchemaInPrompt: false
+            )
+            #expect(response.content.address == Address(street: "Main", unit: nil))
+            #expect(response.content.previous == [Address(street: "Old", unit: "2")])
+            #expect(response.content.step == .note(nil))
+
+            let data = try #require(SchemaURLProtocol.recordedBodies.first)
+            let body = try #require(JSONSerialization.jsonObject(with: data) as? [String: Any])
+            let sent = try provider.requestSchema(body)
+            #expect(sent["required"] as? [String] == ["address", "name", "previous", "step"])
+            let properties = try #require(sent["properties"] as? [String: [String: Any]])
+            let previous = try #require(properties["previous"]?["items"] as? [String: Any])
+            for address in [try #require(properties["address"]), previous] {
+                #expect(address["required"] as? [String] == ["street", "unit"])
+                #expect(address["additionalProperties"] as? Bool == false)
+                let unit = (address["properties"] as? [String: [String: Any]])?["unit"]
+                #expect(unit?["type"] as? [String] == ["string", "null"])
+            }
+            let cases = try #require(properties["step"]?["anyOf"] as? [[String: Any]])
+            let note = try #require(
+                cases.first {
+                    let properties = $0["properties"] as? [String: [String: Any]]
+                    return properties?["type"]?["enum"] as? [String] == ["note"]
+                }
+            )
+            #expect(note["required"] as? [String] == ["type", "value"])
+            #expect(note["additionalProperties"] as? Bool == false)
+            let value = (note["properties"] as? [String: [String: Any]])?["value"]
+            #expect(value?["type"] as? [String] == ["string", "null"])
+        }
+    }
+
     private func json(_ value: [String: Any]) throws -> String {
         String(decoding: try JSONSerialization.data(withJSONObject: value), as: UTF8.self)
     }
@@ -463,4 +514,79 @@ import Testing
         }
     }
 
+    @Generable
+    private struct SchemaPromptGreeting {
+        let text: String
+    }
+
+    /// The text of the user message that says `prompt`, in whichever shape the provider sends it.
+    func userMessage(saying prompt: String, in body: Any) -> String? {
+        if let message = body as? [String: Any], message["role"] as? String == "user",
+            let data = try? JSONSerialization.data(withJSONObject: message),
+            let text = String(data: data, encoding: .utf8), text.contains(prompt)
+        {
+            return text
+        }
+        let children: [Any] =
+            if let dictionary = body as? [String: Any] { Array(dictionary.values) } else { body as? [Any] ?? [] }
+        return children.lazy.compactMap { userMessage(saying: prompt, in: $0) }.first
+    }
+
+    extension ProviderSchemaResponseTests {
+        /// The body of the request the session sent, after answering `content`.
+        private func sentBody(
+            _ provider: Provider,
+            streaming: Bool,
+            content: String,
+            ask: (LanguageModelSession) async throws -> Void
+        ) async throws -> [String: Any] {
+            SchemaURLProtocol.reset()
+            defer { SchemaURLProtocol.reset() }
+            SchemaURLProtocol.enqueue(
+                json: try streaming ? provider.stream(text: content) : json(provider.response(text: content))
+            )
+            try await ask(provider.session())
+            let data = try #require(SchemaURLProtocol.recordedBodies.first)
+            return try #require(JSONSerialization.jsonObject(with: data) as? [String: Any])
+        }
+
+        /// A model whose server ignores the schema it's sent only knows what to write from the prompt.
+        @Test(arguments: Provider.allCases, [false, true])
+        func aStructuredRequestSaysItsSchema(_ provider: Provider, _ streaming: Bool) async throws {
+            let body = try await sentBody(provider, streaming: streaming, content: #"{"text":"Hi"}"#) { session in
+                let reply =
+                    try await streaming
+                    ? session.streamResponse(to: "Hello", generating: SchemaPromptGreeting.self).collect().content
+                    : session.respond(to: "Hello", generating: SchemaPromptGreeting.self).content
+                #expect(reply.text == "Hi")
+            }
+            // Said after what's asked, where a model still reads it after rounds of tool calls.
+            let message = try #require(userMessage(saying: "Hello", in: body))
+            let schema = try #require(message.range(of: "Respond with valid JSON matching this object schema"))
+            #expect(message.range(of: "Hello")!.upperBound <= schema.lowerBound)
+            #expect(message.contains("text"))
+            // The server is still asked for the schema, for those that enforce it.
+            _ = try provider.requestSchema(body)
+        }
+
+        @Test(arguments: Provider.allCases)
+        func aStructuredRequestLeavesItsSchemaOutWhenAskedTo(_ provider: Provider) async throws {
+            let body = try await sentBody(provider, streaming: false, content: #"{"text":"Hi"}"#) { session in
+                _ = try await session.respond(
+                    to: "Hello",
+                    generating: SchemaPromptGreeting.self,
+                    includeSchemaInPrompt: false
+                )
+            }
+            #expect(userMessage(saying: "Hello", in: body)?.contains("Respond with valid JSON") == false)
+        }
+
+        @Test(arguments: Provider.allCases)
+        func aTextRequestHasNoSchema(_ provider: Provider) async throws {
+            let body = try await sentBody(provider, streaming: false, content: "Hi") { session in
+                _ = try await session.respond(to: "Hello")
+            }
+            #expect(userMessage(saying: "Hello", in: body)?.contains("Respond with valid JSON") == false)
+        }
+    }
 #endif

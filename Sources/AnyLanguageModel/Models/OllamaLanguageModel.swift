@@ -1,6 +1,8 @@
 import Foundation
 import HTTPTypes
-import HTTPTypesFoundation
+#if !os(WASI)
+    import HTTPTypesFoundation
+#endif
 import JSONSchema
 import OrderedCollections
 
@@ -150,6 +152,11 @@ public struct OllamaLanguageModel: LanguageModel, ProfileRequestIdentifiedLangua
             ollamaFormat = try JSONValue(schema)
         }
 
+        let schemaInstructions = GenerationSchema.promptInstructions(
+            generating: type,
+            schema: schema,
+            includeSchemaInPrompt: includeSchemaInPrompt
+        )
         let url = baseURL.appendingPathComponent("api/chat")
         var entries: [Transcript.Entry] = []
         var usage = RequestsUsage()
@@ -179,7 +186,7 @@ public struct OllamaLanguageModel: LanguageModel, ProfileRequestIdentifiedLangua
                 convertToolToOllamaFormat
             )
             var messages = try ollamaMessages(
-                from: requestContext.transcript,
+                from: requestContext.transcript.saying(schemaInstructions),
                 replacing: entries,
                 with: inFlightMessages,
                 hasDynamicProfile: requestContext.hasDynamicProfile
@@ -325,7 +332,13 @@ public struct OllamaLanguageModel: LanguageModel, ProfileRequestIdentifiedLangua
             continuation in
             let task = Task {
                 do {
-                    let format = type == String.self ? nil : try JSONValue(convertSchemaToOllamaFormat(schema))
+                    let format: JSONValue? =
+                        type == String.self ? nil : try JSONValue(convertSchemaToOllamaFormat(schema))
+                    let schemaInstructions = GenerationSchema.promptInstructions(
+                        generating: type,
+                        schema: schema,
+                        includeSchemaInPrompt: includeSchemaInPrompt
+                    )
                     var inFlightMessages: [OllamaMessage] = []
                     var state = StreamingResponseState<Content>()
                     let toolRounds = session.toolRoundLimit(for: "Ollama", options: options)
@@ -354,7 +367,7 @@ public struct OllamaLanguageModel: LanguageModel, ProfileRequestIdentifiedLangua
                             convertToolToOllamaFormat
                         )
                         var messages = try ollamaMessages(
-                            from: requestContext.transcript,
+                            from: requestContext.transcript.saying(schemaInstructions),
                             replacing: state.entries,
                             with: inFlightMessages,
                             hasDynamicProfile: requestContext.hasDynamicProfile

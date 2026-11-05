@@ -132,6 +132,22 @@ struct ResponseSchemaInliningTests {
         }
     }
 
+    /// A schema that can't be inlined, such as a recursive one, is said in the prompt as it's
+    /// encoded, with its definitions.
+    @Test func aRecursiveSchemaIsSaidWithItsDefinitions() throws {
+        let root = DynamicGenerationSchema(
+            name: "Node",
+            properties: [
+                .init(name: "children", schema: .init(arrayOf: .init(referenceTo: "Node")))
+            ]
+        )
+        let prompt = try GenerationSchema(root: root, dependencies: []).schemaPrompt()
+        #expect(prompt.hasPrefix("Respond with valid JSON matching this"), "\(prompt)")
+        #expect(prompt.contains(#""$defs""#), "\(prompt)")
+        #expect(prompt.contains(#""Node""#), "\(prompt)")
+        #expect(prompt.contains(#""children""#), "\(prompt)")
+    }
+
     @Test(arguments: [
         ##"{"$ref":"#/$defs/Missing"}"##,
         ##"{"type":"object","properties":{"item":{"$ref":"#/$defs/Missing"}}}"##,
