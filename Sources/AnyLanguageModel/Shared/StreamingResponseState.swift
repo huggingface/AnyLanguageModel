@@ -55,13 +55,15 @@ struct StreamingResponseState<Content: Generable> {
     /// The value must decode as the complete content type, not only its partial form,
     /// so that `collect()` accepts the snapshot.
     /// A type that accepts none of these values
-    /// throws ``LanguageModelSession/ToolExecutionStopped`` with the entries instead.
+    /// throws ``LanguageModelSession/ToolExecutionStopped`` with the entries
+    /// and the usage of the requests so far instead.
     func stoppedSnapshot(provider: String) throws -> LanguageModelSession.ResponseStream<Content>.Snapshot {
         if let snapshot = snapshot(), (try? Content(snapshot.rawContent)) != nil { return snapshot }
         guard let empty = StoppedContent.empty(Content.self) else {
             throw LanguageModelSession.ToolExecutionStopped(
                 provider: provider,
-                transcriptEntries: ArraySlice(entries)
+                transcriptEntries: ArraySlice(entries),
+                requests: requests
             )
         }
         return .init(

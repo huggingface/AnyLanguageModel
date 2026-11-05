@@ -1509,6 +1509,9 @@ public final class LanguageModelSession: @unchecked Sendable {
                         session.endResponding()
                         continuation.finish()
                     } catch {
+                        if let stopped = error as? ToolExecutionStopped {
+                            counted.count(stopped.requests, prepaid: nil)
+                        }
                         session.withTranscriptMutation {
                             session.state.withLock { state in
                                 state.removeEntries(committedEntries)

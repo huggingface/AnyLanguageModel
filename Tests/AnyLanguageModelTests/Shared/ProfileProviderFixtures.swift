@@ -187,6 +187,42 @@ import Testing
             #expect(selected.sawToolOutput)
         }
 
+        /// A stop after a model handoff that throws reports and counts the rounds of both models.
+        func providerModelHandoffStopKeepsEveryRound(_ provider: Provider, _ streaming: Bool) async throws {
+            UsageURLProtocol.reset()
+            for _ in 0 ..< 2 {
+                UsageURLProtocol.enqueue(
+                    json: streaming
+                        ? try provider.toolStream()
+                        : try Self.json(provider.response(text: "", counts: provider.counts, tool: true))
+                )
+            }
+            let state = AlternatingProviderProfileState()
+            let session = LanguageModelSession(
+                profile: AlternatingProviderProfile(
+                    state: state,
+                    first: provider.makeModel(),
+                    second: provider.makeModel()
+                )
+            )
+            session.toolExecutionDelegate = StopSecondRoundDelegate()
+
+            let error = await #expect(throws: LanguageModelSession.ToolExecutionStopped.self) {
+                if streaming {
+                    _ = try await session.streamResponse(to: "Weather?", generating: Int.self).collect()
+                } else {
+                    _ = try await session.respond(to: "Weather?", generating: Int.self)
+                }
+            }
+
+            #expect(state.useSecond.withLock { $0 })
+            #expect(error?.transcriptEntries.count == 3)
+            #expect(UsageURLProtocol.recordedBodies.count == 2)
+            var everyRequest = provider.expected
+            everyRequest.add(provider.expected)
+            #expect(session.usage == everyRequest)
+        }
+
         func providerModelHandoffsShareToolRoundLimit(_ provider: Provider, _ streaming: Bool) async throws {
             UsageURLProtocol.reset()
             let limit = GenerationOptions().maximumToolRounds

@@ -38,26 +38,30 @@ extension LanguageModelSession {
             callSiteValue: includeSchemaInPrompt
         )
         let response: Response<Content>
-        if type == GeneratedContent.self {
-            let generated = try await requestContext.model.respond(
-                within: self,
-                to: prompt,
-                schema: schema,
-                includeSchemaInPrompt: includeSchemaInPrompt,
-                options: requestContext.options
-            )
-            guard let typed = generated as? Response<Content> else {
-                preconditionFailure("GeneratedContent response type mismatch")
+        do {
+            if type == GeneratedContent.self {
+                let generated = try await requestContext.model.respond(
+                    within: self,
+                    to: prompt,
+                    schema: schema,
+                    includeSchemaInPrompt: includeSchemaInPrompt,
+                    options: requestContext.options
+                )
+                guard let typed = generated as? Response<Content> else {
+                    preconditionFailure("GeneratedContent response type mismatch")
+                }
+                response = typed
+            } else {
+                response = try await requestContext.model.respond(
+                    within: self,
+                    to: prompt,
+                    generating: type,
+                    includeSchemaInPrompt: includeSchemaInPrompt,
+                    options: requestContext.options
+                )
             }
-            response = typed
-        } else {
-            response = try await requestContext.model.respond(
-                within: self,
-                to: prompt,
-                generating: type,
-                includeSchemaInPrompt: includeSchemaInPrompt,
-                options: requestContext.options
-            )
+        } catch let stopped as ToolExecutionStopped {
+            throw stopped.continuing(after: prefixEntries, usage: prefixUsage)
         }
 
         var earlierUsage = prefixUsage
@@ -147,6 +151,8 @@ extension LanguageModelSession {
                         )
                     }
                     continuation.finish()
+                } catch let stopped as ToolExecutionStopped {
+                    continuation.finish(throwing: stopped.continuing(after: prefixEntries, usage: prefixUsage))
                 } catch {
                     continuation.finish(throwing: error)
                 }

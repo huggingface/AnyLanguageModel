@@ -1015,9 +1015,55 @@ import Testing
                 #expect(error?.provider == provider.name)
                 #expect(error?.transcriptEntries.count == 1)
                 #expect(session.transcript.count == 1)
+                #expect(session.usage == provider.expected)
             }
             try await expectStopped(Int.self)
             try await expectStopped(Bool.self)
+        }
+
+        /// A response that stops in a later round and throws counts every round's request once,
+        /// whether or not snapshots already reported some of them.
+        @Test(arguments: Provider.allCases, [false, true])
+        func stoppedResponseAfterCompletedRoundCountsEveryRequest(
+            _ provider: Provider,
+            _ streaming: Bool
+        ) async throws {
+            // Without a dynamic profile, Anthropic's `respond` makes one request.
+            if provider == .anthropic && !streaming { return }
+            func expectStopped<Content: Generable>(_ type: Content.Type) async throws {
+                UsageURLProtocol.reset()
+                for _ in 0 ..< 2 {
+                    UsageURLProtocol.enqueue(
+                        json: streaming
+                            ? try provider.toolStream()
+                            : try Self.json(provider.response(text: "", counts: provider.counts, tool: true))
+                    )
+                }
+                let tool = RecordingWeatherTool()
+                let session = provider.makeSession(tools: [tool])
+                session.toolExecutionDelegate = StopSecondRoundDelegate()
+                let error = await #expect(throws: LanguageModelSession.ToolExecutionStopped.self) {
+                    if streaming {
+                        _ = try await session.streamResponse(to: "Weather?", generating: type).collect()
+                    } else {
+                        _ = try await session.respond(to: "Weather?", generating: type)
+                    }
+                }
+                #expect(error?.transcriptEntries.count == 3)
+                #expect(tool.cities.withLock { $0 } == ["Paris"])
+                #expect(UsageURLProtocol.recordedBodies.count == 2)
+                #expect(session.transcript.count == 1)
+                #expect(session.usage == Self.usage(of: provider, requests: 2))
+                #expect(!session.isResponding)
+            }
+            try await expectStopped(Int.self)
+            try await expectStopped(Bool.self)
+            try await expectStopped(Forecast.self)
+        }
+
+        @Test(arguments: Provider.allCases, [false, true])
+        func stoppedResponseAfterModelHandoff(_ provider: Provider, _ streaming: Bool) async throws {
+            try await providerModelHandoffStopKeepsEveryRound(provider, streaming)
         }
 
         @Test(arguments: Provider.allCases)
@@ -1041,6 +1087,7 @@ import Testing
             let stopped = try #require(thrownError as? LanguageModelSession.ToolExecutionStopped)
             #expect(stopped.provider == provider.name)
             #expect(stopped.transcriptEntries.count == 1)
+            #expect(session.usage == provider.expected)
         }
 
         @Test func openResponsesToolHistoryUsesTopLevelFunctionCallItems() async throws {
@@ -1502,6 +1549,21 @@ import Testing
             func toolCallDecision(for toolCall: Transcript.ToolCall, in session: LanguageModelSession) async
                 -> ToolExecutionDecision
             { .stop }
+        }
+
+        /// Runs the first tool call and stops the next one.
+        struct StopSecondRoundDelegate: ToolExecutionDelegate {
+            let calls = Locked(0)
+
+            func toolCallDecision(for toolCall: Transcript.ToolCall, in session: LanguageModelSession) async
+                -> ToolExecutionDecision
+            {
+                let call = calls.withLock { calls in
+                    calls += 1
+                    return calls
+                }
+                return call == 1 ? .execute : .stop
+            }
         }
 
         @Test(arguments: Provider.allCases)
