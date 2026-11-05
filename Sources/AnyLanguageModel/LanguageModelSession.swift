@@ -1550,9 +1550,10 @@ public final class LanguageModelSession: @unchecked Sendable {
     /// - Note: This API is exclusive to AnyLanguageModel on OS 26.
     ///   It follows the Foundation Models 27 `Usage` API,
     ///   so code that uses it ports to Foundation Models on OS 27.
-    ///   The `Codable` and `Equatable` conformances are exclusive to AnyLanguageModel;
+    ///   The `Codable`, `CustomReflectable`, and `Equatable` conformances
+    ///   are exclusive to AnyLanguageModel;
     ///   Foundation Models 27 doesn't provide them.
-    public struct Usage: Sendable, Equatable, Codable {
+    public struct Usage: Sendable, Equatable, Codable, CustomReflectable {
         /// Token counts for the input submitted to the model.
         public struct Input: Sendable, Equatable, Codable {
             /// The number of input tokens reported by the provider.
@@ -1606,7 +1607,7 @@ public final class LanguageModelSession: @unchecked Sendable {
         /// It stays with the value when a model copies the usage to another snapshot,
         /// as when it rebuilds the snapshot with the public initializer,
         /// so that the session doesn't count the requests again.
-        /// It isn't compared or encoded.
+        /// It isn't compared, encoded, or reflected.
         internal var prepaid: CountedRequestsUsage.Prepaid?
 
         /// The sum of the input and output token counts.
@@ -1642,6 +1643,11 @@ public final class LanguageModelSession: @unchecked Sendable {
 
         public static func == (lhs: Self, rhs: Self) -> Bool {
             lhs.input == rhs.input && lhs.output == rhs.output && lhs.metadata == rhs.metadata
+        }
+
+        /// A mirror of the public fields, which descriptions and `dump` show.
+        public var customMirror: Mirror {
+            Mirror(self, children: ["input": input, "output": output, "metadata": metadata], displayStyle: .struct)
         }
 
         /// Accumulates counts across responses;
