@@ -102,7 +102,7 @@ extension LanguageModel {
         includeSchemaInPrompt: Bool,
         options: GenerationOptions
     ) -> LanguageModelSession.ResponseStream<Content> {
-        streamStructuredResponse {
+        streamStructuredResponse(within: session) {
             try await respond(
                 within: session,
                 to: prompt,
@@ -114,14 +114,22 @@ extension LanguageModel {
     }
 
     /// Converts a complete response into one snapshot without changing its schema.
+    ///
+    /// A stream counts its requests from its snapshots.
+    /// A response that throws yields none,
+    /// so the requests of the rounds that it completed are counted for `session` instead.
     func streamStructuredResponse<Content: Generable>(
+        within session: LanguageModelSession,
         generate: @escaping @Sendable () async throws -> LanguageModelSession.Response<Content>
     ) -> LanguageModelSession.ResponseStream<Content> {
         .init(
             stream: AsyncThrowingStream { continuation in
                 let task = Task {
+                    let channel = RequestUsageChannel { _ in }
                     do {
-                        let response = try await generate()
+                        let response = try await RequestUsageChannel.$current.withValue(channel) {
+                            try await generate()
+                        }
                         continuation.yield(
                             .init(
                                 content: response.content.asPartiallyGenerated(),
@@ -132,6 +140,7 @@ extension LanguageModel {
                         )
                         continuation.finish()
                     } catch {
+                        session.recordUsage(channel.reportedUsage)
                         continuation.finish(throwing: error)
                     }
                 }
