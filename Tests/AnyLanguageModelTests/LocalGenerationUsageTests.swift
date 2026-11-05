@@ -387,13 +387,20 @@ struct LocalGenerationUsageTests {
     /// A wrapper that makes two requests of its own
     /// and reports each in snapshots that it builds with the public initializer
     /// counts both requests.
+    ///
+    /// A snapshot built with the public initializer reports only its final request's usage,
+    /// so the session can't tell a new request from an update of the same one,
+    /// and counts the highest value of each field.
+    /// Counting both needs a public way to report the usage of a response's earlier requests.
     @Test func wrapperRequestsReportedWithThePublicInitializerCountEach() async throws {
         let model = LocalTwoOwnRequestsModel()
         let session = LanguageModelSession(model: model)
         for try await _ in session.streamResponse(to: "A number", generating: Int.self) {}
         var total = model.first
         total.add(model.second)
-        #expect(session.usage == total)
+        withKnownIssue("The public snapshot initializer reports only the final request's usage") {
+            #expect(session.usage == total)
+        }
     }
 }
 

@@ -209,25 +209,26 @@ final class RequestUsageChannel: Sendable {
 /// so the session counts each request once,
 /// whether or not the snapshot reaches it, and whatever relays it.
 final class CountedRequestsUsage: Sendable {
-    /// The requests that a snapshot reports and that the account counted before the snapshot.
+    /// The requests that a snapshot reports and that an account counted before the snapshot.
+    ///
+    /// The usage of the snapshot's final request carries it,
+    /// including in copies of that usage, such as a snapshot rebuilt with the public initializer.
     final class Prepaid: Sendable {
-        /// The usage of the snapshot's final request.
-        let final: LanguageModelSession.Usage
+        /// The account that counted the requests.
+        weak let account: CountedRequestsUsage?
 
-        fileprivate init(final: LanguageModelSession.Usage) {
-            self.final = final
+        /// The requests that the account counted.
+        let requests: RequestsUsage
+
+        fileprivate init(account: CountedRequestsUsage, requests: RequestsUsage) {
+            self.account = account
+            self.requests = requests
         }
     }
 
-    private struct State: Sendable {
-        /// The highest usage that the stream's own snapshots reported.
-        var reported = LanguageModelSession.Usage.zero
-        /// Prepaid requests whose snapshots the session hasn't read yet.
-        var pending: [Prepaid] = []
-    }
-
     private let record: @Sendable (LanguageModelSession.Usage) -> Void
-    private let state = Locked(State())
+    /// The highest usage that the stream's own requests reported.
+    private let reported = Locked(LanguageModelSession.Usage.zero)
 
     /// An account that passes the usage that it hasn't counted yet to `record`.
     init(record: @escaping @Sendable (LanguageModelSession.Usage) -> Void) {
@@ -237,35 +238,41 @@ final class CountedRequestsUsage: Sendable {
     /// Counts `requests` before the snapshot that reports them,
     /// whatever the stream's other snapshots reported.
     ///
-    /// - Returns: The token for the snapshot to carry,
+    /// - Returns: The token for the usage of the snapshot's final request to carry,
     ///   so that the session doesn't count its requests again.
     func prepay(_ requests: RequestsUsage) -> Prepaid {
-        let prepaid = Prepaid(final: requests.final)
-        state.withLock { $0.pending.append(prepaid) }
-        record(requests.total)
-        return prepaid
+        var counted = requests
+        counted.final.prepaid = nil
+        record(counted.total)
+        return Prepaid(account: self, requests: counted)
     }
 
     /// Counts the usage in a snapshot's `requests` that isn't counted yet.
     ///
-    /// A snapshot that carries `prepaid` counts nothing.
-    /// So does a snapshot without it that reports only a pending prepaid request,
-    /// as when a model rebuilds a prepaid snapshot with the public initializer.
-    /// Other snapshots report the stream's own requests,
-    /// and count what they add to the highest usage that those reported.
-    func count(_ requests: RequestsUsage, prepaid: Prepaid?) {
-        let increment = state.withLock { state -> LanguageModelSession.Usage in
-            if let prepaid {
-                state.pending.removeAll { $0 === prepaid }
-                return .zero
-            }
-            if let index = state.pending.firstIndex(where: { $0.final == requests.total }) {
-                state.pending.remove(at: index)
-                return .zero
-            }
-            return requests.total.increment(since: &state.reported)
+    /// A snapshot whose final request's usage carries a token that this account made
+    /// counts only what a model changed in the prepaid requests' usage.
+    /// Other snapshots report the stream's own requests.
+    /// Either counts what it adds to the highest usage that the stream's own requests reported.
+    func count(_ requests: RequestsUsage) {
+        var own = requests
+        if let prepaid = requests.final.prepaid, prepaid.account === self {
+            own = RequestsUsage(
+                earlier: Self.change(of: requests.earlier, from: prepaid.requests.earlier),
+                final: Self.change(of: requests.final, from: prepaid.requests.final)
+            )
         }
+        let increment = reported.withLock { own.total.increment(since: &$0) }
         record(increment)
+    }
+
+    /// The counts that `usage` adds to `prepaid`, and the metadata that it changes.
+    private static func change(
+        of usage: LanguageModelSession.Usage,
+        from prepaid: LanguageModelSession.Usage
+    ) -> LanguageModelSession.Usage {
+        var change = usage.subtracting(prepaid)
+        change.metadata = usage.metadata.filter { prepaid.metadata[$0.key] != $0.value }
+        return change
     }
 }
 
