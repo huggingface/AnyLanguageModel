@@ -118,6 +118,10 @@ extension LanguageModel {
     /// A stream counts its requests from its snapshots.
     /// A response that throws yields none,
     /// so the requests of the rounds that it completed are counted for `session` instead.
+    /// A response that returns after the consumer cancels
+    /// yields a snapshot that `session` doesn't read,
+    /// so its requests are counted before the snapshot is yielded,
+    /// through an account that the snapshot shares with `session`.
     func streamStructuredResponse<Content: Generable>(
         within session: LanguageModelSession,
         generate: @escaping @Sendable () async throws -> LanguageModelSession.Response<Content>
@@ -126,16 +130,19 @@ extension LanguageModel {
             stream: AsyncThrowingStream { continuation in
                 let task = Task {
                     let channel = RequestUsageChannel { _ in }
+                    let counted = CountedRequestsUsage { session.recordUsage($0) }
                     do {
                         let response = try await RequestUsageChannel.$current.withValue(channel) {
                             try await generate()
                         }
+                        counted.count(response.requests.total)
                         continuation.yield(
                             .init(
                                 content: response.content.asPartiallyGenerated(),
                                 rawContent: response.rawContent,
                                 transcriptEntries: response.transcriptEntries,
-                                requests: response.requests
+                                requests: response.requests,
+                                countedRequests: counted
                             )
                         )
                         continuation.finish()

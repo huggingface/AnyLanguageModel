@@ -182,6 +182,28 @@ final class RequestUsageChannel: Sendable {
     }
 }
 
+/// The usage of a streamed response's requests that its session counted.
+///
+/// A stream that yields one complete snapshot
+/// counts the snapshot's requests through this before it yields the snapshot,
+/// and the session counts them through the same account when it reads the snapshot,
+/// so the session counts each request once,
+/// whether or not the snapshot reaches it.
+final class CountedRequestsUsage: Sendable {
+    private let record: @Sendable (LanguageModelSession.Usage) -> Void
+    private let counted = Locked(LanguageModelSession.Usage.zero)
+
+    /// An account that passes the usage that it hasn't counted yet to `record`.
+    init(record: @escaping @Sendable (LanguageModelSession.Usage) -> Void) {
+        self.record = record
+    }
+
+    /// Counts the usage in `total` that isn't counted yet.
+    func count(_ total: LanguageModelSession.Usage) {
+        record(counted.withLock { total.increment(since: &$0) })
+    }
+}
+
 /// Usage fields shared by OpenAI's Responses API and Open Responses.
 struct ResponsesUsage: Decodable, Sendable {
     let inputTokens: Int?
