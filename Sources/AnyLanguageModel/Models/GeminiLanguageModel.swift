@@ -345,11 +345,10 @@ public struct GeminiLanguageModel: LanguageModel, ProfileRequestIdentifiedLangua
                 switch resolution {
                 case .stop:
                     entries.append(.toolCalls(callsEntry))
-                    let empty = try emptyResponseContent(for: type)
-                    return LanguageModelSession.Response(
-                        content: empty.content,
-                        rawContent: empty.rawContent,
-                        transcriptEntries: ArraySlice(entries),
+                    return try stoppedResponse(
+                        generating: type,
+                        provider: "Gemini",
+                        transcriptEntries: entries,
                         requests: usage
                     )
                 case .invocations(let invocations):
@@ -544,7 +543,7 @@ public struct GeminiLanguageModel: LanguageModel, ProfileRequestIdentifiedLangua
                         switch resolution {
                         case .stop:
                             state.entries.append(.toolCalls(callsEntry))
-                            continuation.yield(try state.stoppedSnapshot())
+                            continuation.yield(try state.stoppedSnapshot(provider: "Gemini"))
                             continuation.finish()
                             return
                         case .invocations(let invocations):
@@ -768,25 +767,6 @@ private func textPartsText(_ parts: [GeminiPart]?) -> String {
         default: return nil
         }
     }.joined() ?? ""
-}
-
-private func emptyResponseContent<Content: Generable>(
-    for type: Content.Type
-) throws -> (content: Content, rawContent: GeneratedContent) {
-    if type == String.self {
-        let raw = GeneratedContent("")
-        return ("" as! Content, raw)
-    }
-
-    let rawEmpty = GeneratedContent(properties: [:])
-    do {
-        let content = try type.init(rawEmpty)
-        return (content, rawEmpty)
-    } catch {
-        let rawNull = try GeneratedContent(json: "null")
-        let content = try type.init(rawNull)
-        return (content, rawNull)
-    }
 }
 
 private func toGeminiFunctionResponse(

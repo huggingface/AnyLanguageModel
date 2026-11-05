@@ -233,10 +233,10 @@ public struct OllamaLanguageModel: LanguageModel, ProfileRequestIdentifiedLangua
                 switch resolution {
                 case .stop:
                     entries.append(.toolCalls(callsEntry))
-                    return .init(
-                        content: "" as! Content,
-                        rawContent: GeneratedContent(""),
-                        transcriptEntries: ArraySlice(entries),
+                    return try stoppedResponse(
+                        generating: type,
+                        provider: "Ollama",
+                        transcriptEntries: entries,
                         requests: usage
                     )
                 case .invocations(let invocations):
@@ -434,7 +434,7 @@ public struct OllamaLanguageModel: LanguageModel, ProfileRequestIdentifiedLangua
                         switch resolution {
                         case .stop:
                             state.entries.append(.toolCalls(callsEntry))
-                            continuation.yield(try state.stoppedSnapshot())
+                            continuation.yield(try state.stoppedSnapshot(provider: "Ollama"))
                             continuation.finish()
                             return
                         case .invocations(let invocations):

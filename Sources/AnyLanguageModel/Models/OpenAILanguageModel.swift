@@ -631,11 +631,10 @@ public struct OpenAILanguageModel: LanguageModel, ProfileRequestIdentifiedLangua
                     if !calls.isEmpty {
                         entries.append(.toolCalls(callsEntry))
                     }
-                    let empty = try emptyResponseContent(for: type)
-                    return LanguageModelSession.Response(
-                        content: empty.content,
-                        rawContent: empty.rawContent,
-                        transcriptEntries: ArraySlice(entries),
+                    return try stoppedResponse(
+                        generating: type,
+                        provider: "OpenAI",
+                        transcriptEntries: entries,
                         requests: usage
                     )
                 case .invocations(let invocations):
@@ -781,11 +780,10 @@ public struct OpenAILanguageModel: LanguageModel, ProfileRequestIdentifiedLangua
                     if !calls.isEmpty {
                         entries.append(.toolCalls(callsEntry))
                     }
-                    let empty = try emptyResponseContent(for: type)
-                    return LanguageModelSession.Response(
-                        content: empty.content,
-                        rawContent: empty.rawContent,
-                        transcriptEntries: ArraySlice(entries),
+                    return try stoppedResponse(
+                        generating: type,
+                        provider: "OpenAI",
+                        transcriptEntries: entries,
                         requests: usage
                     )
                 case .invocations(let invocations):
@@ -1057,7 +1055,7 @@ public struct OpenAILanguageModel: LanguageModel, ProfileRequestIdentifiedLangua
                         switch resolution {
                         case .stop:
                             state.entries.append(.toolCalls(callsEntry))
-                            continuation.yield(try state.stoppedSnapshot())
+                            continuation.yield(try state.stoppedSnapshot(provider: "OpenAI"))
                             continuation.finish()
                             return
                         case .invocations(let invocations):
@@ -2176,19 +2174,6 @@ private func convertToolToOpenAIFormat(_ tool: any Tool) -> OpenAITool {
         rawParameters: rawParameters
     )
     return OpenAITool(type: "function", function: fn)
-}
-
-private func emptyResponseContent<Content: Generable>(
-    for type: Content.Type
-) throws -> (content: Content, rawContent: GeneratedContent) {
-    if type == String.self {
-        let raw = GeneratedContent("")
-        return ("" as! Content, raw)
-    }
-
-    let raw = GeneratedContent(properties: [:])
-    let content = try type.init(raw)
-    return (content, raw)
 }
 
 private func toGeneratedContent(_ jsonString: String?) throws -> GeneratedContent {
