@@ -1431,7 +1431,7 @@ public final class LanguageModelSession: @unchecked Sendable {
                     do {
                         for try await snapshot in stream {
                             lastSnapshot = snapshot
-                            counted.count(snapshot.requests, prepaid: snapshot.prepaid)
+                            counted.count(snapshot.requests)
                             continuation.yield(snapshot)
                         }
 
@@ -1550,9 +1550,10 @@ public final class LanguageModelSession: @unchecked Sendable {
     /// - Note: This API is exclusive to AnyLanguageModel on OS 26.
     ///   It follows the Foundation Models 27 `Usage` API,
     ///   so code that uses it ports to Foundation Models on OS 27.
-    ///   The `Codable` and `Equatable` conformances are exclusive to AnyLanguageModel;
+    ///   The `Codable`, `CustomReflectable`, and `Equatable` conformances
+    ///   are exclusive to AnyLanguageModel;
     ///   Foundation Models 27 doesn't provide them.
-    public struct Usage: Sendable, Equatable, Codable {
+    public struct Usage: Sendable, Equatable, Codable, CustomReflectable {
         /// Token counts for the input submitted to the model.
         public struct Input: Sendable, Equatable, Codable {
             /// The number of input tokens reported by the provider.
@@ -1600,6 +1601,15 @@ public final class LanguageModelSession: @unchecked Sendable {
         /// Additional usage statistics supplied by the model.
         public var metadata: [String: GeneratedContent]
 
+        /// The token for the requests of a snapshot whose stream counted them before yielding it,
+        /// if this is the usage of that snapshot's final request.
+        ///
+        /// It stays with the value when a model copies the usage to another snapshot,
+        /// as when it rebuilds the snapshot with the public initializer,
+        /// so that the session doesn't count the requests again.
+        /// It isn't compared, encoded, or reflected.
+        internal var prepaid: CountedRequestsUsage.Prepaid?
+
         /// The sum of the input and output token counts.
         public var totalTokenCount: Int {
             input.totalTokenCount + output.totalTokenCount
@@ -1626,6 +1636,19 @@ public final class LanguageModelSession: @unchecked Sendable {
             input: .init(totalTokenCount: 0, cachedTokenCount: 0),
             output: .init(totalTokenCount: 0, reasoningTokenCount: 0)
         )
+
+        private enum CodingKeys: String, CodingKey {
+            case input, output, metadata
+        }
+
+        public static func == (lhs: Self, rhs: Self) -> Bool {
+            lhs.input == rhs.input && lhs.output == rhs.output && lhs.metadata == rhs.metadata
+        }
+
+        /// A mirror of the public fields, which descriptions and `dump` show.
+        public var customMirror: Mirror {
+            Mirror(self, children: ["input": input, "output": output, "metadata": metadata], displayStyle: .struct)
+        }
 
         /// Accumulates counts across responses;
         /// the latest value wins for each metadata key.
@@ -2920,8 +2943,6 @@ extension LanguageModelSession {
 
             internal var providerMetadata: [String: String]?
 
-            /// The token for this snapshot's requests, if its stream counted them before yielding it.
-            internal var prepaid: CountedRequestsUsage.Prepaid?
             /// Creates a snapshot from partially generated content and raw content.
             /// - Parameters:
             ///   - content: The partially generated content.
@@ -2955,15 +2976,13 @@ extension LanguageModelSession {
                 rawContent: GeneratedContent,
                 transcriptEntries: ArraySlice<Transcript.Entry> = [],
                 requests: RequestsUsage,
-                providerMetadata: [String: String]? = nil,
-                prepaid: CountedRequestsUsage.Prepaid? = nil
+                providerMetadata: [String: String]? = nil
             ) {
                 self.content = content
                 self.rawContent = rawContent
                 self.transcriptEntries = transcriptEntries
                 self.requests = requests
                 self.providerMetadata = providerMetadata
-                self.prepaid = prepaid
             }
         }
     }

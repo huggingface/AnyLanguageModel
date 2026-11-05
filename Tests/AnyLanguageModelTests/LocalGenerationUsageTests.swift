@@ -239,6 +239,57 @@ struct LocalGenerationUsageTests {
         #expect(session.usage == model.round)
     }
 
+    /// Usage describes only its public fields, whether or not it carries a prepaid token,
+    /// as usage in Foundation Models does.
+    @Test(arguments: [false, true])
+    func usageDescriptionsOmitThePrepaidToken(carriesToken: Bool) throws {
+        var usage = LanguageModelSession.Usage(
+            input: .init(totalTokenCount: 20, cachedTokenCount: 1),
+            output: .init(totalTokenCount: 4, reasoningTokenCount: 2),
+            metadata: ["k": "v"]
+        )
+        if carriesToken {
+            let account = CountedRequestsUsage { _ in }
+            usage.prepaid = account.prepay(RequestsUsage(final: usage))
+            try #require(usage.prepaid != nil)
+        }
+
+        let fields = """
+            (input: AnyLanguageModel.LanguageModelSession.Usage.Input(totalTokenCount: 20, cachedTokenCount: 1), \
+            output: AnyLanguageModel.LanguageModelSession.Usage.Output(totalTokenCount: 4, reasoningTokenCount: 2), \
+            metadata: ["k": GeneratedContent(string("v"))])
+            """
+        #expect(String(describing: usage) == "Usage" + fields)
+        #expect("\(usage)" == "Usage" + fields)
+        #expect(String(reflecting: usage) == "AnyLanguageModel.LanguageModelSession.Usage" + fields)
+
+        var dumped = ""
+        dump(usage, to: &dumped)
+        #expect(
+            dumped == """
+                ▿ AnyLanguageModel.LanguageModelSession.Usage
+                  ▿ input: AnyLanguageModel.LanguageModelSession.Usage.Input
+                    - totalTokenCount: 20
+                    - cachedTokenCount: 1
+                  ▿ output: AnyLanguageModel.LanguageModelSession.Usage.Output
+                    - totalTokenCount: 4
+                    - reasoningTokenCount: 2
+                  ▿ metadata: 1 key/value pair
+                    ▿ (2 elements)
+                      - key: "k"
+                      ▿ value: GeneratedContent(string("v"))
+                        - id: nil
+                        ▿ kind: AnyLanguageModel.GeneratedContent.Kind.string
+                          - string: "v"
+
+                """
+        )
+
+        let mirror = Mirror(reflecting: usage)
+        #expect(mirror.children.map(\.label) == ["input", "output", "metadata"])
+        #expect(mirror.displayStyle == .struct)
+    }
+
     /// A structured response that reports its rounds as they complete
     /// counts each request once, whether or not it's streamed.
     @Test(arguments: [false, true])
@@ -357,6 +408,50 @@ struct LocalGenerationUsageTests {
         var total = childFirst ? model.first : model.second
         total.add(model.child.round)
         #expect(session.usage == total)
+    }
+
+    /// A wrapper's own snapshot whose usage equals a structured stream's final request
+    /// counts as the wrapper's request,
+    /// whether or not the wrapper then relays the structured snapshot.
+    @Test(arguments: [false, true])
+    func ownSnapshotMatchingAStructuredRequestCountsOnce(relaysChild: Bool) async throws {
+        let model = LocalMatchingOwnUsageModel(relaysChild: relaysChild)
+        let session = LanguageModelSession(model: model)
+        for try await _ in session.streamResponse(to: "A number", generating: Int.self) {}
+        var total = model.own
+        total.add(model.child.round)
+        #expect(session.usage == total)
+    }
+
+    /// A structured snapshot that a wrapper rebuilds with the public initializer
+    /// and whose usage the wrapper increases
+    /// counts the structured stream's request once and the wrapper's increase.
+    @Test func rebuiltStructuredSnapshotWithChangedUsageCountsTheChange() async throws {
+        let model = LocalAdjustingModel()
+        let session = LanguageModelSession(model: model)
+        for try await _ in session.streamResponse(to: "A number", generating: Int.self) {}
+        var total = model.child.round
+        total.add(model.extra)
+        #expect(session.usage == total)
+    }
+
+    /// A wrapper that makes two requests of its own
+    /// and reports each in snapshots that it builds with the public initializer
+    /// counts both requests.
+    ///
+    /// A snapshot built with the public initializer reports only its final request's usage,
+    /// so the session can't tell a new request from an update of the same one,
+    /// and counts the highest value of each field.
+    /// Counting both needs a public way to report the usage of a response's earlier requests.
+    @Test func wrapperRequestsReportedWithThePublicInitializerCountEach() async throws {
+        let model = LocalTwoOwnRequestsModel()
+        let session = LanguageModelSession(model: model)
+        for try await _ in session.streamResponse(to: "A number", generating: Int.self) {}
+        var total = model.first
+        total.add(model.second)
+        withKnownIssue("The public snapshot initializer reports only the final request's usage") {
+            #expect(session.usage == total)
+        }
     }
 }
 
@@ -910,6 +1005,192 @@ private struct LocalInterleavedModel: LanguageModel {
                             await model.reportAgain.wait()
                             report(model.second)
                         }
+                        continuation.finish()
+                    } catch {
+                        continuation.finish(throwing: error)
+                    }
+                }
+                continuation.onTermination = { _ in task.cancel() }
+            }
+        )
+    }
+}
+
+/// A model that drains a local model's structured stream,
+/// reports a request of its own whose usage equals the structured stream's request,
+/// and then relays the structured snapshot when `relaysChild` is true.
+private struct LocalMatchingOwnUsageModel: LanguageModel {
+    typealias UnavailableReason = Never
+    let relaysChild: Bool
+    let child = LocalSingleRoundModel()
+    var own: LanguageModelSession.Usage { child.round }
+
+    func respond<Content: Generable>(
+        within session: LanguageModelSession,
+        to prompt: Prompt,
+        generating type: Content.Type,
+        includeSchemaInPrompt: Bool,
+        options: GenerationOptions
+    ) async throws -> LanguageModelSession.Response<Content> {
+        try await streamResponse(
+            within: session,
+            to: prompt,
+            generating: type,
+            includeSchemaInPrompt: includeSchemaInPrompt,
+            options: options
+        ).collect()
+    }
+
+    func streamResponse<Content: Generable>(
+        within session: LanguageModelSession,
+        to prompt: Prompt,
+        generating type: Content.Type,
+        includeSchemaInPrompt: Bool,
+        options: GenerationOptions
+    ) -> sending LanguageModelSession.ResponseStream<Content> {
+        let model = self
+        return .init(
+            stream: AsyncThrowingStream { continuation in
+                let task = Task {
+                    do {
+                        let upstream = model.child.streamResponse(
+                            within: session,
+                            to: prompt,
+                            generating: type,
+                            includeSchemaInPrompt: includeSchemaInPrompt,
+                            options: options
+                        )
+                        var snapshots: [LanguageModelSession.ResponseStream<Content>.Snapshot] = []
+                        for try await snapshot in upstream { snapshots.append(snapshot) }
+                        // A fresh value, as a wrapper reports its own request's usage.
+                        let own = LanguageModelSession.Usage(
+                            input: .init(
+                                totalTokenCount: model.own.input.totalTokenCount,
+                                cachedTokenCount: model.own.input.cachedTokenCount
+                            ),
+                            output: .init(
+                                totalTokenCount: model.own.output.totalTokenCount,
+                                reasoningTokenCount: model.own.output.reasoningTokenCount
+                            )
+                        )
+                        let raw = GeneratedContent(1)
+                        continuation.yield(
+                            .init(content: try Content(raw).asPartiallyGenerated(), rawContent: raw, usage: own)
+                        )
+                        if model.relaysChild {
+                            for snapshot in snapshots { continuation.yield(snapshot) }
+                        }
+                        continuation.finish()
+                    } catch {
+                        continuation.finish(throwing: error)
+                    }
+                }
+                continuation.onTermination = { _ in task.cancel() }
+            }
+        )
+    }
+}
+
+/// A model that rebuilds each snapshot of a local model's structured stream with the public initializer,
+/// adding `extra` input tokens of its own to the snapshot's usage.
+private struct LocalAdjustingModel: LanguageModel {
+    typealias UnavailableReason = Never
+    let child = LocalSingleRoundModel()
+    let extra = LocalGenerationUsage(promptTokenCount: 3, generatedTokenCount: 0).value
+
+    func respond<Content: Generable>(
+        within session: LanguageModelSession,
+        to prompt: Prompt,
+        generating type: Content.Type,
+        includeSchemaInPrompt: Bool,
+        options: GenerationOptions
+    ) async throws -> LanguageModelSession.Response<Content> {
+        try await streamResponse(
+            within: session,
+            to: prompt,
+            generating: type,
+            includeSchemaInPrompt: includeSchemaInPrompt,
+            options: options
+        ).collect()
+    }
+
+    func streamResponse<Content: Generable>(
+        within session: LanguageModelSession,
+        to prompt: Prompt,
+        generating type: Content.Type,
+        includeSchemaInPrompt: Bool,
+        options: GenerationOptions
+    ) -> sending LanguageModelSession.ResponseStream<Content> {
+        let upstream = child.streamResponse(
+            within: session,
+            to: prompt,
+            generating: type,
+            includeSchemaInPrompt: includeSchemaInPrompt,
+            options: options
+        )
+        let extra = extra
+        return .init(
+            stream: AsyncThrowingStream { continuation in
+                let task = Task {
+                    do {
+                        for try await snapshot in upstream {
+                            var usage = snapshot.usage
+                            usage.input.totalTokenCount += extra.input.totalTokenCount
+                            continuation.yield(
+                                .init(content: snapshot.content, rawContent: snapshot.rawContent, usage: usage)
+                            )
+                        }
+                        continuation.finish()
+                    } catch {
+                        continuation.finish(throwing: error)
+                    }
+                }
+                continuation.onTermination = { _ in task.cancel() }
+            }
+        )
+    }
+}
+
+/// A model that makes two requests of its own
+/// and reports each request's usage in a snapshot built with the public initializer.
+/// The second request uses more input tokens and fewer output tokens than the first.
+private struct LocalTwoOwnRequestsModel: LanguageModel {
+    typealias UnavailableReason = Never
+    let first = LocalGenerationUsage(promptTokenCount: 30, generatedTokenCount: 5).value
+    let second = LocalGenerationUsage(promptTokenCount: 40, generatedTokenCount: 2).value
+
+    func respond<Content: Generable>(
+        within session: LanguageModelSession,
+        to prompt: Prompt,
+        generating type: Content.Type,
+        includeSchemaInPrompt: Bool,
+        options: GenerationOptions
+    ) async throws -> LanguageModelSession.Response<Content> {
+        try await streamResponse(
+            within: session,
+            to: prompt,
+            generating: type,
+            includeSchemaInPrompt: includeSchemaInPrompt,
+            options: options
+        ).collect()
+    }
+
+    func streamResponse<Content: Generable>(
+        within session: LanguageModelSession,
+        to prompt: Prompt,
+        generating type: Content.Type,
+        includeSchemaInPrompt: Bool,
+        options: GenerationOptions
+    ) -> sending LanguageModelSession.ResponseStream<Content> {
+        let (first, second) = (first, second)
+        return .init(
+            stream: AsyncThrowingStream { continuation in
+                let task = Task {
+                    do {
+                        let raw = GeneratedContent(7)
+                        let content = try Content(raw).asPartiallyGenerated()
+                        continuation.yield(.init(content: content, rawContent: raw, usage: first))
+                        continuation.yield(.init(content: content, rawContent: raw, usage: second))
                         continuation.finish()
                     } catch {
                         continuation.finish(throwing: error)
