@@ -955,11 +955,10 @@ import Foundation
                     if !calls.isEmpty {
                         allEntries.append(.toolCalls(Transcript.ToolCalls(calls)))
                     }
-                    let stopped = try stoppedResponseContent(for: type)
-                    return LanguageModelSession.Response(
-                        content: stopped.content,
-                        rawContent: stopped.rawContent,
-                        transcriptEntries: ArraySlice(allEntries),
+                    return try stoppedResponse(
+                        generating: type,
+                        provider: "Llama",
+                        transcriptEntries: allEntries,
                         requests: usage
                     )
                 case .invocations(let invocations):

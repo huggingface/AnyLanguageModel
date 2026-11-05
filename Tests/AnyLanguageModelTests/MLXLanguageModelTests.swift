@@ -440,6 +440,37 @@ import Testing
             #expect(response.content.temperatureFahrenheit == 72)
         }
 
+        @Test(arguments: [false, true])
+        func structuredResponseStoppedByDelegate(_ streaming: Bool) async throws {
+            let weatherTool = spy(on: WeatherTool())
+            let session = LanguageModelSession(
+                model: model,
+                tools: [weatherTool],
+                instructions: "You are a helpful assistant. Use available tools when needed."
+            )
+            session.toolExecutionDelegate = StopToolExecutionDelegate()
+            let prompt = "How's the weather in San Francisco?"
+            let options = GenerationOptions(sampling: .greedy, maximumResponseTokens: 512)
+
+            do {
+                _ =
+                    try await streaming
+                    ? session.streamResponse(to: prompt, generating: WeatherReport.self, options: options).collect()
+                    : session.respond(to: prompt, generating: WeatherReport.self, options: options)
+                Issue.record("Expected LanguageModelSession.ToolExecutionStopped")
+            } catch let error as LanguageModelSession.ToolExecutionStopped {
+                #expect(error.provider == "MLX")
+                let calls = error.transcriptEntries.flatMap { entry -> [Transcript.ToolCall] in
+                    if case .toolCalls(let calls) = entry { Array(calls) } else { [] }
+                }
+                #expect(calls.contains { $0.toolName == weatherTool.name })
+                #expect(!error.transcriptEntries.contains { if case .toolOutput = $0 { true } else { false } })
+            }
+            #expect(await weatherTool.calls.isEmpty)
+            // The session keeps only the prompt.
+            #expect(session.transcript.count == 2)
+        }
+
         @Test func multimodalWithImageURL() async throws {
             let transcript = Transcript(entries: [
                 .prompt(

@@ -53,23 +53,41 @@ struct LocalGenerationTokenStream {
 }
 
 extension LanguageModel {
-    /// The content of a response that stops at a tool call
+    /// The response that ends when a ``ToolExecutionDelegate`` stops a tool call
     /// before the model writes an answer.
-    func stoppedResponseContent<Content: Generable>(
-        for type: Content.Type
-    ) throws -> (content: Content, rawContent: GeneratedContent) {
+    ///
+    /// A `String`, or a type that can be empty, ends with an empty value.
+    /// A type with required properties can't be empty,
+    /// so this throws ``LanguageModelSession/ToolExecutionStopped`` with the entries instead.
+    func stoppedResponse<Content: Generable>(
+        generating type: Content.Type,
+        provider: String,
+        transcriptEntries: [Transcript.Entry],
+        requests: RequestsUsage
+    ) throws -> LanguageModelSession.Response<Content> {
+        func response(_ content: Content, _ rawContent: GeneratedContent) -> LanguageModelSession.Response<Content> {
+            .init(
+                content: content,
+                rawContent: rawContent,
+                transcriptEntries: ArraySlice(transcriptEntries),
+                requests: requests
+            )
+        }
         if type == String.self {
-            return ("" as! Content, GeneratedContent(""))
+            return response("" as! Content, GeneratedContent(""))
         }
         let emptyObject = GeneratedContent(properties: [:])
         if let content = try? Content(emptyObject) {
-            return (content, emptyObject)
+            return response(content, emptyObject)
         }
         let nullContent = GeneratedContent(kind: .null)
         if let content = try? Content(nullContent) {
-            return (content, nullContent)
+            return response(content, nullContent)
         }
-        throw GeneratedContentError.typeMismatch
+        throw LanguageModelSession.ToolExecutionStopped(
+            provider: provider,
+            transcriptEntries: ArraySlice(transcriptEntries)
+        )
     }
 
     /// Constrained local generation produces one complete structured snapshot.

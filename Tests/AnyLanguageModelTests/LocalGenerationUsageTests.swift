@@ -179,6 +179,39 @@ struct LocalGenerationUsageTests {
         #expect(respondedSession.usage.totalTokenCount == 48)
         #expect(streamedSession.usage == respondedSession.usage)
     }
+
+    /// A stopped response ends with an empty value when its type can be empty,
+    /// and otherwise throws with the tool calls that the delegate stopped.
+    @Test func stoppedResponseThrowsWithEntriesForRequiredFields() throws {
+        let model = LocalStructuredUsageModel()
+        let call = Transcript.ToolCall(
+            id: "call-1",
+            toolName: WeatherTool().name,
+            arguments: try GeneratedContent(json: #"{"city":"Paris"}"#)
+        )
+        let entries: [Transcript.Entry] = [.toolCalls(.init([call]))]
+
+        let text = try model.stoppedResponse(
+            generating: String.self,
+            provider: "Local",
+            transcriptEntries: entries,
+            requests: RequestsUsage()
+        )
+        #expect(text.content.isEmpty)
+        #expect(Array(text.transcriptEntries) == entries)
+
+        #expect {
+            _ = try model.stoppedResponse(
+                generating: WeatherReport.self,
+                provider: "Local",
+                transcriptEntries: entries,
+                requests: RequestsUsage()
+            )
+        } throws: { error in
+            guard let stopped = error as? LanguageModelSession.ToolExecutionStopped else { return false }
+            return stopped.provider == "Local" && Array(stopped.transcriptEntries) == entries
+        }
+    }
 }
 
 private struct LocalStructuredUsageModel: LanguageModel {

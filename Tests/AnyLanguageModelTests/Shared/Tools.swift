@@ -25,3 +25,12 @@ struct WeatherReport {
     @Guide(description: "The temperature in degrees Fahrenheit")
     var temperatureFahrenheit: Int
 }
+
+/// A delegate that stops every tool call before it runs.
+struct StopToolExecutionDelegate: ToolExecutionDelegate {
+    func toolCallDecision(for toolCall: Transcript.ToolCall, in session: LanguageModelSession) async
+        -> ToolExecutionDecision
+    {
+        .stop
+    }
+}
