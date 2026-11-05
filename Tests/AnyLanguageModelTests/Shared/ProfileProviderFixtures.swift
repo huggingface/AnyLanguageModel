@@ -362,7 +362,8 @@ import Testing
             #expect(state.executions.withLock { $0 } == ["City 0", "City 1"])
             #expect(state.outputHistoryCounts.withLock { $0 } == [1, 2])
             #expect(state.promptIDs.withLock { $0.count } == 1)
-            #expect(session.transcript.count == 6)
+            // The profile's instructions entry, the prompt, two Tool rounds, and the response.
+            #expect(session.transcript.count == 7)
             #expect(Set(session.transcript.map(\.id)).count == session.transcript.count)
             let lastRequest = try #require(UsageURLProtocol.recordedBodies.last)
             let text = String(decoding: lastRequest, as: UTF8.self)
@@ -399,8 +400,16 @@ import Testing
             }
 
             #expect(state.outputHistoryCounts.withLock { $0 } == [1, 2])
-            #expect(session.transcript.count == 1)
-            #expect(session.transcript.allSatisfy { if case .prompt = $0 { true } else { false } })
+            // Only the profile's instructions entry and the prompt remain.
+            #expect(session.transcript.count == 2)
+            #expect(
+                session.transcript.allSatisfy {
+                    switch $0 {
+                    case .instructions, .prompt: true
+                    default: false
+                    }
+                }
+            )
         }
 
         func ordinaryWrapperKeepsTheProviderToolLoop(_ provider: Provider, _ streaming: Bool) async throws {
