@@ -243,23 +243,28 @@ import Testing
 
             let completed = LanguageModelSession(model: model, tools: [WeatherTool()])
             var reportedRounds: [LanguageModelSession.Usage] = []
+            var lastSnapshot: LanguageModelSession.ResponseStream<String>.Snapshot?
             for try await snapshot in completed.streamResponse(to: prompt, options: options) {
                 if snapshot.usage != .zero, snapshot.usage != reportedRounds.last {
                     reportedRounds.append(snapshot.usage)
                 }
+                lastSnapshot = snapshot
             }
+            // A snapshot reports its latest request's usage, and the session counts every request.
             #expect(reportedRounds.count == 2)
             #expect(reportedRounds.first == response.usage)
-            let total = try #require(reportedRounds.last)
-            #expect(total.input.totalTokenCount > response.usage.input.totalTokenCount)
-            #expect(total.output.totalTokenCount > response.usage.output.totalTokenCount)
+            let final = try #require(reportedRounds.last)
+            var total = response.usage
+            total.add(final)
+            #expect(lastSnapshot?.requests.total == total)
             #expect(completed.usage == total)
             let fullResponse = try await LanguageModelSession(model: model, tools: [WeatherTool()]).respond(
                 to: prompt,
                 options: options
             )
             attachResponse(fullResponse, "fullResponse")
-            #expect(fullResponse.usage == total)
+            #expect(fullResponse.usage == final)
+            #expect(fullResponse.requests.total == total)
 
             let failing = LanguageModelSession(model: model, tools: [UsageFailingWeatherTool()])
             await #expect(throws: LanguageModelSession.ToolCallError.self) {
@@ -362,7 +367,9 @@ import Testing
             #expect(foundToolOutput)
             #expect(response.usage.input.totalTokenCount > 0)
             #expect(response.usage.output.totalTokenCount > 0)
-            #expect(session.usage == response.usage)
+            // The response reports its final request's usage, and the session counts every request.
+            #expect(session.usage == response.requests.total)
+            #expect(session.usage.input.totalTokenCount > response.usage.input.totalTokenCount)
 
             let calls = await weatherTool.calls
             #expect(calls.count >= 1)
@@ -413,7 +420,9 @@ import Testing
             #expect(foundToolOutput)
             #expect((lastSnapshot?.usage.input.totalTokenCount ?? 0) > 0)
             #expect((lastSnapshot?.usage.output.totalTokenCount ?? 0) > 0)
-            #expect(session.usage == lastSnapshot?.usage)
+            // The snapshot reports its latest request's usage, and the session counts every request.
+            #expect(session.usage == lastSnapshot?.requests.total)
+            #expect(session.usage.input.totalTokenCount > (lastSnapshot?.usage.input.totalTokenCount ?? 0))
         }
 
         @Test(arguments: [false, true])
