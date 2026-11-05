@@ -1,7 +1,7 @@
 import Foundation
 import Testing
 
-@testable import AnyLanguageModel
+@_spi(Compatibility) @testable import AnyLanguageModel
 
 #if canImport(Darwin) && !canImport(AsyncHTTPClient)
     @Suite("Anthropic reasoning replay", .serialized)
@@ -87,16 +87,34 @@ import Testing
             }
         }
 
+        enum LimitedToolFlow: CaseIterable {
+            case streaming, profileStreaming, profileResponse
+        }
+
         /// The round past the limit didn't run, so its reasoning isn't carried with the rounds that did.
-        @Test func toolRoundLimitOmitsTheReasoningOfTheRoundPastIt() async throws {
+        @Test(arguments: LimitedToolFlow.allCases)
+        func toolRoundLimitOmitsTheReasoningOfTheRoundPastIt(flow: LimitedToolFlow) async throws {
             ReasoningURLProtocol.reset()
-            ReasoningURLProtocol.enqueue(eventStream: events(tool: true))
-            ReasoningURLProtocol.enqueue(eventStream: events(tool: true))
+            let streaming = flow != .profileResponse
+            if streaming {
+                ReasoningURLProtocol.enqueue(eventStream: events(tool: true))
+                ReasoningURLProtocol.enqueue(eventStream: events(tool: true))
+            } else {
+                ReasoningURLProtocol.enqueue(json: response(tool: true))
+                ReasoningURLProtocol.enqueue(json: response(tool: true))
+            }
             var options = GenerationOptions()
             options.maximumToolRounds = 1
-            let session = LanguageModelSession(model: model(), tools: [WeatherTool()])
+            let session =
+                flow == .streaming
+                ? LanguageModelSession(model: model(), tools: [WeatherTool()])
+                : LanguageModelSession(profile: LanguageModelSession.Profile { WeatherTool() }.model(model()))
             do {
-                _ = try await session.streamResponse(to: "Weather", options: options).collect()
+                if streaming {
+                    _ = try await session.streamResponse(to: "Weather", options: options).collect()
+                } else {
+                    _ = try await session.respond(to: "Weather", options: options)
+                }
                 Issue.record("Expected the tool-round limit")
             } catch let error as LanguageModelSession.ToolRoundLimitExceeded {
                 let kinds = error.transcriptEntries.map { entry in

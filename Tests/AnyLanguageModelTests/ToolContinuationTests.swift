@@ -211,6 +211,27 @@ struct ToolContinuationTests {
         #expect(Array(session.properties.history) == previous)
     }
 
+    // A tool round resolves the request's context again with its pending entries,
+    // and the callbacks of the new context can still edit the history.
+    @Test func toolOutputCallbackKeepsItsEditAfterTheContextResolvesAgain() async throws {
+        let call = Transcript.ToolCall(id: "call_0", toolName: "fixture", arguments: .init(properties: [:]))
+        let output = Transcript.ToolOutput(
+            id: call.id,
+            toolName: call.toolName,
+            segments: [.text(.init(content: "pending"))]
+        )
+        let added = Transcript.Entry.prompt(.init(segments: [.text(.init(content: "Added"))]))
+        let session = LanguageModelSession(
+            profile: LanguageModelSession.Profile { Instructions("History") }
+                .model(ToolRoundCallbackModel(call: call, output: output))
+                .onToolOutput { _, _ in
+                    SessionPropertyBinding.values!.history.append(added)
+                }
+        )
+        _ = try await session.respond(to: "Use the tool")
+        #expect(session.transcript.contains(added))
+    }
+
     private static func round(_ result: String) -> [Transcript.Entry] {
         let call = Transcript.ToolCall(id: "call_0", toolName: "fixture", arguments: .init(properties: [:]))
         return [
@@ -235,5 +256,42 @@ private struct OfferedToolProbe: Tool {
     func call(arguments: String) async throws -> String {
         calls.withLock { $0 += 1 }
         return "executed"
+    }
+}
+
+/// Runs one tool round through the profile callbacks, as a provider's tool loop does.
+private struct ToolRoundCallbackModel: LanguageModel {
+    typealias UnavailableReason = Never
+    var availability: Availability<Never> { .available }
+    let call: Transcript.ToolCall
+    let output: Transcript.ToolOutput
+
+    func respond<Content>(
+        within session: LanguageModelSession,
+        to prompt: Prompt,
+        generating type: Content.Type,
+        includeSchemaInPrompt: Bool,
+        options: GenerationOptions
+    ) async throws -> LanguageModelSession.Response<Content> where Content: Generable {
+        let round: [Transcript.Entry] = [.toolCalls(.init([call])), .toolOutput(output)]
+        let context = try await session.resolvedRequestContext(including: round)
+        try await session.profileDidProduceToolOutput(
+            for: call,
+            output: output,
+            requestContext: context,
+            currentRoundEntries: round
+        )
+        let raw = GeneratedContent("response")
+        return .init(content: try Content(raw), rawContent: raw, transcriptEntries: [])
+    }
+
+    func streamResponse<Content>(
+        within session: LanguageModelSession,
+        to prompt: Prompt,
+        generating type: Content.Type,
+        includeSchemaInPrompt: Bool,
+        options: GenerationOptions
+    ) -> sending LanguageModelSession.ResponseStream<Content> where Content: Generable {
+        fatalError("ToolRoundCallbackModel only supports nonstreaming tests")
     }
 }
