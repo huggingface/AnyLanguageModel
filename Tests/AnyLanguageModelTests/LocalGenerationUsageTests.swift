@@ -200,6 +200,16 @@ struct LocalGenerationUsageTests {
         #expect(text.content.isEmpty)
         #expect(Array(text.transcriptEntries) == entries)
 
+        let reports = try model.stoppedResponse(
+            generating: [WeatherReport].self,
+            provider: "Local",
+            transcriptEntries: entries,
+            requests: RequestsUsage()
+        )
+        #expect(reports.content.isEmpty)
+        #expect(reports.rawContent == GeneratedContent(kind: .array([])))
+        #expect(Array(reports.transcriptEntries) == entries)
+
         #expect {
             _ = try model.stoppedResponse(
                 generating: WeatherReport.self,
@@ -211,15 +221,6 @@ struct LocalGenerationUsageTests {
             guard let stopped = error as? LanguageModelSession.ToolExecutionStopped else { return false }
             return stopped.provider == "Local" && Array(stopped.transcriptEntries) == entries
         }
-
-        let array = try model.stoppedResponse(
-            generating: [String].self,
-            provider: "Local",
-            transcriptEntries: entries,
-            requests: RequestsUsage()
-        )
-        #expect(array.content.isEmpty)
-        #expect(array.rawContent.kind == .array([]))
 
         func expectStopped<Content: Generable>(_ type: Content.Type) {
             #expect(throws: LanguageModelSession.ToolExecutionStopped.self) {
@@ -233,6 +234,58 @@ struct LocalGenerationUsageTests {
         }
         expectStopped(Int.self)
         expectStopped(Bool.self)
+    }
+
+    /// A streamed structured response that throws after a completed round yields no snapshot,
+    /// and the session still counts the round's request, as a response that isn't streamed does.
+    @Test(arguments: [false, true])
+    func failedStructuredStreamCountsCompletedRounds(_ streaming: Bool) async throws {
+        let model = LocalFailingRoundModel()
+        let session = LanguageModelSession(model: model)
+        do {
+            _ =
+                try await streaming
+                ? session.streamResponse(to: "A number", generating: Int.self).collect()
+                : session.respond(to: "A number", generating: Int.self)
+            Issue.record("Expected LocalFailingRoundModel.Failure")
+        } catch is LocalFailingRoundModel.Failure {}
+        #expect(session.usage == model.round)
+    }
+}
+
+/// A model whose first round completes
+/// and whose response then throws, as when a tool throws.
+private struct LocalFailingRoundModel: LanguageModel {
+    typealias UnavailableReason = Never
+    struct Failure: Error {}
+    let round = LocalGenerationUsage(promptTokenCount: 20, generatedTokenCount: 4).value
+
+    func respond<Content: Generable>(
+        within session: LanguageModelSession,
+        to prompt: Prompt,
+        generating type: Content.Type,
+        includeSchemaInPrompt: Bool,
+        options: GenerationOptions
+    ) async throws -> LanguageModelSession.Response<Content> {
+        var requests = RequestsUsage()
+        requests.add(round)
+        throw Failure()
+    }
+
+    func streamResponse<Content: Generable>(
+        within session: LanguageModelSession,
+        to prompt: Prompt,
+        generating type: Content.Type,
+        includeSchemaInPrompt: Bool,
+        options: GenerationOptions
+    ) -> sending LanguageModelSession.ResponseStream<Content> {
+        streamStructuredResponse(
+            within: session,
+            to: prompt,
+            generating: type,
+            includeSchemaInPrompt: includeSchemaInPrompt,
+            options: options
+        )
     }
 }
 

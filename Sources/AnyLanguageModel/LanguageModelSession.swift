@@ -1312,7 +1312,7 @@ public final class LanguageModelSession: @unchecked Sendable {
         model.prewarm(for: self, promptPrefix: promptPrefix)
     }
 
-    nonisolated private func recordUsage(_ usage: Usage) {
+    nonisolated func recordUsage(_ usage: Usage) {
         guard usage != .zero else { return }
         withMutation(keyPath: \.usage) {
             state.withLock { $0.usage.add(usage) }

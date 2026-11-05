@@ -1066,7 +1066,7 @@ import Foundation
             options: GenerationOptions
         ) -> sending LanguageModelSession.ResponseStream<Content> where Content: Generable {
             guard type == String.self else {
-                return streamStructuredResponse {
+                return streamStructuredResponse(within: session) {
                     try await self.respond(
                         within: session,
                         to: prompt,
