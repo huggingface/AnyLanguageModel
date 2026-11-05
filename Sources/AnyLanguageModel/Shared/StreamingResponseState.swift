@@ -51,30 +51,24 @@ struct StreamingResponseState<Content: Generable> {
     /// A stopped tool call can have no response text, including for structured generation.
     ///
     /// When the text so far doesn't decode as the complete content type,
-    /// the snapshot uses the first empty value that the content type accepts:
-    /// an empty object, an empty array, `null`, and then zero or `false` for scalar types.
+    /// the snapshot uses the first value in ``StoppedContent`` that the content type accepts.
     /// The value must decode as the complete content type, not only its partial form,
     /// so that `collect()` accepts the snapshot.
-    /// A type with required properties accepts none of these,
-    /// so this throws ``LanguageModelSession/ToolExecutionStopped`` with the entries instead.
+    /// A type that accepts none of these values
+    /// throws ``LanguageModelSession/ToolExecutionStopped`` with the entries instead.
     func stoppedSnapshot(provider: String) throws -> LanguageModelSession.ResponseStream<Content>.Snapshot {
         if let snapshot = snapshot(), (try? Content(snapshot.rawContent)) != nil { return snapshot }
-        let candidates: [GeneratedContent.Kind] = [
-            .structure(properties: [:], orderedKeys: []), .array([]), .null, .number(0), .bool(false),
-        ]
-        for kind in candidates {
-            let raw = GeneratedContent(kind: kind)
-            guard let content = try? Content(raw) else { continue }
-            return .init(
-                content: content.asPartiallyGenerated(),
-                rawContent: raw,
-                transcriptEntries: ArraySlice(entries),
-                requests: requests
+        guard let empty = StoppedContent.empty(Content.self) else {
+            throw LanguageModelSession.ToolExecutionStopped(
+                provider: provider,
+                transcriptEntries: ArraySlice(entries)
             )
         }
-        throw LanguageModelSession.ToolExecutionStopped(
-            provider: provider,
-            transcriptEntries: ArraySlice(entries)
+        return .init(
+            content: empty.content.asPartiallyGenerated(),
+            rawContent: empty.rawContent,
+            transcriptEntries: ArraySlice(entries),
+            requests: requests
         )
     }
 

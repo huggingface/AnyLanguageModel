@@ -966,32 +966,58 @@ import Testing
             #expect(!session.isResponding)
         }
 
-        @Test(arguments: Provider.allCases)
-        func stoppedStreamedToolsWithoutEmptyObjectContent(_ provider: Provider) async throws {
+        /// A stopped array response ends with an empty array,
+        /// in a stream and from `respond` alike.
+        @Test(arguments: Provider.allCases, [false, true])
+        func stoppedArrayResponseIsEmpty(_ provider: Provider, _ streaming: Bool) async throws {
             UsageURLProtocol.reset()
-            UsageURLProtocol.enqueue(json: try provider.toolStream())
+            UsageURLProtocol.enqueue(
+                json: streaming
+                    ? try provider.toolStream()
+                    : try Self.json(provider.response(text: "", counts: provider.counts, tool: true))
+            )
             let tool = RecordingWeatherTool()
             let session = provider.makeSession(tools: [tool])
             session.toolExecutionDelegate = StopDelegate()
-            var snapshots: [LanguageModelSession.ResponseStream<Int>.Snapshot] = []
-            for try await snapshot in session.streamResponse(to: "Weather?", generating: Int.self) {
-                snapshots.append(snapshot)
-            }
-            let last = try #require(snapshots.last)
-            let content: Int = last.content
-            #expect(content == 0)
-            #expect(last.transcriptEntries.count == 1)
-            #expect(last.usage == provider.expected)
-            #expect(session.transcript.count == 3)
-
-            UsageURLProtocol.enqueue(json: try provider.toolStream())
-            let arraySession = provider.makeSession(tools: [tool])
-            arraySession.toolExecutionDelegate = StopDelegate()
-            let response = try await arraySession.streamResponse(to: "Weather?", generating: [String].self).collect()
+            let response =
+                try await streaming
+                ? session.streamResponse(to: "Weather?", generating: [String].self).collect()
+                : session.respond(to: "Weather?", generating: [String].self)
             #expect(response.content.isEmpty)
+            #expect(response.rawContent.kind == .array([]))
             #expect(response.transcriptEntries.count == 1)
+            #expect(response.usage == provider.expected)
+            #expect(session.transcript.count == 3)
             #expect(tool.cities.withLock { $0.isEmpty })
-            #expect(UsageURLProtocol.recordedBodies.count == 2)
+            #expect(UsageURLProtocol.recordedBodies.count == 1)
+        }
+
+        /// A stopped number or Boolean response throws,
+        /// because zero or `false` would look like the model's answer.
+        @Test(arguments: Provider.allCases, [false, true])
+        func stoppedScalarResponseThrows(_ provider: Provider, _ streaming: Bool) async throws {
+            func expectStopped<Content: Generable>(_ type: Content.Type) async throws {
+                UsageURLProtocol.reset()
+                UsageURLProtocol.enqueue(
+                    json: streaming
+                        ? try provider.toolStream()
+                        : try Self.json(provider.response(text: "", counts: provider.counts, tool: true))
+                )
+                let session = provider.makeSession(tools: [RecordingWeatherTool()])
+                session.toolExecutionDelegate = StopDelegate()
+                let error = await #expect(throws: LanguageModelSession.ToolExecutionStopped.self) {
+                    if streaming {
+                        _ = try await session.streamResponse(to: "Weather?", generating: type).collect()
+                    } else {
+                        _ = try await session.respond(to: "Weather?", generating: type)
+                    }
+                }
+                #expect(error?.provider == provider.name)
+                #expect(error?.transcriptEntries.count == 1)
+                #expect(session.transcript.count == 1)
+            }
+            try await expectStopped(Int.self)
+            try await expectStopped(Bool.self)
         }
 
         @Test(arguments: Provider.allCases)

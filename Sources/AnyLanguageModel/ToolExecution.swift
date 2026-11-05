@@ -102,7 +102,9 @@ extension LanguageModelSession {
     /// or a type that can be empty,
     /// ends with an empty value and the tool calls that stopped it.
     /// A type with required properties can't be empty,
-    /// so the response throws this error instead.
+    /// and zero or `false` would look like the model's answer,
+    /// so a response of such a type, a number, or a Boolean
+    /// throws this error instead.
     ///
     /// The rounds that ran are in `transcriptEntries`,
     /// each tool call followed by its output,
