@@ -726,6 +726,16 @@
 
         private var started: [Started] = []
 
+        /// The Foundation Models session that sends the request's rounds.
+        private var session: FoundationModels.LanguageModelSession?
+
+        /// The session's usage when each call started: all the rounds up to the call's own.
+        private var usageAtCalls: [LanguageModelSession.Usage] = []
+
+        /// The usage counted for the response so far: the rounds that completed before the latest
+        /// call started.
+        private var reported: LanguageModelSession.Usage = .zero
+
         /// The calls that ran, each followed by its output, in the order they started.
         var entries: [Transcript.Entry] {
             started.flatMap { started -> [Transcript.Entry] in
@@ -734,8 +744,62 @@
             }
         }
 
+        /// A call started: the round that made it completed, so what it used is counted for the
+        /// response now, as each request's usage is, and kept if the response then throws.
         func start(_ call: Transcript.ToolCall) {
             started.append(Started(call: call, output: nil))
+            let usage = sessionUsage
+            usageAtCalls.append(usage)
+            count(upTo: usage)
+        }
+
+        /// Foundation Models returned: every round completed, so what they used is counted for the
+        /// response now, before its content is made, and kept if anything throws after.
+        func returned() {
+            count(upTo: sessionUsage)
+        }
+
+        /// Counts for the response what the rounds used up to `usage` that isn't counted yet.
+        private func count(upTo usage: LanguageModelSession.Usage) {
+            RequestUsageChannel.report(usage.subtracting(reported))
+            reported = usage
+        }
+
+        /// Records the session that sends the request's rounds, whose usage counts them all.
+        func sends(with session: FoundationModels.LanguageModelSession) {
+            self.session = session
+        }
+
+        /// Every round's usage so far, as the session counts it.
+        private var sessionUsage: LanguageModelSession.Usage {
+            #if compiler(>=6.4) && !os(tvOS)
+                if #available(macOS 27.0, iOS 27.0, visionOS 27.0, watchOS 27.0, *), let session {
+                    return LanguageModelSession.Usage(session.usage)
+                }
+            #endif
+            return .zero
+        }
+
+        /// The rounds' usage, with `final` as the final round's.
+        func requests(final: LanguageModelSession.Usage) -> RequestsUsage {
+            RequestsUsage(final: final, total: sessionUsage)
+        }
+
+        /// The rounds' usage when a call stopped the request.
+        func requestsAtStop() -> RequestsUsage {
+            Self.requestsAtStop(usageAtCalls: usageAtCalls, total: sessionUsage)
+        }
+
+        /// The rounds' usage when the last of the calls stopped the request, from the session's
+        /// usage when each call started: its round is the final one, and the rounds before it
+        /// ended before the calls of its round started, which all see the same usage.
+        static func requestsAtStop(
+            usageAtCalls: [LanguageModelSession.Usage],
+            total: LanguageModelSession.Usage
+        ) -> RequestsUsage {
+            let stoppingRound = usageAtCalls.last ?? total
+            let earlier = usageAtCalls.last { $0 != stoppingRound } ?? .zero
+            return RequestsUsage(earlier: earlier, final: total.subtracting(earlier))
         }
 
         func ran(_ call: Transcript.ToolCall, output: Transcript.ToolOutput) {
@@ -758,9 +822,10 @@
             Transcript.ToolOutput(id: call.id, toolName: tool.name, segments: segments)
         }
         guard let session, let delegate = session.toolExecutionDelegate else {
-            let text = try await tool.callFunction(content: arguments).promptRepresentation.description
-            await ToolCallRecord.current?.ran(call, output: output([.text(.init(content: text))]))
-            return FoundationModels.Prompt(text)
+            let segments = try await tool.makeOutputSegments(from: arguments)
+            let prompt = try segments.toFoundationModelsToolOutput()
+            await ToolCallRecord.current?.ran(call, output: output(segments))
+            return prompt
         }
         await delegate.didGenerateToolCalls([call], in: session)
         switch await delegate.toolCallDecision(for: call, in: session) {
@@ -775,14 +840,61 @@
             return prompt
         case .execute:
             do {
-                let text = try await tool.callFunction(content: arguments).promptRepresentation.description
-                await delegate.didExecuteToolCall(call, output: output([.text(.init(content: text))]), in: session)
-                await ToolCallRecord.current?.ran(call, output: output([.text(.init(content: text))]))
-                return FoundationModels.Prompt(text)
+                let segments = try await tool.makeOutputSegments(from: arguments)
+                let prompt = try segments.toFoundationModelsToolOutput()
+                await delegate.didExecuteToolCall(call, output: output(segments), in: session)
+                await ToolCallRecord.current?.ran(call, output: output(segments))
+                return prompt
             } catch {
                 await delegate.didFailToolCall(call, error: error, in: session)
                 throw error
             }
+        }
+    }
+
+    #if compiler(>=6.4) && !os(tvOS)
+        @available(macOS 27.0, iOS 27.0, visionOS 27.0, watchOS 27.0, *)
+        extension AnyLanguageModel.LanguageModelSession.Usage {
+            /// Foundation Models' usage, with the metadata that converts.
+            init(_ usage: FoundationModels.LanguageModelSession.Usage) {
+                self.init(
+                    input: .init(
+                        totalTokenCount: usage.input.totalTokenCount,
+                        cachedTokenCount: usage.input.cachedTokenCount
+                    ),
+                    output: .init(
+                        totalTokenCount: usage.output.totalTokenCount,
+                        reasoningTokenCount: usage.output.reasoningTokenCount
+                    ),
+                    metadata: usage.metadata.compactMapValues { try? GeneratedContent($0) }
+                )
+            }
+        }
+    #endif
+
+    @available(macOS 26.0, iOS 26.0, watchOS 27.0, tvOS 26.0, visionOS 26.0, *)
+    extension FoundationModels.LanguageModelSession.Response {
+        /// The usage of the response's final request, which Foundation Models reports from OS 27.
+        var finalRequestUsage: AnyLanguageModel.LanguageModelSession.Usage {
+            #if compiler(>=6.4) && !os(tvOS)
+                if #available(macOS 27.0, iOS 27.0, visionOS 27.0, watchOS 27.0, *) {
+                    return .init(usage)
+                }
+            #endif
+            return .zero
+        }
+    }
+
+    @available(macOS 26.0, iOS 26.0, watchOS 27.0, tvOS 26.0, visionOS 26.0, *)
+    extension FoundationModels.LanguageModelSession.ResponseStream.Snapshot {
+        /// The usage so far of the response's final request, which Foundation Models reports from OS 27.
+        var finalRequestUsage: AnyLanguageModel.LanguageModelSession.Usage {
+            #if compiler(>=6.4) && !os(tvOS)
+                if #available(macOS 27.0, iOS 27.0, visionOS 27.0, watchOS 27.0, *) {
+                    return .init(usage)
+                }
+            #endif
+            return .zero
         }
     }
 
@@ -1368,6 +1480,7 @@
         do {
             let response = try await ToolCallRecord.$current.withValue(record) {
                 try await fmRespondRunningTools(
+                    record: record,
                     makeSession: makeSession,
                     fmPrompt: fmPrompt,
                     fmOptions: fmOptions,
@@ -1380,7 +1493,7 @@
                 content: response.content,
                 rawContent: response.rawContent,
                 transcriptEntries: ArraySlice(await record.entries) + response.transcriptEntries,
-                usage: response.usage
+                requests: response.requests
             )
         } catch {
             // The delegate stopped at a tool call: the response ends there, with the calls that ran
@@ -1390,13 +1503,15 @@
             return LanguageModelSession.Response(
                 content: stopped.content,
                 rawContent: stopped.raw,
-                transcriptEntries: ArraySlice(await record.entries + [.toolCalls(Transcript.ToolCalls([call]))])
+                transcriptEntries: ArraySlice(await record.entries + [.toolCalls(Transcript.ToolCalls([call]))]),
+                requests: await record.requestsAtStop()
             )
         }
     }
 
     @available(macOS 26.0, iOS 26.0, watchOS 27.0, tvOS 26.0, visionOS 26.0, *)
     private func fmRespondRunningTools<Content>(
+        record: ToolCallRecord,
         makeSession: @Sendable () async throws -> FoundationModels.LanguageModelSession,
         fmPrompt: FoundationModels.Prompt,
         fmOptions: FoundationModels.GenerationOptions,
@@ -1405,13 +1520,16 @@
         includeSchemaInPrompt: Bool
     ) async throws -> LanguageModelSession.Response<Content> where Content: Generable {
         let fmSession = try await makeSession()
+        await record.sends(with: fmSession)
         if type == String.self {
             let fmResponse = try await fmSession.respond(to: fmPrompt, options: fmOptions)
+            await record.returned()
             let generatedContent = GeneratedContent(fmResponse.content)
             return LanguageModelSession.Response(
                 content: fmResponse.content as! Content,
                 rawContent: generatedContent,
-                transcriptEntries: []
+                transcriptEntries: [],
+                requests: await record.requests(final: fmResponse.finalRequestUsage)
             )
         } else {
             // For non-String types, use schema-based generation
@@ -1422,6 +1540,8 @@
                 includeSchemaInPrompt: includeSchemaInPrompt,
                 options: fmOptions
             )
+            await record.returned()
+            let requests = await record.requests(final: fmResponse.finalRequestUsage)
 
             func finalize(content: Content) -> LanguageModelSession.Response<Content> {
                 let normalizedRaw = content.generatedContent
@@ -1433,13 +1553,15 @@
                     return LanguageModelSession.Response(
                         content: placeholder.content,
                         rawContent: placeholder.rawContent,
-                        transcriptEntries: []
+                        transcriptEntries: [],
+                        requests: requests
                     )
                 }
                 return LanguageModelSession.Response(
                     content: content,
                     rawContent: normalizedRaw,
-                    transcriptEntries: []
+                    transcriptEntries: [],
+                    requests: requests
                 )
             }
 
@@ -1476,6 +1598,7 @@
         let record = ToolCallRecord()
         let running = ToolCallRecord.$current.withValue(record) {
             fmStreamResponseRunningTools(
+                record: record,
                 makeSession: makeSession,
                 fmPrompt: fmPrompt,
                 fmOptions: fmOptions,
@@ -1493,10 +1616,15 @@
                             last = snapshot
                             continuation.yield(snapshot)
                         }
-                        let ran = await record.entries
-                        if !ran.isEmpty, var last {
-                            last.transcriptEntries = ArraySlice(ran) + last.transcriptEntries
-                            continuation.yield(last)
+                        // The calls that ran, and every round's usage now that the last one ended.
+                        if var last {
+                            let ran = await record.entries
+                            let requests = await record.requests(final: last.usage)
+                            if !ran.isEmpty || requests != last.requests {
+                                last.transcriptEntries = ArraySlice(ran) + last.transcriptEntries
+                                last.requests = requests
+                                continuation.yield(last)
+                            }
                         }
                         continuation.finish()
                     } catch {
@@ -1509,6 +1637,7 @@
                             await record.entries + [.toolCalls(Transcript.ToolCalls([call]))]
                         if var last {
                             last.transcriptEntries += entries
+                            last.requests = await record.requestsAtStop()
                             continuation.yield(last)
                         } else {
                             do {
@@ -1517,7 +1646,8 @@
                                     .init(
                                         content: stopped.content.asPartiallyGenerated(),
                                         rawContent: stopped.raw,
-                                        transcriptEntries: ArraySlice(entries)
+                                        transcriptEntries: ArraySlice(entries),
+                                        requests: await record.requestsAtStop()
                                     )
                                 )
                             } catch {
@@ -1535,6 +1665,7 @@
 
     @available(macOS 26.0, iOS 26.0, watchOS 27.0, tvOS 26.0, visionOS 26.0, *)
     private func fmStreamResponseRunningTools<Content>(
+        record: ToolCallRecord,
         makeSession: @escaping @Sendable () async throws -> FoundationModels.LanguageModelSession,
         fmPrompt: FoundationModels.Prompt,
         fmOptions: FoundationModels.GenerationOptions,
@@ -1590,7 +1721,13 @@
 
                             let raw = GeneratedContent(accumulatedText)
                             let snapshotContent = (accumulatedText as! Content).asPartiallyGenerated()
-                            continuation.yield(.init(content: snapshotContent, rawContent: raw))
+                            continuation.yield(
+                                .init(
+                                    content: snapshotContent,
+                                    rawContent: raw,
+                                    requests: await record.requests(final: snapshot.finalRequestUsage)
+                                )
+                            )
                         }
                         continuation.finish()
                     } catch {
@@ -1613,9 +1750,11 @@
 
                         var accumulatedText = ""
                         var didYield = false
+                        var finalUsage = AnyLanguageModel.LanguageModelSession.Usage.zero
                         do {
                             var lastLength = 0
                             for try await snapshot in fmTextStream {
+                                finalUsage = snapshot.finalRequestUsage
                                 var chunkText: String = snapshot.content
                                 if chunkText == "null" && accumulatedText.isEmpty {
                                     chunkText = ""
@@ -1630,21 +1769,35 @@
                                 if let partialContent = try? GeneratedContent(json: accumulatedText) {
                                     let partial: Content.PartiallyGenerated? = try? .init(partialContent)
                                     if let partial {
-                                        continuation.yield(.init(content: partial, rawContent: partialContent))
+                                        continuation.yield(
+                                            .init(
+                                                content: partial,
+                                                rawContent: partialContent,
+                                                requests: await record.requests(final: finalUsage)
+                                            )
+                                        )
                                         didYield = true
                                     }
                                 }
                             }
                             if !didYield, let placeholder = placeholderPartialContent(for: type, schema: schema) {
                                 continuation.yield(
-                                    .init(content: placeholder.content, rawContent: placeholder.rawContent)
+                                    .init(
+                                        content: placeholder.content,
+                                        rawContent: placeholder.rawContent,
+                                        requests: await record.requests(final: finalUsage)
+                                    )
                                 )
                             }
                             continuation.finish()
                         } catch {
                             if !didYield, let placeholder = placeholderPartialContent(for: type, schema: schema) {
                                 continuation.yield(
-                                    .init(content: placeholder.content, rawContent: placeholder.rawContent)
+                                    .init(
+                                        content: placeholder.content,
+                                        rawContent: placeholder.rawContent,
+                                        requests: await record.requests(final: finalUsage)
+                                    )
                                 )
                             }
                             continuation.finish(throwing: error)
@@ -1652,8 +1805,10 @@
                     }
 
                     var didYield = false
+                    var finalUsage = AnyLanguageModel.LanguageModelSession.Usage.zero
                     do {
                         for try await snapshot in fmStream {
+                            finalUsage = snapshot.finalRequestUsage
                             let jsonString = snapshot.content.jsonString
                             let raw =
                                 (try? GeneratedContent(snapshot.content))
@@ -1664,7 +1819,13 @@
                             if let partialContent = try? GeneratedContent(json: jsonString) {
                                 let partial: Content.PartiallyGenerated? = try? .init(partialContent)
                                 if let partial {
-                                    continuation.yield(.init(content: partial, rawContent: partialContent))
+                                    continuation.yield(
+                                        .init(
+                                            content: partial,
+                                            rawContent: partialContent,
+                                            requests: await record.requests(final: finalUsage)
+                                        )
+                                    )
                                     didYield = true
                                     continue
                                 }
@@ -1673,13 +1834,23 @@
                             // Fallback to full conversion when partial decoding isn't possible.
                             if let value = try? type.init(raw) {
                                 let snapshotContent = value.asPartiallyGenerated()
-                                continuation.yield(.init(content: snapshotContent, rawContent: raw))
+                                continuation.yield(
+                                    .init(
+                                        content: snapshotContent,
+                                        rawContent: raw,
+                                        requests: await record.requests(final: finalUsage)
+                                    )
+                                )
                                 didYield = true
                             }
                         }
                         if !didYield, let placeholder = placeholderPartialContent(for: type, schema: schema) {
                             continuation.yield(
-                                .init(content: placeholder.content, rawContent: placeholder.rawContent)
+                                .init(
+                                    content: placeholder.content,
+                                    rawContent: placeholder.rawContent,
+                                    requests: await record.requests(final: finalUsage)
+                                )
                             )
                         }
                         continuation.finish()
@@ -1700,6 +1871,7 @@
                         continuation.finish(throwing: error)
                         return
                     }
+                    await record.sends(with: fmSession)
                     if type == String.self {
                         await processStringStream(fmSession)
                     } else {

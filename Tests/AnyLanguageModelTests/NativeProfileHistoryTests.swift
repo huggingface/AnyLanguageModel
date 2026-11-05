@@ -29,7 +29,11 @@ import Testing
                 prompt: prompt
             )
             #expect(!native.transcript.contains { if case .prompt = $0 { true } else { false } })
-            #expect(Array(session.transcript) == [earlier, current])
+            let canonical = session.transcript.filter { entry in
+                if case .instructions = entry { return false }
+                return true
+            }
+            #expect(canonical == [earlier, current])
         }
 
         @Test func ordinaryDynamicInstructionsAreEvaluatedOnlyByTheNativeSession() {
@@ -58,12 +62,14 @@ import Testing
                 }
                 .model(MockLanguageModel())
             )
+            // Creating a profile session evaluates the profile once to record its instructions.
+            #expect(evaluations.withLock { $0 } == 1)
             _ = makeFoundationModelsSession(
                 model: FoundationModels.SystemLanguageModel.default,
                 session: session,
                 prompt: AnyLanguageModel.Prompt("Current")
             )
-            #expect(evaluations.withLock { $0 } == 1)
+            #expect(evaluations.withLock { $0 } == 2)
         }
 
         @Test func nativeProfileInitialContextSurvivesDetachedEvaluationWithoutFreezingLaterRequests() async {
@@ -75,16 +81,19 @@ import Testing
                 }
                 .model(MockLanguageModel())
             )
+            // Creating a profile session evaluates the profile once to record its instructions.
+            #expect(evaluations.withLock { $0 } == 1)
             let initialContext = session.resolvedRequestContext()
+            #expect(evaluations.withLock { $0 } == 2)
             let adapter = FoundationModelsDynamicInstructionsAdapter(session: session, initialContext: initialContext)
             await Task.detached {
                 #expect(AnyLanguageModel.SessionPropertyBinding.values == nil)
                 _ = adapter.body
             }.value
-            #expect(evaluations.withLock { $0 } == 1)
+            #expect(evaluations.withLock { $0 } == 2)
 
             await Task.detached { _ = adapter.body }.value
-            #expect(evaluations.withLock { $0 } == 2)
+            #expect(evaluations.withLock { $0 } == 3)
         }
     }
 

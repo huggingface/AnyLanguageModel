@@ -42,7 +42,9 @@ import Testing
                     }
                     content = try #require(last)
                 } else {
-                    content = try await session.respond(to: prompt, schema: schema).content
+                    let response = try await session.respond(to: prompt, schema: schema)
+                    attachResponse(response)
+                    content = response.content
                 }
                 let answer = try SchemaResponseTests.Answer(content)
                 #expect(answer.answer.contains("Paris"))
