@@ -323,6 +323,50 @@ import Testing
     }
 
     #if compiler(>=6.4)
+        @available(macOS 27.0, iOS 27.0, visionOS 27.0, *)
+        @Test(arguments: [false, true])
+        func ordinaryNativeToolImageSurvivesDeletionAndReplay(useDelegate: Bool) async throws {
+            let data = try onePixelPNG()
+            let url = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+                .appendingPathExtension("png")
+            try data.write(to: url)
+            defer { try? FileManager.default.removeItem(at: url) }
+            let tool = NativeImageOutputTool(imageURL: url)
+            let session = LanguageModelSession(model: SystemLanguageModel.default, tools: [tool])
+            if useDelegate { session.toolExecutionDelegate = ScriptedDelegate([.execute]) }
+            let record = ToolCallRecord()
+            try await ToolCallRecord.$current.withValue(record) {
+                _ = try await callTool(tool, with: GeneratedContent("image"), in: session)
+            }
+            try FileManager.default.removeItem(at: url)
+            let transcript = Transcript(entries: await record.entries)
+            let replay = try JSONDecoder().decode(Transcript.self, from: JSONEncoder().encode(transcript))
+            let outputs = replay.compactMap { entry -> Transcript.ToolOutput? in
+                if case .toolOutput(let output) = entry { return output }
+                return nil
+            }
+            let output = try #require(outputs.first)
+            #expect(output.segments.count == 2)
+            guard case .image(let image) = output.segments.last else {
+                Issue.record("Expected the native Tool's image, not its text description")
+                return
+            }
+            #expect(image.source == .data(data, mimeType: "image/png"))
+            _ = try output.segments.toFoundationModelsToolOutput()
+        }
+
+        private struct NativeImageOutputTool: Tool {
+            let imageURL: URL
+            let description = "Return an image"
+
+            func call(arguments: String) async throws -> Prompt {
+                Prompt {
+                    "Image output"
+                    Attachment(imageURL: imageURL)
+                }
+            }
+        }
+
         /// An image the delegate provides goes to Foundation Models as an attachment.
         @available(macOS 27.0, iOS 27.0, visionOS 27.0, *)
         @Test func providedImageIsAttached() async throws {
@@ -456,6 +500,7 @@ import Testing
             let session = LanguageModelSession(model: model)
 
             let response = try await session.respond(to: "Say 'Hello'")
+            attachResponse(response)
             #expect(!response.content.isEmpty)
         }
 
@@ -468,6 +513,7 @@ import Testing
             )
 
             let response = try await session.respond(to: "What is 2+2?")
+            attachResponse(response)
             #expect(!response.content.isEmpty)
         }
 
@@ -481,6 +527,7 @@ import Testing
                 to: "Generate a number",
                 options: options
             )
+            attachResponse(response)
             #expect(!response.content.isEmpty)
         }
 
@@ -533,10 +580,12 @@ import Testing
                 let options = GenerationOptions(sampling: .greedy)
 
                 let first = try await session.respond(to: "What should you reply?", options: options)
+                attachResponse(first, "first")
                 #expect(first.content.localizedCaseInsensitiveContains("apple"))
 
                 state.useWeather = true
                 let second = try await session.respond(to: "How's the weather in San Francisco?", options: options)
+                attachResponse(second, "second")
                 #expect(second.content.contains("72°F"))
 
                 #expect(
@@ -553,6 +602,7 @@ import Testing
             let session = LanguageModelSession(model: SystemLanguageModel.default, tools: [weatherTool])
 
             let response = try await session.respond(to: "How's the weather in San Francisco?")
+            attachResponse(response)
 
             // The calls Foundation Models ran are in the response's transcript, with their outputs.
             var foundToolOutput = false
@@ -577,6 +627,7 @@ import Testing
             session.toolExecutionDelegate = delegate
 
             let response = try await session.respond(to: "How's the weather in San Francisco? Use the tool.")
+            attachResponse(response)
 
             #expect(await weatherTool.calls.isEmpty)
             let generated = await delegate.generated
@@ -599,6 +650,7 @@ import Testing
             session.toolExecutionDelegate = delegate
 
             let response = try await session.respond(to: "How's the weather in San Francisco? Use the tool.")
+            attachResponse(response)
 
             #expect(await weatherTool.calls.isEmpty)
             let generated = await delegate.generated
@@ -700,6 +752,7 @@ import Testing
                 }
                 throw error
             }
+            attachResponse(firstResponse, "firstResponse")
             #expect(!firstResponse.content.isEmpty)
 
             let secondResponse: LanguageModelSession.Response<String>
@@ -714,6 +767,7 @@ import Testing
                 }
                 throw error
             }
+            attachResponse(secondResponse, "secondResponse")
             let repliedNumbers = secondResponse.content
                 .split { !$0.isNumber }
                 .compactMap { Int($0) }
@@ -735,6 +789,7 @@ import Testing
                 to: "Generate a friendly greeting",
                 generating: Greeting.self
             )
+            attachResponse(response)
 
             #expect(!response.content.message.isEmpty)
         }
@@ -747,6 +802,7 @@ import Testing
                 to: "Create a fictional person who is a software engineer",
                 generating: Person.self
             )
+            attachResponse(response)
 
             #expect(!response.content.name.isEmpty)
             #expect(response.content.age >= 0 && response.content.age <= 150)
@@ -761,6 +817,7 @@ import Testing
                 to: "Calculate 15 + 27",
                 generating: MathResult.self
             )
+            attachResponse(response)
 
             #expect(!response.content.expression.isEmpty)
             #expect(!response.content.explanation.isEmpty)
@@ -776,6 +833,7 @@ import Testing
                 to: "Describe the color red",
                 generating: ColorInfo.self
             )
+            attachResponse(response)
 
             #expect(!response.content.name.isEmpty)
             #expect(!response.content.hexCode.isEmpty)
@@ -792,6 +850,7 @@ import Testing
                 to: "Recommend 3 classic science fiction books",
                 generating: BookRecommendations.self
             )
+            attachResponse(response)
 
             if response.content.titles.isEmpty {
                 #expect(response.rawContent.jsonString.contains("titles"))
@@ -808,6 +867,7 @@ import Testing
                 to: "Analyze the sentiment of: 'I love this product!'",
                 generating: SentimentAnalysis.self
             )
+            attachResponse(response)
 
             #expect(["positive", "negative", "neutral"].contains(response.content.sentiment.lowercased()))
             #expect(response.content.confidence >= 0.0 && response.content.confidence <= 1.0)
@@ -822,6 +882,7 @@ import Testing
                 to: "Plan a counter: add 2, then add 3, then report the total.",
                 generating: CounterPlan.self
             )
+            attachResponse(response)
 
             #expect(!response.content.steps.isEmpty)
         }
@@ -836,6 +897,7 @@ import Testing
                 to: "Add 2 to the counter.",
                 generating: CounterStep.self
             )
+            attachResponse(response)
 
             let type = try response.rawContent.value(String.self, forProperty: "type")
             #expect(["add", "reset", "report"].contains(type))
@@ -852,6 +914,7 @@ import Testing
                 to: "Create an interesting fictional character",
                 generating: Person.self
             )
+            attachResponse(response)
 
             #expect(!response.content.name.isEmpty)
             #expect(response.content.age >= 0)
@@ -961,4 +1024,198 @@ import Testing
             .stop
         }
     }
+    /// When a call stops a request, its round is the final one: the rounds before it are those
+    /// that ended before its round's calls started, which all see the same usage. No model is involved.
+    @available(macOS 26.0, iOS 26.0, tvOS 26.0, visionOS 26.0, *)
+    @Test func stopSplitsTheStoppingRoundFromEarlierOnes() {
+        func usage(_ input: Int, _ output: Int) -> LanguageModelSession.Usage {
+            .init(
+                input: .init(totalTokenCount: input, cachedTokenCount: 0),
+                output: .init(totalTokenCount: output, reasoningTokenCount: 0)
+            )
+        }
+        // Two calls in the first round, then the stopping call in the second.
+        let second = ToolCallRecord.requestsAtStop(
+            usageAtCalls: [usage(100, 10), usage(100, 10), usage(250, 25)],
+            total: usage(250, 25)
+        )
+        #expect(second.earlier == usage(100, 10))
+        #expect(second.final == usage(150, 15))
+        // A stop in the first round leaves no earlier round.
+        let first = ToolCallRecord.requestsAtStop(usageAtCalls: [usage(100, 10)], total: usage(100, 10))
+        #expect(first.earlier == .zero)
+        #expect(first.final == usage(100, 10))
+    }
+
+    #if compiler(>=6.4) && !os(tvOS)
+        /// As in Foundation Models, a response reports its final request's usage,
+        /// and the session counts every request.
+        @Suite("SystemLanguageModel usage", .enabled(if: isSystemLanguageModelAvailable))
+        private struct SystemLanguageModelUsageTests {
+            static let prompt = "What's the weather in Cupertino? Use the tool."
+
+            @available(macOS 26.0, iOS 26.0, tvOS 26.0, visionOS 26.0, *)
+            @Test func responseReportsTheFinalRequest() async throws {
+                guard #available(macOS 27.0, iOS 27.0, visionOS 27.0, *) else { return }
+                let session = LanguageModelSession(model: SystemLanguageModel.default, tools: [WeatherTool()])
+                let response = try await session.respond(to: Self.prompt)
+                #expect(response.usage.input.totalTokenCount > 0)
+                #expect(response.usage.output.totalTokenCount > 0)
+                Self.expectSession(session.usage, counts: response.usage, after: response.transcriptEntries)
+            }
+
+            @available(macOS 26.0, iOS 26.0, tvOS 26.0, visionOS 26.0, *)
+            @Test func streamedResponseReportsTheFinalRequest() async throws {
+                guard #available(macOS 27.0, iOS 27.0, visionOS 27.0, *) else { return }
+                let session = LanguageModelSession(model: SystemLanguageModel.default, tools: [WeatherTool()])
+                var last: LanguageModelSession.ResponseStream<String>.Snapshot?
+                for try await snapshot in session.streamResponse(to: Self.prompt) {
+                    if let last {
+                        #expect(snapshot.requests.total.totalTokenCount >= last.requests.total.totalTokenCount)
+                    }
+                    last = snapshot
+                }
+                let final = try #require(last)
+                #expect(final.usage.input.totalTokenCount > 0)
+                Self.expectSession(session.usage, counts: final.usage, after: final.transcriptEntries)
+            }
+
+            /// A stopped call ends the response in the round that made it, and the session still
+            /// counts the round.
+            @available(macOS 26.0, iOS 26.0, tvOS 26.0, visionOS 26.0, *)
+            @Test func stoppedResponseCountsItsRequests() async throws {
+                guard #available(macOS 27.0, iOS 27.0, visionOS 27.0, *) else { return }
+                let session = LanguageModelSession(model: SystemLanguageModel.default, tools: [WeatherTool()])
+                session.toolExecutionDelegate = StoppingDelegate()
+                let response = try await session.respond(to: Self.prompt)
+                guard response.transcriptEntries.contains(where: { if case .toolCalls = $0 { true } else { false } })
+                else { return }  // The model answered without calling the tool.
+                #expect(response.usage.input.totalTokenCount > 0)
+                #expect(session.usage == response.usage)
+            }
+
+            /// A response that throws keeps the usage of the rounds it completed: the round that
+            /// called the tool is counted as the call starts, before the tool fails.
+            @available(macOS 26.0, iOS 26.0, tvOS 26.0, visionOS 26.0, *)
+            @Test func failedResponseCountsTheRoundsItCompleted() async throws {
+                guard #available(macOS 27.0, iOS 27.0, visionOS 27.0, *) else { return }
+                let session = LanguageModelSession(model: SystemLanguageModel.default, tools: [FailingWeatherTool()])
+                let error = await #expect(throws: (any Error).self) { try await session.respond(to: Self.prompt) }
+                #expect(error.map(FailingWeatherTool.failed(in:)) == true, "\(String(describing: error))")
+                #expect(session.usage.input.totalTokenCount > 0)
+                #expect(session.usage.output.totalTokenCount > 0)
+            }
+
+            /// A response that throws once Foundation Models returns, as a model wrapping this one
+            /// may, keeps what its requests used: it's counted as Foundation Models returns, before
+            /// the content is made from it.
+            @available(macOS 26.0, iOS 26.0, tvOS 26.0, visionOS 26.0, *)
+            @Test func responseThatThrowsAfterFoundationModelsReturnsKeepsItsUsage() async throws {
+                guard #available(macOS 27.0, iOS 27.0, visionOS 27.0, *) else { return }
+                let text = LanguageModelSession(model: ThrowingAfterwards())
+                await #expect(throws: ThrowingAfterwards.Failure.self) { try await text.respond(to: "Say hello.") }
+                #expect(text.usage.input.totalTokenCount > 0)
+                #expect(text.usage.output.totalTokenCount > 0)
+
+                let structured = LanguageModelSession(model: ThrowingAfterwards())
+                await #expect(throws: ThrowingAfterwards.Failure.self) {
+                    try await structured.respond(to: "Greet Ann.", generating: Greeting.self)
+                }
+                #expect(structured.usage.input.totalTokenCount > 0)
+                #expect(structured.usage.output.totalTokenCount > 0)
+            }
+
+            /// A model as another library would write one: it calls the system model through
+            /// `respond`, then fails.
+            @available(macOS 26.0, iOS 26.0, tvOS 26.0, visionOS 26.0, *)
+            struct ThrowingAfterwards: LanguageModel {
+                enum Failure: Error { case afterTheSystemModel }
+
+                let wrapped = SystemLanguageModel.default
+
+                var availability: Availability<SystemLanguageModel.UnavailableReason> { wrapped.availability }
+
+                func respond<Content>(
+                    within session: LanguageModelSession,
+                    to prompt: Prompt,
+                    generating type: Content.Type,
+                    includeSchemaInPrompt: Bool,
+                    options: GenerationOptions
+                ) async throws -> LanguageModelSession.Response<Content> where Content: Generable {
+                    _ = try await wrapped.respond(
+                        within: session,
+                        to: prompt,
+                        generating: type,
+                        includeSchemaInPrompt: includeSchemaInPrompt,
+                        options: options
+                    )
+                    throw Failure.afterTheSystemModel
+                }
+
+                func streamResponse<Content>(
+                    within session: LanguageModelSession,
+                    to prompt: Prompt,
+                    generating type: Content.Type,
+                    includeSchemaInPrompt: Bool,
+                    options: GenerationOptions
+                ) -> sending LanguageModelSession.ResponseStream<Content> where Content: Generable {
+                    wrapped.streamResponse(
+                        within: session,
+                        to: prompt,
+                        generating: type,
+                        includeSchemaInPrompt: includeSchemaInPrompt,
+                        options: options
+                    )
+                }
+            }
+
+            /// A weather tool whose lookup fails.
+            struct FailingWeatherTool: Tool {
+                let name = "getWeather"
+                let description = "Retrieve the latest weather information for a city"
+
+                @Generable
+                struct Arguments {
+                    @Guide(description: "The city to fetch the weather for")
+                    var city: String
+                }
+
+                struct Unavailable: Error {}
+
+                func call(arguments: Arguments) async throws -> String {
+                    throw Unavailable()
+                }
+
+                /// Whether `error` is the lookup's failure, which Foundation Models wraps in its own
+                /// `ToolCallError`.
+                @available(macOS 26.0, iOS 26.0, tvOS 26.0, visionOS 26.0, *)
+                static func failed(in error: any Error) -> Bool {
+                    if error is Unavailable { return true }
+                    if let wrapped = error as? FoundationModels.LanguageModelSession.ToolCallError {
+                        return failed(in: wrapped.underlyingError)
+                    }
+                    if let wrapped = error as? LanguageModelSession.ToolCallError {
+                        return failed(in: wrapped.underlyingError)
+                    }
+                    return false
+                }
+            }
+
+            /// The session counts the final request, and more when the response ran tools in
+            /// earlier rounds.
+            @available(macOS 26.0, iOS 26.0, tvOS 26.0, visionOS 26.0, *)
+            private static func expectSession(
+                _ session: LanguageModelSession.Usage,
+                counts final: LanguageModelSession.Usage,
+                after entries: ArraySlice<Transcript.Entry>
+            ) {
+                let ranTools = entries.contains { if case .toolOutput = $0 { true } else { false } }
+                if ranTools {
+                    #expect(session.input.totalTokenCount > final.input.totalTokenCount)
+                } else {
+                    #expect(session == final)
+                }
+            }
+        }
+    #endif
 #endif

@@ -27,6 +27,7 @@ struct AnthropicLanguageModelTests {
     @Test func basicResponse() async throws {
         let session = LanguageModelSession(model: model)
         let response = try await session.respond(to: "Say hello")
+        attachResponse(response)
         #expect(!response.content.isEmpty)
     }
 
@@ -37,6 +38,7 @@ struct AnthropicLanguageModelTests {
         )
 
         let response = try await session.respond(to: "What is 2+2?")
+        attachResponse(response)
         #expect(!response.content.isEmpty)
     }
 
@@ -97,6 +99,7 @@ struct AnthropicLanguageModelTests {
             to: "Tell me a fact",
             options: options
         )
+        attachResponse(response)
         #expect(!response.content.isEmpty)
     }
 
@@ -107,6 +110,7 @@ struct AnthropicLanguageModelTests {
             to: "Summarize the weather with a short summary and a celsius temperature.",
             generating: AnthropicStructuredForecast.self
         )
+        attachResponse(response)
 
         #expect(!response.content.summary.isEmpty)
         #expect(response.rawContent.jsonString.contains("summary"))
@@ -116,9 +120,11 @@ struct AnthropicLanguageModelTests {
         let session = LanguageModelSession(model: model)
 
         let firstResponse = try await session.respond(to: "My favorite color is blue")
+        attachResponse(firstResponse, "firstResponse")
         #expect(!firstResponse.content.isEmpty)
 
         let secondResponse = try await session.respond(to: "What did I just tell you?")
+        attachResponse(secondResponse, "secondResponse")
         #expect(secondResponse.content.contains("color"))
     }
 
@@ -127,6 +133,7 @@ struct AnthropicLanguageModelTests {
         let session = LanguageModelSession(model: model, tools: [weatherTool])
 
         let response = try await session.respond(to: "How's the weather in San Francisco?")
+        attachResponse(response)
 
         var foundToolOutput = false
         for case let .toolOutput(toolOutput) in response.transcriptEntries {
@@ -143,6 +150,7 @@ struct AnthropicLanguageModelTests {
             to: "Describe this image",
             image: .init(url: testImageURL)
         )
+        attachResponse(response)
         #expect(!response.content.isEmpty)
     }
 
@@ -152,6 +160,7 @@ struct AnthropicLanguageModelTests {
             to: "Describe this image",
             image: .init(data: testImageData, mimeType: "image/png")
         )
+        attachResponse(response)
         #expect(!response.content.isEmpty)
     }
 }

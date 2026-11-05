@@ -33,7 +33,7 @@ let package = Package(
         .package(url: "https://github.com/huggingface/swift-huggingface", from: "1.0.0"),
         .package(
             url: "https://github.com/mattt/EventSource",
-            from: "1.3.0",
+            from: "1.6.0",
             traits: [
                 .defaults,
                 .trait(name: "AsyncHTTPClient", condition: .when(traits: ["AsyncHTTPClient"])),
@@ -44,7 +44,7 @@ let package = Package(
         .package(url: "https://github.com/ml-explore/mlx-swift-lm", .upToNextMinor(from: "3.32.3")),
         .package(url: "https://github.com/swiftlang/swift-syntax", from: "602.0.0"),
         .package(url: "https://github.com/swift-server/async-http-client.git", from: "1.24.0"),
-        .package(url: "https://github.com/apple/swift-http-types", from: "1.0.0"),
+        .package(url: "https://github.com/apple/swift-http-types", from: "1.5.0"),
     ],
     targets: [
         .target(
@@ -54,7 +54,14 @@ let package = Package(
                 .product(name: "EventSource", package: "EventSource"),
                 .product(name: "JSONSchema", package: "JSONSchema"),
                 .product(name: "HTTPTypes", package: "swift-http-types"),
-                .product(name: "HTTPTypesFoundation", package: "swift-http-types"),
+                .product(
+                    name: "HTTPTypesFoundation",
+                    package: "swift-http-types",
+                    // It extends URLSession, which WASI doesn't have.
+                    condition: .when(platforms: [
+                        .macOS, .macCatalyst, .iOS, .tvOS, .watchOS, .visionOS, .linux, .windows, .android,
+                    ])
+                ),
                 .product(
                     name: "MLXLLM",
                     package: "mlx-swift-lm",
