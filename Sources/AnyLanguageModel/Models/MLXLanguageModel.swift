@@ -1093,27 +1093,6 @@ import Foundation
             let generationScope = beginGenerationScope()
             defer { endGenerationScope(generationScope) }
 
-            if type != String.self {
-                let requestContext = session.resolvedRequestContext()
-                let (jsonString, usage) = try await generateStructuredJSON(
-                    context: context,
-                    tokenCache: loaded.tokenCache,
-                    requestContext: requestContext,
-                    prompt: prompt,
-                    schema: schema,
-                    options: options,
-                    includeSchemaInPrompt: includeSchemaInPrompt
-                )
-                let generatedContent = try GeneratedContent(json: jsonString)
-                let content = try type.init(generatedContent)
-                return LanguageModelSession.Response(
-                    content: content,
-                    rawContent: generatedContent,
-                    transcriptEntries: ArraySlice([]),
-                    usage: usage
-                )
-            }
-
             // Map AnyLanguageModel GenerationOptions to MLX GenerateParameters
             let generateParameters = toGenerateParameters(options)
 
@@ -1129,12 +1108,19 @@ import Foundation
             var allTextChunks: [String] = []
             var allEntries: [Transcript.Entry] = []
             let toolRounds = session.toolRoundLimit(for: "MLX", options: options)
+            var requestContext: LanguageModelSession.RequestContext
 
-            // Loop until no more tool calls
+            // Loop until no more tool calls.
+            // A structured response runs the same tool loop as a text response.
+            // When the model answers without calling a tool,
+            // the response generates its content from the tool calls and outputs.
             while true {
-                let requestContext = session.resolvedRequestContext()
+                requestContext = session.resolvedRequestContext()
                 // MLX has no tool-choice setting.
                 let tools = options.toolsOffered(from: requestContext.tools)
+                if type != String.self, tools.isEmpty {
+                    break
+                }
                 let toolSpecs = mlxToolSpecs(for: tools)
                 let chat =
                     convertTranscriptToMLXChat(
@@ -1209,10 +1195,10 @@ import Foundation
                         if !calls.isEmpty {
                             allEntries.append(.toolCalls(Transcript.ToolCalls(calls)))
                         }
-                        return LanguageModelSession.Response(
-                            content: "" as! Content,
-                            rawContent: GeneratedContent(""),
-                            transcriptEntries: ArraySlice(allEntries),
+                        return try stoppedResponse(
+                            generating: type,
+                            provider: "MLX",
+                            transcriptEntries: allEntries,
                             requests: usage
                         )
                     case .invocations(let invocations):
@@ -1235,10 +1221,32 @@ import Foundation
                 break
             }
 
-            let text = allTextChunks.joined()
+            if type == String.self {
+                let text = allTextChunks.joined()
+                return LanguageModelSession.Response(
+                    content: text as! Content,
+                    rawContent: GeneratedContent(text),
+                    transcriptEntries: ArraySlice(allEntries),
+                    requests: usage
+                )
+            }
+
+            let (jsonString, structuredUsage) = try await generateStructuredJSON(
+                context: context,
+                tokenCache: loaded.tokenCache,
+                requestContext: requestContext,
+                pendingChat: pendingChat,
+                prompt: prompt,
+                schema: schema,
+                options: options,
+                includeSchemaInPrompt: includeSchemaInPrompt
+            )
+            usage.add(structuredUsage)
+            let generatedContent = try GeneratedContent(json: jsonString)
+            let content = try type.init(generatedContent)
             return LanguageModelSession.Response(
-                content: text as! Content,
-                rawContent: GeneratedContent(text),
+                content: content,
+                rawContent: generatedContent,
                 transcriptEntries: ArraySlice(allEntries),
                 requests: usage
             )
@@ -1287,7 +1295,7 @@ import Foundation
             options: GenerationOptions
         ) -> sending LanguageModelSession.ResponseStream<Content> where Content: Generable {
             guard type == String.self else {
-                return streamStructuredResponse {
+                return streamStructuredResponse(within: session) {
                     try await self.respond(
                         within: session,
                         to: prompt,
@@ -2030,6 +2038,7 @@ import Foundation
         context: ModelContext,
         tokenCache: StructuredGenerationTokenCache,
         requestContext: LanguageModelSession.RequestContext,
+        pendingChat: [MLXLMCommon.Chat.Message],
         prompt: Prompt,
         schema: GenerationSchema,
         options: GenerationOptions,
@@ -2038,10 +2047,11 @@ import Foundation
         let maxTokens = options.maximumResponseTokens ?? 512
         let generateParameters = toStructuredGenerateParameters(options)
 
-        let baseChat = convertTranscriptToMLXChat(
-            requestContext: requestContext,
-            fallbackPrompt: prompt.description
-        )
+        let baseChat =
+            convertTranscriptToMLXChat(
+                requestContext: requestContext,
+                fallbackPrompt: prompt.description
+            ) + pendingChat
         let schemaPrompt = includeSchemaInPrompt ? schema.schemaPrompt() : nil
         let chat = normalizeChatForStructuredGeneration(baseChat, schemaPrompt: schemaPrompt)
 

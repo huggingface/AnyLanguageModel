@@ -53,6 +53,47 @@ struct LocalGenerationTokenStream {
 }
 
 extension LanguageModel {
+    /// The response that ends when a ``ToolExecutionDelegate`` stops a tool call
+    /// before the model writes an answer.
+    ///
+    /// A `String`, or a type that can be empty, ends with an empty value.
+    /// A type with required properties can't be empty,
+    /// so this throws ``LanguageModelSession/ToolExecutionStopped`` with the entries instead.
+    func stoppedResponse<Content: Generable>(
+        generating type: Content.Type,
+        provider: String,
+        transcriptEntries: [Transcript.Entry],
+        requests: RequestsUsage
+    ) throws -> LanguageModelSession.Response<Content> {
+        func response(_ content: Content, _ rawContent: GeneratedContent) -> LanguageModelSession.Response<Content> {
+            .init(
+                content: content,
+                rawContent: rawContent,
+                transcriptEntries: ArraySlice(transcriptEntries),
+                requests: requests
+            )
+        }
+        if type == String.self {
+            return response("" as! Content, GeneratedContent(""))
+        }
+        let emptyObject = GeneratedContent(properties: [:])
+        if let content = try? Content(emptyObject) {
+            return response(content, emptyObject)
+        }
+        let nullContent = GeneratedContent(kind: .null)
+        if let content = try? Content(nullContent) {
+            return response(content, nullContent)
+        }
+        let emptyArray = GeneratedContent(kind: .array([]))
+        if let content = try? Content(emptyArray) {
+            return response(content, emptyArray)
+        }
+        throw LanguageModelSession.ToolExecutionStopped(
+            provider: provider,
+            transcriptEntries: ArraySlice(transcriptEntries)
+        )
+    }
+
     /// Constrained local generation produces one complete structured snapshot.
     func streamStructuredResponse<Content: Generable>(
         within session: LanguageModelSession,
@@ -61,7 +102,7 @@ extension LanguageModel {
         includeSchemaInPrompt: Bool,
         options: GenerationOptions
     ) -> LanguageModelSession.ResponseStream<Content> {
-        streamStructuredResponse {
+        streamStructuredResponse(within: session) {
             try await respond(
                 within: session,
                 to: prompt,
@@ -73,24 +114,33 @@ extension LanguageModel {
     }
 
     /// Converts a complete response into one snapshot without changing its schema.
+    ///
+    /// A stream counts its requests from its snapshots.
+    /// A response that throws yields none,
+    /// so the requests of the rounds that it completed are counted for `session` instead.
     func streamStructuredResponse<Content: Generable>(
+        within session: LanguageModelSession,
         generate: @escaping @Sendable () async throws -> LanguageModelSession.Response<Content>
     ) -> LanguageModelSession.ResponseStream<Content> {
         .init(
             stream: AsyncThrowingStream { continuation in
                 let task = Task {
+                    let channel = RequestUsageChannel { _ in }
                     do {
-                        let response = try await generate()
+                        let response = try await RequestUsageChannel.$current.withValue(channel) {
+                            try await generate()
+                        }
                         continuation.yield(
                             .init(
                                 content: response.content.asPartiallyGenerated(),
                                 rawContent: response.rawContent,
                                 transcriptEntries: response.transcriptEntries,
-                                usage: response.usage
+                                requests: response.requests
                             )
                         )
                         continuation.finish()
                     } catch {
+                        session.recordUsage(channel.reportedUsage)
                         continuation.finish(throwing: error)
                     }
                 }

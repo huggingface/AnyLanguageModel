@@ -163,10 +163,122 @@ struct LocalGenerationUsageTests {
         #expect(streamed.usage == model.usage)
         #expect(session.usage.totalTokenCount == 2 * model.usage.totalTokenCount)
     }
+
+    /// A structured response that called tools made a request for each round,
+    /// and a streamed one counts every round, as a response does.
+    @Test func structuredSnapshotCountsEveryRequest() async throws {
+        let model = LocalStructuredUsageModel(
+            earlier: LocalGenerationUsage(promptTokenCount: 30, generatedTokenCount: 5).value
+        )
+        let streamedSession = LanguageModelSession(model: model)
+        let streamed = try await streamedSession.streamResponse(to: "A number", generating: Int.self).collect()
+        let respondedSession = LanguageModelSession(model: model)
+        let response = try await respondedSession.respond(to: "A number", generating: Int.self)
+        #expect(streamed.usage == model.usage)
+        #expect(response.usage == model.usage)
+        #expect(respondedSession.usage.totalTokenCount == 48)
+        #expect(streamedSession.usage == respondedSession.usage)
+    }
+
+    /// A stopped response ends with an empty value when its type can be empty,
+    /// and otherwise throws with the tool calls that the delegate stopped.
+    @Test func stoppedResponseThrowsWithEntriesForRequiredFields() throws {
+        let model = LocalStructuredUsageModel()
+        let call = Transcript.ToolCall(
+            id: "call-1",
+            toolName: WeatherTool().name,
+            arguments: try GeneratedContent(json: #"{"city":"Paris"}"#)
+        )
+        let entries: [Transcript.Entry] = [.toolCalls(.init([call]))]
+
+        let text = try model.stoppedResponse(
+            generating: String.self,
+            provider: "Local",
+            transcriptEntries: entries,
+            requests: RequestsUsage()
+        )
+        #expect(text.content.isEmpty)
+        #expect(Array(text.transcriptEntries) == entries)
+
+        let reports = try model.stoppedResponse(
+            generating: [WeatherReport].self,
+            provider: "Local",
+            transcriptEntries: entries,
+            requests: RequestsUsage()
+        )
+        #expect(reports.content.isEmpty)
+        #expect(reports.rawContent == GeneratedContent(kind: .array([])))
+        #expect(Array(reports.transcriptEntries) == entries)
+
+        #expect {
+            _ = try model.stoppedResponse(
+                generating: WeatherReport.self,
+                provider: "Local",
+                transcriptEntries: entries,
+                requests: RequestsUsage()
+            )
+        } throws: { error in
+            guard let stopped = error as? LanguageModelSession.ToolExecutionStopped else { return false }
+            return stopped.provider == "Local" && Array(stopped.transcriptEntries) == entries
+        }
+    }
+
+    /// A streamed structured response that throws after a completed round yields no snapshot,
+    /// and the session still counts the round's request, as a response that isn't streamed does.
+    @Test(arguments: [false, true])
+    func failedStructuredStreamCountsCompletedRounds(_ streaming: Bool) async throws {
+        let model = LocalFailingRoundModel()
+        let session = LanguageModelSession(model: model)
+        do {
+            _ =
+                try await streaming
+                ? session.streamResponse(to: "A number", generating: Int.self).collect()
+                : session.respond(to: "A number", generating: Int.self)
+            Issue.record("Expected LocalFailingRoundModel.Failure")
+        } catch is LocalFailingRoundModel.Failure {}
+        #expect(session.usage == model.round)
+    }
+}
+
+/// A model whose first round completes
+/// and whose response then throws, as when a tool throws.
+private struct LocalFailingRoundModel: LanguageModel {
+    typealias UnavailableReason = Never
+    struct Failure: Error {}
+    let round = LocalGenerationUsage(promptTokenCount: 20, generatedTokenCount: 4).value
+
+    func respond<Content: Generable>(
+        within session: LanguageModelSession,
+        to prompt: Prompt,
+        generating type: Content.Type,
+        includeSchemaInPrompt: Bool,
+        options: GenerationOptions
+    ) async throws -> LanguageModelSession.Response<Content> {
+        var requests = RequestsUsage()
+        requests.add(round)
+        throw Failure()
+    }
+
+    func streamResponse<Content: Generable>(
+        within session: LanguageModelSession,
+        to prompt: Prompt,
+        generating type: Content.Type,
+        includeSchemaInPrompt: Bool,
+        options: GenerationOptions
+    ) -> sending LanguageModelSession.ResponseStream<Content> {
+        streamStructuredResponse(
+            within: session,
+            to: prompt,
+            generating: type,
+            includeSchemaInPrompt: includeSchemaInPrompt,
+            options: options
+        )
+    }
 }
 
 private struct LocalStructuredUsageModel: LanguageModel {
     typealias UnavailableReason = Never
+    var earlier = LanguageModelSession.Usage.zero
     let usage = LocalGenerationUsage(promptTokenCount: 12, generatedTokenCount: 1).value
 
     func respond<Content: Generable>(
@@ -177,7 +289,12 @@ private struct LocalStructuredUsageModel: LanguageModel {
         options: GenerationOptions
     ) async throws -> LanguageModelSession.Response<Content> {
         let raw = GeneratedContent(7)
-        return .init(content: try Content(raw), rawContent: raw, transcriptEntries: [], usage: usage)
+        return .init(
+            content: try Content(raw),
+            rawContent: raw,
+            transcriptEntries: [],
+            requests: RequestsUsage(earlier: earlier, final: usage)
+        )
     }
 
     func streamResponse<Content: Generable>(

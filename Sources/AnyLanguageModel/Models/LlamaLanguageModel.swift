@@ -845,180 +845,182 @@ import Foundation
             let runtimeOptions = resolvedOptions(from: options)
             let structuredOptions = resolvedStructuredOptions(from: options)
 
-            let imageMarker = mtmdContext != nil ? String(cString: mtmd_default_marker()) : nil
+            // Structured output does not go through the projector yet.
+            // Without an image marker, a prompt with an image throws
+            // before any generation or tool call,
+            // rather than answer about an image the model never saw.
+            let imageMarker =
+                type == String.self && mtmdContext != nil ? String(cString: mtmd_default_marker()) : nil
 
-            if type == String.self {
-                let maxTokens = runtimeOptions.maximumResponseTokens ?? 100
-                let outputFormat = currentToolCallFormat()
-                let toolRounds = session.toolRoundLimit(for: "Llama", options: options)
-                var allEntries: [Transcript.Entry] = []
-                var text = ""
-                var usage = RequestsUsage()
-                var pendingEntries: [Transcript.Entry] = []
+            let maxTokens = runtimeOptions.maximumResponseTokens ?? 100
+            let outputFormat = currentToolCallFormat()
+            let toolRounds = session.toolRoundLimit(for: "Llama", options: options)
+            var allEntries: [Transcript.Entry] = []
+            var text = ""
+            var usage = RequestsUsage()
+            var pendingEntries: [Transcript.Entry] = []
+            var requestContext: LanguageModelSession.RequestContext
+            var offeredTools = false
 
-                generationLoop: while true {
-                    let requestContext = session.resolvedRequestContext()
-                    if mmprojPath == nil {
-                        try validateNoImageSegments(in: requestContext.transcript)
+            // A structured response runs the same tool loop as a text response.
+            // When the model answers without calling a tool,
+            // the response generates its content from the tool calls and outputs.
+            generationLoop: while true {
+                requestContext = session.resolvedRequestContext()
+                if mmprojPath == nil {
+                    try validateNoImageSegments(in: requestContext.transcript)
+                }
+                // llama.cpp has no tool-choice setting.
+                let tools = options.toolsOffered(from: requestContext.tools)
+                if type != String.self, tools.isEmpty {
+                    break generationLoop
+                }
+                offeredTools = true
+                let toolContext = try makeToolPromptContext(
+                    tools: tools,
+                    pendingEntries: pendingEntries
+                )
+                var promptImages: [Data] = []
+                let fullPrompt = try formatPrompt(
+                    requestContext: requestContext,
+                    extraSystemMessage: nil,
+                    assistantPrefill: runtimeOptions.assistantPrefill,
+                    imageMarker: imageMarker,
+                    images: &promptImages,
+                    toolContext: toolContext
+                )
+
+                var accumulated = ""
+                let terminator = toolContext?.format.callTerminator
+                let collectToken: (String) -> Bool = { tokenText in
+                    accumulated += tokenText
+                    if let terminator,
+                        accumulated.suffix(terminator.count + 8).contains(terminator)
+                    {
+                        return false
                     }
-                    // llama.cpp has no tool-choice setting.
-                    let tools = options.toolsOffered(from: requestContext.tools)
-                    let toolContext = try makeToolPromptContext(
-                        tools: tools,
-                        pendingEntries: pendingEntries
-                    )
-                    var promptImages: [Data] = []
-                    let fullPrompt = try formatPrompt(
-                        requestContext: requestContext,
-                        extraSystemMessage: nil,
-                        assistantPrefill: runtimeOptions.assistantPrefill,
-                        imageMarker: imageMarker,
-                        images: &promptImages,
-                        toolContext: toolContext
-                    )
-
-                    var accumulated = ""
-                    let terminator = toolContext?.format.callTerminator
-                    let collectToken: (String) -> Bool = { tokenText in
-                        accumulated += tokenText
-                        if let terminator,
-                            accumulated.suffix(terminator.count + 8).contains(terminator)
-                        {
-                            return false
-                        }
-                        return true
-                    }
-
-                    let roundUsage: LanguageModelSession.Usage
-                    if promptImages.isEmpty {
-                        roundUsage = try generateChatText(
-                            session: session,
-                            prompt: fullPrompt,
-                            maxTokens: maxTokens,
-                            options: runtimeOptions,
-                            onToken: collectToken
-                        )
-                    } else {
-                        discardCachedSessionContext()
-                        let context = try makeFreshContext(options: runtimeOptions)
-                        defer { llama_free(context) }
-                        roundUsage = try performMultimodalGeneration(
-                            context: context,
-                            prompt: fullPrompt,
-                            images: promptImages,
-                            maxTokens: maxTokens,
-                            options: runtimeOptions,
-                            onToken: collectToken
-                        )
-                    }
-
-                    usage.add(roundUsage)
-
-                    guard let format = toolContext?.format else {
-                        text = outputFormat.streamingVisibleText(
-                            in: accumulated,
-                            withholdToolCalls: false,
-                            holdPartialMarkers: false
-                        )
-                        break generationLoop
-                    }
-                    let (visibleText, parsedCalls) = format.parseToolCalls(in: accumulated)
-                    // Keep the text from every round, as the streaming path does,
-                    // so a preamble before a tool call is not lost.
-                    text += visibleText
-                    if parsedCalls.isEmpty {
-                        break generationLoop
-                    }
-
-                    try session.recordToolRound(toolRounds, completed: allEntries)
-
-                    let resolution = try await resolveToolCalls(
-                        parsedCalls,
-                        tools: requestContext.toolsForExecution(in: session, offeredTools: tools),
-                        session: session
-                    )
-                    switch resolution {
-                    case .stop(let calls):
-                        if !calls.isEmpty {
-                            allEntries.append(.toolCalls(Transcript.ToolCalls(calls)))
-                        }
-                        return LanguageModelSession.Response(
-                            content: "" as! Content,
-                            rawContent: GeneratedContent(""),
-                            transcriptEntries: ArraySlice(allEntries),
-                            requests: usage
-                        )
-                    case .invocations(let invocations):
-                        guard !invocations.isEmpty else {
-                            break generationLoop
-                        }
-                        let callsEntry = Transcript.Entry.toolCalls(
-                            Transcript.ToolCalls(invocations.map(\.call))
-                        )
-                        allEntries.append(callsEntry)
-                        pendingEntries.append(callsEntry)
-                        for invocation in invocations {
-                            let outputEntry = Transcript.Entry.toolOutput(invocation.output)
-                            allEntries.append(outputEntry)
-                            pendingEntries.append(outputEntry)
-                        }
-                    }
+                    return true
                 }
 
+                let roundUsage: LanguageModelSession.Usage
+                if promptImages.isEmpty {
+                    roundUsage = try generateChatText(
+                        session: session,
+                        prompt: fullPrompt,
+                        maxTokens: maxTokens,
+                        options: runtimeOptions,
+                        onToken: collectToken
+                    )
+                } else {
+                    discardCachedSessionContext()
+                    let context = try makeFreshContext(options: runtimeOptions)
+                    defer { llama_free(context) }
+                    roundUsage = try performMultimodalGeneration(
+                        context: context,
+                        prompt: fullPrompt,
+                        images: promptImages,
+                        maxTokens: maxTokens,
+                        options: runtimeOptions,
+                        onToken: collectToken
+                    )
+                }
+
+                usage.add(roundUsage)
+
+                guard let format = toolContext?.format else {
+                    text = outputFormat.streamingVisibleText(
+                        in: accumulated,
+                        withholdToolCalls: false,
+                        holdPartialMarkers: false
+                    )
+                    break generationLoop
+                }
+                let (visibleText, parsedCalls) = format.parseToolCalls(in: accumulated)
+                // Keep the text from every round, as the streaming path does,
+                // so a preamble before a tool call is not lost.
+                text += visibleText
+                if parsedCalls.isEmpty {
+                    break generationLoop
+                }
+
+                try session.recordToolRound(toolRounds, completed: allEntries)
+
+                let resolution = try await resolveToolCalls(
+                    parsedCalls,
+                    tools: requestContext.toolsForExecution(in: session, offeredTools: tools),
+                    session: session
+                )
+                switch resolution {
+                case .stop(let calls):
+                    if !calls.isEmpty {
+                        allEntries.append(.toolCalls(Transcript.ToolCalls(calls)))
+                    }
+                    return try stoppedResponse(
+                        generating: type,
+                        provider: "Llama",
+                        transcriptEntries: allEntries,
+                        requests: usage
+                    )
+                case .invocations(let invocations):
+                    guard !invocations.isEmpty else {
+                        break generationLoop
+                    }
+                    let callsEntry = Transcript.Entry.toolCalls(
+                        Transcript.ToolCalls(invocations.map(\.call))
+                    )
+                    allEntries.append(callsEntry)
+                    pendingEntries.append(callsEntry)
+                    for invocation in invocations {
+                        let outputEntry = Transcript.Entry.toolOutput(invocation.output)
+                        allEntries.append(outputEntry)
+                        pendingEntries.append(outputEntry)
+                    }
+                }
+            }
+            if type == String.self {
                 return LanguageModelSession.Response(
                     content: text as! Content,
                     rawContent: GeneratedContent(text),
                     transcriptEntries: ArraySlice(allEntries),
                     requests: usage
                 )
-            } else {
-                let requestContext = session.resolvedRequestContext()
-                if mmprojPath == nil {
-                    try validateNoImageSegments(in: requestContext.transcript)
-                }
-                var promptImages: [Data] = []
-                let fullPrompt: String
-                if includeSchemaInPrompt {
-                    fullPrompt = try formatPrompt(
-                        requestContext: requestContext,
-                        extraSystemMessage: schema.schemaPrompt(),
-                        assistantPrefill: runtimeOptions.assistantPrefill,
-                        imageMarker: imageMarker,
-                        images: &promptImages
-                    )
-                } else {
-                    fullPrompt = try formatPrompt(
-                        requestContext: requestContext,
-                        extraSystemMessage: nil,
-                        assistantPrefill: runtimeOptions.assistantPrefill,
-                        imageMarker: imageMarker,
-                        images: &promptImages
-                    )
-                }
-                // Structured output does not go through the projector yet; refuse rather
-                // than answer about an image the model never saw.
-                guard promptImages.isEmpty else {
-                    throw LlamaLanguageModelError.unsupportedFeature
-                }
-                let context = try makeFreshContext(options: runtimeOptions)
-                defer { llama_free(context) }
-                let maxTokens = structuredOptions.maximumResponseTokens ?? 512
-                let (jsonString, usage) = try await generateStructuredJSON(
-                    context: context,
-                    prompt: fullPrompt,
-                    schema: schema,
-                    maxTokens: maxTokens,
-                    options: structuredOptions
-                )
-                let generatedContent = try GeneratedContent(json: jsonString)
-                let content = try type.init(generatedContent)
-                return LanguageModelSession.Response(
-                    content: content,
-                    rawContent: generatedContent,
-                    transcriptEntries: ArraySlice([]),
-                    usage: usage
-                )
             }
+
+            // After a tool loop, the context replays the tool calls and outputs
+            // from the transcript and this response, without offering the tools.
+            // Without tools, structured generation leaves tool entries out, as before.
+            var toolContext: LlamaToolPromptContext?
+            if offeredTools {
+                toolContext = try LlamaToolPromptContext(format: currentToolCallFormat(), tools: [])
+                toolContext?.pendingEntries = pendingEntries
+            }
+            var promptImages: [Data] = []
+            let fullPrompt = try formatPrompt(
+                requestContext: requestContext,
+                extraSystemMessage: includeSchemaInPrompt ? schema.schemaPrompt() : nil,
+                assistantPrefill: runtimeOptions.assistantPrefill,
+                imageMarker: imageMarker,
+                images: &promptImages,
+                toolContext: toolContext
+            )
+            let context = try makeFreshContext(options: runtimeOptions)
+            defer { llama_free(context) }
+            let (jsonString, structuredUsage) = try await generateStructuredJSON(
+                context: context,
+                prompt: fullPrompt,
+                schema: schema,
+                maxTokens: structuredOptions.maximumResponseTokens ?? 512,
+                options: structuredOptions
+            )
+            usage.add(structuredUsage)
+            let generatedContent = try GeneratedContent(json: jsonString)
+            let content = try type.init(generatedContent)
+            return LanguageModelSession.Response(
+                content: content,
+                rawContent: generatedContent,
+                transcriptEntries: ArraySlice(allEntries),
+                requests: usage
+            )
         }
 
         public func streamResponse<Content>(
@@ -1064,7 +1066,7 @@ import Foundation
             options: GenerationOptions
         ) -> sending LanguageModelSession.ResponseStream<Content> where Content: Generable {
             guard type == String.self else {
-                return streamStructuredResponse {
+                return streamStructuredResponse(within: session) {
                     try await self.respond(
                         within: session,
                         to: prompt,

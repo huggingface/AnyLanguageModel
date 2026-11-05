@@ -415,6 +415,128 @@ import Testing
             #expect(response.usage.output.totalTokenCount > 0)
         }
 
+        @Test(arguments: [false, true])
+        func structuredResponseWithTools(_ streaming: Bool) async throws {
+            let weatherTool = spy(on: WeatherTool())
+            let session = LanguageModelSession(
+                model: model,
+                tools: [weatherTool],
+                instructions: "You are a helpful assistant. Use available tools when needed."
+            )
+            let prompt = "How's the weather in San Francisco? /no_think"
+            let options = GenerationOptions(sampling: .greedy, maximumResponseTokens: 512)
+
+            let response =
+                try await streaming
+                ? session.streamResponse(to: prompt, generating: WeatherReport.self, options: options).collect()
+                : session.respond(to: prompt, generating: WeatherReport.self, options: options)
+            attachResponse(response)
+
+            let calls = await weatherTool.calls
+            #expect(calls.count >= 1)
+            #expect(response.transcriptEntries.contains { if case .toolOutput = $0 { true } else { false } })
+            // The temperature comes only from the tool's output.
+            #expect(response.content.temperatureFahrenheit == 72)
+        }
+
+        @Test func structuredResponseWithToolsUsesEarlierToolOutput() async throws {
+            let weatherTool = spy(on: WeatherTool())
+            let call = Transcript.ToolCall(
+                id: "call-1",
+                toolName: weatherTool.name,
+                arguments: try GeneratedContent(json: #"{"city":"Paris"}"#)
+            )
+            // Only the earlier tool output has the temperature;
+            // the earlier answer doesn't repeat it.
+            let transcript = Transcript(entries: [
+                .instructions(
+                    .init(
+                        segments: [.text(.init(content: "You are a helpful assistant."))],
+                        toolDefinitions: []
+                    )
+                ),
+                .prompt(.init(segments: [.text(.init(content: "Look up the weather in Paris."))])),
+                .toolCalls(.init([call])),
+                .toolOutput(
+                    .init(
+                        id: call.id,
+                        toolName: call.toolName,
+                        segments: [.text(.init(content: "The weather in Paris is cloudy and 58°F / 14°C"))]
+                    )
+                ),
+                .response(.init(assetIDs: [], segments: [.text(.init(content: "I looked up the weather in Paris."))])),
+            ])
+            let session = LanguageModelSession(model: model, tools: [weatherTool], transcript: transcript)
+
+            let response = try await session.respond(
+                to: "Report the weather in Paris that you already looked up. Don't call a tool. /no_think",
+                generating: WeatherReport.self,
+                options: GenerationOptions(sampling: .greedy, maximumResponseTokens: 512)
+            )
+            attachResponse(response)
+
+            #expect(await weatherTool.calls.isEmpty)
+            #expect(response.content.temperatureFahrenheit == 58)
+        }
+
+        @Test(arguments: [false, true])
+        func structuredResponseStoppedByDelegate(_ streaming: Bool) async throws {
+            let weatherTool = spy(on: WeatherTool())
+            let session = LanguageModelSession(
+                model: model,
+                tools: [weatherTool],
+                instructions: "You are a helpful assistant. Use available tools when needed."
+            )
+            session.toolExecutionDelegate = StopToolExecutionDelegate()
+            let prompt = "How's the weather in San Francisco? /no_think"
+            let options = GenerationOptions(sampling: .greedy, maximumResponseTokens: 512)
+
+            do {
+                _ =
+                    try await streaming
+                    ? session.streamResponse(to: prompt, generating: WeatherReport.self, options: options).collect()
+                    : session.respond(to: prompt, generating: WeatherReport.self, options: options)
+                Issue.record("Expected LanguageModelSession.ToolExecutionStopped")
+            } catch let error as LanguageModelSession.ToolExecutionStopped {
+                #expect(error.provider == "Llama")
+                let calls = error.transcriptEntries.flatMap { entry -> [Transcript.ToolCall] in
+                    if case .toolCalls(let calls) = entry { Array(calls) } else { [] }
+                }
+                #expect(calls.contains { $0.toolName == weatherTool.name })
+                #expect(!error.transcriptEntries.contains { if case .toolOutput = $0 { true } else { false } })
+            }
+            #expect(await weatherTool.calls.isEmpty)
+            // The session keeps only the prompt.
+            #expect(session.transcript.count == 2)
+        }
+
+        /// An array can be empty, so a stopped response of an array type
+        /// ends with an empty array and the tool calls that the delegate stopped.
+        @Test(arguments: [false, true])
+        func arrayResponseStoppedByDelegate(_ streaming: Bool) async throws {
+            let weatherTool = spy(on: WeatherTool())
+            let session = LanguageModelSession(
+                model: model,
+                tools: [weatherTool],
+                instructions: "You are a helpful assistant. Use available tools when needed."
+            )
+            session.toolExecutionDelegate = StopToolExecutionDelegate()
+            let prompt = "How's the weather in San Francisco? /no_think"
+            let options = GenerationOptions(sampling: .greedy, maximumResponseTokens: 512)
+
+            let response =
+                try await streaming
+                ? session.streamResponse(to: prompt, generating: [WeatherReport].self, options: options).collect()
+                : session.respond(to: prompt, generating: [WeatherReport].self, options: options)
+            #expect(response.content.isEmpty)
+            let calls = response.transcriptEntries.flatMap { entry -> [Transcript.ToolCall] in
+                if case .toolCalls(let calls) = entry { Array(calls) } else { [] }
+            }
+            #expect(calls.contains { $0.toolName == weatherTool.name })
+            #expect(!response.transcriptEntries.contains { if case .toolOutput = $0 { true } else { false } })
+            #expect(await weatherTool.calls.isEmpty)
+        }
+
         @Test func structuredGenerationBasicStruct() async throws {
             let session = LanguageModelSession(
                 model: model,
@@ -550,6 +672,23 @@ import Testing
                 last = snapshot.content
             }
             #expect(last.lowercased().contains("red"))
+        }
+
+        @Test func structuredResponseRejectsImagesBeforeCallingTools() async throws {
+            let weatherTool = spy(on: WeatherTool())
+            let transcript = Transcript(entries: [
+                .prompt(
+                    Transcript.Prompt(segments: [
+                        .text(.init(content: "Use getWeather to get the weather in the city in this image.")),
+                        .image(.init(data: Self.redSquarePNG, mimeType: "image/png")),
+                    ])
+                )
+            ])
+            let session = LanguageModelSession(model: model, tools: [weatherTool], transcript: transcript)
+            await #expect(throws: LlamaLanguageModelError.unsupportedFeature) {
+                _ = try await session.respond(to: "", generating: WeatherReport.self)
+            }
+            #expect(await weatherTool.calls.isEmpty)
         }
 
         @Test func rejectsImagesWithoutProjector() async throws {
