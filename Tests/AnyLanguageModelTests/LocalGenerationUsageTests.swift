@@ -317,6 +317,29 @@ struct LocalGenerationUsageTests {
         total.add(model.child.round)
         #expect(session.usage == total)
     }
+
+    /// A stream that reports an earlier request
+    /// and then relays a structured stream that completes after the consumer cancels
+    /// counts both requests.
+    @Test func relayedStructuredStreamCompletedAfterCancellationCountsEveryRequest() async throws {
+        let model = LocalPrefixedCancelledModel()
+        let session = LanguageModelSession(model: model)
+        let received = Gate()
+        let consumer = Task {
+            for try await _ in session.streamResponse(to: "Numbers", generating: [Int].self) {
+                received.open()
+            }
+        }
+        await received.wait()
+        await model.child.reported.wait()
+        consumer.cancel()
+        _ = await consumer.result
+        model.child.release.open()
+        #expect(try await eventually(session.usage != model.earlier))
+        var total = model.earlier
+        total.add(model.child.round)
+        #expect(session.usage == total)
+    }
 }
 
 /// Waits for `condition` to become true, and returns false if it doesn't before `timeout`.
@@ -715,6 +738,67 @@ private struct LocalPrefixedFailingModel: LanguageModel {
                 let task = Task {
                     do {
                         let raw = GeneratedContent(1)
+                        continuation.yield(
+                            .init(content: try Content(raw).asPartiallyGenerated(), rawContent: raw, usage: earlier)
+                        )
+                        let upstream = child.streamResponse(
+                            within: session,
+                            to: prompt,
+                            generating: type,
+                            includeSchemaInPrompt: includeSchemaInPrompt,
+                            options: options
+                        )
+                        for try await snapshot in upstream {
+                            continuation.yield(snapshot)
+                        }
+                        continuation.finish()
+                    } catch {
+                        continuation.finish(throwing: error)
+                    }
+                }
+                continuation.onTermination = { _ in task.cancel() }
+            }
+        )
+    }
+}
+
+/// A model whose stream yields a snapshot with the usage of an earlier request,
+/// then relays the stream of a local model whose round completes
+/// and whose response waits for `child.release` and then stops.
+private struct LocalPrefixedCancelledModel: LanguageModel {
+    typealias UnavailableReason = Never
+    let earlier = LocalGenerationUsage(promptTokenCount: 30, generatedTokenCount: 5).value
+    let child = LocalCancelledRoundModel(throwsCancellation: false)
+
+    func respond<Content: Generable>(
+        within session: LanguageModelSession,
+        to prompt: Prompt,
+        generating type: Content.Type,
+        includeSchemaInPrompt: Bool,
+        options: GenerationOptions
+    ) async throws -> LanguageModelSession.Response<Content> {
+        try await streamResponse(
+            within: session,
+            to: prompt,
+            generating: type,
+            includeSchemaInPrompt: includeSchemaInPrompt,
+            options: options
+        ).collect()
+    }
+
+    func streamResponse<Content: Generable>(
+        within session: LanguageModelSession,
+        to prompt: Prompt,
+        generating type: Content.Type,
+        includeSchemaInPrompt: Bool,
+        options: GenerationOptions
+    ) -> sending LanguageModelSession.ResponseStream<Content> {
+        let (earlier, child) = (earlier, child)
+        return .init(
+            stream: AsyncThrowingStream { continuation in
+                let task = Task {
+                    do {
+                        let raw = GeneratedContent(kind: .array([]))
                         continuation.yield(
                             .init(content: try Content(raw).asPartiallyGenerated(), rawContent: raw, usage: earlier)
                         )
