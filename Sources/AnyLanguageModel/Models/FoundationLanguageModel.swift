@@ -107,7 +107,7 @@
         private func makeRequest(
             for session: LanguageModelSession,
             prompt: Prompt,
-            fmPrompt: FoundationModels.Prompt
+            fmPrompt: FoundationModels.Prompt?
         ) async throws -> FoundationModelsRequest {
             try makeFoundationModelsRequest(
                 model: try await loadedModel(),
@@ -159,7 +159,7 @@
             includeSchemaInPrompt: Bool,
             options: GenerationOptions
         ) async throws -> LanguageModelSession.Response<Content> where Content: Generable {
-            let fmPrompt = try prompt.toFoundationModels()
+            let fmPrompt = try prompt.toFoundationModelsUnlessProjected(in: session)
             return try await fmRespond(
                 makeRequest: { try await self.makeRequest(for: session, prompt: prompt, fmPrompt: fmPrompt) },
                 fmOptions: options.toFoundationModels(),
@@ -211,9 +211,9 @@
             includeSchemaInPrompt: Bool,
             options: GenerationOptions
         ) -> sending LanguageModelSession.ResponseStream<Content> where Content: Generable {
-            let fmPrompt: FoundationModels.Prompt
+            let fmPrompt: FoundationModels.Prompt?
             do {
-                fmPrompt = try prompt.toFoundationModels()
+                fmPrompt = try prompt.toFoundationModelsUnlessProjected(in: session)
             } catch {
                 return .init(stream: AsyncThrowingStream { $0.finish(throwing: error) })
             }

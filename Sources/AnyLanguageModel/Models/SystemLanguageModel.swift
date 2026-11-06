@@ -194,7 +194,7 @@
             includeSchemaInPrompt: Bool,
             options: GenerationOptions
         ) async throws -> LanguageModelSession.Response<Content> where Content: Generable {
-            let fmPrompt = try prompt.toFoundationModels()
+            let fmPrompt = try prompt.toFoundationModelsUnlessProjected(in: session)
             let fmOptions = options.toFoundationModels()
 
             return try await fmRespond(
@@ -248,9 +248,9 @@
             includeSchemaInPrompt: Bool,
             options: GenerationOptions
         ) -> sending LanguageModelSession.ResponseStream<Content> where Content: Generable {
-            let fmPrompt: FoundationModels.Prompt
+            let fmPrompt: FoundationModels.Prompt?
             do {
-                fmPrompt = try prompt.toFoundationModels()
+                fmPrompt = try prompt.toFoundationModelsUnlessProjected(in: session)
             } catch {
                 return .init(stream: AsyncThrowingStream { $0.finish(throwing: error) })
             }
@@ -298,7 +298,7 @@
         private func makeRequest(
             for session: LanguageModelSession,
             prompt: Prompt,
-            fmPrompt: FoundationModels.Prompt
+            fmPrompt: FoundationModels.Prompt?
         ) throws -> FoundationModelsRequest {
             #if compiler(>=6.4) && !os(tvOS)
                 if #available(macOS 27.0, iOS 27.0, visionOS 27.0, watchOS 27.0, *) {
@@ -331,7 +331,7 @@
                             .map { Transcript.ToolDefinition(tool: $0) }
                     )
                 ),
-                prompt: fmPrompt
+                prompt: try fmPrompt ?? prompt.toFoundationModels()
             )
         }
 
@@ -407,34 +407,68 @@
             }
         }
 
-        /// Splits a profile's projected history into the native history and the prompt to send.
+        /// A profile that sends the session's dynamic instructions
+        /// and puts rewritten segments in the request's prompt.
+        ///
+        /// A Foundation Models prompt can't set a structured segment's ID or source,
+        /// so a history transform sets the segments on the entry that the session creates,
+        /// which keeps the entry's options and response format.
+        /// The transform also runs for the request that continues after tool calls.
+        @available(macOS 27.0, iOS 27.0, visionOS 27.0, watchOS 27.0, *)
+        private struct FoundationModelsRewrittenPromptProfile<Model: FoundationModels.LanguageModel>:
+            FoundationModels.LanguageModelSession.DynamicProfile
+        {
+            let model: Model
+            let session: LanguageModelSession
+            let segments: [FoundationModels.Transcript.Segment]
+
+            var body: some FoundationModels.LanguageModelSession.DynamicProfile {
+                FoundationModels.LanguageModelSession.Profile {
+                    FoundationModelsDynamicInstructionsAdapter(session: session)
+                }
+                .model(model)
+                .historyTransform { [segments] entries in
+                    var entries = entries
+                    for index in entries.indices.reversed() {
+                        guard case .prompt(var prompt) = entries[index] else { continue }
+                        prompt.segments = segments
+                        entries[index] = .prompt(prompt)
+                        break
+                    }
+                    return entries
+                }
+            }
+        }
+
+        /// Splits a profile's projected history into the native history
+        /// and, if a history transform rewrote the current prompt, the rewritten prompt.
         ///
         /// Foundation Models sends the output of a profile's history transforms,
-        /// so if a transform rewrites the current prompt,
-        /// the rewritten prompt takes the place of the current one.
+        /// so the rewritten prompt takes the place of the current one.
         ///
         /// The canonical transcript ends with the current prompt during a request.
         /// If the projection leaves out that prompt or ends with another entry,
         /// the native session still appends the current prompt,
         /// because a Foundation Models session request always takes a prompt.
+        ///
+        /// - Throws: ``PromptBridgeError`` for a rewritten image Foundation Models can't take.
         @available(macOS 27.0, iOS 27.0, visionOS 27.0, watchOS 27.0, *)
-        private func fmProjectedHistoryAndPrompt(
+        private func fmProjectedHistory(
             _ projected: Transcript,
             canonical: Transcript,
-            prompt: Prompt,
-            fmPrompt: FoundationModels.Prompt
-        ) throws -> (history: Transcript, prompt: FoundationModels.Prompt) {
+            prompt: Prompt
+        ) throws -> (history: Transcript, rewrittenPrompt: [FoundationModels.Transcript.Segment]?) {
             guard case .prompt(let current)? = canonical.last,
                 prompt.matchesTranscriptOccurrence(current.segments, occurrenceID: current.id),
                 case .prompt(let last)? = projected.last,
                 projected.last != canonical.last
             else {
-                return (fmTranscriptDroppingDuplicatePrompt(projected, prompt: prompt), fmPrompt)
+                return (fmTranscriptDroppingDuplicatePrompt(projected, prompt: prompt), nil)
             }
-            return (
-                Transcript(entries: projected.dropLast()),
-                try last.segments.toFoundationModelsToolOutput()
-            )
+            // The conversion to transcript segments leaves out images it can't convert,
+            // so this rejects them first.
+            _ = try last.segments.toFoundationModelsToolOutput()
+            return (Transcript(entries: projected.dropLast()), last.segments.toFoundationModels())
         }
 
         @available(macOS 27.0, iOS 27.0, visionOS 27.0, watchOS 27.0, *)
@@ -442,21 +476,20 @@
             model: Model,
             session: LanguageModelSession,
             prompt: Prompt,
-            fmPrompt: FoundationModels.Prompt
+            fmPrompt: FoundationModels.Prompt?
         ) throws -> FoundationModelsRequest {
             if session.usesDynamicInstructions {
                 // Only a profile can project history, so ordinary dynamic instructions
                 // aren't evaluated here.
-                let (history, requestPrompt) =
+                let (history, rewrittenPrompt) =
                     if session.usesDynamicProfile {
-                        try fmProjectedHistoryAndPrompt(
+                        try fmProjectedHistory(
                             session.resolvedRequestContext().transcript,
                             canonical: session.transcript,
-                            prompt: prompt,
-                            fmPrompt: fmPrompt
+                            prompt: prompt
                         )
                     } else {
-                        (fmTranscriptDroppingDuplicatePrompt(session.transcript, prompt: prompt), fmPrompt)
+                        (fmTranscriptDroppingDuplicatePrompt(session.transcript, prompt: prompt), nil)
                     }
                 // Foundation Models evaluates the dynamic instructions itself,
                 // so the history leaves out the instructions entry.
@@ -466,13 +499,27 @@
                         return true
                     }
                 ).toFoundationModels(instructions: nil, toolDefinitions: [])
+                if let rewrittenPrompt {
+                    return FoundationModelsRequest(
+                        session: FoundationModels.LanguageModelSession(
+                            profile: FoundationModelsRewrittenPromptProfile(
+                                model: model,
+                                session: session,
+                                segments: rewrittenPrompt
+                            ),
+                            history: fmHistory
+                        ),
+                        // The profile's history transform replaces this prompt's segments.
+                        prompt: FoundationModels.Prompt("")
+                    )
+                }
                 return FoundationModelsRequest(
                     session: FoundationModels.LanguageModelSession(
                         model: model,
                         dynamicInstructions: FoundationModelsDynamicInstructionsAdapter(session: session),
                         history: fmHistory
                     ),
-                    prompt: requestPrompt
+                    prompt: try fmPrompt ?? prompt.toFoundationModels()
                 )
             }
 
@@ -491,13 +538,23 @@
                             .map { Transcript.ToolDefinition(tool: $0) }
                     )
                 ),
-                prompt: fmPrompt
+                prompt: try fmPrompt ?? prompt.toFoundationModels()
             )
         }
     #endif
 
     @available(macOS 26.0, iOS 26.0, watchOS 27.0, tvOS 26.0, visionOS 26.0, *)
     extension Prompt {
+        /// The prompt for Foundation Models,
+        /// or `nil` for a profile session, which can send a rewritten prompt instead.
+        ///
+        /// A profile session converts this prompt only if the request sends it.
+        func toFoundationModelsUnlessProjected(
+            in session: LanguageModelSession
+        ) throws -> FoundationModels.Prompt? {
+            session.usesDynamicProfile ? nil : try toFoundationModels()
+        }
+
         func toFoundationModels() throws -> FoundationModels.Prompt {
             let prompts: [FoundationModels.Prompt] = try components.map { component in
                 switch component {
