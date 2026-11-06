@@ -484,6 +484,14 @@ actor ToolExecutionObserver: ToolExecutionDelegate {
 session.toolExecutionDelegate = ToolExecutionObserver()
 ```
 
+When a delegate returns `.stop`,
+the response ends with an empty value and the tool calls that stopped it:
+`""` for `String`, or `[]` for an array.
+A type that can't be empty, such as one with required properties,
+a number, or a Boolean,
+throws `LanguageModelSession.ToolExecutionStopped` instead,
+with the rounds that ran and the stopped calls in its `transcriptEntries`.
+
 > [!NOTE]
 > Tool execution delegates are an AnyLanguageModel extension.
 > See [Differences from Foundation Models](#differences-from-foundation-models).
@@ -619,6 +627,117 @@ A transcript keeps the tool-calling mode of each prompt.
 
 No AnyLanguageModel API accepts `ContextOptions` yet,
 so creating one has no effect on a request.
+
+### Dynamic Profiles
+
+`LanguageModelSession.DynamicProfile` mirrors the Foundation Models 27 profile
+API on supported AnyLanguageModel deployment targets. A profile chooses one
+active `Profile` for each actual model request and can change its model,
+instructions, tools, generation options, and transcript
+projection without rebuilding the session:
+
+```swift
+extension SessionPropertyValues {
+    @SessionPropertyEntry var isReviewing = false
+}
+
+struct EditingProfile: LanguageModelSession.DynamicProfile {
+    let model: any LanguageModel
+    @SessionProperty(\.isReviewing) private var isReviewing
+
+    var body: some LanguageModelSession.DynamicProfile {
+        if isReviewing {
+            Profile {
+                Instructions("Review the current draft.")
+                ReviewTool()
+            }
+            .model(model)
+            .temperature(0.1)
+        } else {
+            Profile {
+                Instructions("Help edit the current draft.")
+                EditTool()
+            }
+            .model(model)
+            .temperature(0.7)
+        }
+    }
+}
+
+let session = LanguageModelSession(
+    profile: EditingProfile(model: model),
+    history: savedHistory
+)
+session.properties.isReviewing = true
+```
+
+A profile must set a model with `.model(_:)`.
+Unlike Foundation Models, which falls back to the system language model,
+a request whose active profile sets no model
+throws `LanguageModelSession.DynamicProfileError.missingModel`.
+`init(profile:history:)` keeps a first instructions entry in `history`
+as the base instructions and leaves out any other instructions entries.
+
+Value modifiers use call-site, inner-profile, then outer-profile precedence:
+a non-`nil` generation option passed with a request overrides the profile,
+and otherwise the innermost modifier, closest to the `Profile`, sets the value.
+Lifecycle callbacks accumulate, and the outermost runs first,
+except for `onDeactivate`, where the innermost runs first.
+History transforms also run outermost first,
+and each one receives the entries that the one before it returned.
+When the active profile changes,
+the previous profile's `onDeactivate` actions run,
+then the new profile's `onActivate` actions,
+and then `onPrompt` actions run before the first model request for the prompt.
+`onReasoning` actions run before `onResponse` actions.
+
+A session runs its profile's callbacks and lifecycle actions one at a time,
+even when requests overlap.
+While a callback waits for a request or a response stream,
+other callbacks can run, so captured state can change across that wait.
+A callback that waits for another task
+that makes a request on the same session never finishes.
+
+`historyTransform` changes only the transcript
+projection for that request; `session.transcript` remains the canonical history,
+unless the transform writes to the `history` session property.
+`@SessionProperty` exposes isolated session state to profiles, dynamic
+instructions, and tools. The built-in `history` property is writable from a
+profile or lifecycle callback and read-only while dynamic instructions or a Tool
+is active.
+
+The five HTTP providers (OpenAI, Open Responses, Anthropic, Gemini, and Ollama)
+evaluate the profile and its history transforms again
+before each request that continues a response after tool calls,
+and run `onToolCall` and `onToolOutput`.
+With these providers, a Tool's `history` property includes
+the tool calls and outputs of the current response, including the Tool's own call.
+
+MLX, llama.cpp, Core ML, Private Cloud Compute, and the system model
+don't run `onToolCall` or `onToolOutput` yet.
+MLX and llama.cpp evaluate the profile once for each response,
+so their tool rounds use the same instructions, tools, and options,
+and a Tool's `history` property doesn't include the response's tool rounds.
+
+The system model and Private Cloud Compute run tools in a native
+Foundation Models session.
+They evaluate the profile and its history transforms again
+before the continuation after a tool round,
+so the continuation uses the new instructions, tools, and transcript projection.
+A continuation that selects another model stays on the native session's model,
+and changed options don't apply to it.
+A Tool's `history` property doesn't include the Tool's own call.
+As with dynamic instructions, the system model supports profiles
+only in apps built with Swift 6.4 or later
+that run on OS 27 or later, and not on tvOS.
+
+External compatibility models that own Tool continuation use
+`resolvedRequestContext(including:options:)`,
+which the `Compatibility` SPI exposes, before every provider request. The
+`including:` entries are the canonical Tool calls and outputs completed in the
+current response but not yet committed to the session transcript. Calls execute
+against the tools in the producing request context; the next resolved context is
+used only for the continuation request.
 
 ### Reasoning in the transcript
 
@@ -1049,6 +1168,13 @@ say which API they follow.
 - `ContextOptions`, `GenerationOptions.ToolCallingMode`, and `GenerationOptions.toolCallingMode`:
   [request options](#foundation-models-27-request-options),
   which follow the Foundation Models 27 API.
+- `LanguageModelSession.DynamicProfile`, profile modifiers, lifecycle callbacks,
+  session properties, and `LanguageModelSession.init(profile:history:)`:
+  [dynamic profiles](#dynamic-profiles), which mirror Foundation Models 27 on
+  earlier deployment targets, but require a model.
+  `resolvedRequestContext(including:options:)` and
+  the explicit compatibility lifecycle hooks are AnyLanguageModel extensions for
+  external model implementations, exposed only through the `Compatibility` SPI.
 - `Transcript.Entry.reasoning` and `Transcript.Reasoning`:
   [reasoning in the transcript](#reasoning-in-the-transcript),
   which follows the Foundation Models 27 API.
