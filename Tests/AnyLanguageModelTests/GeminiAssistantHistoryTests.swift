@@ -161,6 +161,28 @@ struct GeminiAssistantHistoryTests {
         )
     }
 
+    /// A delegate's message doesn't start a new turn,
+    /// so the round before it keeps its text and the text's place on the next turn.
+    @Test(arguments: [false, true])
+    func aPendingMessageKeepsTheTextOfTheRoundBeforeIt(streaming: Bool) async throws {
+        let transport = FakeTransport(replies: [
+            try Self.reply(parts: [Self.text("Checking."), Self.call], streaming: streaming),
+            try Self.reply(parts: [Self.text("Sunny.")], streaming: streaming),
+            try Self.reply(parts: [Self.text("Bye.")], streaming: streaming),
+        ])
+        let session = Self.session(transport, edit: .none)
+        session.toolExecutionDelegate = SteeringGeminiDelegate()
+        _ = try await Self.ask(session, "Weather?", streaming: streaming)
+        _ = try await Self.ask(session, "Thanks", streaming: streaming)
+
+        #expect(
+            try Self.labels(transport.bodies[2]) == [
+                "user: Weather?", "model: Checking.", "call #call-signature", "output", "user: Be brief.",
+                "model: Sunny.", "user: Thanks",
+            ]
+        )
+    }
+
     /// A saved transcript has the same metadata, whichever release wrote it.
     @Test(arguments: [false, true])
     func aSavedTranscriptReplaysItsPartsAndSignatures(edited: Bool) async throws {
@@ -329,6 +351,19 @@ struct GeminiAssistantHistoryTests {
                 "user: Thanks",
             ]
         )
+    }
+}
+
+/// Hands over one message after the first round of tool calls.
+private final class SteeringGeminiDelegate: ToolExecutionDelegate, @unchecked Sendable {
+    private let lock = NSLock()
+    private var pending = [AnyLanguageModel.Prompt("Be brief.")]
+
+    func pendingMessages(in session: LanguageModelSession) async -> [AnyLanguageModel.Prompt] {
+        lock.withLock {
+            defer { pending = [] }
+            return pending
+        }
     }
 }
 

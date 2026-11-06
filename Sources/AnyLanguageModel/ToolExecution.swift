@@ -62,6 +62,38 @@ public protocol ToolExecutionDelegate: Sendable {
         error: any Error,
         in session: LanguageModelSession
     ) async
+
+    /// Asks the delegate for messages to add to a response in progress,
+    /// after a round of tool calls and before the model's next request.
+    ///
+    /// Use this to let someone steer a long response while it runs:
+    /// return what they've sent since the last round,
+    /// and the model reads it after the round's tool outputs.
+    /// Each message joins the response's transcript entries as a prompt,
+    /// in order, and is sent in the request in the same form,
+    /// so a later response replays it exactly as it was sent.
+    ///
+    /// The session asks after every round of tool calls
+    /// in providers whose tool loop continues after a round.
+    /// Messages the delegate is still holding when a response ends
+    /// without another round stay with the app,
+    /// which can send them as the next prompt.
+    /// Steering doesn't reset ``GenerationOptions/maximumToolRounds``.
+    ///
+    /// Once returned, the messages are the response's.
+    /// If the response then fails,
+    /// they're handled like the rest of its entries,
+    /// as the session's ``LanguageModelSession/transcriptErrorHandlingPolicy`` says:
+    /// a streaming response's checkpoint may keep them,
+    /// and a reverted or nonstreaming response doesn't.
+    /// They aren't handed back, so resend any that matter.
+    ///
+    /// ``SystemLanguageModel`` doesn't ask:
+    /// Foundation Models runs its own tool loop.
+    ///
+    /// - Parameter session: The session generating the response.
+    /// - Returns: The messages to add, oldest first; empty for none.
+    func pendingMessages(in session: LanguageModelSession) async -> [Prompt]
 }
 
 // MARK: - Default Implementations
@@ -84,6 +116,9 @@ extension ToolExecutionDelegate {
         output: Transcript.ToolOutput,
         in session: LanguageModelSession
     ) async {}
+
+    /// Provides a default implementation that adds no messages.
+    public func pendingMessages(in session: LanguageModelSession) async -> [Prompt] { [] }
 
     /// Provides a default no-op implementation.
     public func didFailToolCall(

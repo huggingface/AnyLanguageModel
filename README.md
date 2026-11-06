@@ -535,6 +535,30 @@ a number, or a Boolean,
 throws `LanguageModelSession.ToolExecutionStopped` instead,
 with the rounds that ran and the stopped calls in its `transcriptEntries`.
 
+A delegate can also steer a response while it runs.
+After each round of tool calls, before the model's next request,
+the session asks the delegate for messages to add,
+and the model reads them after the round's tool outputs:
+
+```swift
+actor Steering: ToolExecutionDelegate {
+    private var inbox: [Prompt] = []
+
+    func send(_ message: Prompt) { inbox.append(message) }
+
+    func pendingMessages(in session: LanguageModelSession) async -> [Prompt] {
+        defer { inbox.removeAll() }
+        return inbox
+    }
+}
+```
+
+Each message joins the transcript as a prompt, after the round's tool outputs,
+and is sent in the request in the same form, so later responses replay it as it was sent.
+Messages still waiting when a response ends without another round of tool calls
+stay with your app, to send as the next prompt.
+`SystemLanguageModel` doesn't ask, because Foundation Models runs its own tool loop.
+
 > [!NOTE]
 > Tool execution delegates are an AnyLanguageModel extension.
 > See [Differences from Foundation Models](#differences-from-foundation-models).
