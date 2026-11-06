@@ -611,8 +611,9 @@ extension LanguageModelSession.DynamicProfile {
     /// - Parameter action: The action to run, which receives the tool call.
     /// - Returns: A profile with the action.
     ///
-    /// - Important: At this time, none of the language models in AnyLanguageModel
-    ///   run this action when they call a tool.
+    /// - Important: OpenAI, Open Responses, Anthropic, Gemini, and Ollama run this action
+    ///   when they call a tool. MLX, llama.cpp, Core ML, Private Cloud Compute,
+    ///   and the system model don't run it yet.
     public func onToolCall(
         @_inheritActorContext perform action:
             nonisolated(nonsending) sending @escaping (
@@ -630,8 +631,9 @@ extension LanguageModelSession.DynamicProfile {
     /// - Parameter action: The action to run.
     /// - Returns: A profile with the action.
     ///
-    /// - Important: At this time, none of the language models in AnyLanguageModel
-    ///   run this action when they call a tool.
+    /// - Important: OpenAI, Open Responses, Anthropic, Gemini, and Ollama run this action
+    ///   when they call a tool. MLX, llama.cpp, Core ML, Private Cloud Compute,
+    ///   and the system model don't run it yet.
     public func onToolCall(
         @_inheritActorContext perform action: nonisolated(nonsending) sending @escaping () async throws -> Void
     ) -> some LanguageModelSession.DynamicProfile {
@@ -645,8 +647,9 @@ extension LanguageModelSession.DynamicProfile {
     /// - Parameter action: The action to run, which receives the tool call and its output.
     /// - Returns: A profile with the action.
     ///
-    /// - Important: At this time, none of the language models in AnyLanguageModel
-    ///   run this action when they call a tool.
+    /// - Important: OpenAI, Open Responses, Anthropic, Gemini, and Ollama run this action
+    ///   when they call a tool. MLX, llama.cpp, Core ML, Private Cloud Compute,
+    ///   and the system model don't run it yet.
     public func onToolOutput(
         @_inheritActorContext perform action:
             nonisolated(nonsending) sending @escaping (
@@ -665,8 +668,9 @@ extension LanguageModelSession.DynamicProfile {
     /// - Parameter action: The action to run.
     /// - Returns: A profile with the action.
     ///
-    /// - Important: At this time, none of the language models in AnyLanguageModel
-    ///   run this action when they call a tool.
+    /// - Important: OpenAI, Open Responses, Anthropic, Gemini, and Ollama run this action
+    ///   when they call a tool. MLX, llama.cpp, Core ML, Private Cloud Compute,
+    ///   and the system model don't run it yet.
     public func onToolOutput(
         @_inheritActorContext perform action: nonisolated(nonsending) sending @escaping () async throws -> Void
     ) -> some LanguageModelSession.DynamicProfile {
