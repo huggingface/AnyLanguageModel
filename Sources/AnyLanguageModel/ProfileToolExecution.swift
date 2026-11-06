@@ -183,12 +183,24 @@ extension LanguageModelSession {
         return ResponseStream(stream: stream)
     }
 
+    /// Resolves a round of tool calls the same way for every provider whose tool loop runs here.
+    ///
+    /// The delegate hears about the round, then decides each call in order; a `.stop` ends the
+    /// round before any call runs. The calls then run at once, as Foundation Models runs them:
+    /// a tool can be called concurrently with itself or with other tools, so one that isn't
+    /// safe to run alongside others serializes its own work. Each sees the history as the round
+    /// began. Once they're done, the profile and the delegate hear about each call in the order
+    /// the model made them, one at a time, and the results keep that order.
+    ///
+    /// When a call throws, the round is cancelled first: the other calls are cancelled and
+    /// waited for. Only then does the delegate hear about the error, and only the one the
+    /// round throws.
     func resolveProfileToolCalls(
         _ calls: [Transcript.ToolCall],
         requestContext: RequestContext,
         currentRoundEntries: [Transcript.Entry],
         offeredTools: [any Tool]? = nil,
-        missingToolOutput: @Sendable (Transcript.ToolCall) -> [Transcript.Segment] = { call in
+        missingToolOutput: @escaping @Sendable (Transcript.ToolCall) -> [Transcript.Segment] = { call in
             [.text(.init(content: "Tool not found: \(call.toolName)"))]
         }
     ) async throws -> ProfileToolResolution {
@@ -220,50 +232,42 @@ extension LanguageModelSession {
             toolsByName[tool.name] = tool
         }
 
+        try Task.checkCancellation()
+        let outputs: [Transcript.ToolOutput]
+        do {
+            outputs = try await withThrowingTaskGroup(of: (Int, Transcript.ToolOutput).self) { group in
+                for (index, (call, decision)) in zip(calls, decisions).enumerated() {
+                    let tool = toolsByName[call.toolName]
+                    group.addTask {
+                        let output = try await self.toolOutput(
+                            for: call,
+                            decision: decision,
+                            tool: tool,
+                            requestContext: requestContext,
+                            currentRoundEntries: currentRoundEntries,
+                            missingToolOutput: missingToolOutput
+                        )
+                        return (index, output)
+                    }
+                }
+                var outputs = [Transcript.ToolOutput?](repeating: nil, count: calls.count)
+                for try await (index, output) in group {
+                    outputs[index] = output
+                }
+                return outputs.compactMap { $0 }
+            }
+        } catch let failure as ToolCallFailure {
+            // The group has cancelled and waited for the other calls by now.
+            if let delegate = toolExecutionDelegate {
+                await delegate.didFailToolCall(failure.call, error: failure.underlyingError, in: self)
+            }
+            throw ToolCallError(tool: failure.tool, underlyingError: failure.underlyingError)
+        }
+
         var invocations: [ProfileToolInvocation] = []
         invocations.reserveCapacity(calls.count)
         var completedEntries: [Transcript.Entry] = []
-        for (call, decision) in zip(calls, decisions) {
-            try Task.checkCancellation()
-            let output: Transcript.ToolOutput
-            switch decision {
-            case .stop:
-                return .stop(calls: calls)
-            case .provideOutput(let segments):
-                output = Transcript.ToolOutput(
-                    id: call.id,
-                    toolName: call.toolName,
-                    segments: segments
-                )
-            case .execute:
-                guard let tool = toolsByName[call.toolName] else {
-                    output = Transcript.ToolOutput(
-                        id: call.id,
-                        toolName: call.toolName,
-                        segments: missingToolOutput(call)
-                    )
-                    break
-                }
-                do {
-                    let segments = try await withProfileToolExecution(
-                        requestContext: requestContext,
-                        currentRoundEntries: currentRoundEntries + completedEntries
-                    ) {
-                        try await tool.makeOutputSegments(from: call.arguments)
-                    }
-                    output = Transcript.ToolOutput(
-                        id: call.id,
-                        toolName: tool.name,
-                        segments: segments
-                    )
-                } catch {
-                    if let delegate = toolExecutionDelegate {
-                        await delegate.didFailToolCall(call, error: error, in: self)
-                    }
-                    throw ToolCallError(tool: tool, underlyingError: error)
-                }
-            }
-
+        for (call, output) in zip(calls, outputs) {
             invocations.append(.init(call: call, output: output))
             completedEntries.append(.toolOutput(output))
             try await profileDidProduceToolOutput(
@@ -278,4 +282,42 @@ extension LanguageModelSession {
         }
         return .invocations(invocations)
     }
+
+    /// One call's output: the delegate's, a missing tool's, or the tool's own.
+    private func toolOutput(
+        for call: Transcript.ToolCall,
+        decision: ToolExecutionDecision,
+        tool: (any Tool)?,
+        requestContext: RequestContext,
+        currentRoundEntries: [Transcript.Entry],
+        missingToolOutput: @Sendable (Transcript.ToolCall) -> [Transcript.Segment]
+    ) async throws -> Transcript.ToolOutput {
+        switch decision {
+        case .provideOutput(let segments):
+            return Transcript.ToolOutput(id: call.id, toolName: call.toolName, segments: segments)
+        case .stop, .execute:
+            // A `.stop` ends the round before any call runs, so here it's `.execute`.
+            guard let tool else {
+                return Transcript.ToolOutput(id: call.id, toolName: call.toolName, segments: missingToolOutput(call))
+            }
+            do {
+                let segments = try await withProfileToolExecution(
+                    requestContext: requestContext,
+                    currentRoundEntries: currentRoundEntries
+                ) {
+                    try await tool.makeOutputSegments(from: call.arguments)
+                }
+                return Transcript.ToolOutput(id: call.id, toolName: tool.name, segments: segments)
+            } catch {
+                throw ToolCallFailure(call: call, tool: tool, underlyingError: error)
+            }
+        }
+    }
+}
+
+/// A tool call that threw, kept until the round has cancelled the others.
+private struct ToolCallFailure: Error {
+    let call: Transcript.ToolCall
+    let tool: any Tool
+    let underlyingError: any Error
 }

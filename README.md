@@ -455,6 +455,14 @@ let response = try await session.respond {
 print(response.content)
 ```
 
+When a model calls several tools in one round,
+the calls run at once, as they do in Foundation Models,
+and the round takes as long as its slowest call.
+A tool can be called concurrently with itself or with other tools,
+so one that isn't safe to run alongside others should serialize its own work.
+Results go back to the model in the order it made the calls.
+If a call throws, the others are cancelled and the response fails with that error.
+
 To observe or control tool execution, assign a delegate on the session:
 
 ```swift
@@ -483,6 +491,12 @@ actor ToolExecutionObserver: ToolExecutionDelegate {
 
 session.toolExecutionDelegate = ToolExecutionObserver()
 ```
+
+The delegate decides each call in the order the model made them, before any call runs.
+Once the round's calls are done,
+it hears about each one in that order, one at a time.
+If a call throws, the others are cancelled first,
+and the delegate hears only about the error the response fails with.
 
 When a delegate returns `.stop`,
 the response ends with an empty value and the tool calls that stopped it:

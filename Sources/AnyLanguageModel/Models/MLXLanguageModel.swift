@@ -1187,7 +1187,9 @@ import Foundation
 
                     let resolution = try await resolveToolCalls(
                         collectedToolCalls,
-                        tools: requestContext.toolsForExecution(in: session, offeredTools: tools),
+                        requestContext: requestContext,
+                        offeredTools: tools,
+                        currentRoundEntries: allEntries,
                         session: session
                     )
                     switch resolution {
@@ -1452,7 +1454,9 @@ import Foundation
 
                             let resolution = try await resolveToolCalls(
                                 collectedToolCalls,
-                                tools: requestContext.toolsForExecution(in: session, offeredTools: tools),
+                                requestContext: requestContext,
+                                offeredTools: tools,
+                                currentRoundEntries: accumulatedEntries,
                                 session: session
                             )
                             switch resolution {
@@ -1869,96 +1873,25 @@ import Foundation
 
     private func resolveToolCalls(
         _ toolCalls: [MLXLMCommon.ToolCall],
-        tools: [any Tool],
+        requestContext: LanguageModelSession.RequestContext,
+        offeredTools: [any Tool],
+        currentRoundEntries: [Transcript.Entry],
         session: LanguageModelSession
     ) async throws -> ToolResolutionOutcome {
         if toolCalls.isEmpty { return .invocations([]) }
-
-        var toolsByName: [String: any Tool] = [:]
-        for tool in tools {
-            if toolsByName[tool.name] == nil {
-                toolsByName[tool.name] = tool
-            }
-        }
-
         let transcriptCalls = try makeTranscriptToolCalls(from: toolCalls)
-
-        if let delegate = session.toolExecutionDelegate {
-            await delegate.didGenerateToolCalls(transcriptCalls, in: session)
+        let entries = currentRoundEntries + [.toolCalls(Transcript.ToolCalls(transcriptCalls))]
+        switch try await session.resolveProfileToolCalls(
+            transcriptCalls,
+            requestContext: requestContext,
+            currentRoundEntries: entries,
+            offeredTools: offeredTools
+        ) {
+        case .stop(let calls):
+            return .stop(calls: calls)
+        case .invocations(let invocations):
+            return .invocations(invocations.map { ToolInvocationResult(call: $0.call, output: $0.output) })
         }
-
-        guard !transcriptCalls.isEmpty else { return .invocations([]) }
-
-        var decisions: [ToolExecutionDecision] = []
-        decisions.reserveCapacity(transcriptCalls.count)
-
-        if let delegate = session.toolExecutionDelegate {
-            for call in transcriptCalls {
-                let decision = await delegate.toolCallDecision(for: call, in: session)
-                if case .stop = decision {
-                    return .stop(calls: transcriptCalls)
-                }
-                decisions.append(decision)
-            }
-        } else {
-            decisions = Array(repeating: .execute, count: transcriptCalls.count)
-        }
-
-        var results: [ToolInvocationResult] = []
-        results.reserveCapacity(transcriptCalls.count)
-
-        for (index, call) in transcriptCalls.enumerated() {
-            switch decisions[index] {
-            case .stop:
-                // This branch should be unreachable because `.stop` returns during decision collection.
-                // Keep it as a defensive guard in case that logic changes.
-                return .stop(calls: transcriptCalls)
-            case .provideOutput(let segments):
-                let output = Transcript.ToolOutput(
-                    id: call.id,
-                    toolName: call.toolName,
-                    segments: segments
-                )
-                if let delegate = session.toolExecutionDelegate {
-                    await delegate.didExecuteToolCall(call, output: output, in: session)
-                }
-                results.append(ToolInvocationResult(call: call, output: output))
-            case .execute:
-                guard let tool = toolsByName[call.toolName] else {
-                    let message = Transcript.Segment.text(.init(content: "Tool not found: \(call.toolName)"))
-                    let output = Transcript.ToolOutput(
-                        id: call.id,
-                        toolName: call.toolName,
-                        segments: [message]
-                    )
-                    if let delegate = session.toolExecutionDelegate {
-                        await delegate.didExecuteToolCall(call, output: output, in: session)
-                    }
-                    results.append(ToolInvocationResult(call: call, output: output))
-                    continue
-                }
-
-                do {
-                    let segments = try await tool.makeOutputSegments(from: call.arguments)
-                    let output = Transcript.ToolOutput(
-                        id: call.id,
-                        toolName: tool.name,
-                        segments: segments
-                    )
-                    if let delegate = session.toolExecutionDelegate {
-                        await delegate.didExecuteToolCall(call, output: output, in: session)
-                    }
-                    results.append(ToolInvocationResult(call: call, output: output))
-                } catch {
-                    if let delegate = session.toolExecutionDelegate {
-                        await delegate.didFailToolCall(call, error: error, in: session)
-                    }
-                    throw LanguageModelSession.ToolCallError(tool: tool, underlyingError: error)
-                }
-            }
-        }
-
-        return .invocations(results)
     }
 
     private func toGeneratedContent(_ args: [String: MLXLMCommon.JSONValue]) throws -> GeneratedContent {
