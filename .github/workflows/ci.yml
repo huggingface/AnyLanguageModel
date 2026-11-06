@@ -153,6 +153,7 @@ jobs:
         run: xcodebuild build -scheme AnyLanguageModel -destination 'generic/platform=tvOS' CODE_SIGNING_ALLOWED=NO
 
       - name: Build tests for tvOS Simulator
+        if: matrix.xcode == '27.0'
         run: xcodebuild build-for-testing -scheme AnyLanguageModel -destination 'generic/platform=tvOS Simulator' CODE_SIGNING_ALLOWED=NO
 
   test-linux:
