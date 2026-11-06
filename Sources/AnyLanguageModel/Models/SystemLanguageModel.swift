@@ -769,20 +769,42 @@
         return nil
     }
 
+    /// The provider that ``LanguageModelSession/ToolExecutionStopped`` names for these responses.
+    private let stoppedResponseProvider = "Foundation Models"
+
     @available(macOS 26.0, iOS 26.0, watchOS 27.0, tvOS 26.0, visionOS 26.0, *)
-    /// The emptiest content of `type`, for a response that stopped at tool calls before any content.
+    /// The snapshot that ends a stream that a delegate stopped, as for the HTTP models.
     ///
-    /// - Throws: ``GeneratedContentError/typeMismatch`` when `type` takes no empty value,
-    ///   as other models do when they stop at tool calls.
-    func stoppedContent<Content: Generable>(of type: Content.Type) throws -> (content: Content, raw: GeneratedContent) {
-        let candidates: [GeneratedContent.Kind] = [
-            .string(""), .structure(properties: [:], orderedKeys: []), .array([]), .null, .number(0), .bool(false),
-        ]
-        for kind in candidates {
-            let raw = GeneratedContent(kind: kind)
-            if let content = try? Content(raw) { return (content, raw) }
+    /// The last snapshot stays when it decodes as the complete content type,
+    /// so that `collect()` accepts it.
+    /// Otherwise, the snapshot uses the first value in ``StoppedContent`` that the type accepts.
+    ///
+    /// - Throws: ``LanguageModelSession/ToolExecutionStopped`` with the entries and the usage
+    ///   when the type accepts none of these values.
+    func stoppedStreamSnapshot<Content: Generable>(
+        after last: LanguageModelSession.ResponseStream<Content>.Snapshot?,
+        entries: [Transcript.Entry],
+        requests: RequestsUsage
+    ) throws -> LanguageModelSession.ResponseStream<Content>.Snapshot {
+        let allEntries = (last?.transcriptEntries ?? []) + entries
+        if var last, (try? Content(last.rawContent)) != nil {
+            last.transcriptEntries = allEntries
+            last.requests = requests
+            return last
         }
-        throw GeneratedContentError.typeMismatch
+        guard let empty = StoppedContent.empty(Content.self) else {
+            throw LanguageModelSession.ToolExecutionStopped(
+                provider: stoppedResponseProvider,
+                transcriptEntries: allEntries,
+                requests: requests
+            )
+        }
+        return .init(
+            content: empty.content.asPartiallyGenerated(),
+            rawContent: empty.rawContent,
+            transcriptEntries: allEntries,
+            requests: requests
+        )
     }
 
     /// A type-erased wrapper that bridges any `Tool` to `FoundationModels.Tool`.
@@ -1600,13 +1622,20 @@
             )
         } catch {
             // The delegate stopped at a tool call: the response ends there, with the calls that ran
-            // before it and then the call.
+            // before it and then the call. A type that can't be empty throws with those entries;
+            // the session already counted the rounds as they completed.
             guard let call = stoppedToolCall(in: error) else { throw error }
-            let stopped = try stoppedContent(of: type)
+            let entries = await record.entries + [.toolCalls(Transcript.ToolCalls([call]))]
+            guard let empty = StoppedContent.empty(type) else {
+                throw LanguageModelSession.ToolExecutionStopped(
+                    provider: stoppedResponseProvider,
+                    transcriptEntries: ArraySlice(entries)
+                )
+            }
             return LanguageModelSession.Response(
-                content: stopped.content,
-                rawContent: stopped.raw,
-                transcriptEntries: ArraySlice(await record.entries + [.toolCalls(Transcript.ToolCalls([call]))]),
+                content: empty.content,
+                rawContent: empty.rawContent,
+                transcriptEntries: ArraySlice(entries),
                 requests: await record.requestsAtStop()
             )
         }
@@ -1730,32 +1759,25 @@
                         }
                         continuation.finish()
                     } catch {
-                        // The delegate stopped at a tool call: the stream ends there, with the call.
+                        // The delegate stopped at a tool call: the stream ends there, with the call,
+                        // or throws with it when the content type can't be empty.
                         guard let call = stoppedToolCall(in: error) else {
                             continuation.finish(throwing: error)
                             return
                         }
                         let entries: [Transcript.Entry] =
                             await record.entries + [.toolCalls(Transcript.ToolCalls([call]))]
-                        if var last {
-                            last.transcriptEntries += entries
-                            last.requests = await record.requestsAtStop()
-                            continuation.yield(last)
-                        } else {
-                            do {
-                                let stopped = try stoppedContent(of: type)
-                                continuation.yield(
-                                    .init(
-                                        content: stopped.content.asPartiallyGenerated(),
-                                        rawContent: stopped.raw,
-                                        transcriptEntries: ArraySlice(entries),
-                                        requests: await record.requestsAtStop()
-                                    )
+                        do {
+                            continuation.yield(
+                                try stoppedStreamSnapshot(
+                                    after: last,
+                                    entries: entries,
+                                    requests: await record.requestsAtStop()
                                 )
-                            } catch {
-                                continuation.finish(throwing: error)
-                                return
-                            }
+                            )
+                        } catch {
+                            continuation.finish(throwing: error)
+                            return
                         }
                         continuation.finish()
                     }
