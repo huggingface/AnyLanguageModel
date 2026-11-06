@@ -133,9 +133,17 @@ extension LanguageModelSession {
     /// before the model generated a value of the response's type.
     ///
     /// When a delegate returns ``ToolExecutionDecision/stop``,
-    /// a response that generates a `String`,
-    /// or a type that can be empty,
-    /// ends with an empty value and the tool calls that stopped it.
+    /// the response ends with the tool calls that stopped it.
+    /// `respond(to:)` returns an empty value,
+    /// even if the model wrote text before the tool calls:
+    /// `""` for `String`, and otherwise the first of `{}`, `null`, and `[]`
+    /// that decodes as the type.
+    /// After a profile hands the response off to another model,
+    /// a `String` response starts with the text from before the hand-off.
+    /// A stream keeps its last snapshot if that snapshot decodes as the complete type,
+    /// so a `String` stream ends with the text so far.
+    /// Otherwise, a stream also ends with an empty value.
+    /// Structured streams from MLX and llama.cpp follow the rule for `respond(to:)`.
     /// A type with required properties can't be empty,
     /// and zero or `false` would look like the model's answer,
     /// so a response of such a type, a number, or a Boolean

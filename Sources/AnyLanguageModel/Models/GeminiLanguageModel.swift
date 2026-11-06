@@ -349,7 +349,8 @@ public struct GeminiLanguageModel: LanguageModel, ProfileRequestIdentifiedLangua
                         generating: type,
                         provider: "Gemini",
                         transcriptEntries: entries,
-                        requests: usage
+                        requests: usage,
+                        providerMetadata: stoppedResponseContentMetadata
                     )
                 case .invocations(let invocations):
                     entries.append(.toolCalls(callsEntry))
@@ -857,7 +858,7 @@ private func geminiFunctionResponseData(from url: URL) throws -> GeminiInlineDat
 extension Transcript {
     fileprivate func toGeminiContent() throws -> [GeminiContent] {
         var messages = [GeminiContent]()
-        for item in self {
+        for item in geminiReplayEntries {
             switch item {
             case .instructions(let instructions):
                 messages.append(
@@ -1095,6 +1096,106 @@ private func textPartMetadata(
     else { return nil }
     let data = try JSONEncoder().encode(textParts)
     return [textPartsMetadataKey: String(decoding: data, as: UTF8.self)]
+}
+
+/// The text of the stored text parts in `metadata`, if there are any.
+private func storedText(in metadata: [String: String]?) -> String? {
+    guard let json = metadata?[textPartsMetadataKey],
+        let textParts = try? JSONDecoder().decode([GeminiTextHistoryPart].self, from: Data(json.utf8))
+    else { return nil }
+    return textParts.map(\.part.text).joined()
+}
+
+extension Transcript {
+    /// The entries to send on replay, with each turn's stored text parts resolved.
+    ///
+    /// A string response shows the caller the text of its turn's tool rounds,
+    /// and a caller can edit, rebuild, or remove the response but can't see the metadata.
+    /// So stored parts apply only when the response's segments still contain their text,
+    /// and replay sends only text that is in the current segments.
+    /// Otherwise, the segments are the turn's text, without the old signatures,
+    /// and the rounds send only their calls, which keep their signatures.
+    /// The same goes for a finished turn without a response.
+    fileprivate var geminiReplayEntries: [Entry] {
+        var entries = Array(self)
+        var removed: Set<Int> = []
+        for turn in assistantTurns(entries) {
+            if case .prompt(let prompt) = entries[turn.range.lowerBound], prompt.responseFormat != nil {
+                resolveStructuredTurn(in: &entries, turn: turn.range)
+            } else {
+                resolveStringTurn(in: &entries, turn: turn.range, isLast: turn.isLast, removed: &removed)
+            }
+        }
+        return entries.indices.filter { !removed.contains($0) }.map { entries[$0] }
+    }
+
+    private func resolveStringTurn(
+        in entries: inout [Entry],
+        turn: Range<Int>,
+        isLast: Bool,
+        removed: inout Set<Int>
+    ) {
+        let roundText = entries[turn].compactMap { entry -> String? in
+            if case .toolCalls(let calls) = entry { storedText(in: calls.providerMetadata) } else { nil }
+        }.joined()
+        var hasResponse = false
+        var isCurrent = true
+        var carried = roundText
+        for index in turn {
+            guard case .response(var response) = entries[index] else { continue }
+            hasResponse = true
+            let text = response.segments.singleText
+            if response.providerMetadata == stoppedResponseContentMetadata, text == "" {
+                removed.insert(index)
+            } else if let text, text.hasPrefix(carried) {
+                let rest = String(text.dropFirst(carried.count))
+                if rest.isEmpty, !carried.isEmpty {
+                    removed.insert(index)
+                } else if storedText(in: response.providerMetadata) != rest {
+                    response.providerMetadata?[textPartsMetadataKey] = nil
+                    response.segments = [.text(.init(content: rest))]
+                    entries[index] = .response(response)
+                }
+            } else {
+                isCurrent = false
+                response.providerMetadata?[textPartsMetadataKey] = nil
+                entries[index] = .response(response)
+            }
+            carried = ""
+        }
+        guard !(hasResponse ? isCurrent : isLast) else { return }
+        for index in turn {
+            guard case .toolCalls(var calls) = entries[index] else { continue }
+            calls.providerMetadata?[textPartsMetadataKey] = nil
+            entries[index] = .toolCalls(calls)
+        }
+    }
+
+    /// A structured response doesn't include its rounds' text, so they keep it.
+    /// Its stored parts apply only when they are still the response's content.
+    private func resolveStructuredTurn(in entries: inout [Entry], turn: Range<Int>) {
+        for index in turn {
+            guard case .response(var response) = entries[index] else { continue }
+            let current = response.segments.singleText.flatMap { try? GeneratedContent(json: $0) }
+            let stored = storedText(in: response.providerMetadata).flatMap { try? GeneratedContent(json: $0) }
+            if current == nil || current != stored {
+                response.providerMetadata?[textPartsMetadataKey] = nil
+                entries[index] = .response(response)
+            }
+        }
+    }
+}
+
+extension [Transcript.Segment] {
+    /// The segments' text, if they are all text.
+    fileprivate var singleText: String? {
+        var result = ""
+        for segment in self {
+            guard case .text(let text) = segment else { return nil }
+            result += text.content
+        }
+        return result
+    }
 }
 
 private func restoreTextParts(

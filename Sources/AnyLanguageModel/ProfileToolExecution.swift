@@ -85,17 +85,24 @@ extension LanguageModelSession {
         earlierUsage.add(response.requests.earlier)
         var content = response.content
         var rawContent = response.rawContent
+        var providerMetadata = response.providerMetadata
         if type == String.self, case .string(let suffix) = response.rawContent.kind {
             let combined = prefixText + suffix
             content = combined as! Content
             rawContent = GeneratedContent(combined)
+            providerMetadata = handoffResponseMetadata(
+                providerMetadata,
+                responseText: suffix,
+                prefixText: prefixText,
+                prefixEntries: prefixEntries
+            )
         }
         return Response(
             content: content,
             rawContent: rawContent,
             transcriptEntries: ArraySlice(prefixEntries + response.transcriptEntries),
             requests: RequestsUsage(earlier: earlierUsage, final: response.requests.final),
-            providerMetadata: response.providerMetadata
+            providerMetadata: providerMetadata
         )
     }
 
@@ -154,10 +161,17 @@ extension LanguageModelSession {
                         unprepaidUsage.add(snapshot.unprepaidUsage)
                         var content = snapshot.content
                         var rawContent = snapshot.rawContent
+                        var providerMetadata = snapshot.providerMetadata
                         if type == String.self, case .string(let suffix) = snapshot.rawContent.kind {
                             let combined = prefixText + suffix
                             content = combined as! Content.PartiallyGenerated
                             rawContent = GeneratedContent(combined)
+                            providerMetadata = handoffResponseMetadata(
+                                providerMetadata,
+                                responseText: suffix,
+                                prefixText: prefixText,
+                                prefixEntries: prefixEntries
+                            )
                         }
                         continuation.yield(
                             .init(
@@ -165,7 +179,7 @@ extension LanguageModelSession {
                                 rawContent: rawContent,
                                 transcriptEntries: ArraySlice(prefixEntries + snapshot.transcriptEntries),
                                 requests: RequestsUsage(earlier: earlierUsage, final: snapshot.requests.final),
-                                providerMetadata: snapshot.providerMetadata,
+                                providerMetadata: providerMetadata,
                                 prepaid: snapshot.prepaid,
                                 unprepaidUsage: unprepaidUsage
                             )

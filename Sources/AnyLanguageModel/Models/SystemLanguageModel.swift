@@ -1,4 +1,4 @@
-#if canImport(FoundationModels)
+#if canImport(FoundationModels) && (!os(tvOS) || compiler(<6.4))
     import FoundationModels
     import Foundation
 
@@ -372,7 +372,7 @@
         ///   with the Foundation Models framework.
         ///   Foundation Models 27 has a `SystemLanguageModel.Error` type with other cases.
         public enum Error: LocalizedError, Sendable, Equatable {
-            /// The session uses dynamic instructions,
+            /// The session uses dynamic instructions or a dynamic profile,
             /// which the system language model supports only in apps built with Swift 6.4 or later
             /// that run on OS 27 or later, and not on tvOS.
             case dynamicInstructionsUnavailable

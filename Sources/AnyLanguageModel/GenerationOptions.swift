@@ -151,6 +151,8 @@ public struct GenerationOptions: Sendable, Equatable {
     ///   For ``ToolCallingMode/disallowed``, they offer the model no tools.
     ///   They can't make the model call a tool,
     ///   so they offer the tools as usual for ``ToolCallingMode/required``.
+    ///   `CoreMLLanguageModel` offers tools only by rendering them into its chat template,
+    ///   and doesn't run tool calls.
     ///
     /// As in Foundation Models, the mode applies to every request in a response,
     /// including each request that continues the response after tool calls.
@@ -158,6 +160,11 @@ public struct GenerationOptions: Sendable, Equatable {
     /// a ``ToolExecutionDelegate`` stops the response,
     /// dynamic instructions remove the tools,
     /// or a round of tool calls past ``maximumToolRounds`` ends the response.
+    /// ``SystemLanguageModel``, ``PrivateCloudComputeLanguageModel``, and ``FoundationLanguageModel``
+    /// ignore ``maximumToolRounds``,
+    /// so with them, end the loop with a delegate's ``ToolExecutionDecision/stop``
+    /// or with dynamic instructions that remove the tools.
+    /// Without tools, a required request to these models throws a Foundation Models error.
     ///
     /// - Note: This API is exclusive to AnyLanguageModel on OS 26.
     ///   It follows the Foundation Models 27 `GenerationOptions.toolCallingMode` API,
@@ -168,8 +175,8 @@ public struct GenerationOptions: Sendable, Equatable {
     /// with ``LanguageModelSession/ToolRoundLimitExceeded``, which carries the rounds that ran.
     /// Must be at least `1`.
     ///
-    /// ``SystemLanguageModel`` and ``PrivateCloudComputeLanguageModel`` ignore it:
-    /// Foundation Models runs tool calls itself.
+    /// ``SystemLanguageModel``, ``PrivateCloudComputeLanguageModel``, and ``FoundationLanguageModel``
+    /// ignore it: Foundation Models runs tool calls itself.
     ///
     /// - Note: This API is exclusive to AnyLanguageModel
     ///   and using it means your code is no longer drop-in compatible

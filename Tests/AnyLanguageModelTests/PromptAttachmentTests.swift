@@ -225,7 +225,7 @@ struct PromptAttachmentTests {
             )
         }
 
-        #if canImport(FoundationModels)
+        #if canImport(FoundationModels) && (!os(tvOS) || compiler(<6.4))
             @available(macOS 26.0, iOS 26.0, watchOS 27.0, tvOS 26.0, visionOS 26.0, *)
             @Test func duplicateSuppressionDoesNotReencodeRecordedAttachments() throws {
                 let encoded = try AnyLanguageModel.Prompt {
@@ -262,7 +262,7 @@ struct PromptAttachmentTests {
         #endif
     #endif
 
-    #if canImport(FoundationModels)
+    #if canImport(FoundationModels) && (!os(tvOS) || compiler(<6.4))
         @Test func bridgeErrorsDescribeTheirCause() {
             let unavailable = AnyLanguageModel.PromptBridgeError.attachmentsUnavailable
             let nonFileURL = AnyLanguageModel.PromptBridgeError.nonFileImageURL
