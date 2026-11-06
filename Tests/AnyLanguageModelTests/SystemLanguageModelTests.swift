@@ -182,8 +182,7 @@ import Testing
         let entries: [AnyLanguageModel.Transcript.Entry]
         if streaming {
             let stream = fmStreamResponse(
-                makeSession: makeSession,
-                fmPrompt: .init(""),
+                makeRequest: { FoundationModelsRequest(session: try await makeSession(), prompt: .init("")) },
                 fmOptions: .init(),
                 type: String.self,
                 schema: String.generationSchema,
@@ -194,8 +193,7 @@ import Testing
             entries = Array(try #require(last).transcriptEntries)
         } else {
             let response = try await fmRespond(
-                makeSession: makeSession,
-                fmPrompt: .init(""),
+                makeRequest: { FoundationModelsRequest(session: try await makeSession(), prompt: .init("")) },
                 fmOptions: .init(),
                 type: String.self,
                 schema: String.generationSchema,
@@ -251,8 +249,7 @@ import Testing
         let error = await #expect(throws: GeneratedContentError.self) {
             if streaming {
                 let stream = fmStreamResponse(
-                    makeSession: makeSession,
-                    fmPrompt: .init(""),
+                    makeRequest: { FoundationModelsRequest(session: try await makeSession(), prompt: .init("")) },
                     fmOptions: .init(),
                     type: Forecast.self,
                     schema: Forecast.generationSchema,
@@ -261,8 +258,7 @@ import Testing
                 for try await _ in stream {}
             } else {
                 _ = try await fmRespond(
-                    makeSession: makeSession,
-                    fmPrompt: .init(""),
+                    makeRequest: { FoundationModelsRequest(session: try await makeSession(), prompt: .init("")) },
                     fmOptions: .init(),
                     type: Forecast.self,
                     schema: Forecast.generationSchema,
