@@ -91,7 +91,11 @@ session.toolExecutionDelegate = ToolExecutionObserver()
 - Swift 6.3+ (Xcode 26.4+);
   `PrivateCloudComputeLanguageModel` and `FoundationLanguageModel`
   compile only with Swift 6.4+ (Xcode 27+) and aren't available on tvOS
-- iOS 17.0+ / macOS 14.0+ / visionOS 1.0+ / Linux
+- iOS 17.0+ / macOS 14.0+ / tvOS 17.0+ / watchOS 10.0+ / visionOS 1.0+ / Linux / WASI
+- `SystemLanguageModel` isn't available on watchOS,
+  and is available on tvOS only with Swift 6.3
+- On WASI, remote models need [a transport that you provide](#transports-on-wasi)
+- CI builds watchOS with Xcode 27 and WASI with Swift 6.4
 
 ## Installation
 
@@ -411,6 +415,9 @@ to Foundation Models only in apps built with Swift 6.4 or later
 that run on macOS, iOS, or visionOS 27 or later.
 On earlier runtimes, and on tvOS and watchOS,
 they throw an error when a prompt has an attachment.
+An image in a Tool output follows the same conditions:
+it goes to Foundation Models as an attachment,
+and otherwise the tool call throws the same error.
 The system bridge requires local file URLs; other provider adapters retain URL
 images in their existing transcript representation.
 
@@ -422,6 +429,14 @@ file remaining at its URL. Remote image URLs are retained without downloading.
 Gemini supports images in Tool function responses only with Gemini 3 and later.
 In Gemini Tool outputs, remote image URLs are sent as text at their original
 position without downloading the image; the transcript retains the image segment.
+
+In Tool outputs, an image type that the API doesn't take is sent as `<image>` text:
+Anthropic takes JPEG, PNG, GIF, and WebP,
+and Gemini takes PNG, JPEG, and WebP.
+In an Anthropic prompt, a local file with another extension throws an error.
+Ollama takes only image data,
+so it sends any image URL in a prompt, and a remote URL in a Tool output,
+as text without downloading it.
 
 This compatibility surface covers `CGImage` and `imageURL` attachments in
 prompts and ordinary Tool outputs. Instruction attachments, labels, `CIImage`,
@@ -721,6 +736,28 @@ that makes a request on the same session never finishes.
 `historyTransform` changes only the transcript
 projection for that request; `session.transcript` remains the canonical history,
 unless the transform writes to the `history` session property.
+
+When a turn is replayed on OpenAI (both API variants), Open Responses, and Gemini,
+edits to a string response take precedence
+over the text the session stored when it wrote the turn:
+a changed or removed response sends only its current text and the turn's calls.
+Structured responses are the limit.
+Editing or removing one doesn't remove text from that turn's earlier tool rounds,
+which stays in internal metadata on the `toolCalls` entry and is still sent.
+During streaming, a caller may have seen that text in snapshots;
+with `respond`, it never appears.
+To remove it, drop or rebuild the `toolCalls` entry.
+The same limit applies when a transform changes a prompt
+so that a string turn counts as structured,
+and it can apply when a transform removes a later prompt
+but keeps its `toolCalls` entry.
+
+An edit in place also leaves the original text in the metadata of the entry
+or the response in a saved transcript.
+For a string turn, that text isn't sent, but it's still stored.
+A plain `historyTransform` never changes the stored transcript.
+To remove text from it, write `history` with those entries dropped or rebuilt.
+
 `@SessionProperty` exposes isolated session state to profiles, dynamic
 instructions, and tools. The built-in `history` property is writable from a
 profile or lifecycle callback and read-only while dynamic instructions or a Tool
@@ -1717,8 +1754,9 @@ options[custom: AnthropicLanguageModel.self] = .init(
 Effort levels are `.low`, `.medium`, `.high`, `.extraHigh`, and `.max`;
 [support varies by model](https://platform.claude.com/docs/en/build-with-claude/effort).
 The existing `Thinking(budgetTokens:)` initializer remains available.
-Thinking text and signatures are not currently exposed in session responses or streaming snapshots,
-and signed thinking blocks are not preserved for tool-call follow-ups.
+Thinking blocks appear in responses and streaming snapshots
+as [reasoning entries](#reasoning-in-the-transcript),
+and signed blocks go back unchanged in tool-call follow-ups.
 
 ### Google Gemini
 
