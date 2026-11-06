@@ -1,7 +1,9 @@
 import EventSource
 import Foundation
 import HTTPTypes
-import HTTPTypesFoundation
+#if !os(WASI)
+    import HTTPTypesFoundation
+#endif
 import JSONSchema
 import OrderedCollections
 
@@ -511,6 +513,12 @@ public struct AnthropicLanguageModel: LanguageModel, ProfileRequestIdentifiedLan
             ) {
                 return continuation
             }
+            let schemaInstructions = session.schemaInstructions(
+                for: requestContext,
+                generating: type,
+                schema: schema,
+                includeSchemaInPrompt: includeSchemaInPrompt
+            )
             let anthropicTools: [AnthropicTool] = try requestContext.tools.map {
                 try convertToolToAnthropicFormat($0)
             }
@@ -518,7 +526,7 @@ public struct AnthropicLanguageModel: LanguageModel, ProfileRequestIdentifiedLan
                 model: model,
                 system: nil,
                 messages: try anthropicMessages(
-                    from: requestContext.transcript,
+                    from: requestContext.transcript.saying(schemaInstructions),
                     replacing: entries,
                     with: inFlightMessages,
                     hasDynamicProfile: requestContext.hasDynamicProfile
@@ -561,11 +569,10 @@ public struct AnthropicLanguageModel: LanguageModel, ProfileRequestIdentifiedLan
                 switch resolution {
                 case .stop:
                     entries.append(.toolCalls(callsEntry))
-                    let empty = try emptyResponseContent(for: type)
-                    return .init(
-                        content: empty.content,
-                        rawContent: empty.rawContent,
-                        transcriptEntries: ArraySlice(entries),
+                    return try stoppedResponse(
+                        generating: type,
+                        provider: "Anthropic",
+                        transcriptEntries: entries,
                         requests: usage
                     )
                 case .invocations(let invocations):
@@ -573,28 +580,26 @@ public struct AnthropicLanguageModel: LanguageModel, ProfileRequestIdentifiedLan
                     for invocation in invocations {
                         entries.append(.toolOutput(invocation.output))
                     }
-                    if requestContext.hasDynamicProfile {
-                        inFlightMessages.append(.init(role: .assistant, content: message.content))
-                        let results: [AnthropicContent] = try invocations.map { invocation in
-                            .toolResult(
-                                .init(
-                                    toolUseId: invocation.call.id,
-                                    content: try convertSegmentsToAnthropicContent(
-                                        invocation.output.segments,
-                                        isToolOutput: true
-                                    )
+                    inFlightMessages.append(.init(role: .assistant, content: message.content))
+                    let results: [AnthropicContent] = try invocations.map { invocation in
+                        .toolResult(
+                            .init(
+                                toolUseId: invocation.call.id,
+                                content: try convertSegmentsToAnthropicContent(
+                                    invocation.output.segments,
+                                    isToolOutput: true
                                 )
                             )
-                        }
-                        inFlightMessages.append(.init(role: .user, content: results))
-                        if type == String.self {
-                            earlierText += message.content.compactMap { block -> String? in
-                                if case .text(let text) = block { return text.text }
-                                return nil
-                            }.joined()
-                        }
-                        continue
+                        )
                     }
+                    inFlightMessages.append(.init(role: .user, content: results))
+                    if type == String.self {
+                        earlierText += message.content.compactMap { block -> String? in
+                            if case .text(let text) = block { return text.text }
+                            return nil
+                        }.joined()
+                    }
+                    continue
                 }
             }
 
@@ -698,11 +703,17 @@ public struct AnthropicLanguageModel: LanguageModel, ProfileRequestIdentifiedLan
                             continuation.finish()
                             return
                         }
+                        let schemaInstructions = session.schemaInstructions(
+                            for: requestContext,
+                            generating: type,
+                            schema: schema,
+                            includeSchemaInPrompt: includeSchemaInPrompt
+                        )
                         let anthropicTools: [AnthropicTool] = try requestContext.tools.map {
                             try convertToolToAnthropicFormat($0)
                         }
                         let messages = try anthropicMessages(
-                            from: requestContext.transcript,
+                            from: requestContext.transcript.saying(schemaInstructions),
                             replacing: state.entries,
                             with: inFlightMessages,
                             hasDynamicProfile: requestContext.hasDynamicProfile
@@ -820,7 +831,7 @@ public struct AnthropicLanguageModel: LanguageModel, ProfileRequestIdentifiedLan
                         switch resolution {
                         case .stop:
                             state.entries.append(.toolCalls(callsEntry))
-                            continuation.yield(try state.stoppedSnapshot())
+                            continuation.yield(try state.stoppedSnapshot(provider: "Anthropic"))
                             continuation.finish()
                             return
                         case .invocations(let invocations):
@@ -1043,27 +1054,6 @@ private struct ToolInvocationResult {
 private enum ToolResolutionOutcome {
     case stop(calls: [Transcript.ToolCall])
     case invocations([ToolInvocationResult])
-}
-
-private func emptyResponseContent<Content: Generable>(
-    for type: Content.Type
-) throws -> (content: Content, rawContent: GeneratedContent) {
-    if type == String.self {
-        let raw = GeneratedContent("")
-        return ("" as! Content, raw)
-    }
-
-    let emptyObject = GeneratedContent(properties: [:])
-    if let content = try? Content(emptyObject) {
-        return (content, emptyObject)
-    }
-
-    let nullContent = GeneratedContent(kind: .null)
-    if let content = try? Content(nullContent) {
-        return (content, nullContent)
-    }
-
-    throw GeneratedContentError.typeMismatch
 }
 
 private func partialSnapshot<Content: Generable>(

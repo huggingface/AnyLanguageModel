@@ -786,6 +786,32 @@ import Testing
             #expect(message.role == "user")
             #expect(message.content == "<tool_response>\nCount:\n3\n</tool_response>")
         }
+
+        @Test(arguments: [LlamaToolCallFormat.hermesJSON, .qwenXML])
+        func toolResponseImagesBecomePlaceholders(format: LlamaToolCallFormat) {
+            let image = Transcript.Segment.image(.init(data: Data([0x89]), mimeType: "image/png"))
+            let mixed = format.toolResponseMessage(
+                toolName: "f",
+                segments: [.text(.init(content: "before")), image, .text(.init(content: "after"))]
+            )
+            #expect(mixed.content == "<tool_response>\nbefore\n<image>\nafter\n</tool_response>")
+            let imageOnly = format.toolResponseMessage(toolName: "f", segments: [image])
+            #expect(imageOnly.content == "<tool_response>\n<image>\n</tool_response>")
+        }
+
+        @Test func gemmaToolResponseImagesBecomePlaceholders() {
+            let image = Transcript.Segment.image(.init(data: Data([0x89]), mimeType: "image/png"))
+            let imageOnly = LlamaToolCallFormat.gemma.toolResponseMessage(toolName: "f", segments: [image])
+            #expect(imageOnly.content == "<|tool_response>response:f{value:<|\"|><image><|\"|>}<tool_response|>")
+            let mixed = LlamaToolCallFormat.gemma.toolResponseMessage(
+                toolName: "f",
+                segments: [.text(.init(content: "before")), image]
+            )
+            #expect(
+                mixed.content
+                    == "<|tool_response>response:f{value:[<|\"|>before<|\"|>,<|\"|><image><|\"|>]}<tool_response|>"
+            )
+        }
     }
 
     @Suite(

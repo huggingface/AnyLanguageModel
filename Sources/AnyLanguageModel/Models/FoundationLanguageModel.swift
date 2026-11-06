@@ -104,14 +104,16 @@
             }
         }
 
-        private func makeSession(
+        private func makeRequest(
             for session: LanguageModelSession,
-            prompt: Prompt
-        ) async throws -> FoundationModels.LanguageModelSession {
-            makeFoundationModelsSession(
+            prompt: Prompt,
+            fmPrompt: FoundationModels.Prompt?
+        ) async throws -> FoundationModelsRequest {
+            try makeFoundationModelsRequest(
                 model: try await loadedModel(),
                 session: session,
-                prompt: prompt
+                prompt: prompt,
+                fmPrompt: fmPrompt
             )
         }
 
@@ -157,9 +159,9 @@
             includeSchemaInPrompt: Bool,
             options: GenerationOptions
         ) async throws -> LanguageModelSession.Response<Content> where Content: Generable {
+            let fmPrompt = try prompt.toFoundationModelsUnlessProjected(in: session)
             return try await fmRespond(
-                makeSession: { try await self.makeSession(for: session, prompt: prompt) },
-                fmPrompt: try prompt.toFoundationModels(),
+                makeRequest: { try await self.makeRequest(for: session, prompt: prompt, fmPrompt: fmPrompt) },
                 fmOptions: options.toFoundationModels(),
                 type: type,
                 schema: schema,
@@ -209,15 +211,14 @@
             includeSchemaInPrompt: Bool,
             options: GenerationOptions
         ) -> sending LanguageModelSession.ResponseStream<Content> where Content: Generable {
-            let fmPrompt: FoundationModels.Prompt
+            let fmPrompt: FoundationModels.Prompt?
             do {
-                fmPrompt = try prompt.toFoundationModels()
+                fmPrompt = try prompt.toFoundationModelsUnlessProjected(in: session)
             } catch {
                 return .init(stream: AsyncThrowingStream { $0.finish(throwing: error) })
             }
             return fmStreamResponse(
-                makeSession: { try await self.makeSession(for: session, prompt: prompt) },
-                fmPrompt: fmPrompt,
+                makeRequest: { try await self.makeRequest(for: session, prompt: prompt, fmPrompt: fmPrompt) },
                 fmOptions: options.toFoundationModels(),
                 type: type,
                 schema: schema,

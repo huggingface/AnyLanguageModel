@@ -1,6 +1,8 @@
 import Foundation
 import HTTPTypes
-import HTTPTypesFoundation
+#if !os(WASI)
+    import HTTPTypesFoundation
+#endif
 import JSONSchema
 import OrderedCollections
 
@@ -175,11 +177,17 @@ public struct OllamaLanguageModel: LanguageModel, ProfileRequestIdentifiedLangua
             ) {
                 return continuation
             }
+            let schemaInstructions = session.schemaInstructions(
+                for: requestContext,
+                generating: type,
+                schema: schema,
+                includeSchemaInPrompt: includeSchemaInPrompt
+            )
             let ollamaTools = try requestContext.options.toolsOffered(from: requestContext.tools).map(
                 convertToolToOllamaFormat
             )
             var messages = try ollamaMessages(
-                from: requestContext.transcript,
+                from: requestContext.transcript.saying(schemaInstructions),
                 replacing: entries,
                 with: inFlightMessages,
                 hasDynamicProfile: requestContext.hasDynamicProfile
@@ -225,10 +233,10 @@ public struct OllamaLanguageModel: LanguageModel, ProfileRequestIdentifiedLangua
                 switch resolution {
                 case .stop:
                     entries.append(.toolCalls(callsEntry))
-                    return .init(
-                        content: "" as! Content,
-                        rawContent: GeneratedContent(""),
-                        transcriptEntries: ArraySlice(entries),
+                    return try stoppedResponse(
+                        generating: type,
+                        provider: "Ollama",
+                        transcriptEntries: entries,
                         requests: usage
                     )
                 case .invocations(let invocations):
@@ -325,7 +333,8 @@ public struct OllamaLanguageModel: LanguageModel, ProfileRequestIdentifiedLangua
             continuation in
             let task = Task {
                 do {
-                    let format = type == String.self ? nil : try JSONValue(convertSchemaToOllamaFormat(schema))
+                    let format: JSONValue? =
+                        type == String.self ? nil : try JSONValue(convertSchemaToOllamaFormat(schema))
                     var inFlightMessages: [OllamaMessage] = []
                     var state = StreamingResponseState<Content>()
                     let toolRounds = session.toolRoundLimit(for: "Ollama", options: options)
@@ -350,11 +359,17 @@ public struct OllamaLanguageModel: LanguageModel, ProfileRequestIdentifiedLangua
                             continuation.finish()
                             return
                         }
+                        let schemaInstructions = session.schemaInstructions(
+                            for: requestContext,
+                            generating: type,
+                            schema: schema,
+                            includeSchemaInPrompt: includeSchemaInPrompt
+                        )
                         let tools = try requestContext.options.toolsOffered(from: requestContext.tools).map(
                             convertToolToOllamaFormat
                         )
                         var messages = try ollamaMessages(
-                            from: requestContext.transcript,
+                            from: requestContext.transcript.saying(schemaInstructions),
                             replacing: state.entries,
                             with: inFlightMessages,
                             hasDynamicProfile: requestContext.hasDynamicProfile
@@ -419,7 +434,7 @@ public struct OllamaLanguageModel: LanguageModel, ProfileRequestIdentifiedLangua
                         switch resolution {
                         case .stop:
                             state.entries.append(.toolCalls(callsEntry))
-                            continuation.yield(try state.stoppedSnapshot())
+                            continuation.yield(try state.stoppedSnapshot(provider: "Ollama"))
                             continuation.finish()
                             return
                         case .invocations(let invocations):

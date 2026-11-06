@@ -92,3 +92,54 @@ extension ToolExecutionDelegate {
         in session: LanguageModelSession
     ) async {}
 }
+
+extension LanguageModelSession {
+    /// A response that a ``ToolExecutionDelegate`` stopped
+    /// before the model generated a value of the response's type.
+    ///
+    /// When a delegate returns ``ToolExecutionDecision/stop``,
+    /// a response that generates a `String`,
+    /// or a type that can be empty,
+    /// ends with an empty value and the tool calls that stopped it.
+    /// A type with required properties can't be empty,
+    /// and zero or `false` would look like the model's answer,
+    /// so a response of such a type, a number, or a Boolean
+    /// throws this error instead.
+    ///
+    /// The rounds that ran are in `transcriptEntries`,
+    /// each tool call followed by its output,
+    /// and then the tool calls that the delegate stopped, without output.
+    /// As with any error, the session keeps only the prompt,
+    /// so a caller can add these entries to the transcript and continue from there.
+    ///
+    /// - Note: This API is exclusive to AnyLanguageModel.
+    public struct ToolExecutionStopped: Error, CustomStringConvertible, Sendable {
+        /// The provider whose response a delegate stopped.
+        public let provider: String
+
+        /// The rounds that ran, each tool call followed by its output,
+        /// and then the tool calls that the delegate stopped.
+        public let transcriptEntries: ArraySlice<Transcript.Entry>
+
+        /// The usage of a stream's requests, which the session counts when the stream throws this,
+        /// because the stream can end without a snapshot that reports them.
+        internal var requests = RequestsUsage()
+
+        public var description: String {
+            "A tool execution delegate stopped the \(provider) response "
+                + "before the model generated a value of the response type."
+        }
+
+        /// This error for a response that a model continued after a handoff,
+        /// with the entries and usage of the rounds before the handoff.
+        func continuing(after entries: [Transcript.Entry], usage: LanguageModelSession.Usage) -> Self {
+            var earlier = usage
+            earlier.add(requests.earlier)
+            return Self(
+                provider: provider,
+                transcriptEntries: ArraySlice(entries + transcriptEntries),
+                requests: RequestsUsage(earlier: earlier, final: requests.final)
+            )
+        }
+    }
+}

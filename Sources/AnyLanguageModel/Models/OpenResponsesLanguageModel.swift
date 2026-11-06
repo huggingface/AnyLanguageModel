@@ -1,6 +1,8 @@
 import Foundation
 import HTTPTypes
-import HTTPTypesFoundation
+#if !os(WASI)
+    import HTTPTypesFoundation
+#endif
 import JSONSchema
 
 #if canImport(FoundationNetworking)
@@ -558,11 +560,17 @@ public struct OpenResponsesLanguageModel: LanguageModel, ProfileRequestIdentifie
                             continuation.finish()
                             return
                         }
+                        let schemaInstructions = session.schemaInstructions(
+                            for: requestContext,
+                            generating: type,
+                            schema: responseSchema.schema,
+                            includeSchemaInPrompt: includeSchemaInPrompt
+                        )
                         let tools: [OpenResponsesTool]? =
                             requestContext.tools.isEmpty
                             ? nil : requestContext.tools.map(convertToolToOpenResponsesFormat)
                         let messages = openResponsesMessages(
-                            from: requestContext.transcript,
+                            from: requestContext.transcript.saying(schemaInstructions),
                             replacing: state.entries,
                             with: inFlightMessages,
                             hasDynamicProfile: requestContext.hasDynamicProfile
@@ -628,7 +636,7 @@ public struct OpenResponsesLanguageModel: LanguageModel, ProfileRequestIdentifie
                         switch resolution {
                         case .stop:
                             state.entries.append(.toolCalls(callsEntry))
-                            continuation.yield(try state.stoppedSnapshot())
+                            continuation.yield(try state.stoppedSnapshot(provider: "Open Responses"))
                             continuation.finish()
                             return
                         case .invocations(let invocations):
@@ -697,11 +705,17 @@ public struct OpenResponsesLanguageModel: LanguageModel, ProfileRequestIdentifie
             ) {
                 return continuation
             }
+            let schemaInstructions = session.schemaInstructions(
+                for: requestContext,
+                generating: type,
+                schema: responseSchema.schema,
+                includeSchemaInPrompt: includeSchemaInPrompt
+            )
             let tools: [OpenResponsesTool]? =
                 requestContext.tools.isEmpty
                 ? nil : requestContext.tools.map(convertToolToOpenResponsesFormat)
             let messages = openResponsesMessages(
-                from: requestContext.transcript,
+                from: requestContext.transcript.saying(schemaInstructions),
                 replacing: entries,
                 with: inFlightMessages,
                 hasDynamicProfile: requestContext.hasDynamicProfile
@@ -745,11 +759,10 @@ public struct OpenResponsesLanguageModel: LanguageModel, ProfileRequestIdentifie
                     if !calls.isEmpty {
                         entries.append(.toolCalls(callsEntry))
                     }
-                    let empty = try emptyResponseContent(for: type)
-                    return LanguageModelSession.Response(
-                        content: empty.content,
-                        rawContent: empty.rawContent,
-                        transcriptEntries: ArraySlice(entries),
+                    return try stoppedResponse(
+                        generating: type,
+                        provider: "Open Responses",
+                        transcriptEntries: entries,
                         requests: usage
                     )
                 case .invocations(let invocations):
@@ -797,16 +810,6 @@ public struct OpenResponsesLanguageModel: LanguageModel, ProfileRequestIdentifie
         throw OpenResponsesLanguageModelError.noResponseGenerated
     }
 
-    /// Produces empty content and raw content for the given type (used when tool execution stops the response).
-    private func emptyResponseContent<Content: Generable>(for type: Content.Type) throws -> (
-        content: Content, rawContent: GeneratedContent
-    ) {
-        if type == String.self {
-            return ("" as! Content, GeneratedContent(""))
-        }
-        let raw = GeneratedContent(properties: [:])
-        return (try type.init(raw), raw)
-    }
 }
 
 // MARK: - API Request / Response
@@ -907,7 +910,7 @@ private enum OpenResponsesAPI {
         }
 
         if type != String.self {
-            let schemaValue = try schema.toJSONValueForOpenResponsesStrictMode()
+            let schemaValue = try schema.strictModeJSONValue()
             body["text"] = .object([
                 "format": .object([
                     "type": .string("json_schema"),
@@ -1134,8 +1137,10 @@ private func openResponsesConvertSegmentsToBlocks(_ segments: [Transcript.Segmen
     }
 }
 
+/// Tool output content is a string,
+/// so an image segment becomes an `<image>` placeholder at its position.
 private func openResponsesConvertSegmentsToToolContentString(_ segments: [Transcript.Segment]) -> String {
-    segments.compactMap { seg in
+    segments.map { seg in
         switch seg {
         case .text(let t): return t.content
         case .structure(let s):
@@ -1143,7 +1148,7 @@ private func openResponsesConvertSegmentsToToolContentString(_ segments: [Transc
             case .string(let t): return t
             default: return s.content.jsonString
             }
-        case .image: return nil
+        case .image: return "<image>"
         }
     }.joined(separator: "\n")
 }
@@ -1400,23 +1405,5 @@ public enum OpenResponsesLanguageModelError: LocalizedError, Sendable {
         case .noResponseGenerated: return "No response was generated by the model"
         case .streamFailed(let code, let message): return streamFailureDescription(code: code, message: message)
         }
-    }
-}
-
-// MARK: - Schema for structured output
-
-private extension GenerationSchema {
-    func toJSONValueForOpenResponsesStrictMode() throws -> JSONValue {
-        // Open Responses providers follow OpenAI's structured outputs, which don't support `const`.
-        let jsonSchema = try inlinedJSONSchema(omitAdditionalProperties: false, constantsAsEnums: true)
-        var value = try JSONValue(jsonSchema)
-        if case .object(var obj) = value {
-            obj["additionalProperties"] = .bool(false)
-            if case .object(let props)? = obj["properties"], !props.isEmpty {
-                obj["required"] = .array(Array(props.keys).sorted().map { .string($0) })
-            }
-            value = .object(obj)
-        }
-        return value
     }
 }

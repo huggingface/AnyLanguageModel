@@ -11,13 +11,11 @@ import Testing
             profile: Bool
         ) async throws {
             UsageURLProtocol.reset()
-            let legacyAnthropic = provider == .anthropic && !streaming && !profile
-            let roundsPerTurn = legacyAnthropic ? 1 : 2
             let observedCalls = Locked<[Transcript.Entry]>([])
             var expectedOutputs: [String] = []
             var expectedRequests: [[String]] = []
             for turn in 0 ..< 2 {
-                for round in 0 ..< roundsPerTurn {
+                for round in 0 ..< 2 {
                     expectedRequests.append(expectedOutputs)
                     let city = "Turn\(turn)Round\(round)"
                     var response =
@@ -35,16 +33,10 @@ import Testing
                     UsageURLProtocol.enqueue(json: response)
                     expectedOutputs.append("OUTPUT:\(city)")
                 }
-                if !legacyAnthropic {
-                    expectedRequests.append(expectedOutputs)
-                    UsageURLProtocol.enqueue(
-                        json: try streaming ? provider.stream() : Self.json(provider.response())
-                    )
-                }
-            }
-            if legacyAnthropic {
                 expectedRequests.append(expectedOutputs)
-                UsageURLProtocol.enqueue(json: try Self.json(provider.response()))
+                UsageURLProtocol.enqueue(
+                    json: try streaming ? provider.stream() : Self.json(provider.response())
+                )
             }
             let session: LanguageModelSession
             if profile {
@@ -63,7 +55,7 @@ import Testing
             } else {
                 session = provider.makeSession(tools: [ReusedCallIDTool(observedCalls: observedCalls)])
             }
-            for _ in 0 ..< (legacyAnthropic ? 3 : 2) {
+            for _ in 0 ..< 2 {
                 if streaming {
                     _ = try await session.streamResponse(to: "Weather?").collect()
                 } else {
@@ -185,6 +177,42 @@ import Testing
             #expect(selected.temperature == 0.8)
             #expect(selected.tools == ["otherTool"])
             #expect(selected.sawToolOutput)
+        }
+
+        /// A stop after a model handoff that throws reports and counts the rounds of both models.
+        func providerModelHandoffStopKeepsEveryRound(_ provider: Provider, _ streaming: Bool) async throws {
+            UsageURLProtocol.reset()
+            for _ in 0 ..< 2 {
+                UsageURLProtocol.enqueue(
+                    json: streaming
+                        ? try provider.toolStream()
+                        : try Self.json(provider.response(text: "", counts: provider.counts, tool: true))
+                )
+            }
+            let state = AlternatingProviderProfileState()
+            let session = LanguageModelSession(
+                profile: AlternatingProviderProfile(
+                    state: state,
+                    first: provider.makeModel(),
+                    second: provider.makeModel()
+                )
+            )
+            session.toolExecutionDelegate = StopSecondRoundDelegate()
+
+            let error = await #expect(throws: LanguageModelSession.ToolExecutionStopped.self) {
+                if streaming {
+                    _ = try await session.streamResponse(to: "Weather?", generating: Int.self).collect()
+                } else {
+                    _ = try await session.respond(to: "Weather?", generating: Int.self)
+                }
+            }
+
+            #expect(state.useSecond.withLock { $0 })
+            #expect(error?.transcriptEntries.count == 3)
+            #expect(UsageURLProtocol.recordedBodies.count == 2)
+            var everyRequest = provider.expected
+            everyRequest.add(provider.expected)
+            #expect(session.usage == everyRequest)
         }
 
         func providerModelHandoffsShareToolRoundLimit(_ provider: Provider, _ streaming: Bool) async throws {
@@ -362,7 +390,8 @@ import Testing
             #expect(state.executions.withLock { $0 } == ["City 0", "City 1"])
             #expect(state.outputHistoryCounts.withLock { $0 } == [1, 2])
             #expect(state.promptIDs.withLock { $0.count } == 1)
-            #expect(session.transcript.count == 6)
+            // The profile's instructions entry, the prompt, two Tool rounds, and the response.
+            #expect(session.transcript.count == 7)
             #expect(Set(session.transcript.map(\.id)).count == session.transcript.count)
             let lastRequest = try #require(UsageURLProtocol.recordedBodies.last)
             let text = String(decoding: lastRequest, as: UTF8.self)
@@ -399,8 +428,16 @@ import Testing
             }
 
             #expect(state.outputHistoryCounts.withLock { $0 } == [1, 2])
-            #expect(session.transcript.count == 1)
-            #expect(session.transcript.allSatisfy { if case .prompt = $0 { true } else { false } })
+            // Only the profile's instructions entry and the prompt remain.
+            #expect(session.transcript.count == 2)
+            #expect(
+                session.transcript.allSatisfy {
+                    switch $0 {
+                    case .instructions, .prompt: true
+                    default: false
+                    }
+                }
+            )
         }
 
         func ordinaryWrapperKeepsTheProviderToolLoop(_ provider: Provider, _ streaming: Bool) async throws {

@@ -58,6 +58,7 @@ import Testing
             let session = LanguageModelSession(model: model)
 
             let response = try await session.respond(to: "Say hello")
+            attachResponse(response)
             #expect(!response.content.isEmpty)
         }
 
@@ -67,6 +68,7 @@ import Testing
             let options = GenerationOptions(sampling: .greedy, maximumResponseTokens: 8)
             let session = LanguageModelSession(model: model)
             let response = try await session.respond(to: "Say hello", options: options)
+            attachResponse(response)
             let streamed = try await session.streamResponse(to: "Say hello", options: options).collect()
             #expect(response.usage.input.totalTokenCount > 0)
             #expect(response.usage.input.cachedTokenCount == 0)
@@ -89,6 +91,7 @@ import Testing
                 to: "Tell me a fact",
                 options: options
             )
+            attachResponse(response)
             #expect(!response.content.isEmpty)
         }
 
@@ -103,6 +106,7 @@ import Testing
                 to: "Complete this sentence: The sky is",
                 options: greedyOptions
             )
+            attachResponse(greedyResponse, "greedyResponse")
             #expect(!greedyResponse.content.isEmpty)
 
             // Test top-k sampling
@@ -111,6 +115,7 @@ import Testing
                 to: "Complete this sentence: The sky is",
                 options: topKOptions
             )
+            attachResponse(topKResponse, "topKResponse")
             #expect(!topKResponse.content.isEmpty)
 
             // Test nucleus sampling
@@ -119,6 +124,7 @@ import Testing
                 to: "Complete this sentence: The sky is",
                 options: nucleusOptions
             )
+            attachResponse(nucleusResponse, "nucleusResponse")
             #expect(!nucleusResponse.content.isEmpty)
         }
 
@@ -133,6 +139,7 @@ import Testing
                 to: "Write a short story about a cat",
                 options: lowTempOptions
             )
+            attachResponse(lowTempResponse, "lowTempResponse")
             #expect(!lowTempResponse.content.isEmpty)
 
             // Test high temperature (more creative)
@@ -141,6 +148,7 @@ import Testing
                 to: "Write a short story about a cat",
                 options: highTempOptions
             )
+            attachResponse(highTempResponse, "highTempResponse")
             #expect(!highTempResponse.content.isEmpty)
         }
 
@@ -154,6 +162,7 @@ import Testing
                 to: "Write a long story about space exploration",
                 options: options
             )
+            attachResponse(response)
             #expect(!response.content.isEmpty)
             // Note: We can't easily test token count without access to the tokenizer
             // but we can verify the response is not empty
@@ -202,6 +211,7 @@ import Testing
                 to: "Generate a greeting message that says hello",
                 generating: SimpleString.self
             )
+            attachResponse(response)
             #expect(!response.content.message.isEmpty)
         }
 
@@ -216,6 +226,7 @@ import Testing
                 to: "Generate a count value of 42",
                 generating: SimpleInt.self
             )
+            attachResponse(response)
             #expect(response.content.count >= 0)
             let jsonData = response.rawContent.jsonString.data(using: .utf8)
             #expect(jsonData != nil)
@@ -241,6 +252,7 @@ import Testing
                 to: "Generate a boolean value: true",
                 generating: SimpleBool.self
             )
+            attachResponse(response)
             let jsonData = response.rawContent.jsonString.data(using: .utf8)
             #expect(jsonData != nil)
             if let jsonData {
@@ -265,6 +277,7 @@ import Testing
                 to: "Generate a temperature value of 72.5 degrees",
                 generating: SimpleDouble.self
             )
+            attachResponse(response)
             #expect(!response.content.temperature.isNaN)
             #expect(response.content.temperature.isFinite)
         }
@@ -280,6 +293,7 @@ import Testing
                 to: "Generate a person named Alex with nickname 'Lex'. Nickname may be omitted if unsure.",
                 generating: OptionalFields.self
             )
+            attachResponse(response)
             #expect(!response.content.name.isEmpty)
             if let nickname = response.content.nickname {
                 #expect(!nickname.isEmpty)
@@ -297,6 +311,7 @@ import Testing
                 to: "Generate a high priority value",
                 generating: Priority.self
             )
+            attachResponse(response)
             #expect([Priority.low, Priority.medium, Priority.high].contains(response.content))
         }
 
@@ -311,6 +326,7 @@ import Testing
                 to: "Generate a list of 3 color names: red, green, blue",
                 generating: SimpleArray.self
             )
+            attachResponse(response)
             #expect(!response.content.colors.isEmpty)
         }
 
@@ -325,6 +341,7 @@ import Testing
                 to: "Generate a person named John, age 25, living at 123 Main St, Springfield, 12345",
                 generating: StructuredPerson.self
             )
+            attachResponse(response)
             #expect(!response.content.name.isEmpty)
             #expect(response.content.age >= 0)
             #expect(!response.content.address.street.isEmpty)

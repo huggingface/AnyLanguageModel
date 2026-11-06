@@ -1,6 +1,8 @@
 import Foundation
 import HTTPTypes
-import HTTPTypesFoundation
+#if !os(WASI)
+    import HTTPTypesFoundation
+#endif
 import JSONSchema
 
 #if canImport(FoundationNetworking)
@@ -554,11 +556,17 @@ public struct OpenAILanguageModel: LanguageModel, ProfileRequestIdentifiedLangua
             ) {
                 return continuation
             }
+            let schemaInstructions = session.schemaInstructions(
+                for: requestContext,
+                generating: type,
+                schema: responseSchema.schema,
+                includeSchemaInPrompt: includeSchemaInPrompt
+            )
             let tools =
                 requestContext.tools.isEmpty
                 ? nil : requestContext.tools.map(convertToolToOpenAIFormat)
             let messages = openAIMessages(
-                from: requestContext.transcript,
+                from: requestContext.transcript.saying(schemaInstructions),
                 replacing: entries,
                 with: inFlightMessages,
                 hasDynamicProfile: requestContext.hasDynamicProfile,
@@ -623,11 +631,10 @@ public struct OpenAILanguageModel: LanguageModel, ProfileRequestIdentifiedLangua
                     if !calls.isEmpty {
                         entries.append(.toolCalls(callsEntry))
                     }
-                    let empty = try emptyResponseContent(for: type)
-                    return LanguageModelSession.Response(
-                        content: empty.content,
-                        rawContent: empty.rawContent,
-                        transcriptEntries: ArraySlice(entries),
+                    return try stoppedResponse(
+                        generating: type,
+                        provider: "OpenAI",
+                        transcriptEntries: entries,
                         requests: usage
                     )
                 case .invocations(let invocations):
@@ -718,11 +725,17 @@ public struct OpenAILanguageModel: LanguageModel, ProfileRequestIdentifiedLangua
             ) {
                 return continuation
             }
+            let schemaInstructions = session.schemaInstructions(
+                for: requestContext,
+                generating: type,
+                schema: responseSchema.schema,
+                includeSchemaInPrompt: includeSchemaInPrompt
+            )
             let tools =
                 requestContext.tools.isEmpty
                 ? nil : requestContext.tools.map(convertToolToOpenAIFormat)
             let messages = openAIMessages(
-                from: requestContext.transcript,
+                from: requestContext.transcript.saying(schemaInstructions),
                 replacing: entries,
                 with: inFlightMessages,
                 hasDynamicProfile: requestContext.hasDynamicProfile,
@@ -767,11 +780,10 @@ public struct OpenAILanguageModel: LanguageModel, ProfileRequestIdentifiedLangua
                     if !calls.isEmpty {
                         entries.append(.toolCalls(callsEntry))
                     }
-                    let empty = try emptyResponseContent(for: type)
-                    return LanguageModelSession.Response(
-                        content: empty.content,
-                        rawContent: empty.rawContent,
-                        transcriptEntries: ArraySlice(entries),
+                    return try stoppedResponse(
+                        generating: type,
+                        provider: "OpenAI",
+                        transcriptEntries: entries,
                         requests: usage
                     )
                 case .invocations(let invocations):
@@ -895,11 +907,17 @@ public struct OpenAILanguageModel: LanguageModel, ProfileRequestIdentifiedLangua
                             continuation.finish()
                             return
                         }
+                        let schemaInstructions = session.schemaInstructions(
+                            for: requestContext,
+                            generating: type,
+                            schema: responseSchema.schema,
+                            includeSchemaInPrompt: includeSchemaInPrompt
+                        )
                         let tools =
                             requestContext.tools.isEmpty
                             ? nil : requestContext.tools.map(convertToolToOpenAIFormat)
                         let messages = openAIMessages(
-                            from: requestContext.transcript,
+                            from: requestContext.transcript.saying(schemaInstructions),
                             replacing: state.entries,
                             with: inFlightMessages,
                             hasDynamicProfile: requestContext.hasDynamicProfile,
@@ -1037,7 +1055,7 @@ public struct OpenAILanguageModel: LanguageModel, ProfileRequestIdentifiedLangua
                         switch resolution {
                         case .stop:
                             state.entries.append(.toolCalls(callsEntry))
-                            continuation.yield(try state.stoppedSnapshot())
+                            continuation.yield(try state.stoppedSnapshot(provider: "OpenAI"))
                             continuation.finish()
                             return
                         case .invocations(let invocations):
@@ -1113,7 +1131,7 @@ private enum ChatCompletions {
         }
 
         if type != String.self {
-            let jsonSchemaValue = try schema.toJSONValueForOpenAIStrictMode()
+            let jsonSchemaValue = try schema.strictModeJSONValue()
             body["response_format"] = .object([
                 "type": .string("json_schema"),
                 "json_schema": .object([
@@ -1393,7 +1411,7 @@ private enum Responses {
         }
 
         if type != String.self {
-            let jsonSchemaValue = try schema.toJSONValueForOpenAIStrictMode()
+            let jsonSchemaValue = try schema.strictModeJSONValue()
             body["text"] = .object([
                 "format": .object([
                     "type": .string("json_schema"),
@@ -1884,8 +1902,9 @@ private func convertSegmentsToOpenAIBlocks(_ segments: [Transcript.Segment]) -> 
 private func convertSegmentsToToolContentString(_ segments: [Transcript.Segment]) -> String {
     // Tool message content must be string (or text-only parts) per API spec.
     // String is used for broad provider compatibility.
-    // Image segments are intentionally omitted because tool outputs only support text.
-    segments.compactMap { segment in
+    // Tool outputs only support text,
+    // so an image segment becomes an `<image>` placeholder at its position.
+    segments.map { segment in
         switch segment {
         case .text(let textSegment):
             return textSegment.content
@@ -1895,7 +1914,7 @@ private func convertSegmentsToToolContentString(_ segments: [Transcript.Segment]
             default: return structuredSegment.content.jsonString
             }
         case .image:
-            return nil
+            return "<image>"
         }
     }.joined(separator: "\n")
 }
@@ -2157,19 +2176,6 @@ private func convertToolToOpenAIFormat(_ tool: any Tool) -> OpenAITool {
     return OpenAITool(type: "function", function: fn)
 }
 
-private func emptyResponseContent<Content: Generable>(
-    for type: Content.Type
-) throws -> (content: Content, rawContent: GeneratedContent) {
-    if type == String.self {
-        let raw = GeneratedContent("")
-        return ("" as! Content, raw)
-    }
-
-    let raw = GeneratedContent(properties: [:])
-    let content = try type.init(raw)
-    return (content, raw)
-}
-
 private func toGeneratedContent(_ jsonString: String?) throws -> GeneratedContent {
     guard let jsonString, !jsonString.isEmpty else { return GeneratedContent(properties: [:]) }
     return try GeneratedContent(json: jsonString)
@@ -2346,38 +2352,6 @@ public enum OpenAILanguageModelError: LocalizedError {
         case .streamFailed(let code, let message):
             return streamFailureDescription(code: code, message: message)
         }
-    }
-}
-
-// MARK: - OpenAI Schema Helpers
-
-private extension GenerationSchema {
-    /// Converts this schema to a JSONValue with OpenAI strict mode requirements applied.
-    ///
-    /// OpenAI strict mode requires:
-    /// 1. `additionalProperties: false` at the root
-    /// 2. All properties (including optional ones) listed in `required`
-    func toJSONValueForOpenAIStrictMode() throws -> JSONValue {
-        // OpenAI's structured outputs don't support `const`.
-        let jsonSchema = try inlinedJSONSchema(omitAdditionalProperties: false, constantsAsEnums: true)
-        var jsonSchemaValue = try JSONValue(jsonSchema)
-
-        if case .object(var schemaObj) = jsonSchemaValue {
-            schemaObj["additionalProperties"] = .bool(false)
-
-            if case .object(let properties)? = schemaObj["properties"],
-                !properties.isEmpty
-            {
-                // OpenAI strict mode requires all properties to be listed as required,
-                // even if the underlying schema marks them optional.
-                let allPropertyNames = Array(properties.keys).sorted()
-                schemaObj["required"] = .array(allPropertyNames.map { .string($0) })
-            }
-
-            jsonSchemaValue = .object(schemaObj)
-        }
-
-        return jsonSchemaValue
     }
 }
 

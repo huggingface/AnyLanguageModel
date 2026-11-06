@@ -61,7 +61,7 @@ extension LanguageModel {
         includeSchemaInPrompt: Bool,
         options: GenerationOptions
     ) -> LanguageModelSession.ResponseStream<Content> {
-        streamStructuredResponse {
+        streamStructuredResponse(within: session) {
             try await respond(
                 within: session,
                 to: prompt,
@@ -73,24 +73,52 @@ extension LanguageModel {
     }
 
     /// Converts a complete response into one snapshot without changing its schema.
+    ///
+    /// A stream counts its requests from its snapshots.
+    /// A response that throws yields none,
+    /// so the requests of the rounds that it completed are counted for `session` instead.
+    /// A response that returns after the consumer cancels
+    /// yields a snapshot that `session` doesn't read,
+    /// so in a stream that `session` makes,
+    /// its requests are prepaid before the snapshot is yielded,
+    /// through the account where `session` counts the stream's snapshots,
+    /// and the snapshot carries the token for them.
+    /// Within a response that isn't streamed, such as one that collects this stream,
+    /// each round is counted through that response's channel as the round completes.
     func streamStructuredResponse<Content: Generable>(
+        within session: LanguageModelSession,
         generate: @escaping @Sendable () async throws -> LanguageModelSession.Response<Content>
     ) -> LanguageModelSession.ResponseStream<Content> {
         .init(
             stream: AsyncThrowingStream { continuation in
+                let enclosing = RequestUsageChannel.current
+                let counted = enclosing?.streamedRequests
                 let task = Task {
+                    let channel =
+                        enclosing.flatMap { $0.streamedRequests == nil ? $0 : nil }
+                        ?? RequestUsageChannel { _ in }
                     do {
-                        let response = try await generate()
+                        let response = try await RequestUsageChannel.$current.withValue(channel) {
+                            try await generate()
+                        }
+                        let prepaid = counted?.prepay(response.requests)
                         continuation.yield(
                             .init(
                                 content: response.content.asPartiallyGenerated(),
                                 rawContent: response.rawContent,
                                 transcriptEntries: response.transcriptEntries,
-                                usage: response.usage
+                                requests: response.requests,
+                                prepaid: prepaid
                             )
                         )
                         continuation.finish()
                     } catch {
+                        // No snapshot reports these requests,
+                        // so they're added to what the session counted,
+                        // whatever the stream's earlier snapshots reported.
+                        if channel !== enclosing {
+                            session.recordUsage(channel.reportedUsage)
+                        }
                         continuation.finish(throwing: error)
                     }
                 }

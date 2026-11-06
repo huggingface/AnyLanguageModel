@@ -182,8 +182,7 @@ import Testing
         let entries: [AnyLanguageModel.Transcript.Entry]
         if streaming {
             let stream = fmStreamResponse(
-                makeSession: makeSession,
-                fmPrompt: .init(""),
+                makeRequest: { FoundationModelsRequest(session: try await makeSession(), prompt: .init("")) },
                 fmOptions: .init(),
                 type: String.self,
                 schema: String.generationSchema,
@@ -194,8 +193,7 @@ import Testing
             entries = Array(try #require(last).transcriptEntries)
         } else {
             let response = try await fmRespond(
-                makeSession: makeSession,
-                fmPrompt: .init(""),
+                makeRequest: { FoundationModelsRequest(session: try await makeSession(), prompt: .init("")) },
                 fmOptions: .init(),
                 type: String.self,
                 schema: String.generationSchema,
@@ -236,44 +234,161 @@ import Testing
         #expect(stoppedToolCall(in: CancellationError()) == nil)
     }
 
-    /// A stop before any content, for a content type that takes no empty value, throws
-    /// `typeMismatch`, as other models do, whether streaming or not. No model is involved.
+    /// Runs a request whose first call asks a stopping delegate, whether streaming or not.
+    /// No model is involved. It returns the raw content of the last snapshot or the response.
     @available(macOS 26.0, iOS 26.0, tvOS 26.0, visionOS 26.0, *)
-    @Test(arguments: [false, true])
-    func stopWithoutEmptyContentThrowsTypeMismatch(streaming: Bool) async throws {
+    private func stoppedRawContent<Content: Generable>(
+        generating type: Content.Type,
+        streaming: Bool,
+        delegate: any ToolExecutionDelegate = StoppingDelegate()
+    ) async throws -> GeneratedContent {
         let weatherTool = spy(on: WeatherTool())
         let session = LanguageModelSession(model: SystemLanguageModel.default, tools: [weatherTool])
-        session.toolExecutionDelegate = StoppingDelegate()
+        session.toolExecutionDelegate = delegate
         let makeSession: @Sendable () async throws -> FoundationModels.LanguageModelSession = {
-            _ = try await callTool(weatherTool, with: GeneratedContent(properties: ["city": "Paris"]), in: session)
-            throw CancellationError()  // The call must stop before reaching here.
-        }
-        let error = await #expect(throws: GeneratedContentError.self) {
-            if streaming {
-                let stream = fmStreamResponse(
-                    makeSession: makeSession,
-                    fmPrompt: .init(""),
-                    fmOptions: .init(),
-                    type: Forecast.self,
-                    schema: Forecast.generationSchema,
-                    includeSchemaInPrompt: false
-                )
-                for try await _ in stream {}
-            } else {
-                _ = try await fmRespond(
-                    makeSession: makeSession,
-                    fmPrompt: .init(""),
-                    fmOptions: .init(),
-                    type: Forecast.self,
-                    schema: Forecast.generationSchema,
-                    includeSchemaInPrompt: false
-                )
+            for city in ["Paris", "Berlin"] {
+                _ = try await callTool(weatherTool, with: GeneratedContent(properties: ["city": city]), in: session)
             }
+            throw CancellationError()  // A call must stop before reaching here.
         }
-        guard case .typeMismatch? = error else {
-            Issue.record("Expected typeMismatch, got \(String(describing: error))")
+        if streaming {
+            let stream = fmStreamResponse(
+                makeRequest: { FoundationModelsRequest(session: try await makeSession(), prompt: .init("")) },
+                fmOptions: .init(),
+                type: type,
+                schema: type.generationSchema,
+                includeSchemaInPrompt: false
+            )
+            var last: LanguageModelSession.ResponseStream<Content>.Snapshot?
+            for try await snapshot in stream { last = snapshot }
+            return try #require(last).rawContent
+        }
+        return try await fmRespond(
+            makeRequest: { FoundationModelsRequest(session: try await makeSession(), prompt: .init("")) },
+            fmOptions: .init(),
+            type: type,
+            schema: type.generationSchema,
+            includeSchemaInPrompt: false
+        ).rawContent
+    }
+
+    /// A stop before any content, for a structure with required properties, a number, or a Boolean,
+    /// throws `ToolExecutionStopped` with the call, as the HTTP models do, whether streaming or not.
+    /// No model is involved.
+    @available(macOS 26.0, iOS 26.0, tvOS 26.0, visionOS 26.0, *)
+    @Test(arguments: [false, true])
+    func stopWithoutEmptyContentThrowsToolExecutionStopped(streaming: Bool) async throws {
+        func expectStopped<Content: Generable>(_ type: Content.Type) async throws {
+            let delegate = StoppingDelegate()
+            let error = await #expect(throws: LanguageModelSession.ToolExecutionStopped.self, "\(type)") {
+                _ = try await stoppedRawContent(generating: type, streaming: streaming, delegate: delegate)
+            }
+            #expect(error?.provider == "Foundation Models")
+            let generated = await delegate.generated
+            guard let error, error.transcriptEntries.count == 1,
+                case .toolCalls(let calls)? = error.transcriptEntries.first
+            else {
+                Issue.record("Expected only the stopped call, got \(String(describing: error))")
+                return
+            }
+            #expect(calls.map(\.id) == generated.map(\.id))
+        }
+        try await expectStopped(Forecast.self)
+        try await expectStopped(Int.self)
+        try await expectStopped(Double.self)
+        try await expectStopped(Bool.self)
+    }
+
+    /// The error keeps the calls that ran before the stop, each with its output.
+    /// No model is involved.
+    @available(macOS 26.0, iOS 26.0, tvOS 26.0, visionOS 26.0, *)
+    @Test(arguments: [false, true])
+    func stopWithoutEmptyContentKeepsCompletedToolCalls(streaming: Bool) async throws {
+        let delegate = ScriptedDelegate([.provideOutput([.text(.init(content: "Sunny"))]), .stop])
+        let error = await #expect(throws: LanguageModelSession.ToolExecutionStopped.self) {
+            _ = try await stoppedRawContent(generating: Int.self, streaming: streaming, delegate: delegate)
+        }
+        let generated = await delegate.generated
+        guard let entries = error?.transcriptEntries.map({ $0 }), entries.count == 3,
+            case .toolCalls(let completed) = entries[0],
+            case .toolOutput(let output) = entries[1],
+            case .toolCalls(let stopped) = entries[2]
+        else {
+            Issue.record("Expected the completed call, its output, and the stopped call: \(String(describing: error))")
             return
         }
+        #expect(completed.map(\.id) == [generated[0].id])
+        #expect(output.id == generated[0].id)
+        #expect(stopped.map(\.id) == [generated[1].id])
+    }
+
+    /// A type that can be empty ends with the shared empty values. No model is involved.
+    @available(macOS 26.0, iOS 26.0, tvOS 26.0, visionOS 26.0, *)
+    @Test(arguments: [false, true])
+    func stopUsesTheSharedEmptyValues(streaming: Bool) async throws {
+        let string = try await stoppedRawContent(generating: String.self, streaming: streaming)
+        #expect(string.kind == .string(""))
+        let array = try await stoppedRawContent(generating: [String].self, streaming: streaming)
+        #expect(array.kind == .array([]))
+        let generated = try await stoppedRawContent(generating: GeneratedContent.self, streaming: streaming)
+        #expect(generated.kind == .structure(properties: [:], orderedKeys: []))
+    }
+
+    /// A stream that stopped after snapshots keeps the last one only if it decodes as the complete
+    /// type, so that `collect()` accepts it. Otherwise it ends with an empty value or throws
+    /// with the entries and usage, as the HTTP models do. No model is involved.
+    @available(macOS 26.0, iOS 26.0, tvOS 26.0, visionOS 26.0, *)
+    @Test func stopAfterSnapshotsEndsTheStreamLikeHTTPModels() throws {
+        let call = Transcript.ToolCall(id: "call", toolName: "getWeather", arguments: GeneratedContent(properties: [:]))
+        let entries: [Transcript.Entry] = [.toolCalls(Transcript.ToolCalls([call]))]
+        let requests = RequestsUsage(
+            earlier: .init(
+                input: .init(totalTokenCount: 100, cachedTokenCount: 0),
+                output: .init(totalTokenCount: 10, reasoningTokenCount: 0)
+            ),
+            final: .init(
+                input: .init(totalTokenCount: 150, cachedTokenCount: 0),
+                output: .init(totalTokenCount: 15, reasoningTokenCount: 0)
+            )
+        )
+
+        // Text so far decodes as a string, so it stays.
+        let text = try stoppedStreamSnapshot(
+            after: LanguageModelSession.ResponseStream<String>.Snapshot(
+                content: "Hel",
+                rawContent: GeneratedContent("Hel"),
+                requests: RequestsUsage()
+            ),
+            entries: entries,
+            requests: requests
+        )
+        #expect(text.rawContent.kind == .string("Hel"))
+        #expect(text.transcriptEntries.count == 1)
+        #expect(text.requests == requests)
+
+        // A partial value that doesn't decode gives way to the empty value.
+        let partialArray = LanguageModelSession.ResponseStream<[String]>.Snapshot(
+            content: ["Hel"],
+            rawContent: GeneratedContent("Hel"),
+            requests: RequestsUsage()
+        )
+        let array = try stoppedStreamSnapshot(after: partialArray, entries: entries, requests: requests)
+        #expect(array.rawContent.kind == .array([]))
+        #expect(array.content.isEmpty)
+        #expect(array.transcriptEntries.count == 1)
+        #expect(array.requests == requests)
+
+        // A partial structure with no empty value throws, with the usage the session counts.
+        let partialForecast = LanguageModelSession.ResponseStream<Forecast>.Snapshot(
+            content: try Forecast.PartiallyGenerated(GeneratedContent(properties: [:])),
+            rawContent: GeneratedContent(properties: [:]),
+            requests: RequestsUsage()
+        )
+        let error = #expect(throws: LanguageModelSession.ToolExecutionStopped.self) {
+            _ = try stoppedStreamSnapshot(after: partialForecast, entries: entries, requests: requests)
+        }
+        #expect(error?.transcriptEntries.count == 1)
+        #expect(error?.requests == requests)
     }
 
     /// Parallel calls keep the order they started in, not the order they finish in.
@@ -500,6 +615,7 @@ import Testing
             let session = LanguageModelSession(model: model)
 
             let response = try await session.respond(to: "Say 'Hello'")
+            attachResponse(response)
             #expect(!response.content.isEmpty)
         }
 
@@ -512,6 +628,7 @@ import Testing
             )
 
             let response = try await session.respond(to: "What is 2+2?")
+            attachResponse(response)
             #expect(!response.content.isEmpty)
         }
 
@@ -525,6 +642,7 @@ import Testing
                 to: "Generate a number",
                 options: options
             )
+            attachResponse(response)
             #expect(!response.content.isEmpty)
         }
 
@@ -577,10 +695,12 @@ import Testing
                 let options = GenerationOptions(sampling: .greedy)
 
                 let first = try await session.respond(to: "What should you reply?", options: options)
+                attachResponse(first, "first")
                 #expect(first.content.localizedCaseInsensitiveContains("apple"))
 
                 state.useWeather = true
                 let second = try await session.respond(to: "How's the weather in San Francisco?", options: options)
+                attachResponse(second, "second")
                 #expect(second.content.contains("72°F"))
 
                 #expect(
@@ -597,6 +717,7 @@ import Testing
             let session = LanguageModelSession(model: SystemLanguageModel.default, tools: [weatherTool])
 
             let response = try await session.respond(to: "How's the weather in San Francisco?")
+            attachResponse(response)
 
             // The calls Foundation Models ran are in the response's transcript, with their outputs.
             var foundToolOutput = false
@@ -621,6 +742,7 @@ import Testing
             session.toolExecutionDelegate = delegate
 
             let response = try await session.respond(to: "How's the weather in San Francisco? Use the tool.")
+            attachResponse(response)
 
             #expect(await weatherTool.calls.isEmpty)
             let generated = await delegate.generated
@@ -643,6 +765,7 @@ import Testing
             session.toolExecutionDelegate = delegate
 
             let response = try await session.respond(to: "How's the weather in San Francisco? Use the tool.")
+            attachResponse(response)
 
             #expect(await weatherTool.calls.isEmpty)
             let generated = await delegate.generated
@@ -744,6 +867,7 @@ import Testing
                 }
                 throw error
             }
+            attachResponse(firstResponse, "firstResponse")
             #expect(!firstResponse.content.isEmpty)
 
             let secondResponse: LanguageModelSession.Response<String>
@@ -758,6 +882,7 @@ import Testing
                 }
                 throw error
             }
+            attachResponse(secondResponse, "secondResponse")
             let repliedNumbers = secondResponse.content
                 .split { !$0.isNumber }
                 .compactMap { Int($0) }
@@ -779,6 +904,7 @@ import Testing
                 to: "Generate a friendly greeting",
                 generating: Greeting.self
             )
+            attachResponse(response)
 
             #expect(!response.content.message.isEmpty)
         }
@@ -791,6 +917,7 @@ import Testing
                 to: "Create a fictional person who is a software engineer",
                 generating: Person.self
             )
+            attachResponse(response)
 
             #expect(!response.content.name.isEmpty)
             #expect(response.content.age >= 0 && response.content.age <= 150)
@@ -805,6 +932,7 @@ import Testing
                 to: "Calculate 15 + 27",
                 generating: MathResult.self
             )
+            attachResponse(response)
 
             #expect(!response.content.expression.isEmpty)
             #expect(!response.content.explanation.isEmpty)
@@ -820,6 +948,7 @@ import Testing
                 to: "Describe the color red",
                 generating: ColorInfo.self
             )
+            attachResponse(response)
 
             #expect(!response.content.name.isEmpty)
             #expect(!response.content.hexCode.isEmpty)
@@ -836,6 +965,7 @@ import Testing
                 to: "Recommend 3 classic science fiction books",
                 generating: BookRecommendations.self
             )
+            attachResponse(response)
 
             if response.content.titles.isEmpty {
                 #expect(response.rawContent.jsonString.contains("titles"))
@@ -852,6 +982,7 @@ import Testing
                 to: "Analyze the sentiment of: 'I love this product!'",
                 generating: SentimentAnalysis.self
             )
+            attachResponse(response)
 
             #expect(["positive", "negative", "neutral"].contains(response.content.sentiment.lowercased()))
             #expect(response.content.confidence >= 0.0 && response.content.confidence <= 1.0)
@@ -866,6 +997,7 @@ import Testing
                 to: "Plan a counter: add 2, then add 3, then report the total.",
                 generating: CounterPlan.self
             )
+            attachResponse(response)
 
             #expect(!response.content.steps.isEmpty)
         }
@@ -880,6 +1012,7 @@ import Testing
                 to: "Add 2 to the counter.",
                 generating: CounterStep.self
             )
+            attachResponse(response)
 
             let type = try response.rawContent.value(String.self, forProperty: "type")
             #expect(["add", "reset", "report"].contains(type))
@@ -896,6 +1029,7 @@ import Testing
                 to: "Create an interesting fictional character",
                 generating: Person.self
             )
+            attachResponse(response)
 
             #expect(!response.content.name.isEmpty)
             #expect(response.content.age >= 0)
@@ -1005,4 +1139,224 @@ import Testing
             .stop
         }
     }
+    /// When a call stops a request, its round is the final one: the rounds before it are those
+    /// that ended before its round's calls started, which all see the same usage. No model is involved.
+    @available(macOS 26.0, iOS 26.0, tvOS 26.0, visionOS 26.0, *)
+    @Test func stopSplitsTheStoppingRoundFromEarlierOnes() {
+        func usage(_ input: Int, _ output: Int) -> LanguageModelSession.Usage {
+            .init(
+                input: .init(totalTokenCount: input, cachedTokenCount: 0),
+                output: .init(totalTokenCount: output, reasoningTokenCount: 0)
+            )
+        }
+        // Two calls in the first round, then the stopping call in the second.
+        let second = ToolCallRecord.requestsAtStop(
+            usageAtCalls: [usage(100, 10), usage(100, 10), usage(250, 25)],
+            total: usage(250, 25)
+        )
+        #expect(second.earlier == usage(100, 10))
+        #expect(second.final == usage(150, 15))
+        // A stop in the first round leaves no earlier round.
+        let first = ToolCallRecord.requestsAtStop(usageAtCalls: [usage(100, 10)], total: usage(100, 10))
+        #expect(first.earlier == .zero)
+        #expect(first.final == usage(100, 10))
+    }
+
+    #if compiler(>=6.4) && !os(tvOS)
+        /// As in Foundation Models, a response reports its final request's usage,
+        /// and the session counts every request.
+        @Suite("SystemLanguageModel usage", .enabled(if: isSystemLanguageModelAvailable))
+        private struct SystemLanguageModelUsageTests {
+            static let prompt = "What's the weather in Cupertino? Use the tool."
+
+            @available(macOS 26.0, iOS 26.0, tvOS 26.0, visionOS 26.0, *)
+            @Test func responseReportsTheFinalRequest() async throws {
+                guard #available(macOS 27.0, iOS 27.0, visionOS 27.0, *) else { return }
+                let session = LanguageModelSession(model: SystemLanguageModel.default, tools: [WeatherTool()])
+                let response = try await session.respond(to: Self.prompt)
+                #expect(response.usage.input.totalTokenCount > 0)
+                #expect(response.usage.output.totalTokenCount > 0)
+                Self.expectSession(session.usage, counts: response.usage, after: response.transcriptEntries)
+            }
+
+            @available(macOS 26.0, iOS 26.0, tvOS 26.0, visionOS 26.0, *)
+            @Test func streamedResponseReportsTheFinalRequest() async throws {
+                guard #available(macOS 27.0, iOS 27.0, visionOS 27.0, *) else { return }
+                let session = LanguageModelSession(model: SystemLanguageModel.default, tools: [WeatherTool()])
+                var last: LanguageModelSession.ResponseStream<String>.Snapshot?
+                for try await snapshot in session.streamResponse(to: Self.prompt) {
+                    if let last {
+                        #expect(snapshot.requests.total.totalTokenCount >= last.requests.total.totalTokenCount)
+                    }
+                    last = snapshot
+                }
+                let final = try #require(last)
+                #expect(final.usage.input.totalTokenCount > 0)
+                Self.expectSession(session.usage, counts: final.usage, after: final.transcriptEntries)
+            }
+
+            /// A stopped call ends the response in the round that made it, and the session still
+            /// counts the round.
+            @available(macOS 26.0, iOS 26.0, tvOS 26.0, visionOS 26.0, *)
+            @Test func stoppedResponseCountsItsRequests() async throws {
+                guard #available(macOS 27.0, iOS 27.0, visionOS 27.0, *) else { return }
+                let session = LanguageModelSession(model: SystemLanguageModel.default, tools: [WeatherTool()])
+                session.toolExecutionDelegate = StoppingDelegate()
+                let response = try await session.respond(to: Self.prompt)
+                guard response.transcriptEntries.contains(where: { if case .toolCalls = $0 { true } else { false } })
+                else { return }  // The model answered without calling the tool.
+                #expect(response.usage.input.totalTokenCount > 0)
+                #expect(session.usage == response.usage)
+            }
+
+            /// A stopped call for a type that can't be empty throws, and the session keeps the prompt
+            /// and counts the round, whether streaming or not.
+            @available(macOS 26.0, iOS 26.0, tvOS 26.0, visionOS 26.0, *)
+            @Test(arguments: [false, true])
+            func stoppedResponseThatThrowsCountsItsRequests(streaming: Bool) async throws {
+                guard #available(macOS 27.0, iOS 27.0, visionOS 27.0, *) else { return }
+                let session = LanguageModelSession(model: SystemLanguageModel.default, tools: [WeatherTool()])
+                let delegate = StoppingDelegate()
+                session.toolExecutionDelegate = delegate
+                do {
+                    if streaming {
+                        _ = try await session.streamResponse(to: Self.prompt, generating: Int.self).collect()
+                    } else {
+                        _ = try await session.respond(to: Self.prompt, generating: Int.self)
+                    }
+                    // A response may return only if the model answered without calling the tool.
+                    #expect(await delegate.generated.isEmpty)
+                } catch let stopped as LanguageModelSession.ToolExecutionStopped {
+                    #expect(!stopped.transcriptEntries.isEmpty)
+                    #expect(session.transcript.count == 1)
+                    #expect(session.usage.input.totalTokenCount > 0)
+                    #expect(session.usage.output.totalTokenCount > 0)
+                    #expect(!session.isResponding)
+                }
+            }
+
+            /// A response that throws keeps the usage of the rounds it completed: the round that
+            /// called the tool is counted as the call starts, before the tool fails.
+            @available(macOS 26.0, iOS 26.0, tvOS 26.0, visionOS 26.0, *)
+            @Test func failedResponseCountsTheRoundsItCompleted() async throws {
+                guard #available(macOS 27.0, iOS 27.0, visionOS 27.0, *) else { return }
+                let session = LanguageModelSession(model: SystemLanguageModel.default, tools: [FailingWeatherTool()])
+                let error = await #expect(throws: (any Error).self) { try await session.respond(to: Self.prompt) }
+                #expect(error.map(FailingWeatherTool.failed(in:)) == true, "\(String(describing: error))")
+                #expect(session.usage.input.totalTokenCount > 0)
+                #expect(session.usage.output.totalTokenCount > 0)
+            }
+
+            /// A response that throws once Foundation Models returns, as a model wrapping this one
+            /// may, keeps what its requests used: it's counted as Foundation Models returns, before
+            /// the content is made from it.
+            @available(macOS 26.0, iOS 26.0, tvOS 26.0, visionOS 26.0, *)
+            @Test func responseThatThrowsAfterFoundationModelsReturnsKeepsItsUsage() async throws {
+                guard #available(macOS 27.0, iOS 27.0, visionOS 27.0, *) else { return }
+                let text = LanguageModelSession(model: ThrowingAfterwards())
+                await #expect(throws: ThrowingAfterwards.Failure.self) { try await text.respond(to: "Say hello.") }
+                #expect(text.usage.input.totalTokenCount > 0)
+                #expect(text.usage.output.totalTokenCount > 0)
+
+                let structured = LanguageModelSession(model: ThrowingAfterwards())
+                await #expect(throws: ThrowingAfterwards.Failure.self) {
+                    try await structured.respond(to: "Greet Ann.", generating: Greeting.self)
+                }
+                #expect(structured.usage.input.totalTokenCount > 0)
+                #expect(structured.usage.output.totalTokenCount > 0)
+            }
+
+            /// A model as another library would write one: it calls the system model through
+            /// `respond`, then fails.
+            @available(macOS 26.0, iOS 26.0, tvOS 26.0, visionOS 26.0, *)
+            struct ThrowingAfterwards: LanguageModel {
+                enum Failure: Error { case afterTheSystemModel }
+
+                let wrapped = SystemLanguageModel.default
+
+                var availability: Availability<SystemLanguageModel.UnavailableReason> { wrapped.availability }
+
+                func respond<Content>(
+                    within session: LanguageModelSession,
+                    to prompt: Prompt,
+                    generating type: Content.Type,
+                    includeSchemaInPrompt: Bool,
+                    options: GenerationOptions
+                ) async throws -> LanguageModelSession.Response<Content> where Content: Generable {
+                    _ = try await wrapped.respond(
+                        within: session,
+                        to: prompt,
+                        generating: type,
+                        includeSchemaInPrompt: includeSchemaInPrompt,
+                        options: options
+                    )
+                    throw Failure.afterTheSystemModel
+                }
+
+                func streamResponse<Content>(
+                    within session: LanguageModelSession,
+                    to prompt: Prompt,
+                    generating type: Content.Type,
+                    includeSchemaInPrompt: Bool,
+                    options: GenerationOptions
+                ) -> sending LanguageModelSession.ResponseStream<Content> where Content: Generable {
+                    wrapped.streamResponse(
+                        within: session,
+                        to: prompt,
+                        generating: type,
+                        includeSchemaInPrompt: includeSchemaInPrompt,
+                        options: options
+                    )
+                }
+            }
+
+            /// A weather tool whose lookup fails.
+            struct FailingWeatherTool: Tool {
+                let name = "getWeather"
+                let description = "Retrieve the latest weather information for a city"
+
+                @Generable
+                struct Arguments {
+                    @Guide(description: "The city to fetch the weather for")
+                    var city: String
+                }
+
+                struct Unavailable: Error {}
+
+                func call(arguments: Arguments) async throws -> String {
+                    throw Unavailable()
+                }
+
+                /// Whether `error` is the lookup's failure, which Foundation Models wraps in its own
+                /// `ToolCallError`.
+                @available(macOS 26.0, iOS 26.0, tvOS 26.0, visionOS 26.0, *)
+                static func failed(in error: any Error) -> Bool {
+                    if error is Unavailable { return true }
+                    if let wrapped = error as? FoundationModels.LanguageModelSession.ToolCallError {
+                        return failed(in: wrapped.underlyingError)
+                    }
+                    if let wrapped = error as? LanguageModelSession.ToolCallError {
+                        return failed(in: wrapped.underlyingError)
+                    }
+                    return false
+                }
+            }
+
+            /// The session counts the final request, and more when the response ran tools in
+            /// earlier rounds.
+            @available(macOS 26.0, iOS 26.0, tvOS 26.0, visionOS 26.0, *)
+            private static func expectSession(
+                _ session: LanguageModelSession.Usage,
+                counts final: LanguageModelSession.Usage,
+                after entries: ArraySlice<Transcript.Entry>
+            ) {
+                let ranTools = entries.contains { if case .toolOutput = $0 { true } else { false } }
+                if ranTools {
+                    #expect(session.input.totalTokenCount > final.input.totalTokenCount)
+                } else {
+                    #expect(session == final)
+                }
+            }
+        }
+    #endif
 #endif

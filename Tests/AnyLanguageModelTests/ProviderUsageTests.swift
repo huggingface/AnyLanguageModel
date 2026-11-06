@@ -51,6 +51,17 @@ import Testing
                 }
             }
 
+            /// The provider name in tool errors, such as `ToolRoundLimitExceeded`.
+            var name: String {
+                switch self {
+                case .chat, .responses: "OpenAI"
+                case .openResponses: "Open Responses"
+                case .anthropic: "Anthropic"
+                case .gemini: "Gemini"
+                case .ollama: "Ollama"
+                }
+            }
+
             func makeSession(
                 tools: [any Tool] = [],
                 transcript: Transcript = .init(),
@@ -494,7 +505,7 @@ import Testing
             #expect(response.content.answer == "Hello")
         }
 
-        @Test(arguments: [Provider.chat, .responses, .openResponses, .gemini])
+        @Test(arguments: [Provider.chat, .responses, .openResponses, .anthropic, .gemini])
         func toolRoundsKeepEarlierText(_ provider: Provider) async throws {
             UsageURLProtocol.reset()
             UsageURLProtocol.enqueue(json: try Self.json(provider.response(text: "Checking. ", tool: true)))
@@ -537,9 +548,7 @@ import Testing
             UsageURLProtocol.enqueue(
                 json: try streaming ? provider.toolStream() : Self.json(provider.response(text: "", tool: true))
             )
-            if streaming || provider == .gemini {
-                UsageURLProtocol.enqueue(json: try streaming ? provider.stream() : Self.json(provider.response()))
-            }
+            UsageURLProtocol.enqueue(json: try streaming ? provider.stream() : Self.json(provider.response()))
             UsageURLProtocol.enqueue(json: try Self.json(provider.response()))
             let url = FileManager.default.temporaryDirectory
                 .appendingPathComponent(UUID().uuidString)
@@ -559,7 +568,7 @@ import Testing
             let restored = provider.makeSession(transcript: try JSONDecoder().decode(Transcript.self, from: archived))
             _ = try await restored.respond(to: "Review the image")
 
-            #expect(UsageURLProtocol.recordedBodies.count == (streaming || provider == .gemini ? 3 : 2))
+            #expect(UsageURLProtocol.recordedBodies.count == 3)
             for body in UsageURLProtocol.recordedBodies.dropFirst() {
                 let request = try JSONDecoder().decode([String: JSONValue].self, from: body)
                 if provider == .gemini {
@@ -661,9 +670,7 @@ import Testing
             UsageURLProtocol.enqueue(
                 json: try streaming ? provider.toolStream() : Self.json(provider.response(text: "", tool: true))
             )
-            if streaming || provider == .gemini {
-                UsageURLProtocol.enqueue(json: try streaming ? provider.stream() : Self.json(provider.response()))
-            }
+            UsageURLProtocol.enqueue(json: try streaming ? provider.stream() : Self.json(provider.response()))
             if streaming {
                 _ = try await session.streamResponse(to: "Weather?").collect()
             } else {
@@ -679,7 +686,7 @@ import Testing
             } else {
                 _ = try await restored.respond(to: "Review the image")
             }
-            #expect(UsageURLProtocol.recordedBodies.count == (streaming || provider == .gemini ? 3 : 2))
+            #expect(UsageURLProtocol.recordedBodies.count == 3)
             for body in UsageURLProtocol.recordedBodies.dropFirst() {
                 try expectToolImage(in: body, provider: provider, texts: expectedTexts, mimeType: expectedMIME)
             }
@@ -734,6 +741,87 @@ import Testing
             func toolCallDecision(for toolCall: Transcript.ToolCall, in session: LanguageModelSession) async
                 -> ToolExecutionDecision
             { .provideOutput(segments) }
+        }
+
+        /// Every string value in a request body, at any depth,
+        /// including inside strings that hold JSON, as Open Responses tool outputs do.
+        private func stringValues(in body: Data) throws -> [String] {
+            func collect(_ value: JSONValue) -> [String] {
+                if let string = value.stringValue {
+                    guard string.hasPrefix("{") || string.hasPrefix("["),
+                        let nested = try? JSONDecoder().decode(JSONValue.self, from: Data(string.utf8))
+                    else { return [string] }
+                    return [string] + collect(nested)
+                }
+                if let array = value.arrayValue { return array.flatMap(collect) }
+                if let object = value.objectValue { return object.values.flatMap(collect) }
+                return []
+            }
+            return collect(try JSONDecoder().decode(JSONValue.self, from: body))
+        }
+
+        /// These providers take only text in a tool output,
+        /// so an image becomes a placeholder at its position.
+        @Test(arguments: [Provider.chat, .responses, .openResponses], [false, true])
+        func textOnlyToolOutputsUseImagePlaceholder(_ provider: Provider, _ streaming: Bool) async throws {
+            let image = Transcript.Segment.image(.init(data: testImageData, mimeType: "image/png"))
+            for (segments, expected) in [
+                ([.text(.init(content: "before")), image, .text(.init(content: "after"))], "before\n<image>\nafter"),
+                ([image], "<image>"),
+            ] as [([Transcript.Segment], String)] {
+                UsageURLProtocol.reset()
+                UsageURLProtocol.enqueue(
+                    json: try streaming ? provider.toolStream() : Self.json(provider.response(text: "", tool: true))
+                )
+                UsageURLProtocol.enqueue(json: try streaming ? provider.stream() : Self.json(provider.response()))
+                let session = provider.makeSession(tools: [WeatherTool()])
+                session.toolExecutionDelegate = ImageSegmentsDelegate(segments: segments)
+                if streaming {
+                    _ = try await session.streamResponse(to: "Weather?").collect()
+                } else {
+                    _ = try await session.respond(to: "Weather?")
+                }
+                try #require(UsageURLProtocol.recordedBodies.count == 2)
+                let followUp = try stringValues(in: try #require(UsageURLProtocol.recordedBodies.last))
+                #expect(followUp.contains(expected))
+            }
+        }
+
+        private struct MultilineWeatherTool: Tool {
+            static let output = "Sunny\nHigh of \"21\""
+            let name = "getWeather"
+            let description = "Get the weather"
+
+            func call(arguments: WeatherTool.Arguments) async throws -> String {
+                Self.output
+            }
+        }
+
+        /// A `String` output reaches each provider as plain text, not as a JSON string.
+        @Test(arguments: Provider.allCases)
+        func stringToolOutputIsPlainText(_ provider: Provider) async throws {
+            UsageURLProtocol.reset()
+            UsageURLProtocol.enqueue(json: try provider.toolStream())
+            UsageURLProtocol.enqueue(json: try provider.stream())
+            let session = provider.makeSession(tools: [MultilineWeatherTool()])
+            _ = try await session.streamResponse(to: "Weather?").collect()
+            let output = try #require(
+                session.transcript.compactMap { entry -> Transcript.ToolOutput? in
+                    if case .toolOutput(let output) = entry { return output }
+                    return nil
+                }.first
+            )
+            guard case .text(let text) = try #require(output.segments.first) else {
+                Issue.record("A String output must be a text segment")
+                return
+            }
+            #expect(output.segments.count == 1)
+            #expect(text.content == MultilineWeatherTool.output)
+            try #require(UsageURLProtocol.recordedBodies.count == 2)
+            let followUp = try stringValues(in: try #require(UsageURLProtocol.recordedBodies.last))
+            #expect(followUp.contains { $0.contains(MultilineWeatherTool.output) })
+            let quoted = String(decoding: try JSONEncoder().encode(MultilineWeatherTool.output), as: UTF8.self)
+            #expect(!followUp.contains(quoted))
         }
 
         @Test(arguments: [Provider.anthropic, .gemini])
@@ -874,32 +962,102 @@ import Testing
             #expect(!session.isResponding)
         }
 
-        @Test(arguments: Provider.allCases)
-        func stoppedStreamedToolsWithoutEmptyObjectContent(_ provider: Provider) async throws {
+        /// A stopped array response ends with an empty array,
+        /// in a stream and from `respond` alike.
+        @Test(arguments: Provider.allCases, [false, true])
+        func stoppedArrayResponseIsEmpty(_ provider: Provider, _ streaming: Bool) async throws {
             UsageURLProtocol.reset()
-            UsageURLProtocol.enqueue(json: try provider.toolStream())
+            UsageURLProtocol.enqueue(
+                json: streaming
+                    ? try provider.toolStream()
+                    : try Self.json(provider.response(text: "", counts: provider.counts, tool: true))
+            )
             let tool = RecordingWeatherTool()
             let session = provider.makeSession(tools: [tool])
             session.toolExecutionDelegate = StopDelegate()
-            var snapshots: [LanguageModelSession.ResponseStream<Int>.Snapshot] = []
-            for try await snapshot in session.streamResponse(to: "Weather?", generating: Int.self) {
-                snapshots.append(snapshot)
-            }
-            let last = try #require(snapshots.last)
-            let content: Int = last.content
-            #expect(content == 0)
-            #expect(last.transcriptEntries.count == 1)
-            #expect(last.usage == provider.expected)
-            #expect(session.transcript.count == 3)
-
-            UsageURLProtocol.enqueue(json: try provider.toolStream())
-            let arraySession = provider.makeSession(tools: [tool])
-            arraySession.toolExecutionDelegate = StopDelegate()
-            let response = try await arraySession.streamResponse(to: "Weather?", generating: [String].self).collect()
+            let response =
+                try await streaming
+                ? session.streamResponse(to: "Weather?", generating: [String].self).collect()
+                : session.respond(to: "Weather?", generating: [String].self)
             #expect(response.content.isEmpty)
+            #expect(response.rawContent.kind == .array([]))
             #expect(response.transcriptEntries.count == 1)
+            #expect(response.usage == provider.expected)
+            #expect(session.transcript.count == 3)
             #expect(tool.cities.withLock { $0.isEmpty })
-            #expect(UsageURLProtocol.recordedBodies.count == 2)
+            #expect(UsageURLProtocol.recordedBodies.count == 1)
+        }
+
+        /// A stopped number or Boolean response throws,
+        /// because zero or `false` would look like the model's answer.
+        @Test(arguments: Provider.allCases, [false, true])
+        func stoppedScalarResponseThrows(_ provider: Provider, _ streaming: Bool) async throws {
+            func expectStopped<Content: Generable>(_ type: Content.Type) async throws {
+                UsageURLProtocol.reset()
+                UsageURLProtocol.enqueue(
+                    json: streaming
+                        ? try provider.toolStream()
+                        : try Self.json(provider.response(text: "", counts: provider.counts, tool: true))
+                )
+                let session = provider.makeSession(tools: [RecordingWeatherTool()])
+                session.toolExecutionDelegate = StopDelegate()
+                let error = await #expect(throws: LanguageModelSession.ToolExecutionStopped.self) {
+                    if streaming {
+                        _ = try await session.streamResponse(to: "Weather?", generating: type).collect()
+                    } else {
+                        _ = try await session.respond(to: "Weather?", generating: type)
+                    }
+                }
+                #expect(error?.provider == provider.name)
+                #expect(error?.transcriptEntries.count == 1)
+                #expect(session.transcript.count == 1)
+                #expect(session.usage == provider.expected)
+            }
+            try await expectStopped(Int.self)
+            try await expectStopped(Bool.self)
+        }
+
+        /// A response that stops in a later round and throws counts every round's request once,
+        /// whether or not snapshots already reported some of them.
+        @Test(arguments: Provider.allCases, [false, true])
+        func stoppedResponseAfterCompletedRoundCountsEveryRequest(
+            _ provider: Provider,
+            _ streaming: Bool
+        ) async throws {
+            func expectStopped<Content: Generable>(_ type: Content.Type) async throws {
+                UsageURLProtocol.reset()
+                for _ in 0 ..< 2 {
+                    UsageURLProtocol.enqueue(
+                        json: streaming
+                            ? try provider.toolStream()
+                            : try Self.json(provider.response(text: "", counts: provider.counts, tool: true))
+                    )
+                }
+                let tool = RecordingWeatherTool()
+                let session = provider.makeSession(tools: [tool])
+                session.toolExecutionDelegate = StopSecondRoundDelegate()
+                let error = await #expect(throws: LanguageModelSession.ToolExecutionStopped.self) {
+                    if streaming {
+                        _ = try await session.streamResponse(to: "Weather?", generating: type).collect()
+                    } else {
+                        _ = try await session.respond(to: "Weather?", generating: type)
+                    }
+                }
+                #expect(error?.transcriptEntries.count == 3)
+                #expect(tool.cities.withLock { $0 } == ["Paris"])
+                #expect(UsageURLProtocol.recordedBodies.count == 2)
+                #expect(session.transcript.count == 1)
+                #expect(session.usage == Self.usage(of: provider, requests: 2))
+                #expect(!session.isResponding)
+            }
+            try await expectStopped(Int.self)
+            try await expectStopped(Bool.self)
+            try await expectStopped(Forecast.self)
+        }
+
+        @Test(arguments: Provider.allCases, [false, true])
+        func stoppedResponseAfterModelHandoff(_ provider: Provider, _ streaming: Bool) async throws {
+            try await providerModelHandoffStopKeepsEveryRound(provider, streaming)
         }
 
         @Test(arguments: Provider.allCases)
@@ -920,7 +1078,10 @@ import Testing
             // The round's usage arrives in snapshots without content before the stream throws.
             #expect(!skies.isEmpty)
             #expect(skies.allSatisfy { $0 == nil })
-            #expect(thrownError as? GeneratedContentError == .typeMismatch)
+            let stopped = try #require(thrownError as? LanguageModelSession.ToolExecutionStopped)
+            #expect(stopped.provider == provider.name)
+            #expect(stopped.transcriptEntries.count == 1)
+            #expect(session.usage == provider.expected)
         }
 
         @Test func openResponsesToolHistoryUsesTopLevelFunctionCallItems() async throws {
@@ -982,6 +1143,7 @@ import Testing
                 _ = try await session.streamResponse(to: "Weather?").collect()
                 Issue.record("Expected the tool error")
             } catch let error as LanguageModelSession.ToolCallError {
+                #expect(error.tool is RecordingWeatherTool)
                 #expect(error.underlyingError is ToolFailure)
             }
             #expect(tool.cities.withLock { $0 } == ["Paris"])
@@ -1255,7 +1417,7 @@ import Testing
             #expect(!session.isResponding)
         }
 
-        @Test(arguments: [Provider.chat, .responses, .openResponses, .gemini])
+        @Test(arguments: [Provider.chat, .responses, .openResponses, .anthropic, .gemini])
         func toolRoundsStopAtLimit(_ provider: Provider) async throws {
             UsageURLProtocol.reset()
             var options = GenerationOptions()
@@ -1319,7 +1481,7 @@ import Testing
             #expect(UsageURLProtocol.recordedBodies.count == 3)
         }
 
-        @Test(arguments: [Provider.chat, .responses, .openResponses, .gemini])
+        @Test(arguments: [Provider.chat, .responses, .openResponses, .anthropic, .gemini])
         func repeatedToolRoundRuns(_ provider: Provider) async throws {
             UsageURLProtocol.reset()
             UsageURLProtocol.enqueue(json: try Self.json(provider.response(text: "", tool: true)))
@@ -1345,7 +1507,7 @@ import Testing
 
         /// As in Foundation Models, a response reports its final request's usage,
         /// and the session counts every request.
-        @Test(arguments: [Provider.chat, .responses, .openResponses, .gemini])
+        @Test(arguments: [Provider.chat, .responses, .openResponses, .anthropic, .gemini])
         func toolRoundsReportTheFinalRequest(_ provider: Provider) async throws {
             UsageURLProtocol.reset()
             UsageURLProtocol.enqueue(
@@ -1364,7 +1526,7 @@ import Testing
         }
 
         /// The final request's usage is its own, even when it reports none and an earlier one did.
-        @Test(arguments: [Provider.chat, .responses, .openResponses, .gemini])
+        @Test(arguments: [Provider.chat, .responses, .openResponses, .anthropic, .gemini])
         func finalRequestWithoutUsageReportsNone(_ provider: Provider) async throws {
             UsageURLProtocol.reset()
             UsageURLProtocol.enqueue(
@@ -1383,6 +1545,21 @@ import Testing
             { .stop }
         }
 
+        /// Runs the first tool call and stops the next one.
+        struct StopSecondRoundDelegate: ToolExecutionDelegate {
+            let calls = Locked(0)
+
+            func toolCallDecision(for toolCall: Transcript.ToolCall, in session: LanguageModelSession) async
+                -> ToolExecutionDecision
+            {
+                let call = calls.withLock { calls in
+                    calls += 1
+                    return calls
+                }
+                return call == 1 ? .execute : .stop
+            }
+        }
+
         @Test(arguments: Provider.allCases)
         func stoppedToolCallsPreserveUsage(_ provider: Provider) async throws {
             UsageURLProtocol.reset()
@@ -1393,6 +1570,41 @@ import Testing
             #expect(response.content.isEmpty)
             #expect(response.usage == provider.expected)
             #expect(UsageURLProtocol.recordedBodies.count == 1)
+        }
+
+        /// A stopped response whose type has required properties can't be empty,
+        /// so it throws with the tool calls that the delegate stopped.
+        @Test(arguments: Provider.allCases, [false, true])
+        func stoppedStructuredResponseThrows(_ provider: Provider, _ streaming: Bool) async throws {
+            UsageURLProtocol.reset()
+            UsageURLProtocol.enqueue(
+                json: streaming
+                    ? try provider.toolStream()
+                    : try Self.json(provider.response(text: "", counts: provider.counts, tool: true))
+            )
+            let tool = RecordingWeatherTool()
+            let session = provider.makeSession(tools: [tool])
+            session.toolExecutionDelegate = StopDelegate()
+            let error = await #expect(throws: LanguageModelSession.ToolExecutionStopped.self) {
+                if streaming {
+                    _ = try await session.streamResponse(to: "Weather?", generating: WeatherReport.self).collect()
+                } else {
+                    _ = try await session.respond(to: "Weather?", generating: WeatherReport.self)
+                }
+            }
+            #expect(error?.provider == provider.name)
+            let entries = error?.transcriptEntries ?? []
+            let calls = entries.flatMap { entry -> [Transcript.ToolCall] in
+                if case .toolCalls(let calls) = entry { Array(calls) } else { [] }
+            }
+            #expect(calls.map(\.toolName) == ["getWeather"])
+            #expect(!entries.contains { if case .toolOutput = $0 { true } else { false } })
+            #expect(tool.cities.withLock { $0.isEmpty })
+            #expect(UsageURLProtocol.recordedBodies.count == 1)
+            // The session keeps only the prompt.
+            #expect(session.transcript.count == 1)
+            #expect(session.usage == provider.expected)
+            #expect(!session.isResponding)
         }
     }
     extension ProviderUsageTests {
@@ -1414,7 +1626,10 @@ import Testing
             var tool = RecordingWeatherTool()
             tool.fails = true
             let session = provider.makeSession(tools: [tool])
-            await #expect(throws: LanguageModelSession.ToolCallError.self) { try await session.respond(to: "Weather?") }
+            let error = await #expect(throws: LanguageModelSession.ToolCallError.self) {
+                try await session.respond(to: "Weather?")
+            }
+            #expect(error?.tool is RecordingWeatherTool)
             #expect(UsageURLProtocol.recordedBodies.count == 1)
             #expect(session.usage == provider.expected)
             #expect(!session.isResponding)

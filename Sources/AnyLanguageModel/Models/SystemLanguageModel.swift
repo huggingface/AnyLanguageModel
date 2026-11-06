@@ -194,12 +194,11 @@
             includeSchemaInPrompt: Bool,
             options: GenerationOptions
         ) async throws -> LanguageModelSession.Response<Content> where Content: Generable {
-            let fmPrompt = try prompt.toFoundationModels()
+            let fmPrompt = try prompt.toFoundationModelsUnlessProjected(in: session)
             let fmOptions = options.toFoundationModels()
 
             return try await fmRespond(
-                makeSession: { try self.makeSession(for: session, prompt: prompt) },
-                fmPrompt: fmPrompt,
+                makeRequest: { try self.makeRequest(for: session, prompt: prompt, fmPrompt: fmPrompt) },
                 fmOptions: fmOptions,
                 type: type,
                 schema: schema,
@@ -249,17 +248,16 @@
             includeSchemaInPrompt: Bool,
             options: GenerationOptions
         ) -> sending LanguageModelSession.ResponseStream<Content> where Content: Generable {
-            let fmPrompt: FoundationModels.Prompt
+            let fmPrompt: FoundationModels.Prompt?
             do {
-                fmPrompt = try prompt.toFoundationModels()
+                fmPrompt = try prompt.toFoundationModelsUnlessProjected(in: session)
             } catch {
                 return .init(stream: AsyncThrowingStream { $0.finish(throwing: error) })
             }
             let fmOptions = options.toFoundationModels()
 
             return fmStreamResponse(
-                makeSession: { try self.makeSession(for: session, prompt: prompt) },
-                fmPrompt: fmPrompt,
+                makeRequest: { try self.makeRequest(for: session, prompt: prompt, fmPrompt: fmPrompt) },
                 fmOptions: fmOptions,
                 type: type,
                 schema: schema,
@@ -297,16 +295,18 @@
             )
         }
 
-        private func makeSession(
+        private func makeRequest(
             for session: LanguageModelSession,
-            prompt: Prompt
-        ) throws -> FoundationModels.LanguageModelSession {
+            prompt: Prompt,
+            fmPrompt: FoundationModels.Prompt?
+        ) throws -> FoundationModelsRequest {
             #if compiler(>=6.4) && !os(tvOS)
                 if #available(macOS 27.0, iOS 27.0, visionOS 27.0, watchOS 27.0, *) {
-                    return makeFoundationModelsSession(
+                    return try makeFoundationModelsRequest(
                         model: systemModel,
                         session: session,
-                        prompt: prompt
+                        prompt: prompt,
+                        fmPrompt: fmPrompt
                     )
                 }
             #endif
@@ -317,24 +317,34 @@
                 throw SystemLanguageModel.Error.dynamicInstructionsUnavailable
             }
             let requestContext = session.resolvedRequestContext()
-            return FoundationModels.LanguageModelSession(
-                model: systemModel,
-                tools: requestContext.toolsForExecution(in: session).toFoundationModels(in: session),
-                transcript: fmTranscriptDroppingDuplicatePrompt(
-                    requestContext.transcript,
-                    prompt: prompt
-                ).toFoundationModels(
-                    instructions: requestContext.instructions,
-                    toolDefinitions: requestContext.tools
-                        .filter(\.includesSchemaInInstructions)
-                        .map { Transcript.ToolDefinition(tool: $0) }
-                )
+            return FoundationModelsRequest(
+                session: FoundationModels.LanguageModelSession(
+                    model: systemModel,
+                    tools: requestContext.toolsForExecution(in: session).toFoundationModels(in: session),
+                    transcript: fmTranscriptDroppingDuplicatePrompt(
+                        requestContext.transcript,
+                        prompt: prompt
+                    ).toFoundationModels(
+                        instructions: requestContext.instructions,
+                        toolDefinitions: requestContext.tools
+                            .filter(\.includesSchemaInInstructions)
+                            .map { Transcript.ToolDefinition(tool: $0) }
+                    )
+                ),
+                prompt: try fmPrompt ?? prompt.toFoundationModels()
             )
         }
 
     }
 
     // MARK: - Helpers
+
+    /// A Foundation Models session and the prompt to send to it.
+    @available(macOS 26.0, iOS 26.0, watchOS 27.0, tvOS 26.0, visionOS 26.0, *)
+    struct FoundationModelsRequest: Sendable {
+        let session: FoundationModels.LanguageModelSession
+        let prompt: FoundationModels.Prompt
+    }
 
     @available(macOS 26.0, iOS 26.0, watchOS 27.0, tvOS 26.0, visionOS 26.0, *)
     func fmTranscriptDroppingDuplicatePrompt(_ transcript: Transcript, prompt: Prompt) -> Transcript {
@@ -377,24 +387,19 @@
     }
 
     #if compiler(>=6.4) && !os(tvOS)
-        /// Dynamic instructions that reuse the initial request context and
-        /// resolve the session again for native continuations.
+        /// Dynamic instructions that read an AnyLanguageModel session's request context
+        /// each time Foundation Models evaluates them.
+        ///
+        /// Ordinary dynamic instructions resolve again on each evaluation.
+        /// During a profile session's request, every evaluation returns the request's latest context:
+        /// the one prepared for the request,
+        /// or, after a tool round, the one that ``FoundationModelsProfile`` resolved for the continuation.
         @available(macOS 27.0, iOS 27.0, visionOS 27.0, watchOS 27.0, *)
-        struct FoundationModelsDynamicInstructionsAdapter: FoundationModels.DynamicInstructions, Sendable {
+        struct FoundationModelsDynamicInstructionsAdapter: FoundationModels.DynamicInstructions {
             let session: LanguageModelSession
-            private let initialContext: Locked<LanguageModelSession.RequestContext?>
-
-            init(session: LanguageModelSession, initialContext: LanguageModelSession.RequestContext? = nil) {
-                self.session = session
-                self.initialContext = Locked(initialContext)
-            }
 
             var body: some FoundationModels.DynamicInstructions {
-                let requestContext =
-                    initialContext.withLock { context in
-                        defer { context = nil }
-                        return context
-                    } ?? session.resolvedRequestContext()
+                let requestContext = session.resolvedRequestContext()
                 if let instructions = requestContext.instructions {
                     instructions.toFoundationModels()
                 }
@@ -402,54 +407,311 @@
             }
         }
 
+        /// The entries that a profile session's native request sends,
+        /// projected from one AnyLanguageModel request context.
+        ///
+        /// Foundation Models owns the request's prompt entry and the entries of its tool rounds,
+        /// so the projection refers to them, and takes them from the native history when it's applied.
         @available(macOS 27.0, iOS 27.0, visionOS 27.0, watchOS 27.0, *)
-        func makeFoundationModelsSession<Model: FoundationModels.LanguageModel>(
+        private struct FoundationModelsProjection: Sendable {
+            enum Item: Sendable {
+                case entry(FoundationModels.Transcript.Entry)
+                /// The native prompt entry, which keeps its options and response format,
+                /// with the given segments, or its own if `nil`.
+                case currentPrompt(segments: [FoundationModels.Transcript.Segment]?)
+                /// The native entries of the request's tool rounds, with the model's call IDs.
+                case toolRounds
+            }
+
+            var items: [Item]
+
+            var keepsNativePromptSegments: Bool {
+                items.contains { item in
+                    if case .currentPrompt(segments: nil) = item { return true }
+                    return false
+                }
+            }
+
+            /// Returns the entries to send from the native history of the request:
+            /// its instructions, its prompt, and the entries of its tool rounds.
+            func applied(to native: [FoundationModels.Transcript.Entry]) -> [FoundationModels.Transcript.Entry] {
+                let promptIndex = native.lastIndex { entry in
+                    if case .prompt = entry { return true }
+                    return false
+                }
+                let instructions = native.filter { entry in
+                    if case .instructions = entry { return true }
+                    return false
+                }
+                var entries = instructions
+                for item in items {
+                    switch item {
+                    case .entry(let entry):
+                        entries.append(entry)
+                    case .currentPrompt(let segments):
+                        guard let promptIndex, case .prompt(var prompt) = native[promptIndex] else { continue }
+                        if let segments { prompt.segments = segments }
+                        entries.append(.prompt(prompt))
+                    case .toolRounds:
+                        if let promptIndex { entries += native[(promptIndex + 1)...] }
+                    }
+                }
+                return entries
+            }
+        }
+
+        /// A profile session's native request, which outlives its first context.
+        @available(macOS 27.0, iOS 27.0, visionOS 27.0, watchOS 27.0, *)
+        private final class FoundationModelsProfileRequest: Sendable {
+            let session: LanguageModelSession
+            let prompt: Prompt
+            /// Whether the native prompt entry has placeholder segments.
+            let hasPlaceholderPrompt: Bool
+            private let state: Locked<State>
+
+            private struct State: Sendable {
+                var projection: FoundationModelsProjection
+                var toolRoundEntries: [Transcript.Entry] = []
+            }
+
+            init(
+                session: LanguageModelSession,
+                prompt: Prompt,
+                projection: FoundationModelsProjection,
+                hasPlaceholderPrompt: Bool
+            ) {
+                self.session = session
+                self.prompt = prompt
+                self.hasPlaceholderPrompt = hasPlaceholderPrompt
+                state = Locked(State(projection: projection))
+            }
+
+            var projection: FoundationModelsProjection {
+                state.withLock { $0.projection }
+            }
+
+            /// Resolves the context for the continuation after a tool round.
+            ///
+            /// This is the work of `resolvedRequestContext(including:)` in other providers,
+            /// which needs to wait for lifecycle actions,
+            /// so it can't run when Foundation Models evaluates the dynamic instructions.
+            /// Foundation Models calls the `onToolOutput` actions after all of a round's tools ran
+            /// and before that evaluation, so the first action of a round does the work.
+            func toolRoundDidFinish() async throws {
+                guard let entries = await ToolCallRecord.current?.entries,
+                    entries != state.withLock({ $0.toolRoundEntries })
+                else {
+                    return
+                }
+                state.withLock { $0.toolRoundEntries = entries }
+                let context = try await session.resolvedRequestContext(including: entries)
+                let projection = try fmProjection(
+                    of: context,
+                    prompt: prompt,
+                    toolRoundEntries: entries,
+                    hasPlaceholderPrompt: hasPlaceholderPrompt
+                )
+                state.withLock { $0.projection = projection }
+            }
+        }
+
+        /// A profile that sends a profile session's dynamic instructions and request projection.
+        ///
+        /// Foundation Models evaluates the instructions and runs the history transform
+        /// before each request, including the continuation after a tool round.
+        /// AnyLanguageModel's profile and its history transforms run
+        /// once for each of those requests, in ``FoundationModelsProfileRequest``.
+        @available(macOS 27.0, iOS 27.0, visionOS 27.0, watchOS 27.0, *)
+        private struct FoundationModelsProfile<Model: FoundationModels.LanguageModel>:
+            FoundationModels.LanguageModelSession.DynamicProfile
+        {
+            let model: Model
+            let request: FoundationModelsProfileRequest
+
+            var body: some FoundationModels.LanguageModelSession.DynamicProfile {
+                FoundationModels.LanguageModelSession.Profile {
+                    FoundationModelsDynamicInstructionsAdapter(session: request.session)
+                }
+                .model(model)
+                .onToolOutput {
+                    [request] (_: FoundationModels.Transcript.ToolCall, _: FoundationModels.Transcript.ToolOutput) in
+                    try await request.toolRoundDidFinish()
+                }
+                .historyTransform { [request] entries in
+                    request.projection.applied(to: entries)
+                }
+            }
+        }
+
+        /// Projects a request context for a profile session's native request.
+        ///
+        /// Foundation Models sends the output of a profile's history transforms,
+        /// so the projection keeps their order and leaves out what they leave out.
+        /// A session's `respond(to:)` always takes a prompt,
+        /// but a history transform can remove that prompt from the request or move it.
+        ///
+        /// The current prompt comes from the context's canonical history,
+        /// which ends with that prompt and its tool rounds during a request.
+        /// If the projection leaves out that prompt,
+        /// its last prompt that isn't in the canonical history rewrites the current prompt,
+        /// and keeps the options and response format of the native prompt entry.
+        /// If a profile's history edit changed the current prompt in the canonical history,
+        /// the native prompt entry follows the projection.
+        ///
+        /// - Parameter hasPlaceholderPrompt: Whether the native prompt entry has placeholder segments,
+        ///   so that keeping the current prompt also needs its segments.
+        /// - Throws: ``PromptBridgeError`` for a prompt's image Foundation Models can't take.
+        @available(macOS 27.0, iOS 27.0, visionOS 27.0, watchOS 27.0, *)
+        private func fmProjection(
+            of context: LanguageModelSession.RequestContext,
+            prompt: Prompt,
+            toolRoundEntries: [Transcript.Entry],
+            hasPlaceholderPrompt: Bool
+        ) throws -> FoundationModelsProjection {
+            // The conversion to transcript segments leaves out images it can't convert,
+            // so this rejects them first.
+            func checked(_ segments: [Transcript.Segment]) throws -> [FoundationModels.Transcript.Segment] {
+                _ = try segments.toFoundationModelsToolOutput()
+                return segments.toFoundationModels()
+            }
+            func checkedSegments(of entry: Transcript.Entry) throws -> [FoundationModels.Transcript.Segment] {
+                guard case .prompt(let prompt) = entry else { return [] }
+                return try checked(prompt.segments)
+            }
+
+            let canonical = context.canonicalEntries
+            let projected = context.transcript.filter { entry in
+                if case .instructions = entry { return false }
+                return true
+            }
+            let current = canonical.last { entry in
+                guard case .prompt(let candidate) = entry else { return false }
+                return prompt.matchesTranscriptOccurrence(candidate.segments, occurrenceID: candidate.id)
+            }
+            let keptIndex = current.flatMap { projected.firstIndex(of: $0) }
+            let rewrittenIndex =
+                current == nil || keptIndex != nil
+                ? nil
+                : projected.lastIndex { entry in
+                    if case .prompt = entry { return !canonical.contains(entry) }
+                    return false
+                }
+            let toolRoundRange = toolRoundEntries.isEmpty ? nil : projected.firstRange(of: toolRoundEntries)
+
+            var items: [FoundationModelsProjection.Item] = []
+            for (index, entry) in projected.enumerated() {
+                if index == keptIndex {
+                    items.append(.currentPrompt(segments: hasPlaceholderPrompt ? try checkedSegments(of: entry) : nil))
+                } else if index == rewrittenIndex {
+                    items.append(.currentPrompt(segments: try checkedSegments(of: entry)))
+                } else if let toolRoundRange, toolRoundRange.contains(index) {
+                    if index == toolRoundRange.lowerBound { items.append(.toolRounds) }
+                } else if let converted = entry.toFoundationModels() {
+                    items.append(.entry(converted))
+                }
+            }
+            if current == nil {
+                let segments =
+                    hasPlaceholderPrompt
+                    ? try checked(prompt.makeTranscriptSegments(occurrenceID: UUID().uuidString))
+                    : nil
+                let toolRoundsIndex = items.firstIndex { item in
+                    if case .toolRounds = item { return true }
+                    return false
+                }
+                items.insert(.currentPrompt(segments: segments), at: toolRoundsIndex ?? items.endIndex)
+            }
+            return FoundationModelsProjection(items: items)
+        }
+
+        @available(macOS 27.0, iOS 27.0, visionOS 27.0, watchOS 27.0, *)
+        func makeFoundationModelsRequest<Model: FoundationModels.LanguageModel>(
             model: Model,
             session: LanguageModelSession,
-            prompt: Prompt
-        ) -> FoundationModels.LanguageModelSession {
+            prompt: Prompt,
+            fmPrompt: FoundationModels.Prompt?
+        ) throws -> FoundationModelsRequest {
+            if session.usesDynamicProfile {
+                let context = session.resolvedRequestContext()
+                let projection = try fmProjection(
+                    of: context,
+                    prompt: prompt,
+                    toolRoundEntries: [],
+                    hasPlaceholderPrompt: false
+                )
+                // A prompt that the request doesn't send can have an image Foundation Models can't take,
+                // so this converts the prompt only if the request sends it.
+                let keepsPrompt = projection.keepsNativePromptSegments
+                return FoundationModelsRequest(
+                    session: FoundationModels.LanguageModelSession(
+                        profile: FoundationModelsProfile(
+                            model: model,
+                            request: FoundationModelsProfileRequest(
+                                session: session,
+                                prompt: prompt,
+                                projection: projection,
+                                hasPlaceholderPrompt: !keepsPrompt
+                            )
+                        ),
+                        // The profile's history transform sends the request's whole history.
+                        history: []
+                    ),
+                    prompt: keepsPrompt ? try fmPrompt ?? prompt.toFoundationModels() : FoundationModels.Prompt("")
+                )
+            }
+
             if session.usesDynamicInstructions {
-                let initialContext = session.usesDynamicProfile ? session.resolvedRequestContext() : nil
                 // Foundation Models evaluates the dynamic instructions itself,
                 // so the history leaves out the instructions entry.
-                let history = fmTranscriptDroppingDuplicatePrompt(
-                    Transcript(
-                        entries: (initialContext?.transcript ?? session.transcript).filter { entry in
-                            if case .instructions = entry { return false }
-                            return true
-                        }
-                    ),
-                    prompt: prompt
+                let history = fmTranscriptDroppingDuplicatePrompt(session.transcript, prompt: prompt)
+                let fmHistory = Transcript(
+                    entries: history.filter { entry in
+                        if case .instructions = entry { return false }
+                        return true
+                    }
                 ).toFoundationModels(instructions: nil, toolDefinitions: [])
-                return FoundationModels.LanguageModelSession(
-                    model: model,
-                    dynamicInstructions: FoundationModelsDynamicInstructionsAdapter(
-                        session: session,
-                        initialContext: initialContext
+                return FoundationModelsRequest(
+                    session: FoundationModels.LanguageModelSession(
+                        model: model,
+                        dynamicInstructions: FoundationModelsDynamicInstructionsAdapter(session: session),
+                        history: fmHistory
                     ),
-                    history: history
+                    prompt: try fmPrompt ?? prompt.toFoundationModels()
                 )
             }
 
             let requestContext = session.resolvedRequestContext()
-            return FoundationModels.LanguageModelSession(
-                model: model,
-                tools: requestContext.toolsForExecution(in: session).toFoundationModels(in: session),
-                transcript: fmTranscriptDroppingDuplicatePrompt(
-                    requestContext.transcript,
-                    prompt: prompt
-                ).toFoundationModels(
-                    instructions: requestContext.instructions,
-                    toolDefinitions: requestContext.tools
-                        .filter(\.includesSchemaInInstructions)
-                        .map { Transcript.ToolDefinition(tool: $0) }
-                )
+            return FoundationModelsRequest(
+                session: FoundationModels.LanguageModelSession(
+                    model: model,
+                    tools: requestContext.toolsForExecution(in: session).toFoundationModels(in: session),
+                    transcript: fmTranscriptDroppingDuplicatePrompt(
+                        requestContext.transcript,
+                        prompt: prompt
+                    ).toFoundationModels(
+                        instructions: requestContext.instructions,
+                        toolDefinitions: requestContext.tools
+                            .filter(\.includesSchemaInInstructions)
+                            .map { Transcript.ToolDefinition(tool: $0) }
+                    )
+                ),
+                prompt: try fmPrompt ?? prompt.toFoundationModels()
             )
         }
     #endif
 
     @available(macOS 26.0, iOS 26.0, watchOS 27.0, tvOS 26.0, visionOS 26.0, *)
     extension Prompt {
+        /// The prompt for Foundation Models,
+        /// or `nil` for a profile session, which can send a rewritten prompt instead.
+        ///
+        /// A profile session converts this prompt only if the request sends it.
+        func toFoundationModelsUnlessProjected(
+            in session: LanguageModelSession
+        ) throws -> FoundationModels.Prompt? {
+            session.usesDynamicProfile ? nil : try toFoundationModels()
+        }
+
         func toFoundationModels() throws -> FoundationModels.Prompt {
             let prompts: [FoundationModels.Prompt] = try components.map { component in
                 switch component {
@@ -664,20 +926,42 @@
         return nil
     }
 
+    /// The provider that ``LanguageModelSession/ToolExecutionStopped`` names for these responses.
+    private let stoppedResponseProvider = "Foundation Models"
+
     @available(macOS 26.0, iOS 26.0, watchOS 27.0, tvOS 26.0, visionOS 26.0, *)
-    /// The emptiest content of `type`, for a response that stopped at tool calls before any content.
+    /// The snapshot that ends a stream that a delegate stopped, as for the HTTP models.
     ///
-    /// - Throws: ``GeneratedContentError/typeMismatch`` when `type` takes no empty value,
-    ///   as other models do when they stop at tool calls.
-    func stoppedContent<Content: Generable>(of type: Content.Type) throws -> (content: Content, raw: GeneratedContent) {
-        let candidates: [GeneratedContent.Kind] = [
-            .string(""), .structure(properties: [:], orderedKeys: []), .array([]), .null, .number(0), .bool(false),
-        ]
-        for kind in candidates {
-            let raw = GeneratedContent(kind: kind)
-            if let content = try? Content(raw) { return (content, raw) }
+    /// The last snapshot stays when it decodes as the complete content type,
+    /// so that `collect()` accepts it.
+    /// Otherwise, the snapshot uses the first value in ``StoppedContent`` that the type accepts.
+    ///
+    /// - Throws: ``LanguageModelSession/ToolExecutionStopped`` with the entries and the usage
+    ///   when the type accepts none of these values.
+    func stoppedStreamSnapshot<Content: Generable>(
+        after last: LanguageModelSession.ResponseStream<Content>.Snapshot?,
+        entries: [Transcript.Entry],
+        requests: RequestsUsage
+    ) throws -> LanguageModelSession.ResponseStream<Content>.Snapshot {
+        let allEntries = (last?.transcriptEntries ?? []) + entries
+        if var last, (try? Content(last.rawContent)) != nil {
+            last.transcriptEntries = allEntries
+            last.requests = requests
+            return last
         }
-        throw GeneratedContentError.typeMismatch
+        guard let empty = StoppedContent.empty(Content.self) else {
+            throw LanguageModelSession.ToolExecutionStopped(
+                provider: stoppedResponseProvider,
+                transcriptEntries: allEntries,
+                requests: requests
+            )
+        }
+        return .init(
+            content: empty.content.asPartiallyGenerated(),
+            rawContent: empty.rawContent,
+            transcriptEntries: allEntries,
+            requests: requests
+        )
     }
 
     /// A type-erased wrapper that bridges any `Tool` to `FoundationModels.Tool`.
@@ -721,21 +1005,87 @@
         /// A call that started, with its output once it ran.
         private struct Started {
             let call: Transcript.ToolCall
+            /// The call's entry, which keeps one ID however many times it's read.
+            let entry: Transcript.ToolCalls
             var output: Transcript.ToolOutput?
         }
 
         private var started: [Started] = []
 
+        /// The Foundation Models session that sends the request's rounds.
+        private var session: FoundationModels.LanguageModelSession?
+
+        /// The session's usage when each call started: all the rounds up to the call's own.
+        private var usageAtCalls: [LanguageModelSession.Usage] = []
+
+        /// The usage counted for the response so far: the rounds that completed before the latest
+        /// call started.
+        private var reported: LanguageModelSession.Usage = .zero
+
         /// The calls that ran, each followed by its output, in the order they started.
         var entries: [Transcript.Entry] {
             started.flatMap { started -> [Transcript.Entry] in
                 guard let output = started.output else { return [] }
-                return [.toolCalls(Transcript.ToolCalls([started.call])), .toolOutput(output)]
+                return [.toolCalls(started.entry), .toolOutput(output)]
             }
         }
 
+        /// A call started: the round that made it completed, so what it used is counted for the
+        /// response now, as each request's usage is, and kept if the response then throws.
         func start(_ call: Transcript.ToolCall) {
-            started.append(Started(call: call, output: nil))
+            started.append(Started(call: call, entry: Transcript.ToolCalls([call]), output: nil))
+            let usage = sessionUsage
+            usageAtCalls.append(usage)
+            count(upTo: usage)
+        }
+
+        /// Foundation Models returned: every round completed, so what they used is counted for the
+        /// response now, before its content is made, and kept if anything throws after.
+        func returned() {
+            count(upTo: sessionUsage)
+        }
+
+        /// Counts for the response what the rounds used up to `usage` that isn't counted yet.
+        private func count(upTo usage: LanguageModelSession.Usage) {
+            RequestUsageChannel.report(usage.subtracting(reported))
+            reported = usage
+        }
+
+        /// Records the session that sends the request's rounds, whose usage counts them all.
+        func sends(with session: FoundationModels.LanguageModelSession) {
+            self.session = session
+        }
+
+        /// Every round's usage so far, as the session counts it.
+        private var sessionUsage: LanguageModelSession.Usage {
+            #if compiler(>=6.4) && !os(tvOS)
+                if #available(macOS 27.0, iOS 27.0, visionOS 27.0, watchOS 27.0, *), let session {
+                    return LanguageModelSession.Usage(session.usage)
+                }
+            #endif
+            return .zero
+        }
+
+        /// The rounds' usage, with `final` as the final round's.
+        func requests(final: LanguageModelSession.Usage) -> RequestsUsage {
+            RequestsUsage(final: final, total: sessionUsage)
+        }
+
+        /// The rounds' usage when a call stopped the request.
+        func requestsAtStop() -> RequestsUsage {
+            Self.requestsAtStop(usageAtCalls: usageAtCalls, total: sessionUsage)
+        }
+
+        /// The rounds' usage when the last of the calls stopped the request, from the session's
+        /// usage when each call started: its round is the final one, and the rounds before it
+        /// ended before the calls of its round started, which all see the same usage.
+        static func requestsAtStop(
+            usageAtCalls: [LanguageModelSession.Usage],
+            total: LanguageModelSession.Usage
+        ) -> RequestsUsage {
+            let stoppingRound = usageAtCalls.last ?? total
+            let earlier = usageAtCalls.last { $0 != stoppingRound } ?? .zero
+            return RequestsUsage(earlier: earlier, final: total.subtracting(earlier))
         }
 
         func ran(_ call: Transcript.ToolCall, output: Transcript.ToolOutput) {
@@ -785,6 +1135,52 @@
                 await delegate.didFailToolCall(call, error: error, in: session)
                 throw error
             }
+        }
+    }
+
+    #if compiler(>=6.4) && !os(tvOS)
+        @available(macOS 27.0, iOS 27.0, visionOS 27.0, watchOS 27.0, *)
+        extension AnyLanguageModel.LanguageModelSession.Usage {
+            /// Foundation Models' usage, with the metadata that converts.
+            init(_ usage: FoundationModels.LanguageModelSession.Usage) {
+                self.init(
+                    input: .init(
+                        totalTokenCount: usage.input.totalTokenCount,
+                        cachedTokenCount: usage.input.cachedTokenCount
+                    ),
+                    output: .init(
+                        totalTokenCount: usage.output.totalTokenCount,
+                        reasoningTokenCount: usage.output.reasoningTokenCount
+                    ),
+                    metadata: usage.metadata.compactMapValues { try? GeneratedContent($0) }
+                )
+            }
+        }
+    #endif
+
+    @available(macOS 26.0, iOS 26.0, watchOS 27.0, tvOS 26.0, visionOS 26.0, *)
+    extension FoundationModels.LanguageModelSession.Response {
+        /// The usage of the response's final request, which Foundation Models reports from OS 27.
+        var finalRequestUsage: AnyLanguageModel.LanguageModelSession.Usage {
+            #if compiler(>=6.4) && !os(tvOS)
+                if #available(macOS 27.0, iOS 27.0, visionOS 27.0, watchOS 27.0, *) {
+                    return .init(usage)
+                }
+            #endif
+            return .zero
+        }
+    }
+
+    @available(macOS 26.0, iOS 26.0, watchOS 27.0, tvOS 26.0, visionOS 26.0, *)
+    extension FoundationModels.LanguageModelSession.ResponseStream.Snapshot {
+        /// The usage so far of the response's final request, which Foundation Models reports from OS 27.
+        var finalRequestUsage: AnyLanguageModel.LanguageModelSession.Usage {
+            #if compiler(>=6.4) && !os(tvOS)
+                if #available(macOS 27.0, iOS 27.0, visionOS 27.0, watchOS 27.0, *) {
+                    return .init(usage)
+                }
+            #endif
+            return .zero
         }
     }
 
@@ -1358,8 +1754,7 @@
 
     @available(macOS 26.0, iOS 26.0, watchOS 27.0, tvOS 26.0, visionOS 26.0, *)
     func fmRespond<Content>(
-        makeSession: @Sendable () async throws -> FoundationModels.LanguageModelSession,
-        fmPrompt: FoundationModels.Prompt,
+        makeRequest: @Sendable () async throws -> FoundationModelsRequest,
         fmOptions: FoundationModels.GenerationOptions,
         type: Content.Type,
         schema: GenerationSchema,
@@ -1370,8 +1765,8 @@
         do {
             let response = try await ToolCallRecord.$current.withValue(record) {
                 try await fmRespondRunningTools(
-                    makeSession: makeSession,
-                    fmPrompt: fmPrompt,
+                    record: record,
+                    makeRequest: makeRequest,
                     fmOptions: fmOptions,
                     type: type,
                     schema: schema,
@@ -1382,38 +1777,51 @@
                 content: response.content,
                 rawContent: response.rawContent,
                 transcriptEntries: ArraySlice(await record.entries) + response.transcriptEntries,
-                usage: response.usage
+                requests: response.requests
             )
         } catch {
             // The delegate stopped at a tool call: the response ends there, with the calls that ran
-            // before it and then the call.
+            // before it and then the call. A type that can't be empty throws with those entries;
+            // the session already counted the rounds as they completed.
             guard let call = stoppedToolCall(in: error) else { throw error }
-            let stopped = try stoppedContent(of: type)
+            let entries = await record.entries + [.toolCalls(Transcript.ToolCalls([call]))]
+            guard let empty = StoppedContent.empty(type) else {
+                throw LanguageModelSession.ToolExecutionStopped(
+                    provider: stoppedResponseProvider,
+                    transcriptEntries: ArraySlice(entries)
+                )
+            }
             return LanguageModelSession.Response(
-                content: stopped.content,
-                rawContent: stopped.raw,
-                transcriptEntries: ArraySlice(await record.entries + [.toolCalls(Transcript.ToolCalls([call]))])
+                content: empty.content,
+                rawContent: empty.rawContent,
+                transcriptEntries: ArraySlice(entries),
+                requests: await record.requestsAtStop()
             )
         }
     }
 
     @available(macOS 26.0, iOS 26.0, watchOS 27.0, tvOS 26.0, visionOS 26.0, *)
     private func fmRespondRunningTools<Content>(
-        makeSession: @Sendable () async throws -> FoundationModels.LanguageModelSession,
-        fmPrompt: FoundationModels.Prompt,
+        record: ToolCallRecord,
+        makeRequest: @Sendable () async throws -> FoundationModelsRequest,
         fmOptions: FoundationModels.GenerationOptions,
         type: Content.Type,
         schema: GenerationSchema,
         includeSchemaInPrompt: Bool
     ) async throws -> LanguageModelSession.Response<Content> where Content: Generable {
-        let fmSession = try await makeSession()
+        let request = try await makeRequest()
+        let fmSession = request.session
+        let fmPrompt = request.prompt
+        await record.sends(with: fmSession)
         if type == String.self {
             let fmResponse = try await fmSession.respond(to: fmPrompt, options: fmOptions)
+            await record.returned()
             let generatedContent = GeneratedContent(fmResponse.content)
             return LanguageModelSession.Response(
                 content: fmResponse.content as! Content,
                 rawContent: generatedContent,
-                transcriptEntries: []
+                transcriptEntries: [],
+                requests: await record.requests(final: fmResponse.finalRequestUsage)
             )
         } else {
             // For non-String types, use schema-based generation
@@ -1424,6 +1832,8 @@
                 includeSchemaInPrompt: includeSchemaInPrompt,
                 options: fmOptions
             )
+            await record.returned()
+            let requests = await record.requests(final: fmResponse.finalRequestUsage)
 
             func finalize(content: Content) -> LanguageModelSession.Response<Content> {
                 let normalizedRaw = content.generatedContent
@@ -1435,13 +1845,15 @@
                     return LanguageModelSession.Response(
                         content: placeholder.content,
                         rawContent: placeholder.rawContent,
-                        transcriptEntries: []
+                        transcriptEntries: [],
+                        requests: requests
                     )
                 }
                 return LanguageModelSession.Response(
                     content: content,
                     rawContent: normalizedRaw,
-                    transcriptEntries: []
+                    transcriptEntries: [],
+                    requests: requests
                 )
             }
 
@@ -1467,8 +1879,7 @@
 
     @available(macOS 26.0, iOS 26.0, watchOS 27.0, tvOS 26.0, visionOS 26.0, *)
     func fmStreamResponse<Content>(
-        makeSession: @escaping @Sendable () async throws -> FoundationModels.LanguageModelSession,
-        fmPrompt: FoundationModels.Prompt,
+        makeRequest: @escaping @Sendable () async throws -> FoundationModelsRequest,
         fmOptions: FoundationModels.GenerationOptions,
         type: Content.Type,
         schema: GenerationSchema,
@@ -1478,8 +1889,8 @@
         let record = ToolCallRecord()
         let running = ToolCallRecord.$current.withValue(record) {
             fmStreamResponseRunningTools(
-                makeSession: makeSession,
-                fmPrompt: fmPrompt,
+                record: record,
+                makeRequest: makeRequest,
                 fmOptions: fmOptions,
                 type: type,
                 schema: schema,
@@ -1495,37 +1906,37 @@
                             last = snapshot
                             continuation.yield(snapshot)
                         }
-                        let ran = await record.entries
-                        if !ran.isEmpty, var last {
-                            last.transcriptEntries = ArraySlice(ran) + last.transcriptEntries
-                            continuation.yield(last)
+                        // The calls that ran, and every round's usage now that the last one ended.
+                        if var last {
+                            let ran = await record.entries
+                            let requests = await record.requests(final: last.usage)
+                            if !ran.isEmpty || requests != last.requests {
+                                last.transcriptEntries = ArraySlice(ran) + last.transcriptEntries
+                                last.requests = requests
+                                continuation.yield(last)
+                            }
                         }
                         continuation.finish()
                     } catch {
-                        // The delegate stopped at a tool call: the stream ends there, with the call.
+                        // The delegate stopped at a tool call: the stream ends there, with the call,
+                        // or throws with it when the content type can't be empty.
                         guard let call = stoppedToolCall(in: error) else {
                             continuation.finish(throwing: error)
                             return
                         }
                         let entries: [Transcript.Entry] =
                             await record.entries + [.toolCalls(Transcript.ToolCalls([call]))]
-                        if var last {
-                            last.transcriptEntries += entries
-                            continuation.yield(last)
-                        } else {
-                            do {
-                                let stopped = try stoppedContent(of: type)
-                                continuation.yield(
-                                    .init(
-                                        content: stopped.content.asPartiallyGenerated(),
-                                        rawContent: stopped.raw,
-                                        transcriptEntries: ArraySlice(entries)
-                                    )
+                        do {
+                            continuation.yield(
+                                try stoppedStreamSnapshot(
+                                    after: last,
+                                    entries: entries,
+                                    requests: await record.requestsAtStop()
                                 )
-                            } catch {
-                                continuation.finish(throwing: error)
-                                return
-                            }
+                            )
+                        } catch {
+                            continuation.finish(throwing: error)
+                            return
                         }
                         continuation.finish()
                     }
@@ -1537,8 +1948,8 @@
 
     @available(macOS 26.0, iOS 26.0, watchOS 27.0, tvOS 26.0, visionOS 26.0, *)
     private func fmStreamResponseRunningTools<Content>(
-        makeSession: @escaping @Sendable () async throws -> FoundationModels.LanguageModelSession,
-        fmPrompt: FoundationModels.Prompt,
+        record: ToolCallRecord,
+        makeRequest: @escaping @Sendable () async throws -> FoundationModelsRequest,
         fmOptions: FoundationModels.GenerationOptions,
         type: Content.Type,
         schema: GenerationSchema,
@@ -1569,7 +1980,10 @@
                     }
                 }
 
-                func processStringStream(_ fmSession: FoundationModels.LanguageModelSession) async {
+                func processStringStream(
+                    _ fmSession: FoundationModels.LanguageModelSession,
+                    fmPrompt: FoundationModels.Prompt
+                ) async {
                     let fmStream: FoundationModels.LanguageModelSession.ResponseStream<String> =
                         fmSession.streamResponse(to: fmPrompt, options: fmOptions)
 
@@ -1592,7 +2006,13 @@
 
                             let raw = GeneratedContent(accumulatedText)
                             let snapshotContent = (accumulatedText as! Content).asPartiallyGenerated()
-                            continuation.yield(.init(content: snapshotContent, rawContent: raw))
+                            continuation.yield(
+                                .init(
+                                    content: snapshotContent,
+                                    rawContent: raw,
+                                    requests: await record.requests(final: snapshot.finalRequestUsage)
+                                )
+                            )
                         }
                         continuation.finish()
                     } catch {
@@ -1600,7 +2020,10 @@
                     }
                 }
 
-                func processStructuredStream(_ fmSession: FoundationModels.LanguageModelSession) async {
+                func processStructuredStream(
+                    _ fmSession: FoundationModels.LanguageModelSession,
+                    fmPrompt: FoundationModels.Prompt
+                ) async {
                     let fmSchema = FoundationModels.GenerationSchema(schema)
                     let fmStream = fmSession.streamResponse(
                         to: fmPrompt,
@@ -1615,9 +2038,11 @@
 
                         var accumulatedText = ""
                         var didYield = false
+                        var finalUsage = AnyLanguageModel.LanguageModelSession.Usage.zero
                         do {
                             var lastLength = 0
                             for try await snapshot in fmTextStream {
+                                finalUsage = snapshot.finalRequestUsage
                                 var chunkText: String = snapshot.content
                                 if chunkText == "null" && accumulatedText.isEmpty {
                                     chunkText = ""
@@ -1632,21 +2057,35 @@
                                 if let partialContent = try? GeneratedContent(json: accumulatedText) {
                                     let partial: Content.PartiallyGenerated? = try? .init(partialContent)
                                     if let partial {
-                                        continuation.yield(.init(content: partial, rawContent: partialContent))
+                                        continuation.yield(
+                                            .init(
+                                                content: partial,
+                                                rawContent: partialContent,
+                                                requests: await record.requests(final: finalUsage)
+                                            )
+                                        )
                                         didYield = true
                                     }
                                 }
                             }
                             if !didYield, let placeholder = placeholderPartialContent(for: type, schema: schema) {
                                 continuation.yield(
-                                    .init(content: placeholder.content, rawContent: placeholder.rawContent)
+                                    .init(
+                                        content: placeholder.content,
+                                        rawContent: placeholder.rawContent,
+                                        requests: await record.requests(final: finalUsage)
+                                    )
                                 )
                             }
                             continuation.finish()
                         } catch {
                             if !didYield, let placeholder = placeholderPartialContent(for: type, schema: schema) {
                                 continuation.yield(
-                                    .init(content: placeholder.content, rawContent: placeholder.rawContent)
+                                    .init(
+                                        content: placeholder.content,
+                                        rawContent: placeholder.rawContent,
+                                        requests: await record.requests(final: finalUsage)
+                                    )
                                 )
                             }
                             continuation.finish(throwing: error)
@@ -1654,8 +2093,10 @@
                     }
 
                     var didYield = false
+                    var finalUsage = AnyLanguageModel.LanguageModelSession.Usage.zero
                     do {
                         for try await snapshot in fmStream {
+                            finalUsage = snapshot.finalRequestUsage
                             let jsonString = snapshot.content.jsonString
                             let raw =
                                 (try? GeneratedContent(snapshot.content))
@@ -1666,7 +2107,13 @@
                             if let partialContent = try? GeneratedContent(json: jsonString) {
                                 let partial: Content.PartiallyGenerated? = try? .init(partialContent)
                                 if let partial {
-                                    continuation.yield(.init(content: partial, rawContent: partialContent))
+                                    continuation.yield(
+                                        .init(
+                                            content: partial,
+                                            rawContent: partialContent,
+                                            requests: await record.requests(final: finalUsage)
+                                        )
+                                    )
                                     didYield = true
                                     continue
                                 }
@@ -1675,18 +2122,32 @@
                             // Fallback to full conversion when partial decoding isn't possible.
                             if let value = try? type.init(raw) {
                                 let snapshotContent = value.asPartiallyGenerated()
-                                continuation.yield(.init(content: snapshotContent, rawContent: raw))
+                                continuation.yield(
+                                    .init(
+                                        content: snapshotContent,
+                                        rawContent: raw,
+                                        requests: await record.requests(final: finalUsage)
+                                    )
+                                )
                                 didYield = true
                             }
                         }
                         if !didYield, let placeholder = placeholderPartialContent(for: type, schema: schema) {
                             continuation.yield(
-                                .init(content: placeholder.content, rawContent: placeholder.rawContent)
+                                .init(
+                                    content: placeholder.content,
+                                    rawContent: placeholder.rawContent,
+                                    requests: await record.requests(final: finalUsage)
+                                )
                             )
                         }
                         continuation.finish()
                     } catch {
-                        if didYield || stoppedToolCall(in: error) != nil {
+                        // A profile's continuation failed if it can't make its request,
+                        // and a fallback would send the request and run its tools again.
+                        if didYield || stoppedToolCall(in: error) != nil
+                            || error is LanguageModelSession.DynamicProfileError || error is PromptBridgeError
+                        {
                             continuation.finish(throwing: error)
                         } else {
                             await processTextFallback()
@@ -1695,17 +2156,18 @@
                 }
 
                 let streamingTask: _Concurrency.Task<Void, Never> = _Concurrency.Task(priority: nil) {
-                    let fmSession: FoundationModels.LanguageModelSession
+                    let request: FoundationModelsRequest
                     do {
-                        fmSession = try await makeSession()
+                        request = try await makeRequest()
                     } catch {
                         continuation.finish(throwing: error)
                         return
                     }
+                    await record.sends(with: request.session)
                     if type == String.self {
-                        await processStringStream(fmSession)
+                        await processStringStream(request.session, fmPrompt: request.prompt)
                     } else {
-                        await processStructuredStream(fmSession)
+                        await processStructuredStream(request.session, fmPrompt: request.prompt)
                     }
                 }
                 continuation.onTermination = { _ in streamingTask.cancel() }
