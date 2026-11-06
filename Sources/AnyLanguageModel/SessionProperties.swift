@@ -102,6 +102,9 @@ public final class SessionPropertyValues: @unchecked Sendable {
     }
 
     /// The canonical session history after dynamic instructions.
+    ///
+    /// - Important: Setting this property from dynamic instructions or a Tool's `call`
+    ///   stops the process with a precondition failure.
     public var history: Transcript.HistoryView {
         get {
             _accessSessionProperty(keyPath: \.history)
@@ -313,6 +316,14 @@ final class SessionHistoryBinding: @unchecked Sendable {
 
 extension LanguageModelSession {
     /// Accesses a value in the currently evaluating session.
+    ///
+    /// - Important: Reading or writing the wrapped value
+    ///   anywhere except a session's profile, including its callbacks and history transforms,
+    ///   its dynamic instructions, and a Tool's `call` during its response
+    ///   stops the process with a precondition failure.
+    ///   This includes calling a Tool's `call` directly,
+    ///   a Tool's `description`, and a ``ToolExecutionDelegate``.
+    ///   Use ``LanguageModelSession/properties`` in those places.
     @propertyWrapper
     public struct SessionProperty<Value> {
         private let keyPath: ReferenceWritableKeyPath<SessionPropertyValues, Value>

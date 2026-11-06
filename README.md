@@ -88,8 +88,14 @@ session.toolExecutionDelegate = ToolExecutionObserver()
 
 ## Requirements
 
-- Swift 6.3+ (Xcode 26.4+)
-- iOS 17.0+ / macOS 14.0+ / visionOS 1.0+ / Linux
+- Swift 6.3+ (Xcode 26.4+);
+  `PrivateCloudComputeLanguageModel` and `FoundationLanguageModel`
+  compile only with Swift 6.4+ (Xcode 27+) and aren't available on tvOS
+- iOS 17.0+ / macOS 14.0+ / tvOS 17.0+ / watchOS 10.0+ / visionOS 1.0+ / Linux / WASI
+- `SystemLanguageModel` isn't available on watchOS,
+  and is available on tvOS only with Swift 6.3
+- On WASI, remote models need [a transport that you provide](#transports-on-wasi)
+- CI builds watchOS with Xcode 27 and WASI with Swift 6.4
 
 ## Installation
 
@@ -409,6 +415,9 @@ to Foundation Models only in apps built with Swift 6.4 or later
 that run on macOS, iOS, or visionOS 27 or later.
 On earlier runtimes, and on tvOS and watchOS,
 they throw an error when a prompt has an attachment.
+An image in a Tool output follows the same conditions:
+it goes to Foundation Models as an attachment,
+and otherwise the tool call throws the same error.
 The system bridge requires local file URLs; other provider adapters retain URL
 images in their existing transcript representation.
 
@@ -421,14 +430,25 @@ Gemini supports images in Tool function responses only with Gemini 3 and later.
 In Gemini Tool outputs, remote image URLs are sent as text at their original
 position without downloading the image; the transcript retains the image segment.
 
+In Tool outputs, an image type that the API doesn't take is sent as `<image>` text:
+Anthropic takes JPEG, PNG, GIF, and WebP,
+and Gemini takes PNG, JPEG, and WebP.
+In an Anthropic prompt, a local file with another extension throws an error.
+Ollama takes only image data,
+so it sends any image URL in a prompt, and a remote URL in a Tool output,
+as text without downloading it.
+
 This compatibility surface covers `CGImage` and `imageURL` attachments in
 prompts and ordinary Tool outputs. Instruction attachments, labels, `CIImage`,
 pixel buffers, and newer data attachments remain outside this change.
 
 ### Tool Calling
 
-Tool calling is supported by all providers.
+Tool calling is supported by all providers except Core ML.
 For llama.cpp, it depends on the model's chat format.
+`CoreMLLanguageModel` can render tool definitions into its chat template
+with a `chatTemplateHandler` and a `toolsHandler`,
+but nothing parses or runs a tool call.
 Define tools using the `Tool` protocol and pass them when creating a session:
 
 ```swift
@@ -485,8 +505,17 @@ session.toolExecutionDelegate = ToolExecutionObserver()
 ```
 
 When a delegate returns `.stop`,
-the response ends with an empty value and the tool calls that stopped it:
-`""` for `String`, or `[]` for an array.
+the response ends with the tool calls that stopped it.
+`respond` returns an empty value,
+even if the model wrote text before the tool calls:
+`""` for `String`, and otherwise the first of `{}`, `null`, and `[]`
+that decodes as the type.
+After a profile hands the response off to another model,
+a `String` response starts with the text from before the hand-off.
+A stream keeps its last snapshot if that snapshot decodes as the complete type,
+so a `String` stream ends with the text so far.
+Otherwise, a stream also ends with an empty value.
+Structured streams from MLX and llama.cpp follow the rule for `respond`.
 A type that can't be empty, such as one with required properties,
 a number, or a Boolean,
 throws `LanguageModelSession.ToolExecutionStopped` instead,
@@ -569,7 +598,8 @@ Each provider handles the three modes as follows:
 | `OpenAILanguageModel` (both APIs), `OpenResponsesLanguageModel` | `"tool_choice": "auto"` | `"tool_choice": "none"` | `"tool_choice": "required"` |
 | `AnthropicLanguageModel` | `"tool_choice": {"type": "auto"}` | `"tool_choice": {"type": "none"}` | `"tool_choice": {"type": "any"}` |
 | `GeminiLanguageModel` | `functionCallingConfig` mode `AUTO` | `functionCallingConfig` mode `NONE` | `functionCallingConfig` mode `ANY` |
-| `OllamaLanguageModel`, `MLXLanguageModel`, `LlamaLanguageModel`, `CoreMLLanguageModel` | Tools offered as usual | No tools offered | Not supported: tools offered as usual |
+| `OllamaLanguageModel`, `MLXLanguageModel`, `LlamaLanguageModel` | Tools offered as usual | No tools offered | Not supported: tools offered as usual |
+| `CoreMLLanguageModel` | Tool definitions rendered as usual; no tool runs | No tool definitions rendered | Not supported: tool definitions rendered as usual; no tool runs |
 
 The models that run through Foundation Models pass the mode on
 in apps built with Swift 6.4 or later that run on OS 27 or later,
@@ -616,6 +646,11 @@ a `ToolExecutionDelegate` stops the response,
 dynamic instructions remove the tools,
 or a round of tool calls past `maximumToolRounds`
 ends the response with `LanguageModelSession.ToolRoundLimitExceeded`.
+`SystemLanguageModel`, `PrivateCloudComputeLanguageModel`, and `FoundationLanguageModel`
+ignore `maximumToolRounds`,
+so with them, end the loop with a delegate's `.stop`
+or with dynamic instructions that remove the tools.
+Without tools, a `required` request to these models throws a Foundation Models error.
 
 > [!NOTE]
 > Anthropic rejects `{"type": "any"}`
@@ -701,10 +736,40 @@ that makes a request on the same session never finishes.
 `historyTransform` changes only the transcript
 projection for that request; `session.transcript` remains the canonical history,
 unless the transform writes to the `history` session property.
+
+When a turn is replayed on OpenAI (both API variants), Open Responses, and Gemini,
+edits to a string response take precedence
+over the text the session stored when it wrote the turn:
+a changed or removed response sends only its current text and the turn's calls.
+Structured responses are the limit.
+Editing or removing one doesn't remove text from that turn's earlier tool rounds,
+which stays in internal metadata on the `toolCalls` entry and is still sent.
+During streaming, a caller may have seen that text in snapshots;
+with `respond`, it never appears.
+To remove it, drop or rebuild the `toolCalls` entry.
+The same limit applies when a transform changes a prompt
+so that a string turn counts as structured,
+and it can apply when a transform removes a later prompt
+but keeps its `toolCalls` entry.
+
+An edit in place also leaves the original text in the metadata of the entry
+or the response in a saved transcript.
+For a string turn, that text isn't sent, but it's still stored.
+A plain `historyTransform` never changes the stored transcript.
+To remove text from it, write `history` with those entries dropped or rebuilt.
+
 `@SessionProperty` exposes isolated session state to profiles, dynamic
 instructions, and tools. The built-in `history` property is writable from a
 profile or lifecycle callback and read-only while dynamic instructions or a Tool
 is active.
+Writing `history` from dynamic instructions or a Tool's `call` stops the process.
+So does reading or writing a `@SessionProperty` anywhere except
+a session's profile, including its callbacks and history transforms,
+its dynamic instructions, and a Tool's `call` during its response.
+For example, calling a Tool's `call` directly,
+reading a property in a Tool's `description`,
+and reading one in a `ToolExecutionDelegate` all stop the process.
+Use `session.properties` in those places.
 
 The five HTTP providers (OpenAI, Open Responses, Anthropic, Gemini, and Ollama)
 evaluate the profile and its history transforms again
@@ -713,14 +778,22 @@ and run `onToolCall` and `onToolOutput`.
 With these providers, a Tool's `history` property includes
 the tool calls and outputs of the current response, including the Tool's own call.
 
-MLX, llama.cpp, Core ML, Private Cloud Compute, and the system model
-don't run `onToolCall` or `onToolOutput` yet.
+Create a profile's model outside `body`, as `EditingProfile` does.
+Each model that these providers create has its own identity, which copies share,
+so `.model(OpenAILanguageModel(apiKey: key, model: name))` in `body`
+selects a different model on each evaluation,
+and each continuation hands the response off to the new one.
+With the OpenAI Responses API and Open Responses,
+the next request then leaves out the reasoning item and the function call's `id`.
+
+MLX, llama.cpp, Core ML, Private Cloud Compute, `FoundationLanguageModel`,
+and the system model don't run `onToolCall` or `onToolOutput` yet.
 MLX and llama.cpp evaluate the profile once for each response,
 so their tool rounds use the same instructions, tools, and options,
 and a Tool's `history` property doesn't include the response's tool rounds.
 
-The system model and Private Cloud Compute run tools in a native
-Foundation Models session.
+The system model, Private Cloud Compute, and `FoundationLanguageModel`
+run tools in a native Foundation Models session.
 They evaluate the profile and its history transforms again
 before the continuation after a tool round,
 so the continuation uses the new instructions, tools, and transcript projection.
@@ -816,6 +889,9 @@ print("Session total:", session.usage.totalTokenCount)
 OpenAI (Chat Completions and Responses),
 Open Responses, Anthropic, Google Gemini, Ollama,
 MLX, llama.cpp, and Core ML report token usage.
+`SystemLanguageModel`, `PrivateCloudComputeLanguageModel`, and `FoundationLanguageModel`
+also report it in apps built with Swift 6.4 or later
+that run on OS 27 or later, and not on tvOS.
 Counts follow each provider's definitions.
 A response that calls tools makes a request for each round.
 As in Foundation Models, `response.usage` reports the final request,
@@ -1154,7 +1230,8 @@ say which API they follow.
   OS 27 canonical executors use Foundation Models' own Tool execution instead.
 - `ToolExecutionDelegate`, `ToolExecutionDecision`, and `toolExecutionDelegate`:
   [observing and controlling tool calls](#tool-calling).
-- `transcriptErrorHandlingPolicy` and `waitForResponseCompletion()`:
+- `transcriptErrorHandlingPolicy`, which follows the Foundation Models 27 API,
+  and `waitForResponseCompletion()`:
   what a transcript keeps when a request fails or is cancelled.
 - `LanguageModelSession.tools`, `instructions`, and `resolvedRequestContext()`:
   the session's tools, instructions, and the inputs for each request,
@@ -1181,6 +1258,9 @@ say which API they follow.
 - `GenerationOptions.maximumToolRounds` and `LanguageModelSession.ToolRoundLimitExceeded`:
   the most rounds of tool calls one response may take,
   and the error that ends a response past it.
+  `SystemLanguageModel`, `PrivateCloudComputeLanguageModel`, and `FoundationLanguageModel`
+  ignore the limit, so end their tool loops
+  [another way](#foundation-models-27-request-options).
 - `responseStartTimeout` on remote models:
   how long a [streamed request](#http-transport) waits for its response to start.
 - Public initializers for `Response`, `ResponseStream`, `ResponseStream.Snapshot`,
@@ -1206,6 +1286,14 @@ say which API they follow.
   not as a structured segment.
 - A session created from a transcript restores `instructions`
   only when the first entry is instructions with a single text segment.
+- Writing the `history` session property from dynamic instructions or a Tool's `call`
+  stops the process with a precondition failure.
+  Foundation Models 27 ignores the write.
+- Reading or writing a `@SessionProperty` outside the scopes
+  that [Dynamic Profiles](#dynamic-profiles) lists stops the process.
+  Use `session.properties` there.
+  In Foundation Models 27, the read returns the key's default value,
+  and the write has no effect.
 
 ## Providers
 
@@ -1213,6 +1301,10 @@ say which API they follow.
 
 Uses Apple's [system language model](https://developer.apple.com/documentation/FoundationModels)
 (requires macOS 26 / iOS 26 / visionOS 26 or later).
+Builds with Swift 6.4 or later leave `SystemLanguageModel` out on tvOS,
+where the SDK marks it unavailable.
+So where this README describes what the model does on tvOS,
+such as throwing an error, that applies only to builds with Swift 6.3.
 
 ```swift
 let model = SystemLanguageModel.default
@@ -1662,8 +1754,9 @@ options[custom: AnthropicLanguageModel.self] = .init(
 Effort levels are `.low`, `.medium`, `.high`, `.extraHigh`, and `.max`;
 [support varies by model](https://platform.claude.com/docs/en/build-with-claude/effort).
 The existing `Thinking(budgetTokens:)` initializer remains available.
-Thinking text and signatures are not currently exposed in session responses or streaming snapshots,
-and signed thinking blocks are not preserved for tool-call follow-ups.
+Thinking blocks appear in responses and streaming snapshots
+as [reasoning entries](#reasoning-in-the-transcript),
+and signed blocks go back unchanged in tool-call follow-ups.
 
 ### Google Gemini
 
