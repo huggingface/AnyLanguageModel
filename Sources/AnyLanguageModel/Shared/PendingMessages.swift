@@ -10,6 +10,8 @@ func pendingPrompts(in session: LanguageModelSession) async throws -> [Transcrip
     guard let delegate = session.toolExecutionDelegate else { return [] }
     return try await delegate.pendingMessages(in: session).map { message in
         let id = UUID().uuidString
-        return Transcript.Prompt(id: id, segments: try message.makeTranscriptSegments(occurrenceID: id))
+        var prompt = Transcript.Prompt(id: id, segments: try message.makeTranscriptSegments(occurrenceID: id))
+        prompt.continuesResponse = true
+        return prompt
     }
 }

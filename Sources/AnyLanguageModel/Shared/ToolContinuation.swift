@@ -337,13 +337,14 @@ extension Transcript {
     }
 }
 
-/// The ranges of the turns in `entries`, each from a prompt up to the next prompt.
+/// The ranges of the turns in `entries`, each from a prompt up to the next prompt
+/// that doesn't continue the response in progress.
 func assistantTurns(_ entries: [Transcript.Entry]) -> [(range: Range<Int>, isLast: Bool)] {
     var turns: [(range: Range<Int>, isLast: Bool)] = []
     var start = entries.startIndex
     while start < entries.endIndex {
         let next = entries.indices.dropFirst(start + 1).first {
-            if case .prompt = entries[$0] { true } else { false }
+            if case .prompt(let prompt) = entries[$0] { !prompt.continuesResponse } else { false }
         }
         let end = next ?? entries.endIndex
         turns.append((start ..< end, next == nil))

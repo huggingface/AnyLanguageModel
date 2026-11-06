@@ -290,6 +290,12 @@ public struct Transcript: Sendable, Equatable, Codable {
         /// An optional response format that describes the desired output structure.
         public var responseFormat: ResponseFormat?
 
+        /// Whether a tool execution delegate added this prompt to a response in progress.
+        ///
+        /// Such a prompt is part of its response's turn, so replay doesn't start a new turn at it.
+        /// A prompt that a caller rebuilds starts a new turn.
+        var continuesResponse = false
+
         /// Creates a prompt.
         ///
         /// - Parameters:
@@ -310,7 +316,7 @@ public struct Transcript: Sendable, Equatable, Codable {
         }
 
         private enum CodingKeys: String, CodingKey {
-            case id, segments, options, responseFormat
+            case id, segments, options, responseFormat, continuesResponse
         }
 
         public init(from decoder: Decoder) throws {
@@ -319,6 +325,7 @@ public struct Transcript: Sendable, Equatable, Codable {
             self.segments = try container.decode([Segment].self, forKey: .segments)
             self.options = try container.decode(GenerationOptions.TranscriptCoding.self, forKey: .options).options
             self.responseFormat = try container.decodeIfPresent(ResponseFormat.self, forKey: .responseFormat)
+            self.continuesResponse = try container.decodeIfPresent(Bool.self, forKey: .continuesResponse) ?? false
         }
 
         /// Encodes this prompt into the given encoder.
@@ -332,6 +339,7 @@ public struct Transcript: Sendable, Equatable, Codable {
             try container.encode(segments, forKey: .segments)
             try container.encode(GenerationOptions.TranscriptCoding(options), forKey: .options)
             try container.encodeIfPresent(responseFormat, forKey: .responseFormat)
+            if continuesResponse { try container.encode(true, forKey: .continuesResponse) }
         }
     }
 

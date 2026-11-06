@@ -266,6 +266,189 @@ struct ResponsesAssistantHistoryTests {
         )
     }
 
+    // MARK: Messages from a delegate
+
+    /// Hands over one message after the first round of tool calls.
+    private final class SteeringDelegate: ToolExecutionDelegate, @unchecked Sendable {
+        private let lock = NSLock()
+        private var pending: [AnyLanguageModel.Prompt]
+
+        init(_ message: String) {
+            pending = [AnyLanguageModel.Prompt(message)]
+        }
+
+        func pendingMessages(in session: LanguageModelSession) async -> [AnyLanguageModel.Prompt] {
+            lock.withLock {
+                defer { pending = [] }
+                return pending
+            }
+        }
+    }
+
+    /// A delegate's message doesn't start a new turn,
+    /// so the rounds before it keep their text on the next turn.
+    @Test(arguments: Builder.allCases, [false, true])
+    func aPendingMessageKeepsTheTextOfTheRoundBeforeIt(builder: Builder, streaming: Bool) async throws {
+        let transport = FakeTransport(replies: [
+            try Self.toolReply("Checking.", streaming: streaming),
+            try Self.textReply("Sunny.", streaming: streaming),
+            try Self.textReply("Bye.", streaming: streaming),
+        ])
+        let session = LanguageModelSession(model: builder.makeModel(transport), tools: [WeatherTool()])
+        session.toolExecutionDelegate = SteeringDelegate("Be brief.")
+        let first = try await Self.ask(session, "Weather?", streaming: streaming)
+        _ = try await Self.ask(session, "Thanks", streaming: streaming)
+
+        let inFlight = [
+            "user: Weather?", "assistant: Checking.", "call: call_1", "output: call_1", "user: Be brief.",
+        ]
+        #expect(first == "Checking.Sunny.")
+        #expect(try Self.labels(transport.bodies[1]) == inFlight)
+        #expect(try Self.labels(transport.bodies[2]) == inFlight + ["assistant: Sunny.", "user: Thanks"])
+    }
+
+    @Test(arguments: Builder.allCases, [false, true])
+    func aPendingMessageBetweenRoundsKeepsEachRoundsTextAfterSaving(builder: Builder, streaming: Bool) async throws {
+        let transport = FakeTransport(replies: [
+            try Self.toolReply("Checking.", streaming: streaming),
+            try Self.toolReply("Again.", callID: "call_2", streaming: streaming),
+            try Self.textReply("Sunny.", streaming: streaming),
+            try Self.textReply("Bye.", streaming: streaming),
+        ])
+        let source = LanguageModelSession(model: builder.makeModel(transport), tools: [WeatherTool()])
+        source.toolExecutionDelegate = SteeringDelegate("Be brief.")
+        _ = try await Self.ask(source, "Weather?", streaming: streaming)
+
+        let saved = try JSONEncoder().encode(source.transcript)
+        let session = LanguageModelSession(
+            model: builder.makeModel(transport),
+            transcript: try JSONDecoder().decode(Transcript.self, from: saved)
+        )
+        _ = try await Self.ask(session, "Thanks", streaming: streaming)
+
+        #expect(
+            try Self.labels(transport.bodies[3]) == [
+                "user: Weather?", "assistant: Checking.", "call: call_1", "output: call_1", "user: Be brief.",
+                "assistant: Again.", "call: call_2", "output: call_2", "assistant: Sunny.", "user: Thanks",
+            ]
+        )
+    }
+
+    @Test(arguments: Builder.allCases, [false, true])
+    func aPendingMessageKeepsTheRoundsTextOfAStructuredResponse(builder: Builder, streaming: Bool) async throws {
+        let json = #"{"text":"Hi"}"#
+        let transport = FakeTransport(replies: [
+            try Self.toolReply("Checking.", streaming: streaming),
+            try Self.toolReply("Again.", callID: "call_2", streaming: streaming),
+            try Self.textReply(json, streaming: streaming),
+            try Self.textReply("Bye.", streaming: streaming),
+        ])
+        let session = LanguageModelSession(model: builder.makeModel(transport), tools: [WeatherTool()])
+        session.toolExecutionDelegate = SteeringDelegate("Be brief.")
+        _ =
+            try await streaming
+            ? session.streamResponse(to: "Hello", generating: Greeting.self).collect().content
+            : session.respond(to: "Hello", generating: Greeting.self).content
+        _ = try await Self.ask(session, "Thanks", streaming: streaming)
+
+        let labels = try Self.labels(transport.bodies[3])
+        #expect(
+            Array(labels.dropFirst()) == [
+                "assistant: Checking.", "call: call_1", "output: call_1", "user: Be brief.",
+                "assistant: Again.", "call: call_2", "output: call_2", "assistant: \(json)", "user: Thanks",
+            ]
+        )
+    }
+
+    @Test(arguments: Builder.allCases, [false, true])
+    func aPendingMessageBeforeAStoppedRoundKeepsEachRoundsText(builder: Builder, streaming: Bool) async throws {
+        final class StopSecondRound: ToolExecutionDelegate, @unchecked Sendable {
+            private let lock = NSLock()
+            private var pending = [AnyLanguageModel.Prompt("Be brief.")]
+            private var decisions = 0
+
+            func pendingMessages(in session: LanguageModelSession) async -> [AnyLanguageModel.Prompt] {
+                lock.withLock {
+                    defer { pending = [] }
+                    return pending
+                }
+            }
+
+            func toolCallDecision(
+                for toolCall: Transcript.ToolCall,
+                in session: LanguageModelSession
+            ) async -> ToolExecutionDecision {
+                lock.withLock {
+                    decisions += 1
+                    return decisions == 1 ? .execute : .stop
+                }
+            }
+        }
+        let transport = FakeTransport(replies: [
+            try Self.toolReply("Checking.", streaming: streaming),
+            try Self.toolReply("Again.", callID: "call_2", streaming: streaming),
+            try Self.textReply("Bye.", streaming: streaming),
+        ])
+        let session = LanguageModelSession(model: builder.makeModel(transport), tools: [WeatherTool()])
+        session.toolExecutionDelegate = StopSecondRound()
+        _ = try await Self.ask(session, "Weather?", streaming: streaming)
+        _ = try await Self.ask(session, "Thanks", streaming: streaming)
+
+        #expect(
+            try Self.labels(transport.bodies[2]) == [
+                "user: Weather?", "assistant: Checking.", "call: call_1", "output: call_1", "user: Be brief.",
+                "assistant: Again.", "call: call_2", "user: Thanks",
+            ]
+        )
+    }
+
+    @Test func aPendingMessageKeepsTheTextOfAChatCompletionsRound() async throws {
+        let transport = FakeTransport(replies: [
+            Self.chatToolReply("Checking."),
+            Self.chatTextReply("Sunny."),
+            Self.chatTextReply("Bye."),
+        ])
+        let session = LanguageModelSession(model: Self.chatModel(transport), tools: [WeatherTool()])
+        session.toolExecutionDelegate = SteeringDelegate("Be brief.")
+        _ = try await Self.ask(session, "Weather?", streaming: false)
+        _ = try await Self.ask(session, "Thanks", streaming: false)
+
+        #expect(
+            try Self.labels(transport.bodies[2]) == [
+                "user: Weather?", "assistant: Checking.", "call: call_1", "output: call_1", "user: Be brief.",
+                "assistant: Sunny.", "user: Thanks",
+            ]
+        )
+    }
+
+    /// A caller who edits the response still decides the text of the whole turn.
+    @Test(arguments: Builder.allCases)
+    func anEditedResponseAfterAPendingMessageSendsOnlyItsText(builder: Builder) async throws {
+        let transport = FakeTransport(replies: [
+            try Self.toolReply("Checking.", streaming: false),
+            try Self.textReply("Sunny.", streaming: false),
+            try Self.textReply("Bye.", streaming: false),
+        ])
+        let source = LanguageModelSession(model: builder.makeModel(transport), tools: [WeatherTool()])
+        source.toolExecutionDelegate = SteeringDelegate("Be brief.")
+        _ = try await Self.ask(source, "Weather?", streaming: false)
+
+        let edited = Array(source.transcript).map { entry -> Transcript.Entry in
+            guard case .response(var response) = entry else { return entry }
+            response.segments = [.text(.init(content: "Edited."))]
+            return .response(response)
+        }
+        let session = LanguageModelSession(model: builder.makeModel(transport), transcript: Transcript(entries: edited))
+        _ = try await Self.ask(session, "Thanks", streaming: false)
+
+        #expect(
+            try Self.labels(transport.bodies[2]) == [
+                "user: Weather?", "call: call_1", "output: call_1", "user: Be brief.", "assistant: Edited.",
+                "user: Thanks",
+            ]
+        )
+    }
+
     // MARK: Structured responses
 
     @Test(arguments: Builder.allCases, [false, true])
