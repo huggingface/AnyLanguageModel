@@ -228,3 +228,59 @@ func toolContinuationMessages<Message>(
         + continuation
         + convert(Transcript(entries: projected[range.upperBound...]))
 }
+
+// MARK: - Assistant text in tool rounds
+
+/// Key under which the assistant's text for a tool round is kept in
+/// ``Transcript/ToolCalls/providerMetadata``.
+///
+/// Chat Completions, the OpenAI Responses API, and Open Responses share this key,
+/// so a transcript that moves between them replays each piece of text once.
+/// The key keeps its original name because saved transcripts contain it.
+let assistantContentMetadataKey = "openai.content"
+
+func assistantContentMetadata(_ text: String?) -> [String: String]? {
+    guard let text, !text.isEmpty else { return nil }
+    return [assistantContentMetadataKey: text]
+}
+
+/// The text that a string response replays, kept in
+/// ``Transcript/Response/providerMetadata`` when it differs from the response's content.
+///
+/// A string response includes the text of every tool round,
+/// but replay already sends each round's text with that round's calls.
+/// The response keeps only the final round's text,
+/// so replay sends each piece of text once, as the requests in flight did.
+func responseContentMetadata(_ responseText: String, roundText: String) -> [String: String]? {
+    responseText == roundText ? nil : [assistantContentMetadataKey: roundText]
+}
+
+/// The metadata of a response that a model handoff continues after `prefixEntries`.
+///
+/// The handoff adds `prefixText` to the response's content.
+/// When the tool rounds in `prefixEntries` carry all of that text,
+/// replay already sends it with their calls, so the response keeps only its own text.
+/// Otherwise, a round's text is only in the response, and the metadata doesn't change.
+func handoffResponseMetadata(
+    _ metadata: [String: String]?,
+    responseText: String,
+    prefixText: String,
+    prefixEntries: [Transcript.Entry]
+) -> [String: String]? {
+    guard !prefixText.isEmpty, metadata?[assistantContentMetadataKey] == nil else { return metadata }
+    let carriedText = prefixEntries.compactMap { entry -> String? in
+        guard case .toolCalls(let calls) = entry else { return nil }
+        return calls.providerMetadata?[assistantContentMetadataKey]
+    }.joined()
+    guard carriedText == prefixText else { return metadata }
+    return (metadata ?? [:]).merging([assistantContentMetadataKey: responseText]) { current, _ in current }
+}
+
+extension Transcript.Response {
+    /// The segments to send when this response is replayed.
+    var replayedSegments: [Transcript.Segment] {
+        providerMetadata?[assistantContentMetadataKey].map {
+            [Transcript.Segment.text(.init(content: $0))]
+        } ?? segments
+    }
+}

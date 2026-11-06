@@ -57,8 +57,13 @@ struct StreamingResponseState<Content: Generable> {
     /// A type that accepts none of these values
     /// throws ``LanguageModelSession/ToolExecutionStopped`` with the entries
     /// and the usage of the requests so far instead.
-    func stoppedSnapshot(provider: String) throws -> LanguageModelSession.ResponseStream<Content>.Snapshot {
-        if let snapshot = snapshot(), (try? Content(snapshot.rawContent)) != nil { return snapshot }
+    func stoppedSnapshot(
+        provider: String,
+        providerMetadata: [String: String]? = nil
+    ) throws -> LanguageModelSession.ResponseStream<Content>.Snapshot {
+        if let snapshot = snapshot(providerMetadata: providerMetadata), (try? Content(snapshot.rawContent)) != nil {
+            return snapshot
+        }
         guard let empty = StoppedContent.empty(Content.self) else {
             throw LanguageModelSession.ToolExecutionStopped(
                 provider: provider,

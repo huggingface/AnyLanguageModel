@@ -600,7 +600,10 @@ public struct OpenResponsesLanguageModel: LanguageModel, ProfileRequestIdentifie
                             switch event {
                             case .outputTextDelta(let delta):
                                 state.text += delta
-                                if let snapshot = state.snapshot() { continuation.yield(snapshot) }
+                                let metadata = responseContentMetadata(state.responseText, roundText: state.text)
+                                if let snapshot = state.snapshot(providerMetadata: metadata) {
+                                    continuation.yield(snapshot)
+                                }
                             case .completed(let response):
                                 state.usage.merge(response?.usage?.reportedUsage)
                                 // The completed response contains full tool arguments and
@@ -613,7 +616,10 @@ public struct OpenResponsesLanguageModel: LanguageModel, ProfileRequestIdentifie
                                         )
                                     }
                                 }
-                                if let snapshot = state.snapshot() { continuation.yield(snapshot) }
+                                let metadata = responseContentMetadata(state.responseText, roundText: state.text)
+                                if let snapshot = state.snapshot(providerMetadata: metadata) {
+                                    continuation.yield(snapshot)
+                                }
                                 break responseEvents
                             case .failed(let failure):
                                 throw OpenResponsesLanguageModelError.streamFailed(
@@ -631,12 +637,18 @@ public struct OpenResponsesLanguageModel: LanguageModel, ProfileRequestIdentifie
                             toolCalls,
                             requestContext: requestContext,
                             currentRoundEntries: state.entries,
+                            providerMetadata: assistantContentMetadata(state.text),
                             session: session
                         )
                         switch resolution {
                         case .stop:
                             state.entries.append(.toolCalls(callsEntry))
-                            continuation.yield(try state.stoppedSnapshot(provider: "Open Responses"))
+                            continuation.yield(
+                                try state.stoppedSnapshot(
+                                    provider: "Open Responses",
+                                    providerMetadata: responseContentMetadata(state.responseText, roundText: "")
+                                )
+                            )
                             continuation.finish()
                             return
                         case .invocations(let invocations):
@@ -653,7 +665,8 @@ public struct OpenResponsesLanguageModel: LanguageModel, ProfileRequestIdentifie
                                 )
                             }
                         }
-                        if let snapshot = state.snapshot() { continuation.yield(snapshot) }
+                        let metadata = responseContentMetadata(state.responseText, roundText: "")
+                        if let snapshot = state.snapshot(providerMetadata: metadata) { continuation.yield(snapshot) }
                         state.beginNextRound()
                     }
                     continuation.finish()
@@ -682,6 +695,8 @@ public struct OpenResponsesLanguageModel: LanguageModel, ProfileRequestIdentifie
         var text = ""
         // The text of earlier tool rounds, which string responses include.
         var earlierText = ""
+        // The text of the final round, which replay sends as the response.
+        var roundText = ""
         var lastOutput: [JSONValue]?
         var inFlightMessages: [OpenResponsesMessage] = []
         let url = baseURL.appendingPathComponent("responses")
@@ -739,6 +754,7 @@ public struct OpenResponsesLanguageModel: LanguageModel, ProfileRequestIdentifie
 
             let toolCalls = extractToolCallsFromOutput(resp.output)
             lastOutput = resp.output
+            roundText = resp.outputText ?? extractTextFromOutput(resp.output) ?? ""
             if !toolCalls.isEmpty {
                 if let output = resp.output {
                     for item in output {
@@ -752,6 +768,7 @@ public struct OpenResponsesLanguageModel: LanguageModel, ProfileRequestIdentifie
                     toolCalls,
                     requestContext: requestContext,
                     currentRoundEntries: entries,
+                    providerMetadata: assistantContentMetadata(roundText),
                     session: session
                 )
                 switch resolution {
@@ -777,15 +794,13 @@ public struct OpenResponsesLanguageModel: LanguageModel, ProfileRequestIdentifie
                                 )
                             )
                         }
-                        if type == String.self {
-                            earlierText += resp.outputText ?? extractTextFromOutput(resp.output) ?? ""
-                        }
+                        if type == String.self { earlierText += roundText }
                         continue
                     }
                 }
             }
 
-            text = earlierText + (resp.outputText ?? extractTextFromOutput(resp.output) ?? "")
+            text = earlierText + roundText
             break
         }
 
@@ -794,7 +809,8 @@ public struct OpenResponsesLanguageModel: LanguageModel, ProfileRequestIdentifie
                 content: text as! Content,
                 rawContent: GeneratedContent(text),
                 transcriptEntries: ArraySlice(entries),
-                requests: usage
+                requests: usage,
+                providerMetadata: responseContentMetadata(text, roundText: roundText)
             )
         }
         if let jsonString = extractJSONFromOutput(lastOutput) {
@@ -895,8 +911,27 @@ private enum OpenResponsesAPI {
                     )
                     if !t.isEmpty { body["instructions"] = .string(t) }
                 }
-            case .assistant:
-                break
+            case .assistant(let id):
+                let text = msg.assistantText
+                if !text.isEmpty {
+                    // `AssistantMessageItemParam` also takes string content without `id` and `status`,
+                    // but OpenRouter requires both on assistant messages and shows `output_text` parts.
+                    input.append(
+                        .object([
+                            "type": .string("message"),
+                            "role": .string("assistant"),
+                            "id": .string(id),
+                            "status": .string("completed"),
+                            "content": .array([
+                                .object([
+                                    "type": .string("output_text"),
+                                    "text": .string(text),
+                                    "annotations": .array([]),
+                                ])
+                            ]),
+                        ])
+                    )
+                }
             }
         }
         body["input"] = .array(input)
@@ -1041,7 +1076,8 @@ private struct OpenResponsesMessage: Sendable {
     enum Role: Sendable {
         case system
         case user
-        case assistant
+        /// An assistant message, with the item ID to send for it.
+        case assistant(id: String)
         case tool(id: String)
         case raw(rawContent: JSONValue)
     }
@@ -1051,6 +1087,22 @@ private struct OpenResponsesMessage: Sendable {
     }
     let role: Role
     let content: Content
+
+    /// The message's content as text-only assistant content,
+    /// with an `<image>` placeholder for each image, as in tool outputs.
+    var assistantText: String {
+        switch content {
+        case .text(let text):
+            return text
+        case .blocks(let blocks):
+            return blocks.map { block in
+                switch block {
+                case .text(let text): return text
+                case .imageURL: return "<image>"
+                }
+            }.joined(separator: "\n")
+        }
+    }
 }
 
 private enum OpenResponsesBlock: Sendable {
@@ -1083,11 +1135,15 @@ extension Transcript {
             case .response(let response):
                 list.append(
                     OpenResponsesMessage(
-                        role: .assistant,
-                        content: .blocks(openResponsesConvertSegmentsToBlocks(response.segments))
+                        role: .assistant(id: "msg_\(response.id)"),
+                        content: .blocks(openResponsesConvertSegmentsToBlocks(response.replayedSegments))
                     )
                 )
             case .toolCalls(let toolCalls):
+                // The round's text goes before its calls, as a message of its own.
+                if let text = toolCalls.providerMetadata?[assistantContentMetadataKey] {
+                    list.append(OpenResponsesMessage(role: .assistant(id: "msg_\(toolCalls.id)"), content: .text(text)))
+                }
                 // Function calls are top-level input items, not assistant message content.
                 // The transcript keeps only the call ID, so the optional item ID is omitted.
                 for call in toolCalls {
@@ -1331,6 +1387,7 @@ private func resolveToolCalls(
     _ toolCalls: [OpenResponsesToolCall],
     requestContext: LanguageModelSession.RequestContext,
     currentRoundEntries: [Transcript.Entry],
+    providerMetadata: [String: String]? = nil,
     session: LanguageModelSession
 ) async throws -> (calls: Transcript.ToolCalls, outcome: OpenResponsesToolResolutionOutcome) {
     var transcriptCalls: [Transcript.ToolCall] = []
@@ -1338,7 +1395,7 @@ private func resolveToolCalls(
         let args = (c.arguments.flatMap { try? GeneratedContent(json: $0) } ?? GeneratedContent(properties: [:]))
         transcriptCalls.append(Transcript.ToolCall(id: c.id, toolName: c.name, arguments: args))
     }
-    let callsEntry = Transcript.ToolCalls(transcriptCalls)
+    let callsEntry = Transcript.ToolCalls(transcriptCalls, providerMetadata: providerMetadata)
     let entries = currentRoundEntries + [.toolCalls(callsEntry)]
     switch try await session.resolveProfileToolCalls(
         transcriptCalls,

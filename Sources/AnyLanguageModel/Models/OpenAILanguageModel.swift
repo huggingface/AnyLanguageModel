@@ -700,6 +700,8 @@ public struct OpenAILanguageModel: LanguageModel, ProfileRequestIdentifiedLangua
         var text = ""
         // The text of earlier tool rounds, which string responses include.
         var earlierText = ""
+        // The text of the final round, which replay sends as the response.
+        var roundText = ""
         var lastOutput: [JSONValue]?
         var inFlightMessages: [OpenAIMessage] = []
 
@@ -762,6 +764,7 @@ public struct OpenAILanguageModel: LanguageModel, ProfileRequestIdentifiedLangua
 
             let toolCalls = extractToolCallsFromOutput(resp.output)
             lastOutput = resp.output
+            roundText = resp.outputText ?? extractTextFromOutput(resp.output) ?? ""
             if !toolCalls.isEmpty {
                 if let output = resp.output {
                     for msg in output {
@@ -773,6 +776,7 @@ public struct OpenAILanguageModel: LanguageModel, ProfileRequestIdentifiedLangua
                     toolCalls,
                     requestContext: requestContext,
                     currentRoundEntries: entries,
+                    providerMetadata: assistantContentMetadata(roundText),
                     session: session
                 )
                 switch resolution {
@@ -800,15 +804,13 @@ public struct OpenAILanguageModel: LanguageModel, ProfileRequestIdentifiedLangua
                                 )
                             )
                         }
-                        if type == String.self {
-                            earlierText += resp.outputText ?? extractTextFromOutput(resp.output) ?? ""
-                        }
+                        if type == String.self { earlierText += roundText }
                         continue
                     }
                 }
             }
 
-            text = earlierText + (resp.outputText ?? extractTextFromOutput(resp.output) ?? "")
+            text = earlierText + roundText
 
             break
         }
@@ -818,7 +820,8 @@ public struct OpenAILanguageModel: LanguageModel, ProfileRequestIdentifiedLangua
                 content: text as! Content,
                 rawContent: GeneratedContent(text),
                 transcriptEntries: ArraySlice(entries),
-                requests: usage
+                requests: usage,
+                providerMetadata: responseContentMetadata(text, roundText: roundText)
             )
         }
 
@@ -968,7 +971,10 @@ public struct OpenAILanguageModel: LanguageModel, ProfileRequestIdentifiedLangua
                                 switch event {
                                 case .outputTextDelta(let delta):
                                     state.text += delta
-                                    if let snapshot = state.snapshot() { continuation.yield(snapshot) }
+                                    let metadata = responseContentMetadata(state.responseText, roundText: state.text)
+                                    if let snapshot = state.snapshot(providerMetadata: metadata) {
+                                        continuation.yield(snapshot)
+                                    }
                                 case .completed(let response):
                                     state.usage.merge(response?.usage?.reportedUsage)
                                     // The completed response contains full tool arguments and
@@ -981,7 +987,10 @@ public struct OpenAILanguageModel: LanguageModel, ProfileRequestIdentifiedLangua
                                             )
                                         }
                                     }
-                                    if let snapshot = state.snapshot() { continuation.yield(snapshot) }
+                                    let metadata = responseContentMetadata(state.responseText, roundText: state.text)
+                                    if let snapshot = state.snapshot(providerMetadata: metadata) {
+                                        continuation.yield(snapshot)
+                                    }
                                     break responseEvents
                                 case .failed(let failure):
                                     throw OpenAILanguageModelError.streamFailed(
@@ -1048,14 +1057,18 @@ public struct OpenAILanguageModel: LanguageModel, ProfileRequestIdentifiedLangua
                             toolCalls,
                             requestContext: requestContext,
                             currentRoundEntries: state.entries,
-                            providerMetadata: apiVariant == .chatCompletions
-                                ? assistantContentMetadata(state.text) : nil,
+                            providerMetadata: assistantContentMetadata(state.text),
                             session: session
                         )
                         switch resolution {
                         case .stop:
                             state.entries.append(.toolCalls(callsEntry))
-                            continuation.yield(try state.stoppedSnapshot(provider: "OpenAI"))
+                            continuation.yield(
+                                try state.stoppedSnapshot(
+                                    provider: "OpenAI",
+                                    providerMetadata: responseContentMetadata(state.responseText, roundText: "")
+                                )
+                            )
                             continuation.finish()
                             return
                         case .invocations(let invocations):
@@ -1082,9 +1095,7 @@ public struct OpenAILanguageModel: LanguageModel, ProfileRequestIdentifiedLangua
                         }
                         // This round's text now goes with its tool calls, so a response that
                         // ends here has no text of its own to replay.
-                        let metadata =
-                            apiVariant == .chatCompletions
-                            ? responseContentMetadata(state.responseText, roundText: "") : nil
+                        let metadata = responseContentMetadata(state.responseText, roundText: "")
                         if let snapshot = state.snapshot(providerMetadata: metadata) { continuation.yield(snapshot) }
                         state.beginNextRound()
                     }
@@ -1362,6 +1373,10 @@ private enum Responses {
                     messageRole == "assistant",
                     case .array(let assistantToolCalls) = assistantMessageObject["tool_calls"]
                 {
+                    // The round's text goes before its calls, as a message of its own.
+                    if case .string(let text) = assistantMessageObject["content"], !text.isEmpty {
+                        outputs.append(assistantInputItem(text: text))
+                    }
                     for assistantToolCall in assistantToolCalls {
                         if case .object(let toolCallObject) = assistantToolCall,
                             case .string(let toolCallID) = toolCallObject["id"],
@@ -1397,7 +1412,8 @@ private enum Responses {
                 }
 
             case .assistant:
-                break
+                let text = msg.responsesAssistantText
+                if !text.isEmpty { outputs.append(assistantInputItem(text: text)) }
             }
         }
         body["input"] = .array(outputs)
@@ -1501,6 +1517,16 @@ private enum Responses {
         return .object(body)
     }
 
+    /// An assistant message as an input item, in the `EasyInputMessage` form.
+    /// This form takes string content, without the `id` and `status` of an output message.
+    private static func assistantInputItem(text: String) -> JSONValue {
+        .object([
+            "type": .string("message"),
+            "role": .string("assistant"),
+            "content": .string(text),
+        ])
+    }
+
     struct Response: Decodable, Sendable {
         let id: String
         let output: [JSONValue]?
@@ -1527,26 +1553,6 @@ private enum Responses {
 }
 
 // MARK: - Supporting Types
-
-/// Key under which the assistant's text for a Chat Completions tool-call round is kept in
-/// ``Transcript/ToolCalls/providerMetadata``.
-private let assistantContentMetadataKey = "openai.content"
-
-private func assistantContentMetadata(_ text: String?) -> [String: String]? {
-    guard let text, !text.isEmpty else { return nil }
-    return [assistantContentMetadataKey: text]
-}
-
-/// The text that a Chat Completions string response replays, kept in
-/// ``Transcript/Response/providerMetadata`` when it differs from the response's content.
-///
-/// A string response includes the text of every tool round,
-/// but replay already sends each round's text with that round's calls.
-/// The response keeps only the final round's text,
-/// so replay sends each piece of text once, as the requests in flight did.
-private func responseContentMetadata(_ responseText: String, roundText: String) -> [String: String]? {
-    responseText == roundText ? nil : [assistantContentMetadataKey: roundText]
-}
 
 /// The assistant message that carries a round of tool calls.
 ///
@@ -1735,14 +1741,10 @@ extension Transcript {
                 pendingReasoning = entry
                 continue
             case .response(let response):
-                let segments =
-                    response.providerMetadata?[assistantContentMetadataKey].map {
-                        [Transcript.Segment.text(.init(content: $0))]
-                    } ?? response.segments
                 messages.append(
                     .init(
                         role: .assistant,
-                        content: .blocks(convertSegmentsToOpenAIBlocks(segments)),
+                        content: .blocks(convertSegmentsToOpenAIBlocks(response.replayedSegments)),
                         reasoning: ChatCompletionsReasoning(reasoning, sentTo: host).fields
                     )
                 )
@@ -1785,6 +1787,22 @@ private struct OpenAIMessage: Hashable, Codable, Sendable {
     let content: Content
     /// Reasoning fields sent back on an assistant message (``ChatCompletionsReasoning``).
     var reasoning: [String: JSONValue] = [:]
+
+    /// The message's content as the Responses API's text-only assistant content,
+    /// with an `<image>` placeholder for each image, as in tool outputs.
+    var responsesAssistantText: String {
+        switch content {
+        case .text(let text):
+            return text
+        case .blocks(let blocks):
+            return blocks.map { block in
+                switch block {
+                case .text(let text): return text
+                case .imageURL: return "<image>"
+                }
+            }.joined(separator: "\n")
+        }
+    }
 
     func contentAsJsonValue(for apiVariant: OpenAILanguageModel.APIVariant) -> JSONValue {
         switch content {
