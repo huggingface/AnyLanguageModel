@@ -1,4 +1,4 @@
-#if canImport(FoundationModels)
+#if canImport(FoundationModels) && (!os(tvOS) || compiler(<6.4))
     import FoundationModels
     import Foundation
 
