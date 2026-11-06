@@ -5,10 +5,17 @@ extension LanguageModelSession {
     /// options, and callbacks, which the session resolves before each model request.
     ///
     /// Create a session with a profile with ``LanguageModelSession/init(profile:history:)``.
-    /// The session evaluates ``body`` again before every model request,
-    /// including the requests that continue a response after a tool call,
+    /// The session evaluates ``body`` again before each model request,
     /// so the body can choose a different model, instructions, or tools
     /// from the session's properties and history.
+    /// OpenAI, Open Responses, Anthropic, Gemini, and Ollama also evaluate it again
+    /// before each request that continues a response after a tool call.
+    /// MLX and llama.cpp evaluate it once for each response,
+    /// so their tool rounds use the same instructions, tools, and options.
+    /// The system model and Private Cloud Compute evaluate it again
+    /// before the continuation after a tool round,
+    /// but a continuation that selects another model stays on the native session's model,
+    /// and changed options don't apply to it.
     ///
     /// Build a profile from a ``Profile`` and modifiers such as `model(_:)`,
     /// ``temperature(_:)``, and `onResponse(perform:)`.
