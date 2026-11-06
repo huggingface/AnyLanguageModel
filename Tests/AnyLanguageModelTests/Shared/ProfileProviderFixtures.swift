@@ -11,13 +11,11 @@ import Testing
             profile: Bool
         ) async throws {
             UsageURLProtocol.reset()
-            let legacyAnthropic = provider == .anthropic && !streaming && !profile
-            let roundsPerTurn = legacyAnthropic ? 1 : 2
             let observedCalls = Locked<[Transcript.Entry]>([])
             var expectedOutputs: [String] = []
             var expectedRequests: [[String]] = []
             for turn in 0 ..< 2 {
-                for round in 0 ..< roundsPerTurn {
+                for round in 0 ..< 2 {
                     expectedRequests.append(expectedOutputs)
                     let city = "Turn\(turn)Round\(round)"
                     var response =
@@ -35,16 +33,10 @@ import Testing
                     UsageURLProtocol.enqueue(json: response)
                     expectedOutputs.append("OUTPUT:\(city)")
                 }
-                if !legacyAnthropic {
-                    expectedRequests.append(expectedOutputs)
-                    UsageURLProtocol.enqueue(
-                        json: try streaming ? provider.stream() : Self.json(provider.response())
-                    )
-                }
-            }
-            if legacyAnthropic {
                 expectedRequests.append(expectedOutputs)
-                UsageURLProtocol.enqueue(json: try Self.json(provider.response()))
+                UsageURLProtocol.enqueue(
+                    json: try streaming ? provider.stream() : Self.json(provider.response())
+                )
             }
             let session: LanguageModelSession
             if profile {
@@ -63,7 +55,7 @@ import Testing
             } else {
                 session = provider.makeSession(tools: [ReusedCallIDTool(observedCalls: observedCalls)])
             }
-            for _ in 0 ..< (legacyAnthropic ? 3 : 2) {
+            for _ in 0 ..< 2 {
                 if streaming {
                     _ = try await session.streamResponse(to: "Weather?").collect()
                 } else {
