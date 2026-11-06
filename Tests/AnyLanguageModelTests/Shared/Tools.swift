@@ -15,6 +15,21 @@ struct WeatherTool: Tool {
     }
 }
 
+struct ClockTool: Tool {
+    let name = "getTime"
+    let description = "Retrieve the time in a city"
+
+    @Generable
+    struct Arguments {
+        @Guide(description: "The city to fetch the time for")
+        var city: String
+    }
+
+    func call(arguments: Arguments) async throws -> String {
+        "It's noon in \(arguments.city)"
+    }
+}
+
 /// A structured answer that a model can only fill in correctly
 /// with the output of ``WeatherTool``.
 @Generable

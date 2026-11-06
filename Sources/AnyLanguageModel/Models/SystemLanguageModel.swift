@@ -391,9 +391,9 @@
         /// each time Foundation Models evaluates them.
         ///
         /// Ordinary dynamic instructions resolve again on each evaluation.
-        /// During a profile session's request, every evaluation returns the context
-        /// that was prepared for that request,
-        /// including the evaluation before the continuation after a tool call.
+        /// During a profile session's request, every evaluation returns the request's latest context:
+        /// the one prepared for the request,
+        /// or, after a tool round, the one that ``FoundationModelsProfile`` resolved for the continuation.
         @available(macOS 27.0, iOS 27.0, visionOS 27.0, watchOS 27.0, *)
         struct FoundationModelsDynamicInstructionsAdapter: FoundationModels.DynamicInstructions {
             let session: LanguageModelSession
@@ -407,68 +407,221 @@
             }
         }
 
-        /// A profile that sends the session's dynamic instructions
-        /// and puts rewritten segments in the request's prompt.
+        /// The entries that a profile session's native request sends,
+        /// projected from one AnyLanguageModel request context.
         ///
-        /// A Foundation Models prompt can't set a structured segment's ID or source,
-        /// so a history transform sets the segments on the entry that the session creates,
-        /// which keeps the entry's options and response format.
-        /// The transform also runs for the request that continues after tool calls.
+        /// Foundation Models owns the request's prompt entry and the entries of its tool rounds,
+        /// so the projection refers to them, and takes them from the native history when it's applied.
         @available(macOS 27.0, iOS 27.0, visionOS 27.0, watchOS 27.0, *)
-        private struct FoundationModelsRewrittenPromptProfile<Model: FoundationModels.LanguageModel>:
+        private struct FoundationModelsProjection: Sendable {
+            enum Item: Sendable {
+                case entry(FoundationModels.Transcript.Entry)
+                /// The native prompt entry, which keeps its options and response format,
+                /// with the given segments, or its own if `nil`.
+                case currentPrompt(segments: [FoundationModels.Transcript.Segment]?)
+                /// The native entries of the request's tool rounds, with the model's call IDs.
+                case toolRounds
+            }
+
+            var items: [Item]
+
+            var keepsNativePromptSegments: Bool {
+                items.contains { item in
+                    if case .currentPrompt(segments: nil) = item { return true }
+                    return false
+                }
+            }
+
+            /// Returns the entries to send from the native history of the request:
+            /// its instructions, its prompt, and the entries of its tool rounds.
+            func applied(to native: [FoundationModels.Transcript.Entry]) -> [FoundationModels.Transcript.Entry] {
+                let promptIndex = native.lastIndex { entry in
+                    if case .prompt = entry { return true }
+                    return false
+                }
+                let instructions = native.filter { entry in
+                    if case .instructions = entry { return true }
+                    return false
+                }
+                var entries = instructions
+                for item in items {
+                    switch item {
+                    case .entry(let entry):
+                        entries.append(entry)
+                    case .currentPrompt(let segments):
+                        guard let promptIndex, case .prompt(var prompt) = native[promptIndex] else { continue }
+                        if let segments { prompt.segments = segments }
+                        entries.append(.prompt(prompt))
+                    case .toolRounds:
+                        if let promptIndex { entries += native[(promptIndex + 1)...] }
+                    }
+                }
+                return entries
+            }
+        }
+
+        /// A profile session's native request, which outlives its first context.
+        @available(macOS 27.0, iOS 27.0, visionOS 27.0, watchOS 27.0, *)
+        private final class FoundationModelsProfileRequest: Sendable {
+            let session: LanguageModelSession
+            let prompt: Prompt
+            /// Whether the native prompt entry has placeholder segments.
+            let hasPlaceholderPrompt: Bool
+            private let state: Locked<State>
+
+            private struct State: Sendable {
+                var projection: FoundationModelsProjection
+                var toolRoundEntries: [Transcript.Entry] = []
+            }
+
+            init(
+                session: LanguageModelSession,
+                prompt: Prompt,
+                projection: FoundationModelsProjection,
+                hasPlaceholderPrompt: Bool
+            ) {
+                self.session = session
+                self.prompt = prompt
+                self.hasPlaceholderPrompt = hasPlaceholderPrompt
+                state = Locked(State(projection: projection))
+            }
+
+            var projection: FoundationModelsProjection {
+                state.withLock { $0.projection }
+            }
+
+            /// Resolves the context for the continuation after a tool round.
+            ///
+            /// This is the work of `resolvedRequestContext(including:)` in other providers,
+            /// which needs to wait for lifecycle actions,
+            /// so it can't run when Foundation Models evaluates the dynamic instructions.
+            /// Foundation Models calls the `onToolOutput` actions after all of a round's tools ran
+            /// and before that evaluation, so the first action of a round does the work.
+            func toolRoundDidFinish() async throws {
+                guard let entries = await ToolCallRecord.current?.entries,
+                    entries != state.withLock({ $0.toolRoundEntries })
+                else {
+                    return
+                }
+                state.withLock { $0.toolRoundEntries = entries }
+                let context = try await session.resolvedRequestContext(including: entries)
+                let projection = try fmProjection(
+                    of: context,
+                    prompt: prompt,
+                    toolRoundEntries: entries,
+                    hasPlaceholderPrompt: hasPlaceholderPrompt
+                )
+                state.withLock { $0.projection = projection }
+            }
+        }
+
+        /// A profile that sends a profile session's dynamic instructions and request projection.
+        ///
+        /// Foundation Models evaluates the instructions and runs the history transform
+        /// before each request, including the continuation after a tool round.
+        /// AnyLanguageModel's profile and its history transforms run
+        /// once for each of those requests, in ``FoundationModelsProfileRequest``.
+        @available(macOS 27.0, iOS 27.0, visionOS 27.0, watchOS 27.0, *)
+        private struct FoundationModelsProfile<Model: FoundationModels.LanguageModel>:
             FoundationModels.LanguageModelSession.DynamicProfile
         {
             let model: Model
-            let session: LanguageModelSession
-            let segments: [FoundationModels.Transcript.Segment]
+            let request: FoundationModelsProfileRequest
 
             var body: some FoundationModels.LanguageModelSession.DynamicProfile {
                 FoundationModels.LanguageModelSession.Profile {
-                    FoundationModelsDynamicInstructionsAdapter(session: session)
+                    FoundationModelsDynamicInstructionsAdapter(session: request.session)
                 }
                 .model(model)
-                .historyTransform { [segments] entries in
-                    var entries = entries
-                    for index in entries.indices.reversed() {
-                        guard case .prompt(var prompt) = entries[index] else { continue }
-                        prompt.segments = segments
-                        entries[index] = .prompt(prompt)
-                        break
-                    }
-                    return entries
+                .onToolOutput {
+                    [request] (_: FoundationModels.Transcript.ToolCall, _: FoundationModels.Transcript.ToolOutput) in
+                    try await request.toolRoundDidFinish()
+                }
+                .historyTransform { [request] entries in
+                    request.projection.applied(to: entries)
                 }
             }
         }
 
-        /// Splits a profile's projected history into the native history
-        /// and, if a history transform rewrote the current prompt, the rewritten prompt.
+        /// Projects a request context for a profile session's native request.
         ///
         /// Foundation Models sends the output of a profile's history transforms,
-        /// so the rewritten prompt takes the place of the current one.
+        /// so the projection keeps their order and leaves out what they leave out.
+        /// A session's `respond(to:)` always takes a prompt,
+        /// but a history transform can remove that prompt from the request or move it.
         ///
-        /// The canonical transcript ends with the current prompt during a request.
-        /// If the projection leaves out that prompt or ends with another entry,
-        /// the native session still appends the current prompt,
-        /// because a Foundation Models session request always takes a prompt.
+        /// The current prompt comes from the context's canonical history,
+        /// which ends with that prompt and its tool rounds during a request.
+        /// If the projection leaves out that prompt,
+        /// its last prompt that isn't in the canonical history rewrites the current prompt,
+        /// and keeps the options and response format of the native prompt entry.
+        /// If a profile's history edit changed the current prompt in the canonical history,
+        /// the native prompt entry follows the projection.
         ///
-        /// - Throws: ``PromptBridgeError`` for a rewritten image Foundation Models can't take.
+        /// - Parameter hasPlaceholderPrompt: Whether the native prompt entry has placeholder segments,
+        ///   so that keeping the current prompt also needs its segments.
+        /// - Throws: ``PromptBridgeError`` for a prompt's image Foundation Models can't take.
         @available(macOS 27.0, iOS 27.0, visionOS 27.0, watchOS 27.0, *)
-        private func fmProjectedHistory(
-            _ projected: Transcript,
-            canonical: Transcript,
-            prompt: Prompt
-        ) throws -> (history: Transcript, rewrittenPrompt: [FoundationModels.Transcript.Segment]?) {
-            guard case .prompt(let current)? = canonical.last,
-                prompt.matchesTranscriptOccurrence(current.segments, occurrenceID: current.id),
-                case .prompt(let last)? = projected.last,
-                projected.last != canonical.last
-            else {
-                return (fmTranscriptDroppingDuplicatePrompt(projected, prompt: prompt), nil)
-            }
+        private func fmProjection(
+            of context: LanguageModelSession.RequestContext,
+            prompt: Prompt,
+            toolRoundEntries: [Transcript.Entry],
+            hasPlaceholderPrompt: Bool
+        ) throws -> FoundationModelsProjection {
             // The conversion to transcript segments leaves out images it can't convert,
             // so this rejects them first.
-            _ = try last.segments.toFoundationModelsToolOutput()
-            return (Transcript(entries: projected.dropLast()), last.segments.toFoundationModels())
+            func checked(_ segments: [Transcript.Segment]) throws -> [FoundationModels.Transcript.Segment] {
+                _ = try segments.toFoundationModelsToolOutput()
+                return segments.toFoundationModels()
+            }
+            func checkedSegments(of entry: Transcript.Entry) throws -> [FoundationModels.Transcript.Segment] {
+                guard case .prompt(let prompt) = entry else { return [] }
+                return try checked(prompt.segments)
+            }
+
+            let canonical = context.canonicalEntries
+            let projected = context.transcript.filter { entry in
+                if case .instructions = entry { return false }
+                return true
+            }
+            let current = canonical.last { entry in
+                guard case .prompt(let candidate) = entry else { return false }
+                return prompt.matchesTranscriptOccurrence(candidate.segments, occurrenceID: candidate.id)
+            }
+            let keptIndex = current.flatMap { projected.firstIndex(of: $0) }
+            let rewrittenIndex =
+                current == nil || keptIndex != nil
+                ? nil
+                : projected.lastIndex { entry in
+                    if case .prompt = entry { return !canonical.contains(entry) }
+                    return false
+                }
+            let toolRoundRange = toolRoundEntries.isEmpty ? nil : projected.firstRange(of: toolRoundEntries)
+
+            var items: [FoundationModelsProjection.Item] = []
+            for (index, entry) in projected.enumerated() {
+                if index == keptIndex {
+                    items.append(.currentPrompt(segments: hasPlaceholderPrompt ? try checkedSegments(of: entry) : nil))
+                } else if index == rewrittenIndex {
+                    items.append(.currentPrompt(segments: try checkedSegments(of: entry)))
+                } else if let toolRoundRange, toolRoundRange.contains(index) {
+                    if index == toolRoundRange.lowerBound { items.append(.toolRounds) }
+                } else if let converted = entry.toFoundationModels() {
+                    items.append(.entry(converted))
+                }
+            }
+            if current == nil {
+                let segments =
+                    hasPlaceholderPrompt
+                    ? try checked(prompt.makeTranscriptSegments(occurrenceID: UUID().uuidString))
+                    : nil
+                let toolRoundsIndex = items.firstIndex { item in
+                    if case .toolRounds = item { return true }
+                    return false
+                }
+                items.insert(.currentPrompt(segments: segments), at: toolRoundsIndex ?? items.endIndex)
+            }
+            return FoundationModelsProjection(items: items)
         }
 
         @available(macOS 27.0, iOS 27.0, visionOS 27.0, watchOS 27.0, *)
@@ -478,41 +631,45 @@
             prompt: Prompt,
             fmPrompt: FoundationModels.Prompt?
         ) throws -> FoundationModelsRequest {
+            if session.usesDynamicProfile {
+                let context = session.resolvedRequestContext()
+                let projection = try fmProjection(
+                    of: context,
+                    prompt: prompt,
+                    toolRoundEntries: [],
+                    hasPlaceholderPrompt: false
+                )
+                // A prompt that the request doesn't send can have an image Foundation Models can't take,
+                // so this converts the prompt only if the request sends it.
+                let keepsPrompt = projection.keepsNativePromptSegments
+                return FoundationModelsRequest(
+                    session: FoundationModels.LanguageModelSession(
+                        profile: FoundationModelsProfile(
+                            model: model,
+                            request: FoundationModelsProfileRequest(
+                                session: session,
+                                prompt: prompt,
+                                projection: projection,
+                                hasPlaceholderPrompt: !keepsPrompt
+                            )
+                        ),
+                        // The profile's history transform sends the request's whole history.
+                        history: []
+                    ),
+                    prompt: keepsPrompt ? try fmPrompt ?? prompt.toFoundationModels() : FoundationModels.Prompt("")
+                )
+            }
+
             if session.usesDynamicInstructions {
-                // Only a profile can project history, so ordinary dynamic instructions
-                // aren't evaluated here.
-                let (history, rewrittenPrompt) =
-                    if session.usesDynamicProfile {
-                        try fmProjectedHistory(
-                            session.resolvedRequestContext().transcript,
-                            canonical: session.transcript,
-                            prompt: prompt
-                        )
-                    } else {
-                        (fmTranscriptDroppingDuplicatePrompt(session.transcript, prompt: prompt), nil)
-                    }
                 // Foundation Models evaluates the dynamic instructions itself,
                 // so the history leaves out the instructions entry.
+                let history = fmTranscriptDroppingDuplicatePrompt(session.transcript, prompt: prompt)
                 let fmHistory = Transcript(
                     entries: history.filter { entry in
                         if case .instructions = entry { return false }
                         return true
                     }
                 ).toFoundationModels(instructions: nil, toolDefinitions: [])
-                if let rewrittenPrompt {
-                    return FoundationModelsRequest(
-                        session: FoundationModels.LanguageModelSession(
-                            profile: FoundationModelsRewrittenPromptProfile(
-                                model: model,
-                                session: session,
-                                segments: rewrittenPrompt
-                            ),
-                            history: fmHistory
-                        ),
-                        // The profile's history transform replaces this prompt's segments.
-                        prompt: FoundationModels.Prompt("")
-                    )
-                }
                 return FoundationModelsRequest(
                     session: FoundationModels.LanguageModelSession(
                         model: model,
@@ -826,6 +983,8 @@
         /// A call that started, with its output once it ran.
         private struct Started {
             let call: Transcript.ToolCall
+            /// The call's entry, which keeps one ID however many times it's read.
+            let entry: Transcript.ToolCalls
             var output: Transcript.ToolOutput?
         }
 
@@ -845,14 +1004,14 @@
         var entries: [Transcript.Entry] {
             started.flatMap { started -> [Transcript.Entry] in
                 guard let output = started.output else { return [] }
-                return [.toolCalls(Transcript.ToolCalls([started.call])), .toolOutput(output)]
+                return [.toolCalls(started.entry), .toolOutput(output)]
             }
         }
 
         /// A call started: the round that made it completed, so what it used is counted for the
         /// response now, as each request's usage is, and kept if the response then throws.
         func start(_ call: Transcript.ToolCall) {
-            started.append(Started(call: call, output: nil))
+            started.append(Started(call: call, entry: Transcript.ToolCalls([call]), output: nil))
             let usage = sessionUsage
             usageAtCalls.append(usage)
             count(upTo: usage)
@@ -1962,7 +2121,11 @@
                         }
                         continuation.finish()
                     } catch {
-                        if didYield || stoppedToolCall(in: error) != nil {
+                        // A profile's continuation failed if it can't make its request,
+                        // and a fallback would send the request and run its tools again.
+                        if didYield || stoppedToolCall(in: error) != nil
+                            || error is LanguageModelSession.DynamicProfileError || error is PromptBridgeError
+                        {
                             continuation.finish(throwing: error)
                         } else {
                             await processTextFallback()

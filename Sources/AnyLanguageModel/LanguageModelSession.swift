@@ -205,6 +205,9 @@ public final class LanguageModelSession: @unchecked Sendable {
 
         var hasDynamicProfile: Bool { profile != nil }
 
+        /// The session history that this context resolved from, with the request's tool rounds.
+        var canonicalEntries: [Transcript.Entry] { canonicalTranscript }
+
         fileprivate init(
             transcript: Transcript,
             instructions: Instructions?,
