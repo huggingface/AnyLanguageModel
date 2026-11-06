@@ -153,6 +153,37 @@ private final class RoundSpy: ToolExecutionDelegate, @unchecked Sendable {
     }
 }
 
+/// Records the tool rounds in `history` once `waitsFor` opens.
+private struct HistoryReadingTool: Tool {
+    let name: String
+    let description = "Reads the history"
+    var waitsFor: Gate?
+    var opens: Gate?
+    var seen: Locked<[String]>?
+
+    @LanguageModelSession.SessionProperty(\.history) private var history
+
+    @Generable
+    struct Arguments {
+        @Guide(description: "The answer")
+        var answer: String
+    }
+
+    func call(arguments: Arguments) async throws -> String {
+        await waitsFor?.wait()
+        let entries = history.compactMap { entry -> String? in
+            switch entry {
+            case .toolCalls(let calls): return "calls " + calls.map(\.id).joined(separator: " ")
+            case .toolOutput(let output): return "output " + output.id
+            default: return nil
+            }
+        }
+        seen?.withLock { $0 = entries }
+        await opens?.open()
+        return arguments.answer
+    }
+}
+
 private func call(_ id: String, _ tool: String, answer: String = "ok") throws -> Transcript.ToolCall {
     Transcript.ToolCall(
         id: id,
@@ -203,6 +234,35 @@ struct ToolRoundTests {
         )
 
         #expect(outputs(resolution).map(\.text) == ["one", "two"])
+    }
+
+    /// The second call reads the history after the first has finished,
+    /// and sees the earlier round and this round's calls, but not the first call's output.
+    @Test(.timeLimit(.minutes(1)))
+    func aToolSeesEarlierRoundsAndCurrentCallsButNotOtherCallsOutputs() async throws {
+        let firstFinished = Gate()
+        let seen = Locked<[String]>([])
+        let session = LanguageModelSession(
+            model: MockLanguageModel(),
+            tools: [
+                HistoryReadingTool(name: "first", opens: firstFinished),
+                HistoryReadingTool(name: "second", waitsFor: firstFinished, seen: seen),
+            ]
+        )
+        let earlierCall = try call("0", "first")
+        let earlierRound: [Transcript.Entry] = [
+            .toolCalls(Transcript.ToolCalls([earlierCall])),
+            .toolOutput(Transcript.ToolOutput(id: earlierCall.id, toolName: earlierCall.toolName, segments: [])),
+        ]
+        let calls = [try call("1", "first"), try call("2", "second")]
+
+        _ = try await session.resolveProfileToolCalls(
+            calls,
+            requestContext: session.resolvedRequestContext(),
+            currentRoundEntries: earlierRound + [.toolCalls(Transcript.ToolCalls(calls))]
+        )
+
+        #expect(seen.withLock { $0 } == ["calls 0", "output 0", "calls 1 2"])
     }
 
     /// The first call finishes last, yet the results and the delegate keep the model's order,

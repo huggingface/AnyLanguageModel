@@ -787,10 +787,7 @@ Use `session.properties` in those places.
 
 The five HTTP providers (OpenAI, Open Responses, Anthropic, Gemini, and Ollama)
 evaluate the profile and its history transforms again
-before each request that continues a response after tool calls,
-and run `onToolCall` and `onToolOutput`.
-With these providers, a Tool's `history` property includes
-the tool calls and outputs of the current response, including the Tool's own call.
+before each request that continues a response after tool calls.
 
 Create a profile's model outside `body`, as `EditingProfile` does.
 Each model that these providers create has its own identity, which copies share,
@@ -800,11 +797,20 @@ and each continuation hands the response off to the new one.
 With the OpenAI Responses API and Open Responses,
 the next request then leaves out the reasoning item and the function call's `id`.
 
-MLX, llama.cpp, Core ML, Private Cloud Compute, `FoundationLanguageModel`,
-and the system model don't run `onToolCall` or `onToolOutput` yet.
 MLX and llama.cpp evaluate the profile once for each response,
-so their tool rounds use the same instructions, tools, and options,
-and a Tool's `history` property doesn't include the response's tool rounds.
+so their tool rounds use the same instructions, tools, options,
+and transcript projection.
+
+The five HTTP providers, MLX, and llama.cpp run `onToolCall` and `onToolOutput`.
+With these providers, a Tool's `history` property includes
+the calls and outputs of the response's earlier tool rounds
+and every call in the current round, including the Tool's own call.
+It doesn't include the outputs of the other calls in the current round,
+even the ones that have finished, because the calls in a round run at once.
+A Tool in a program that uses Foundation Models 27 directly sees the same entries.
+
+Core ML, Private Cloud Compute, `FoundationLanguageModel`,
+and the system model don't run `onToolCall` or `onToolOutput` yet.
 
 The system model, Private Cloud Compute, and `FoundationLanguageModel`
 run tools in a native Foundation Models session.

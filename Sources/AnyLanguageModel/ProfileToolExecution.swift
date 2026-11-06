@@ -202,8 +202,9 @@ extension LanguageModelSession {
     /// The delegate hears about the round, then decides each call in order; a `.stop` ends the
     /// round before any call runs. The calls then run at once, as Foundation Models runs them:
     /// a tool can be called concurrently with itself or with other tools, so one that isn't
-    /// safe to run alongside others serializes its own work. Each sees the history as the round
-    /// began. Once they're done, the profile and the delegate hear about each call in the order
+    /// safe to run alongside others serializes its own work. Each sees the earlier rounds and
+    /// every call in this round, but not the outputs of the other calls in this round.
+    /// Once they're done, the profile and the delegate hear about each call in the order
     /// the model made them, one at a time, and the results keep that order.
     ///
     /// When a call throws, the round is cancelled first: the other calls are cancelled and

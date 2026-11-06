@@ -103,6 +103,13 @@ public final class SessionPropertyValues: @unchecked Sendable {
 
     /// The canonical session history after dynamic instructions.
     ///
+    /// During a response from OpenAI, Open Responses, Anthropic, Gemini, Ollama, MLX,
+    /// or llama.cpp, a Tool's `call` reads the calls and outputs of the response's
+    /// earlier tool rounds and every call in the current round, including its own call.
+    /// It doesn't read the outputs of the other calls in the current round,
+    /// even the ones that have finished, because the calls in a round run at once.
+    /// A Tool in a program that uses Foundation Models 27 directly reads the same entries.
+    ///
     /// - Important: Setting this property from dynamic instructions or a Tool's `call`
     ///   stops the process with a precondition failure.
     public var history: Transcript.HistoryView {
