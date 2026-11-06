@@ -160,6 +160,11 @@ public struct GenerationOptions: Sendable, Equatable {
     /// a ``ToolExecutionDelegate`` stops the response,
     /// dynamic instructions remove the tools,
     /// or a round of tool calls past ``maximumToolRounds`` ends the response.
+    /// ``SystemLanguageModel``, ``PrivateCloudComputeLanguageModel``, and ``FoundationLanguageModel``
+    /// ignore ``maximumToolRounds``,
+    /// so with them, end the loop with a delegate's ``ToolExecutionDecision/stop``
+    /// or with dynamic instructions that remove the tools.
+    /// Without tools, a required request to these models throws a Foundation Models error.
     ///
     /// - Note: This API is exclusive to AnyLanguageModel on OS 26.
     ///   It follows the Foundation Models 27 `GenerationOptions.toolCallingMode` API,

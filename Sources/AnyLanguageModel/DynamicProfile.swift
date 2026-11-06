@@ -346,6 +346,14 @@ extension LanguageModelSession.DynamicProfile {
     /// before it changes the transcript or runs any of the profile's actions.
     /// If the modifier appears more than once, the innermost one sets the model.
     ///
+    /// Create the model outside ``body``.
+    /// Each OpenAI, Open Responses, Anthropic, Gemini, or Ollama model that you create
+    /// has its own identity, which copies share,
+    /// so one created in ``body`` is a different model on each evaluation,
+    /// and each continuation after tool calls hands the response off to the new one.
+    /// With the OpenAI Responses API and Open Responses,
+    /// the next request then leaves out the reasoning item and the function call's `id`.
+    ///
     /// - Parameter model: The model to use.
     /// - Returns: A profile that uses the model.
     ///
@@ -365,6 +373,14 @@ extension LanguageModelSession.DynamicProfile {
     /// ``LanguageModelSession/DynamicProfileError/missingModel``
     /// before it changes the transcript or runs any of the profile's actions.
     /// If the modifier appears more than once, the innermost one sets the model.
+    ///
+    /// Create the model outside ``body``.
+    /// Each OpenAI, Open Responses, Anthropic, Gemini, or Ollama model that you create
+    /// has its own identity, which copies share,
+    /// so one created in ``body`` is a different model on each evaluation,
+    /// and each continuation after tool calls hands the response off to the new one.
+    /// With the OpenAI Responses API and Open Responses,
+    /// the next request then leaves out the reasoning item and the function call's `id`.
     ///
     /// - Parameter model: The model to use.
     /// - Returns: A profile that uses the model.
@@ -502,7 +518,7 @@ extension LanguageModelSession.DynamicProfile {
     ///
     /// - Note: This API is exclusive to AnyLanguageModel on OS 26.
     ///   It follows the Foundation Models 27 `transcriptErrorHandlingPolicy(_:)` modifier,
-    ///   so code that uses it ports to Foundation Models on OS 27.
+    ///   which isn't available on tvOS.
     public func transcriptErrorHandlingPolicy(
         _ policy: TranscriptErrorHandlingPolicy?
     ) -> some LanguageModelSession.DynamicProfile {

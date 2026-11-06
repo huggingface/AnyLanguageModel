@@ -90,7 +90,7 @@ session.toolExecutionDelegate = ToolExecutionObserver()
 
 - Swift 6.3+ (Xcode 26.4+);
   `PrivateCloudComputeLanguageModel` and `FoundationLanguageModel`
-  compile only with Swift 6.4+ (Xcode 27+)
+  compile only with Swift 6.4+ (Xcode 27+) and aren't available on tvOS
 - iOS 17.0+ / macOS 14.0+ / visionOS 1.0+ / Linux
 
 ## Installation
@@ -491,12 +491,16 @@ session.toolExecutionDelegate = ToolExecutionObserver()
 
 When a delegate returns `.stop`,
 the response ends with the tool calls that stopped it.
-`respond` returns an empty value:
-`""` for `String`, or `[]` for an array,
-even if the model wrote text before the tool calls.
+`respond` returns an empty value,
+even if the model wrote text before the tool calls:
+`""` for `String`, and otherwise the first of `{}`, `null`, and `[]`
+that decodes as the type.
+After a profile hands the response off to another model,
+a `String` response starts with the text from before the hand-off.
 A stream keeps its last snapshot if that snapshot decodes as the complete type,
 so a `String` stream ends with the text so far.
 Otherwise, a stream also ends with an empty value.
+Structured streams from MLX and llama.cpp follow the rule for `respond`.
 A type that can't be empty, such as one with required properties,
 a number, or a Boolean,
 throws `LanguageModelSession.ToolExecutionStopped` instead,
@@ -627,6 +631,11 @@ a `ToolExecutionDelegate` stops the response,
 dynamic instructions remove the tools,
 or a round of tool calls past `maximumToolRounds`
 ends the response with `LanguageModelSession.ToolRoundLimitExceeded`.
+`SystemLanguageModel`, `PrivateCloudComputeLanguageModel`, and `FoundationLanguageModel`
+ignore `maximumToolRounds`,
+so with them, end the loop with a delegate's `.stop`
+or with dynamic instructions that remove the tools.
+Without tools, a `required` request to these models throws a Foundation Models error.
 
 > [!NOTE]
 > Anthropic rejects `{"type": "any"}`
@@ -716,9 +725,14 @@ unless the transform writes to the `history` session property.
 instructions, and tools. The built-in `history` property is writable from a
 profile or lifecycle callback and read-only while dynamic instructions or a Tool
 is active.
-Writing `history` from dynamic instructions or a Tool stops the process,
-and so does reading or writing a `@SessionProperty`
-outside a session's profile, dynamic instructions, or Tool.
+Writing `history` from dynamic instructions or a Tool's `call` stops the process.
+So does reading or writing a `@SessionProperty` anywhere except
+a session's profile, including its callbacks and history transforms,
+its dynamic instructions, and a Tool's `call` during its response.
+For example, calling a Tool's `call` directly,
+reading a property in a Tool's `description`,
+and reading one in a `ToolExecutionDelegate` all stop the process.
+Use `session.properties` in those places.
 
 The five HTTP providers (OpenAI, Open Responses, Anthropic, Gemini, and Ollama)
 evaluate the profile and its history transforms again
@@ -726,11 +740,14 @@ before each request that continues a response after tool calls,
 and run `onToolCall` and `onToolOutput`.
 With these providers, a Tool's `history` property includes
 the tool calls and outputs of the current response, including the Tool's own call.
-Create the model outside `body`, as `EditingProfile` does.
-Each value of these models has its own identity,
+
+Create a profile's model outside `body`, as `EditingProfile` does.
+Each model that these providers create has its own identity, which copies share,
 so `.model(OpenAILanguageModel(apiKey: key, model: name))` in `body`
 selects a different model on each evaluation,
-and each continuation hands the response off to a new value.
+and each continuation hands the response off to the new one.
+With the OpenAI Responses API and Open Responses,
+the next request then leaves out the reasoning item and the function call's `id`.
 
 MLX, llama.cpp, Core ML, Private Cloud Compute, `FoundationLanguageModel`,
 and the system model don't run `onToolCall` or `onToolOutput` yet.
@@ -1204,6 +1221,9 @@ say which API they follow.
 - `GenerationOptions.maximumToolRounds` and `LanguageModelSession.ToolRoundLimitExceeded`:
   the most rounds of tool calls one response may take,
   and the error that ends a response past it.
+  `SystemLanguageModel`, `PrivateCloudComputeLanguageModel`, and `FoundationLanguageModel`
+  ignore the limit, so end their tool loops
+  [another way](#foundation-models-27-request-options).
 - `responseStartTimeout` on remote models:
   how long a [streamed request](#http-transport) waits for its response to start.
 - Public initializers for `Response`, `ResponseStream`, `ResponseStream.Snapshot`,
@@ -1229,11 +1249,12 @@ say which API they follow.
   not as a structured segment.
 - A session created from a transcript restores `instructions`
   only when the first entry is instructions with a single text segment.
-- Writing the `history` session property from dynamic instructions or a Tool
+- Writing the `history` session property from dynamic instructions or a Tool's `call`
   stops the process with a precondition failure.
   Foundation Models 27 ignores the write.
-- Reading or writing a `@SessionProperty` outside a session's profile,
-  dynamic instructions, or Tool stops the process.
+- Reading or writing a `@SessionProperty` outside the scopes
+  that [Dynamic Profiles](#dynamic-profiles) lists stops the process.
+  Use `session.properties` there.
   In Foundation Models 27, the read returns the key's default value,
   and the write has no effect.
 
@@ -1243,6 +1264,10 @@ say which API they follow.
 
 Uses Apple's [system language model](https://developer.apple.com/documentation/FoundationModels)
 (requires macOS 26 / iOS 26 / visionOS 26 or later).
+Builds with Swift 6.4 or later leave `SystemLanguageModel` out on tvOS,
+where the SDK marks it unavailable.
+So where this README describes what the model does on tvOS,
+such as throwing an error, that applies only to builds with Swift 6.3.
 
 ```swift
 let model = SystemLanguageModel.default

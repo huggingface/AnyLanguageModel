@@ -4,8 +4,8 @@ import Observation
 /// Controls transcript retention when generation fails or is cancelled.
 ///
 /// - Note: This API is exclusive to AnyLanguageModel on OS 26.
-///   It follows the Foundation Models 27 `TranscriptErrorHandlingPolicy` API,
-///   so code that uses it ports to Foundation Models on OS 27.
+///   It follows the Foundation Models 27 `TranscriptErrorHandlingPolicy` type,
+///   which isn't available on tvOS and isn't `Equatable`.
 public struct TranscriptErrorHandlingPolicy: Sendable, Equatable {
     private let shouldRevert: Bool
 
@@ -30,7 +30,7 @@ public final class LanguageModelSession: @unchecked Sendable {
     ///
     /// - Note: This property is exclusive to AnyLanguageModel on OS 26.
     ///   It follows the Foundation Models 27 `transcriptErrorHandlingPolicy` property,
-    ///   so code that uses it ports to Foundation Models on OS 27.
+    ///   which isn't available on tvOS.
     public var transcriptErrorHandlingPolicy: TranscriptErrorHandlingPolicy? {
         get {
             access(keyPath: \.transcriptErrorHandlingPolicy)
