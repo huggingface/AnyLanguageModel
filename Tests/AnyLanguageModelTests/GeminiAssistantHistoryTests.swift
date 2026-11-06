@@ -209,6 +209,65 @@ struct GeminiAssistantHistoryTests {
         )
     }
 
+    /// A stopped stream's response is the round's text. The other builders can't read Gemini's
+    /// text parts, so they send that response, once.
+    @Test
+    func aStoppedStreamSendsItsTextOnceInOtherBuilders() async throws {
+        let transport = FakeTransport(replies: [
+            try Self.reply(parts: [Self.text("Checking."), Self.call], streaming: true)
+        ])
+        let source = LanguageModelSession(model: Self.model(transport), tools: [WeatherTool()])
+        source.toolExecutionDelegate = StoppingGeminiDelegate()
+        _ = try await source.streamResponse(to: "Weather?").collect()
+
+        let bye = #"{"id": "r", "output": [{"type": "message", "content": [{"type": "output_text", "text": "Bye."}]}]}"#
+        let chatBye = #"{"id": "c", "choices": [{"index": 0, "message": {"role": "assistant", "content": "Bye."}}]}"#
+        let models: [(FakeTransport) -> any LanguageModel] = [
+            { OpenAILanguageModel(apiKey: "t", model: "t", apiVariant: .chatCompletions, transport: $0) },
+            { OpenAILanguageModel(apiKey: "t", model: "t", apiVariant: .responses, transport: $0) },
+            {
+                OpenResponsesLanguageModel(
+                    baseURL: URL(string: "https://example.com/v1/")!,
+                    apiKey: "t",
+                    model: "t",
+                    transport: $0
+                )
+            },
+        ]
+        for (index, model) in models.enumerated() {
+            let next = FakeTransport(replies: [.init(chunks: [index == 0 ? chatBye : bye])])
+            let session = LanguageModelSession(model: model(next), transcript: source.transcript)
+            _ = try await session.respond(to: "Thanks")
+            let body = String(decoding: next.bodies[0], as: UTF8.self)
+            #expect(body.components(separatedBy: "Checking.").count - 1 == 1)
+        }
+    }
+
+    /// A transform that empties a stopped stream's response removes the round's text too.
+    @Test
+    func emptyingAStoppedStreamsResponseRemovesItsText() async throws {
+        let transport = FakeTransport(replies: [
+            try Self.reply(parts: [Self.text("SECRET."), Self.call], streaming: true),
+            try Self.reply(parts: [Self.text("Bye.")], streaming: true),
+        ])
+        let session = LanguageModelSession(
+            profile: LanguageModelSession.Profile { WeatherTool() }
+                .model(Self.model(transport))
+                .historyTransform { entries in
+                    entries.map { entry in
+                        guard case .response(var response) = entry else { return entry }
+                        response.segments = [.text(.init(content: ""))]
+                        return .response(response)
+                    }
+                }
+        )
+        session.toolExecutionDelegate = StoppingGeminiDelegate()
+        _ = try await Self.ask(session, "Weather?", streaming: true)
+        _ = try await Self.ask(session, "Thanks", streaming: true)
+
+        #expect(!String(decoding: transport.bodies[1], as: UTF8.self).contains("SECRET."))
+    }
+
     @Test(arguments: [false, true])
     func aSignedStructuredAnswerFollowsItsEdits(edited: Bool) async throws {
         let transport = FakeTransport(replies: [

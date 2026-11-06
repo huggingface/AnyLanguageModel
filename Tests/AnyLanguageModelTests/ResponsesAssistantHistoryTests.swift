@@ -57,6 +57,7 @@ struct ResponsesAssistantHistoryTests {
     private static func toolReply(
         _ text: String = "",
         reasoning: Bool = false,
+        callID: String = "call_1",
         streaming: Bool
     ) throws -> FakeTransport.Reply {
         var output: [[String: Any]] = []
@@ -65,7 +66,7 @@ struct ResponsesAssistantHistoryTests {
         }
         if !text.isEmpty { output.append(message(text)) }
         output.append([
-            "type": "function_call", "id": "fc_1", "call_id": "call_1", "name": "getWeather",
+            "type": "function_call", "id": "fc_1", "call_id": callID, "name": "getWeather",
             "arguments": #"{"city":"Paris"}"#,
         ])
         return try reply(output: output, text: text, streaming: streaming)
@@ -409,9 +410,9 @@ struct ResponsesAssistantHistoryTests {
         OpenAILanguageModel(apiKey: "test", model: "test", apiVariant: .chatCompletions, transport: transport)
     }
 
-    private static func chatToolReply(_ text: String) -> FakeTransport.Reply {
+    private static func chatToolReply(_ text: String, callID: String = "call_1") -> FakeTransport.Reply {
         .init(chunks: [
-            #"{"id": "c", "choices": [{"index": 0, "message": {"role": "assistant", "content": "\#(text)", "reasoning_content": "Hmm.", "tool_calls": [{"id": "call_1", "type": "function", "function": {"name": "getWeather", "arguments": "{\"city\": \"Paris\"}"}}]}}]}"#
+            #"{"id": "c", "choices": [{"index": 0, "message": {"role": "assistant", "content": "\#(text)", "reasoning_content": "Hmm.", "tool_calls": [{"id": "\#(callID)", "type": "function", "function": {"name": "getWeather", "arguments": "{\"city\": \"Paris\"}"}}]}}]}"#
         ])
     }
 
@@ -886,6 +887,60 @@ struct ResponsesAssistantHistoryTests {
         #expect(first.content == "Checking.Sunny.")
         let body = String(decoding: anthropic.bodies[1], as: UTF8.self)
         #expect(body.contains("Checking.Sunny."))
+    }
+
+    // MARK: Several tool rounds
+
+    private static let twoRounds = [
+        "user: Weather?",
+        "assistant: First.", "call: call_1", "output: call_1",
+        "assistant: Second.", "call: call_2", "output: call_2",
+    ]
+
+    @Test(arguments: Builder.allCases, [false, true])
+    func eachToolRoundsTextGoesWithItsOwnCalls(builder: Builder, streaming: Bool) async throws {
+        let transport = FakeTransport(replies: [
+            try Self.toolReply("First.", callID: "call_1", streaming: streaming),
+            try Self.toolReply("Second.", callID: "call_2", streaming: streaming),
+            try Self.textReply("Done.", streaming: streaming),
+            try Self.textReply("Bye.", streaming: streaming),
+        ])
+        let session = LanguageModelSession(model: builder.makeModel(transport), tools: [WeatherTool()])
+        let first = try await Self.ask(session, "Weather?", streaming: streaming)
+        _ = try await Self.ask(session, "Thanks", streaming: streaming)
+
+        #expect(first == "First.Second.Done.")
+        #expect(try Self.labels(transport.bodies[2]) == Self.twoRounds)
+        #expect(try Self.labels(transport.bodies[3]) == Self.twoRounds + ["assistant: Done.", "user: Thanks"])
+    }
+
+    @Test(arguments: [false, true])
+    func eachChatCompletionsToolRoundsTextGoesWithItsOwnCalls(streaming: Bool) async throws {
+        func toolCall(_ id: String) -> String {
+            #"{"tool_calls": [{"index": 0, "id": "\#(id)", "type": "function", "function": {"name": "getWeather", "arguments": "{\"city\": \"Paris\"}"}}]}"#
+        }
+        let transport = FakeTransport(
+            replies: streaming
+                ? [
+                    Self.chatStream([#"{"content": "First."}"#, toolCall("call_1")]),
+                    Self.chatStream([#"{"content": "Second."}"#, toolCall("call_2")]),
+                    Self.chatStream([#"{"content": "Done."}"#]),
+                    Self.chatStream([#"{"content": "Bye."}"#]),
+                ]
+                : [
+                    Self.chatToolReply("First.", callID: "call_1"),
+                    Self.chatToolReply("Second.", callID: "call_2"),
+                    Self.chatTextReply("Done."),
+                    Self.chatTextReply("Bye."),
+                ]
+        )
+        let session = LanguageModelSession(model: Self.chatModel(transport), tools: [WeatherTool()])
+        let first = try await Self.ask(session, "Weather?", streaming: streaming)
+        _ = try await Self.ask(session, "Thanks", streaming: streaming)
+
+        #expect(first == "First.Second.Done.")
+        #expect(try Self.labels(transport.bodies[2]) == Self.twoRounds)
+        #expect(try Self.labels(transport.bodies[3]) == Self.twoRounds + ["assistant: Done.", "user: Thanks"])
     }
 
     // MARK: Item order

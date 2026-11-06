@@ -547,7 +547,10 @@ public struct GeminiLanguageModel: LanguageModel, ProfileRequestIdentifiedLangua
                             continuation.yield(
                                 try state.stoppedSnapshot(
                                     provider: "Gemini",
-                                    providerMetadata: responseContentMetadata(state.responseText, roundText: "")
+                                    // A string response is the round's text, which replay can tell by itself.
+                                    // Other providers can't read the round's text parts, so they send the response.
+                                    providerMetadata: type == String.self
+                                        ? nil : responseContentMetadata(state.responseText, roundText: "")
                                 )
                             )
                             continuation.finish()
