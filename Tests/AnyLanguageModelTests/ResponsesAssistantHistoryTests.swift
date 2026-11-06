@@ -992,6 +992,98 @@ struct ResponsesAssistantHistoryTests {
         #expect(try Self.labels(body) == ["user: Weather?", "call: call_1", "output: call_1", "user: Thanks"])
     }
 
+    // MARK: Stopped structured streams
+
+    /// The JSON that a stream emitted with its tool call is the stopped response's text,
+    /// so it isn't also the tool round's, and an edit to the response removes it.
+    @Test(arguments: Builder.allCases, [false, true])
+    func aStoppedStructuredStreamSendsItsResponseOnce(builder: Builder, edited: Bool) async throws {
+        let json = #"{"text":"SECRET"}"#
+        let transport = FakeTransport(replies: [
+            try Self.toolReply(json, streaming: true),
+            try Self.textReply("Bye.", streaming: true),
+        ])
+        try await expectStoppedStructuredStream(
+            model: builder.makeModel(transport),
+            transport: transport,
+            edited: edited
+        )
+    }
+
+    @Test(arguments: [false, true])
+    func aStoppedStructuredChatCompletionsStreamSendsItsResponseOnce(edited: Bool) async throws {
+        let transport = FakeTransport(replies: [
+            Self.chatStream([
+                #"{"content": "{\"text\":\"SECRET\"}"}"#,
+                #"{"tool_calls": [{"index": 0, "id": "call_1", "type": "function", "function": {"name": "getWeather", "arguments": "{\"city\": \"Paris\"}"}}]}"#,
+            ]),
+            Self.chatStream([#"{"content": "Bye."}"#]),
+        ])
+        try await expectStoppedStructuredStream(model: Self.chatModel(transport), transport: transport, edited: edited)
+    }
+
+    private func expectStoppedStructuredStream(
+        model: any LanguageModel,
+        transport: FakeTransport,
+        edited: Bool
+    ) async throws {
+        let redacted = #"{"text":"REDACTED"}"#
+        let session = LanguageModelSession(
+            profile: LanguageModelSession.Profile { WeatherTool() }
+                .model(model)
+                .historyTransform { entries in
+                    guard edited else { return entries }
+                    return entries.map { entry in
+                        guard case .response(var response) = entry else { return entry }
+                        response.segments = [.text(.init(content: redacted))]
+                        return .response(response)
+                    }
+                }
+        )
+        session.toolExecutionDelegate = StoppingDelegate()
+        let greeting = try await session.streamResponse(to: "Hello", generating: Greeting.self).collect().content
+        #expect(greeting.text == "SECRET")
+        _ = try await Self.ask(session, "Thanks", streaming: true)
+
+        let labels = try Self.labels(transport.bodies[1])
+        #expect(
+            Array(labels.dropFirst()) == [
+                "call: call_1", "assistant: \(edited ? redacted : #"{"text":"SECRET"}"#)", "user: Thanks",
+            ]
+        )
+    }
+
+    /// With only the key for the text as written, nothing says what the response replays.
+    @Test(arguments: Builder.allCases)
+    func partlyPresentMetadataSendsTheSegmentsOnce(builder: Builder) async throws {
+        let call = Transcript.ToolCall(
+            id: "call_1",
+            toolName: "getWeather",
+            arguments: try GeneratedContent(json: #"{"city":"Paris"}"#)
+        )
+        let transcript = Transcript(entries: [
+            .prompt(.init(segments: [.text(.init(content: "Weather?"))])),
+            .toolCalls(.init([call], providerMetadata: ["openai.content": "Checking."])),
+            .toolOutput(.init(id: "call_1", toolName: "getWeather", segments: [.text(.init(content: "Sunny"))])),
+            .response(
+                .init(
+                    assetIDs: [],
+                    segments: [.text(.init(content: "Checking.Sunny."))],
+                    providerMetadata: ["openai.responseText": "Checking.Sunny."]
+                )
+            ),
+        ])
+        let transport = FakeTransport(replies: [try Self.textReply("Bye.", streaming: false)])
+        let session = LanguageModelSession(model: builder.makeModel(transport), transcript: transcript)
+        _ = try await session.respond(to: "Thanks")
+
+        #expect(
+            try Self.labels(transport.bodies[0]) == [
+                "user: Weather?", "call: call_1", "output: call_1", "assistant: Checking.Sunny.", "user: Thanks",
+            ]
+        )
+    }
+
     // MARK: Server state
 
     @Test(arguments: [false, true])

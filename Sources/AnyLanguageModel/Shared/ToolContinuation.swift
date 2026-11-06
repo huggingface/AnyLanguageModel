@@ -305,25 +305,30 @@ extension Transcript {
     /// Otherwise, the response's segments are the turn's text,
     /// and the rounds send only their calls.
     /// The same goes for a finished turn without a response.
-    /// A structured response doesn't include its rounds' text, so they always keep it.
+    /// A structured response doesn't include its rounds' text, so they keep it,
+    /// except for a stopped stream's text, which is the response's own.
     var replayEntries: [Entry] {
         var entries = Array(self)
-        var start = entries.startIndex
-        while start < entries.endIndex {
-            let next = entries.indices.dropFirst(start + 1).first {
-                if case .prompt = entries[$0] { true } else { false }
-            }
-            let end = next ?? entries.endIndex
-            resolveAssistantText(in: &entries, turn: start ..< end, isLast: next == nil)
-            start = end
+        for turn in assistantTurns(entries) {
+            resolveAssistantText(in: &entries, turn: turn.range, isLast: turn.isLast)
         }
         return entries
     }
 
     private func resolveAssistantText(in entries: inout [Entry], turn: Range<Int>, isLast: Bool) {
-        if case .prompt(let prompt) = entries[turn.lowerBound], prompt.responseFormat != nil { return }
         let responses = entries[turn].compactMap { entry -> Response? in
             if case .response(let response) = entry { response } else { nil }
+        }
+        if case .prompt(let prompt) = entries[turn.lowerBound], prompt.responseFormat != nil {
+            let written = Set(responses.compactMap { $0.providerMetadata?[responseTextMetadataKey] })
+            for index in turn {
+                guard case .toolCalls(var calls) = entries[index],
+                    let text = calls.providerMetadata?[assistantContentMetadataKey], written.contains(text)
+                else { continue }
+                calls.providerMetadata?[assistantContentMetadataKey] = nil
+                entries[index] = .toolCalls(calls)
+            }
+            return
         }
         let isCurrent = responses.isEmpty ? isLast : responses.allSatisfy(\.isUnchanged)
         for index in turn {
@@ -343,10 +348,27 @@ extension Transcript {
     }
 }
 
+/// The ranges of the turns in `entries`, each from a prompt up to the next prompt.
+func assistantTurns(_ entries: [Transcript.Entry]) -> [(range: Range<Int>, isLast: Bool)] {
+    var turns: [(range: Range<Int>, isLast: Bool)] = []
+    var start = entries.startIndex
+    while start < entries.endIndex {
+        let next = entries.indices.dropFirst(start + 1).first {
+            if case .prompt = entries[$0] { true } else { false }
+        }
+        let end = next ?? entries.endIndex
+        turns.append((start ..< end, next == nil))
+        start = end
+    }
+    return turns
+}
+
 extension Transcript.Response {
     /// Whether the response's segments are the text that its metadata was written for.
     fileprivate var isUnchanged: Bool {
-        guard let written = providerMetadata?[responseTextMetadataKey] else { return false }
+        guard let written = providerMetadata?[responseTextMetadataKey],
+            providerMetadata?[assistantContentMetadataKey] != nil
+        else { return false }
         var text = ""
         for segment in segments {
             guard case .text(let segment) = segment else { return false }
