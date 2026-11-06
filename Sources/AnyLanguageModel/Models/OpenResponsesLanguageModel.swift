@@ -780,7 +780,8 @@ public struct OpenResponsesLanguageModel: LanguageModel, ProfileRequestIdentifie
                         generating: type,
                         provider: "Open Responses",
                         transcriptEntries: entries,
-                        requests: usage
+                        requests: usage,
+                        providerMetadata: stoppedResponseContentMetadata
                     )
                 case .invocations(let invocations):
                     if !invocations.isEmpty {
@@ -1113,7 +1114,7 @@ private enum OpenResponsesBlock: Sendable {
 extension Transcript {
     fileprivate func toOpenResponsesMessages() -> [OpenResponsesMessage] {
         var list: [OpenResponsesMessage] = []
-        for item in self {
+        for item in replayEntries {
             switch item {
             case .instructions(let inst):
                 list.append(
@@ -1136,7 +1137,7 @@ extension Transcript {
                 list.append(
                     OpenResponsesMessage(
                         role: .assistant(id: "msg_\(response.id)"),
-                        content: .blocks(openResponsesConvertSegmentsToBlocks(response.replayedSegments))
+                        content: .blocks(openResponsesConvertSegmentsToBlocks(response.segments))
                     )
                 )
             case .toolCalls(let toolCalls):

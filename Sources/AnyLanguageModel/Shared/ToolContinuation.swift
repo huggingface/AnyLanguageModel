@@ -232,55 +232,126 @@ func toolContinuationMessages<Message>(
 // MARK: - Assistant text in tool rounds
 
 /// Key under which the assistant's text for a tool round is kept in
-/// ``Transcript/ToolCalls/providerMetadata``.
+/// ``Transcript/ToolCalls/providerMetadata``, and the text that a response replays in
+/// ``Transcript/Response/providerMetadata``.
 ///
 /// Chat Completions, the OpenAI Responses API, and Open Responses share this key,
 /// so a transcript that moves between them replays each piece of text once.
 /// The key keeps its original name because saved transcripts contain it.
 let assistantContentMetadataKey = "openai.content"
 
+/// Key under which a response keeps its text as written, so that replay can tell
+/// when a caller has edited the response since then.
+let responseTextMetadataKey = "openai.responseText"
+
 func assistantContentMetadata(_ text: String?) -> [String: String]? {
     guard let text, !text.isEmpty else { return nil }
     return [assistantContentMetadataKey: text]
 }
 
-/// The text that a string response replays, kept in
-/// ``Transcript/Response/providerMetadata`` when it differs from the response's content.
+/// The metadata of a string response whose content differs from the text it replays.
 ///
 /// A string response includes the text of every tool round,
 /// but replay already sends each round's text with that round's calls.
 /// The response keeps only the final round's text,
 /// so replay sends each piece of text once, as the requests in flight did.
 func responseContentMetadata(_ responseText: String, roundText: String) -> [String: String]? {
-    responseText == roundText ? nil : [assistantContentMetadataKey: roundText]
+    guard responseText != roundText else { return nil }
+    return [assistantContentMetadataKey: roundText, responseTextMetadataKey: responseText]
 }
+
+/// The metadata of the empty response of a stopped request,
+/// which leaves the text of its tool rounds to replay with their calls.
+let stoppedResponseContentMetadata = [assistantContentMetadataKey: "", responseTextMetadataKey: ""]
 
 /// The metadata of a response that a model handoff continues after `prefixEntries`.
 ///
 /// The handoff adds `prefixText` to the response's content.
-/// When the tool rounds in `prefixEntries` carry all of that text,
-/// replay already sends it with their calls, so the response keeps only its own text.
-/// Otherwise, a round's text is only in the response, and the metadata doesn't change.
+/// Replay sends the part of it that tool rounds carry with their calls.
+/// The rest has no other place, so the response keeps it, before its own text.
 func handoffResponseMetadata(
     _ metadata: [String: String]?,
     responseText: String,
     prefixText: String,
     prefixEntries: [Transcript.Entry]
 ) -> [String: String]? {
-    guard !prefixText.isEmpty, metadata?[assistantContentMetadataKey] == nil else { return metadata }
-    let carriedText = prefixEntries.compactMap { entry -> String? in
-        guard case .toolCalls(let calls) = entry else { return nil }
-        return calls.providerMetadata?[assistantContentMetadataKey]
-    }.joined()
-    guard carriedText == prefixText else { return metadata }
-    return (metadata ?? [:]).merging([assistantContentMetadataKey: responseText]) { current, _ in current }
+    guard !prefixText.isEmpty else { return metadata }
+    var uncarried = ""
+    var remaining = prefixText[...]
+    for case .toolCalls(let calls) in prefixEntries {
+        guard let text = calls.providerMetadata?[assistantContentMetadataKey],
+            let range = remaining.range(of: text)
+        else { continue }
+        uncarried += remaining[..<range.lowerBound]
+        remaining = remaining[range.upperBound...]
+    }
+    uncarried += remaining
+    let combined = prefixText + responseText
+    let replayed = uncarried + (metadata?[assistantContentMetadataKey] ?? responseText)
+    guard replayed != combined else { return metadata }
+    return (metadata ?? [:]).merging(
+        [assistantContentMetadataKey: replayed, responseTextMetadataKey: combined]
+    ) { _, new in new }
+}
+
+extension Transcript {
+    /// The entries to send on replay, with each turn's assistant text resolved:
+    /// each response has the segments to send,
+    /// and only tool rounds whose text is still current have it in their metadata.
+    ///
+    /// A string response shows the caller the text of its turn's tool rounds,
+    /// and a caller can edit, rebuild, or remove the response but can't see the metadata.
+    /// So the metadata applies only to a response that is unchanged since it was written.
+    /// Otherwise, the response's segments are the turn's text,
+    /// and the rounds send only their calls.
+    /// The same goes for a finished turn without a response.
+    /// A structured response doesn't include its rounds' text, so they always keep it.
+    var replayEntries: [Entry] {
+        var entries = Array(self)
+        var start = entries.startIndex
+        while start < entries.endIndex {
+            let next = entries.indices.dropFirst(start + 1).first {
+                if case .prompt = entries[$0] { true } else { false }
+            }
+            let end = next ?? entries.endIndex
+            resolveAssistantText(in: &entries, turn: start ..< end, isLast: next == nil)
+            start = end
+        }
+        return entries
+    }
+
+    private func resolveAssistantText(in entries: inout [Entry], turn: Range<Int>, isLast: Bool) {
+        if case .prompt(let prompt) = entries[turn.lowerBound], prompt.responseFormat != nil { return }
+        let responses = entries[turn].compactMap { entry -> Response? in
+            if case .response(let response) = entry { response } else { nil }
+        }
+        let isCurrent = responses.isEmpty ? isLast : responses.allSatisfy(\.isUnchanged)
+        for index in turn {
+            switch entries[index] {
+            case .response(var response):
+                guard isCurrent, let text = response.providerMetadata?[assistantContentMetadataKey] else { continue }
+                response.segments = [.text(.init(content: text))]
+                entries[index] = .response(response)
+            case .toolCalls(var calls):
+                guard !isCurrent else { continue }
+                calls.providerMetadata?[assistantContentMetadataKey] = nil
+                entries[index] = .toolCalls(calls)
+            default:
+                continue
+            }
+        }
+    }
 }
 
 extension Transcript.Response {
-    /// The segments to send when this response is replayed.
-    var replayedSegments: [Transcript.Segment] {
-        providerMetadata?[assistantContentMetadataKey].map {
-            [Transcript.Segment.text(.init(content: $0))]
-        } ?? segments
+    /// Whether the response's segments are the text that its metadata was written for.
+    fileprivate var isUnchanged: Bool {
+        guard let written = providerMetadata?[responseTextMetadataKey] else { return false }
+        var text = ""
+        for segment in segments {
+            guard case .text(let segment) = segment else { return false }
+            text += segment.content
+        }
+        return text == written
     }
 }

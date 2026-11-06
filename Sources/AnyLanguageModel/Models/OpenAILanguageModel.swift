@@ -635,7 +635,8 @@ public struct OpenAILanguageModel: LanguageModel, ProfileRequestIdentifiedLangua
                         generating: type,
                         provider: "OpenAI",
                         transcriptEntries: entries,
-                        requests: usage
+                        requests: usage,
+                        providerMetadata: stoppedResponseContentMetadata
                     )
                 case .invocations(let invocations):
                     if !invocations.isEmpty {
@@ -788,7 +789,8 @@ public struct OpenAILanguageModel: LanguageModel, ProfileRequestIdentifiedLangua
                         generating: type,
                         provider: "OpenAI",
                         transcriptEntries: entries,
-                        requests: usage
+                        requests: usage,
+                        providerMetadata: stoppedResponseContentMetadata
                     )
                 case .invocations(let invocations):
                     if !invocations.isEmpty {
@@ -1718,7 +1720,7 @@ extension Transcript {
         // A Chat Completions reasoning entry goes back on the assistant message right after
         // it, when the request goes to the host that wrote it.
         var pendingReasoning: Transcript.Reasoning?
-        for item in self {
+        for item in replayEntries {
             let reasoning = pendingReasoning
             pendingReasoning = nil
             switch item {
@@ -1744,7 +1746,7 @@ extension Transcript {
                 messages.append(
                     .init(
                         role: .assistant,
-                        content: .blocks(convertSegmentsToOpenAIBlocks(response.replayedSegments)),
+                        content: .blocks(convertSegmentsToOpenAIBlocks(response.segments)),
                         reasoning: ChatCompletionsReasoning(reasoning, sentTo: host).fields
                     )
                 )
