@@ -416,6 +416,26 @@ import Testing
         }
 
         @Test(arguments: [false, true])
+        func toolRoundsKeepOneEntry(_ streaming: Bool) async throws {
+            try await expectOneEntryForEachToolRound(
+                model: model,
+                streaming: streaming,
+                prompt: "Open the front door. /no_think",
+                options: GenerationOptions(sampling: .greedy, maximumResponseTokens: 512)
+            )
+        }
+
+        @Test(arguments: [false, true])
+        func stoppedToolRoundKeepsItsEntry(_ streaming: Bool) async throws {
+            try await expectStoppedToolRoundKeepsItsEntry(
+                model: model,
+                streaming: streaming,
+                prompt: "Open the front door. /no_think",
+                options: GenerationOptions(sampling: .greedy, maximumResponseTokens: 512)
+            )
+        }
+
+        @Test(arguments: [false, true])
         func structuredResponseWithTools(_ streaming: Bool) async throws {
             let weatherTool = spy(on: WeatherTool())
             let session = LanguageModelSession(

@@ -710,16 +710,20 @@ import Foundation
             }
         }
 
+        /// Resolves a round of tool calls.
+        ///
+        /// The returned entry is the one that callbacks and tools saw,
+        /// so the caller records it rather than a new entry with a different ID.
         private func resolveToolCalls(
             _ parsedCalls: [LlamaParsedToolCall],
             requestContext: LanguageModelSession.RequestContext,
             offeredTools: [any Tool],
             currentRoundEntries: [Transcript.Entry],
             session: LanguageModelSession
-        ) async throws -> ToolResolutionOutcome {
-            if parsedCalls.isEmpty { return .invocations([]) }
+        ) async throws -> (calls: Transcript.ToolCalls, outcome: ToolResolutionOutcome) {
             let transcriptCalls = try makeTranscriptToolCalls(from: parsedCalls)
-            let entries = currentRoundEntries + [.toolCalls(Transcript.ToolCalls(transcriptCalls))]
+            let callsEntry = Transcript.ToolCalls(transcriptCalls)
+            let entries = currentRoundEntries + [.toolCalls(callsEntry)]
             switch try await session.resolveProfileToolCalls(
                 transcriptCalls,
                 requestContext: requestContext,
@@ -727,9 +731,11 @@ import Foundation
                 offeredTools: offeredTools
             ) {
             case .stop(let calls):
-                return .stop(calls: calls)
+                return (callsEntry, .stop(calls: calls))
             case .invocations(let invocations):
-                return .invocations(invocations.map { ToolInvocationResult(call: $0.call, output: $0.output) })
+                return (
+                    callsEntry, .invocations(invocations.map { ToolInvocationResult(call: $0.call, output: $0.output) })
+                )
             }
         }
 
@@ -880,7 +886,7 @@ import Foundation
 
                 try session.recordToolRound(toolRounds, completed: allEntries)
 
-                let resolution = try await resolveToolCalls(
+                let (callsEntry, resolution) = try await resolveToolCalls(
                     parsedCalls,
                     requestContext: requestContext,
                     offeredTools: tools,
@@ -888,10 +894,8 @@ import Foundation
                     session: session
                 )
                 switch resolution {
-                case .stop(let calls):
-                    if !calls.isEmpty {
-                        allEntries.append(.toolCalls(Transcript.ToolCalls(calls)))
-                    }
+                case .stop:
+                    allEntries.append(.toolCalls(callsEntry))
                     return try stoppedResponse(
                         generating: type,
                         provider: "Llama",
@@ -902,11 +906,8 @@ import Foundation
                     guard !invocations.isEmpty else {
                         break generationLoop
                     }
-                    let callsEntry = Transcript.Entry.toolCalls(
-                        Transcript.ToolCalls(invocations.map(\.call))
-                    )
-                    allEntries.append(callsEntry)
-                    pendingEntries.append(callsEntry)
+                    allEntries.append(.toolCalls(callsEntry))
+                    pendingEntries.append(.toolCalls(callsEntry))
                     for invocation in invocations {
                         let outputEntry = Transcript.Entry.toolOutput(invocation.output)
                         allEntries.append(outputEntry)
@@ -1135,7 +1136,7 @@ import Foundation
 
                                 try session.recordToolRound(toolRounds, completed: accumulatedEntries)
 
-                                let resolution = try await self.resolveToolCalls(
+                                let (callsEntry, resolution) = try await self.resolveToolCalls(
                                     parsedCalls,
                                     requestContext: requestContext,
                                     offeredTools: tools,
@@ -1143,23 +1144,18 @@ import Foundation
                                     session: session
                                 )
                                 switch resolution {
-                                case .stop(let calls):
+                                case .stop:
                                     emittedBase += roundVisible
-                                    if !calls.isEmpty {
-                                        accumulatedEntries.append(.toolCalls(Transcript.ToolCalls(calls)))
-                                        yieldSnapshot(emittedBase)
-                                    }
+                                    accumulatedEntries.append(.toolCalls(callsEntry))
+                                    yieldSnapshot(emittedBase)
                                     break generationLoop
                                 case .invocations(let invocations):
                                     guard !invocations.isEmpty else {
                                         emittedBase += roundVisible
                                         break generationLoop
                                     }
-                                    let callsEntry = Transcript.Entry.toolCalls(
-                                        Transcript.ToolCalls(invocations.map(\.call))
-                                    )
-                                    accumulatedEntries.append(callsEntry)
-                                    pendingEntries.append(callsEntry)
+                                    accumulatedEntries.append(.toolCalls(callsEntry))
+                                    pendingEntries.append(.toolCalls(callsEntry))
                                     for invocation in invocations {
                                         let outputEntry = Transcript.Entry.toolOutput(invocation.output)
                                         accumulatedEntries.append(outputEntry)
