@@ -8,7 +8,7 @@ import Testing
 
 @testable import AnyLanguageModel
 
-#if canImport(FoundationModels) && !os(watchOS)
+#if canImport(FoundationModels) && (!os(tvOS) || compiler(<6.4)) && !os(watchOS)
     import class FoundationModels.LanguageModelSession
 
     private typealias LanguageModelSession = AnyLanguageModel.LanguageModelSession

@@ -1,6 +1,6 @@
 import Testing
 
-#if canImport(FoundationModels) && !os(watchOS)
+#if canImport(FoundationModels) && (!os(tvOS) || compiler(<6.4)) && !os(watchOS)
     import FoundationModels
 
     private let isFoundationModelsSystemLanguageModelAvailable: Bool = {
