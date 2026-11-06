@@ -88,7 +88,9 @@ session.toolExecutionDelegate = ToolExecutionObserver()
 
 ## Requirements
 
-- Swift 6.3+ (Xcode 26.4+)
+- Swift 6.3+ (Xcode 26.4+);
+  `PrivateCloudComputeLanguageModel` and `FoundationLanguageModel`
+  compile only with Swift 6.4+ (Xcode 27+)
 - iOS 17.0+ / macOS 14.0+ / visionOS 1.0+ / Linux
 
 ## Installation
@@ -427,8 +429,11 @@ pixel buffers, and newer data attachments remain outside this change.
 
 ### Tool Calling
 
-Tool calling is supported by all providers.
+Tool calling is supported by all providers except Core ML.
 For llama.cpp, it depends on the model's chat format.
+`CoreMLLanguageModel` can render tool definitions into its chat template
+with a `chatTemplateHandler` and a `toolsHandler`,
+but nothing parses or runs a tool call.
 Define tools using the `Tool` protocol and pass them when creating a session:
 
 ```swift
@@ -485,8 +490,13 @@ session.toolExecutionDelegate = ToolExecutionObserver()
 ```
 
 When a delegate returns `.stop`,
-the response ends with an empty value and the tool calls that stopped it:
-`""` for `String`, or `[]` for an array.
+the response ends with the tool calls that stopped it.
+`respond` returns an empty value:
+`""` for `String`, or `[]` for an array,
+even if the model wrote text before the tool calls.
+A stream keeps its last snapshot if that snapshot decodes as the complete type,
+so a `String` stream ends with the text so far.
+Otherwise, a stream also ends with an empty value.
 A type that can't be empty, such as one with required properties,
 a number, or a Boolean,
 throws `LanguageModelSession.ToolExecutionStopped` instead,
@@ -569,7 +579,8 @@ Each provider handles the three modes as follows:
 | `OpenAILanguageModel` (both APIs), `OpenResponsesLanguageModel` | `"tool_choice": "auto"` | `"tool_choice": "none"` | `"tool_choice": "required"` |
 | `AnthropicLanguageModel` | `"tool_choice": {"type": "auto"}` | `"tool_choice": {"type": "none"}` | `"tool_choice": {"type": "any"}` |
 | `GeminiLanguageModel` | `functionCallingConfig` mode `AUTO` | `functionCallingConfig` mode `NONE` | `functionCallingConfig` mode `ANY` |
-| `OllamaLanguageModel`, `MLXLanguageModel`, `LlamaLanguageModel`, `CoreMLLanguageModel` | Tools offered as usual | No tools offered | Not supported: tools offered as usual |
+| `OllamaLanguageModel`, `MLXLanguageModel`, `LlamaLanguageModel` | Tools offered as usual | No tools offered | Not supported: tools offered as usual |
+| `CoreMLLanguageModel` | Tool definitions rendered as usual; no tool runs | No tool definitions rendered | Not supported: tool definitions rendered as usual; no tool runs |
 
 The models that run through Foundation Models pass the mode on
 in apps built with Swift 6.4 or later that run on OS 27 or later,
@@ -705,6 +716,9 @@ unless the transform writes to the `history` session property.
 instructions, and tools. The built-in `history` property is writable from a
 profile or lifecycle callback and read-only while dynamic instructions or a Tool
 is active.
+Writing `history` from dynamic instructions or a Tool stops the process,
+and so does reading or writing a `@SessionProperty`
+outside a session's profile, dynamic instructions, or Tool.
 
 The five HTTP providers (OpenAI, Open Responses, Anthropic, Gemini, and Ollama)
 evaluate the profile and its history transforms again
@@ -712,15 +726,20 @@ before each request that continues a response after tool calls,
 and run `onToolCall` and `onToolOutput`.
 With these providers, a Tool's `history` property includes
 the tool calls and outputs of the current response, including the Tool's own call.
+Create the model outside `body`, as `EditingProfile` does.
+Each value of these models has its own identity,
+so `.model(OpenAILanguageModel(apiKey: key, model: name))` in `body`
+selects a different model on each evaluation,
+and each continuation hands the response off to a new value.
 
-MLX, llama.cpp, Core ML, Private Cloud Compute, and the system model
-don't run `onToolCall` or `onToolOutput` yet.
+MLX, llama.cpp, Core ML, Private Cloud Compute, `FoundationLanguageModel`,
+and the system model don't run `onToolCall` or `onToolOutput` yet.
 MLX and llama.cpp evaluate the profile once for each response,
 so their tool rounds use the same instructions, tools, and options,
 and a Tool's `history` property doesn't include the response's tool rounds.
 
-The system model and Private Cloud Compute run tools in a native
-Foundation Models session.
+The system model, Private Cloud Compute, and `FoundationLanguageModel`
+run tools in a native Foundation Models session.
 They evaluate the profile and its history transforms again
 before the continuation after a tool round,
 so the continuation uses the new instructions, tools, and transcript projection.
@@ -816,6 +835,9 @@ print("Session total:", session.usage.totalTokenCount)
 OpenAI (Chat Completions and Responses),
 Open Responses, Anthropic, Google Gemini, Ollama,
 MLX, llama.cpp, and Core ML report token usage.
+`SystemLanguageModel`, `PrivateCloudComputeLanguageModel`, and `FoundationLanguageModel`
+also report it in apps built with Swift 6.4 or later
+that run on OS 27 or later, and not on tvOS.
 Counts follow each provider's definitions.
 A response that calls tools makes a request for each round.
 As in Foundation Models, `response.usage` reports the final request,
@@ -1154,7 +1176,8 @@ say which API they follow.
   OS 27 canonical executors use Foundation Models' own Tool execution instead.
 - `ToolExecutionDelegate`, `ToolExecutionDecision`, and `toolExecutionDelegate`:
   [observing and controlling tool calls](#tool-calling).
-- `transcriptErrorHandlingPolicy` and `waitForResponseCompletion()`:
+- `transcriptErrorHandlingPolicy`, which follows the Foundation Models 27 API,
+  and `waitForResponseCompletion()`:
   what a transcript keeps when a request fails or is cancelled.
 - `LanguageModelSession.tools`, `instructions`, and `resolvedRequestContext()`:
   the session's tools, instructions, and the inputs for each request,
@@ -1206,6 +1229,13 @@ say which API they follow.
   not as a structured segment.
 - A session created from a transcript restores `instructions`
   only when the first entry is instructions with a single text segment.
+- Writing the `history` session property from dynamic instructions or a Tool
+  stops the process with a precondition failure.
+  Foundation Models 27 ignores the write.
+- Reading or writing a `@SessionProperty` outside a session's profile,
+  dynamic instructions, or Tool stops the process.
+  In Foundation Models 27, the read returns the key's default value,
+  and the write has no effect.
 
 ## Providers
 

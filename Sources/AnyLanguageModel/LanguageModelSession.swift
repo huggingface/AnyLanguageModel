@@ -3,9 +3,9 @@ import Observation
 
 /// Controls transcript retention when generation fails or is cancelled.
 ///
-/// - Note: This API is exclusive to AnyLanguageModel
-///   and using it means your code is no longer drop-in compatible
-///   with the Foundation Models framework.
+/// - Note: This API is exclusive to AnyLanguageModel on OS 26.
+///   It follows the Foundation Models 27 `TranscriptErrorHandlingPolicy` API,
+///   so code that uses it ports to Foundation Models on OS 27.
 public struct TranscriptErrorHandlingPolicy: Sendable, Equatable {
     private let shouldRevert: Bool
 
@@ -28,9 +28,9 @@ public final class LanguageModelSession: @unchecked Sendable {
     /// Streaming cancellation never commits the partial answer as a completed response, regardless
     /// of this policy. These defaults do not claim Foundation Models behavioral parity.
     ///
-    /// - Note: This property is exclusive to AnyLanguageModel
-    ///   and using it means your code is no longer drop-in compatible
-    ///   with the Foundation Models framework.
+    /// - Note: This property is exclusive to AnyLanguageModel on OS 26.
+    ///   It follows the Foundation Models 27 `transcriptErrorHandlingPolicy` property,
+    ///   so code that uses it ports to Foundation Models on OS 27.
     public var transcriptErrorHandlingPolicy: TranscriptErrorHandlingPolicy? {
         get {
             access(keyPath: \.transcriptErrorHandlingPolicy)
@@ -128,7 +128,7 @@ public final class LanguageModelSession: @unchecked Sendable {
     /// which stays the same so that unchanged instructions give an equal entry.
     private let profileInstructionsSegmentID = UUID().uuidString
 
-    /// Session-scoped values available to profiles and dynamic instructions.
+    /// Session-scoped values available to profiles, dynamic instructions, and tools.
     public let properties: SessionPropertyValues
 
     /// Whether the session resolves its instructions and tools before each request.
