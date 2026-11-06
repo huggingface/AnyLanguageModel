@@ -710,92 +710,33 @@ import Foundation
             }
         }
 
+        /// Resolves a round of tool calls.
+        ///
+        /// The returned entry is the one that callbacks and tools saw,
+        /// so the caller records it rather than a new entry with a different ID.
         private func resolveToolCalls(
             _ parsedCalls: [LlamaParsedToolCall],
-            tools: [any Tool],
+            requestContext: LanguageModelSession.RequestContext,
+            offeredTools: [any Tool],
+            currentRoundEntries: [Transcript.Entry],
             session: LanguageModelSession
-        ) async throws -> ToolResolutionOutcome {
-            if parsedCalls.isEmpty { return .invocations([]) }
-
-            var toolsByName: [String: any Tool] = [:]
-            for tool in tools where toolsByName[tool.name] == nil {
-                toolsByName[tool.name] = tool
-            }
-
+        ) async throws -> (calls: Transcript.ToolCalls, outcome: ToolResolutionOutcome) {
             let transcriptCalls = try makeTranscriptToolCalls(from: parsedCalls)
-
-            if let delegate = session.toolExecutionDelegate {
-                await delegate.didGenerateToolCalls(transcriptCalls, in: session)
+            let callsEntry = Transcript.ToolCalls(transcriptCalls)
+            let entries = currentRoundEntries + [.toolCalls(callsEntry)]
+            switch try await session.resolveProfileToolCalls(
+                transcriptCalls,
+                requestContext: requestContext,
+                currentRoundEntries: entries,
+                offeredTools: offeredTools
+            ) {
+            case .stop(let calls):
+                return (callsEntry, .stop(calls: calls))
+            case .invocations(let invocations):
+                return (
+                    callsEntry, .invocations(invocations.map { ToolInvocationResult(call: $0.call, output: $0.output) })
+                )
             }
-
-            var decisions: [ToolExecutionDecision] = []
-            decisions.reserveCapacity(transcriptCalls.count)
-
-            if let delegate = session.toolExecutionDelegate {
-                for call in transcriptCalls {
-                    let decision = await delegate.toolCallDecision(for: call, in: session)
-                    if case .stop = decision {
-                        return .stop(calls: transcriptCalls)
-                    }
-                    decisions.append(decision)
-                }
-            } else {
-                decisions = Array(repeating: .execute, count: transcriptCalls.count)
-            }
-
-            var results: [ToolInvocationResult] = []
-            results.reserveCapacity(transcriptCalls.count)
-
-            for (index, call) in transcriptCalls.enumerated() {
-                switch decisions[index] {
-                case .stop:
-                    return .stop(calls: transcriptCalls)
-                case .provideOutput(let segments):
-                    let output = Transcript.ToolOutput(
-                        id: call.id,
-                        toolName: call.toolName,
-                        segments: segments
-                    )
-                    if let delegate = session.toolExecutionDelegate {
-                        await delegate.didExecuteToolCall(call, output: output, in: session)
-                    }
-                    results.append(ToolInvocationResult(call: call, output: output))
-                case .execute:
-                    guard let tool = toolsByName[call.toolName] else {
-                        let message = Transcript.Segment.text(.init(content: "Tool not found: \(call.toolName)"))
-                        let output = Transcript.ToolOutput(
-                            id: call.id,
-                            toolName: call.toolName,
-                            segments: [message]
-                        )
-                        if let delegate = session.toolExecutionDelegate {
-                            await delegate.didExecuteToolCall(call, output: output, in: session)
-                        }
-                        results.append(ToolInvocationResult(call: call, output: output))
-                        continue
-                    }
-
-                    do {
-                        let segments = try await tool.makeOutputSegments(from: call.arguments)
-                        let output = Transcript.ToolOutput(
-                            id: call.id,
-                            toolName: tool.name,
-                            segments: segments
-                        )
-                        if let delegate = session.toolExecutionDelegate {
-                            await delegate.didExecuteToolCall(call, output: output, in: session)
-                        }
-                        results.append(ToolInvocationResult(call: call, output: output))
-                    } catch {
-                        if let delegate = session.toolExecutionDelegate {
-                            await delegate.didFailToolCall(call, error: error, in: session)
-                        }
-                        throw LanguageModelSession.ToolCallError(tool: tool, underlyingError: error)
-                    }
-                }
-            }
-
-            return .invocations(results)
         }
 
         public func respond<Content>(
@@ -945,16 +886,16 @@ import Foundation
 
                 try session.recordToolRound(toolRounds, completed: allEntries)
 
-                let resolution = try await resolveToolCalls(
+                let (callsEntry, resolution) = try await resolveToolCalls(
                     parsedCalls,
-                    tools: requestContext.toolsForExecution(in: session, offeredTools: tools),
+                    requestContext: requestContext,
+                    offeredTools: tools,
+                    currentRoundEntries: allEntries,
                     session: session
                 )
                 switch resolution {
-                case .stop(let calls):
-                    if !calls.isEmpty {
-                        allEntries.append(.toolCalls(Transcript.ToolCalls(calls)))
-                    }
+                case .stop:
+                    allEntries.append(.toolCalls(callsEntry))
                     return try stoppedResponse(
                         generating: type,
                         provider: "Llama",
@@ -965,11 +906,8 @@ import Foundation
                     guard !invocations.isEmpty else {
                         break generationLoop
                     }
-                    let callsEntry = Transcript.Entry.toolCalls(
-                        Transcript.ToolCalls(invocations.map(\.call))
-                    )
-                    allEntries.append(callsEntry)
-                    pendingEntries.append(callsEntry)
+                    allEntries.append(.toolCalls(callsEntry))
+                    pendingEntries.append(.toolCalls(callsEntry))
                     for invocation in invocations {
                         let outputEntry = Transcript.Entry.toolOutput(invocation.output)
                         allEntries.append(outputEntry)
@@ -1198,29 +1136,26 @@ import Foundation
 
                                 try session.recordToolRound(toolRounds, completed: accumulatedEntries)
 
-                                let resolution = try await self.resolveToolCalls(
+                                let (callsEntry, resolution) = try await self.resolveToolCalls(
                                     parsedCalls,
-                                    tools: requestContext.toolsForExecution(in: session, offeredTools: tools),
+                                    requestContext: requestContext,
+                                    offeredTools: tools,
+                                    currentRoundEntries: accumulatedEntries,
                                     session: session
                                 )
                                 switch resolution {
-                                case .stop(let calls):
+                                case .stop:
                                     emittedBase += roundVisible
-                                    if !calls.isEmpty {
-                                        accumulatedEntries.append(.toolCalls(Transcript.ToolCalls(calls)))
-                                        yieldSnapshot(emittedBase)
-                                    }
+                                    accumulatedEntries.append(.toolCalls(callsEntry))
+                                    yieldSnapshot(emittedBase)
                                     break generationLoop
                                 case .invocations(let invocations):
                                     guard !invocations.isEmpty else {
                                         emittedBase += roundVisible
                                         break generationLoop
                                     }
-                                    let callsEntry = Transcript.Entry.toolCalls(
-                                        Transcript.ToolCalls(invocations.map(\.call))
-                                    )
-                                    accumulatedEntries.append(callsEntry)
-                                    pendingEntries.append(callsEntry)
+                                    accumulatedEntries.append(.toolCalls(callsEntry))
+                                    pendingEntries.append(.toolCalls(callsEntry))
                                     for invocation in invocations {
                                         let outputEntry = Transcript.Entry.toolOutput(invocation.output)
                                         accumulatedEntries.append(outputEntry)

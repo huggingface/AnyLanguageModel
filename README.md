@@ -475,6 +475,14 @@ let response = try await session.respond {
 print(response.content)
 ```
 
+When a model calls several tools in one round,
+the calls run at once, as they do in Foundation Models,
+and the round takes as long as its slowest call.
+A tool can be called concurrently with itself or with other tools,
+so one that isn't safe to run alongside others should serialize its own work.
+Results go back to the model in the order it made the calls.
+If a call throws, the others are cancelled and the response fails with that error.
+
 To observe or control tool execution, assign a delegate on the session:
 
 ```swift
@@ -503,6 +511,12 @@ actor ToolExecutionObserver: ToolExecutionDelegate {
 
 session.toolExecutionDelegate = ToolExecutionObserver()
 ```
+
+The delegate decides each call in the order the model made them, before any call runs.
+Once the round's calls are done,
+it hears about each one in that order, one at a time.
+If a call throws, the others are cancelled first,
+and the delegate hears only about the error the response fails with.
 
 When a delegate returns `.stop`,
 the response ends with the tool calls that stopped it.
@@ -773,10 +787,7 @@ Use `session.properties` in those places.
 
 The five HTTP providers (OpenAI, Open Responses, Anthropic, Gemini, and Ollama)
 evaluate the profile and its history transforms again
-before each request that continues a response after tool calls,
-and run `onToolCall` and `onToolOutput`.
-With these providers, a Tool's `history` property includes
-the tool calls and outputs of the current response, including the Tool's own call.
+before each request that continues a response after tool calls.
 
 Create a profile's model outside `body`, as `EditingProfile` does.
 Each model that these providers create has its own identity, which copies share,
@@ -786,11 +797,20 @@ and each continuation hands the response off to the new one.
 With the OpenAI Responses API and Open Responses,
 the next request then leaves out the reasoning item and the function call's `id`.
 
-MLX, llama.cpp, Core ML, Private Cloud Compute, `FoundationLanguageModel`,
-and the system model don't run `onToolCall` or `onToolOutput` yet.
 MLX and llama.cpp evaluate the profile once for each response,
-so their tool rounds use the same instructions, tools, and options,
-and a Tool's `history` property doesn't include the response's tool rounds.
+so their tool rounds use the same instructions, tools, options,
+and transcript projection.
+
+The five HTTP providers, MLX, and llama.cpp run `onToolCall` and `onToolOutput`.
+With these providers, a Tool's `history` property includes
+the calls and outputs of the response's earlier tool rounds
+and every call in the current round, including the Tool's own call.
+It doesn't include the outputs of the other calls in the current round,
+even the ones that have finished, because the calls in a round run at once.
+A Tool in a program that uses Foundation Models 27 directly sees the same entries.
+
+Core ML, Private Cloud Compute, `FoundationLanguageModel`,
+and the system model don't run `onToolCall` or `onToolOutput` yet.
 
 The system model, Private Cloud Compute, and `FoundationLanguageModel`
 run tools in a native Foundation Models session.

@@ -11,7 +11,7 @@ extension LanguageModelSession {
     /// OpenAI, Open Responses, Anthropic, Gemini, and Ollama also evaluate it again
     /// before each request that continues a response after a tool call.
     /// MLX and llama.cpp evaluate it once for each response,
-    /// so their tool rounds use the same instructions, tools, and options.
+    /// so their tool rounds use the same instructions, tools, options, and transcript projection.
     /// The system model, Private Cloud Compute, and `FoundationLanguageModel` evaluate it again
     /// before the continuation after a tool round,
     /// but a continuation that selects another model stays on the native session's model,
@@ -634,8 +634,8 @@ extension LanguageModelSession.DynamicProfile {
     /// - Parameter action: The action to run, which receives the tool call.
     /// - Returns: A profile with the action.
     ///
-    /// - Important: OpenAI, Open Responses, Anthropic, Gemini, and Ollama run this action
-    ///   when they call a tool. MLX, llama.cpp, Core ML, Private Cloud Compute,
+    /// - Important: OpenAI, Open Responses, Anthropic, Gemini, Ollama, MLX, and llama.cpp
+    ///   run this action when they call a tool. Core ML, Private Cloud Compute,
     ///   `FoundationLanguageModel`, and the system model don't run it yet.
     public func onToolCall(
         @_inheritActorContext perform action:
@@ -654,8 +654,8 @@ extension LanguageModelSession.DynamicProfile {
     /// - Parameter action: The action to run.
     /// - Returns: A profile with the action.
     ///
-    /// - Important: OpenAI, Open Responses, Anthropic, Gemini, and Ollama run this action
-    ///   when they call a tool. MLX, llama.cpp, Core ML, Private Cloud Compute,
+    /// - Important: OpenAI, Open Responses, Anthropic, Gemini, Ollama, MLX, and llama.cpp
+    ///   run this action when they call a tool. Core ML, Private Cloud Compute,
     ///   `FoundationLanguageModel`, and the system model don't run it yet.
     public func onToolCall(
         @_inheritActorContext perform action: nonisolated(nonsending) sending @escaping () async throws -> Void
@@ -670,8 +670,8 @@ extension LanguageModelSession.DynamicProfile {
     /// - Parameter action: The action to run, which receives the tool call and its output.
     /// - Returns: A profile with the action.
     ///
-    /// - Important: OpenAI, Open Responses, Anthropic, Gemini, and Ollama run this action
-    ///   when they call a tool. MLX, llama.cpp, Core ML, Private Cloud Compute,
+    /// - Important: OpenAI, Open Responses, Anthropic, Gemini, Ollama, MLX, and llama.cpp
+    ///   run this action when they call a tool. Core ML, Private Cloud Compute,
     ///   `FoundationLanguageModel`, and the system model don't run it yet.
     public func onToolOutput(
         @_inheritActorContext perform action:
@@ -691,8 +691,8 @@ extension LanguageModelSession.DynamicProfile {
     /// - Parameter action: The action to run.
     /// - Returns: A profile with the action.
     ///
-    /// - Important: OpenAI, Open Responses, Anthropic, Gemini, and Ollama run this action
-    ///   when they call a tool. MLX, llama.cpp, Core ML, Private Cloud Compute,
+    /// - Important: OpenAI, Open Responses, Anthropic, Gemini, Ollama, MLX, and llama.cpp
+    ///   run this action when they call a tool. Core ML, Private Cloud Compute,
     ///   `FoundationLanguageModel`, and the system model don't run it yet.
     public func onToolOutput(
         @_inheritActorContext perform action: nonisolated(nonsending) sending @escaping () async throws -> Void

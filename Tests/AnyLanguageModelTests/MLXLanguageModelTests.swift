@@ -344,6 +344,27 @@ import Testing
             #expect(!response.content.isEmpty)
         }
 
+        @Test(arguments: [false, true])
+        func toolRoundsKeepOneEntry(_ streaming: Bool) async throws {
+            // Smaller models stop after the first tool round.
+            try await expectOneEntryForEachToolRound(
+                model: MLXLanguageModel(modelId: "mlx-community/Qwen3-4B-4bit"),
+                streaming: streaming,
+                prompt: "Open the front door. /no_think",
+                options: GenerationOptions(sampling: .greedy, maximumResponseTokens: 512)
+            )
+        }
+
+        @Test(arguments: [false, true])
+        func stoppedToolRoundKeepsItsEntry(_ streaming: Bool) async throws {
+            try await expectStoppedToolRoundKeepsItsEntry(
+                model: MLXLanguageModel(modelId: "mlx-community/Qwen3-4B-4bit"),
+                streaming: streaming,
+                prompt: "Open the front door. /no_think",
+                options: GenerationOptions(sampling: .greedy, maximumResponseTokens: 512)
+            )
+        }
+
         @Test func withTools() async throws {
             let weatherTool = spy(on: WeatherTool())
             let session = LanguageModelSession(
