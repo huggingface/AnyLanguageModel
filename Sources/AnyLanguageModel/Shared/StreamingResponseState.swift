@@ -54,6 +54,7 @@ struct StreamingResponseState<Content: Generable> {
     /// the snapshot uses the first value in ``StoppedContent`` that the content type accepts.
     /// The value must decode as the complete content type, not only its partial form,
     /// so that `collect()` accepts the snapshot.
+    /// `providerMetadata` applies only to string content.
     /// A type that accepts none of these values
     /// throws ``LanguageModelSession/ToolExecutionStopped`` with the entries
     /// and the usage of the requests so far instead.
@@ -61,7 +62,16 @@ struct StreamingResponseState<Content: Generable> {
         provider: String,
         providerMetadata: [String: String]? = nil
     ) throws -> LanguageModelSession.ResponseStream<Content>.Snapshot {
-        if let snapshot = snapshot(providerMetadata: providerMetadata), (try? Content(snapshot.rawContent)) != nil {
+        if Content.self == String.self {
+            if let snapshot = snapshot(providerMetadata: providerMetadata) { return snapshot }
+        } else if var snapshot = snapshot(), (try? Content(snapshot.rawContent)) != nil {
+            // The round's text is now the response itself, so the round doesn't keep it too.
+            if let last = snapshot.transcriptEntries.indices.last,
+                case .toolCalls(var calls) = snapshot.transcriptEntries[last]
+            {
+                calls.providerMetadata = nil
+                snapshot.transcriptEntries[last] = .toolCalls(calls)
+            }
             return snapshot
         }
         guard let empty = StoppedContent.empty(Content.self) else {

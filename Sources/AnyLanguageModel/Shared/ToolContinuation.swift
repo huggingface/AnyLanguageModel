@@ -305,8 +305,7 @@ extension Transcript {
     /// Otherwise, the response's segments are the turn's text,
     /// and the rounds send only their calls.
     /// The same goes for a finished turn without a response.
-    /// A structured response doesn't include its rounds' text, so they keep it,
-    /// except for a stopped stream's text, which is the response's own.
+    /// A structured response doesn't include its rounds' text, so they keep it.
     var replayEntries: [Entry] {
         var entries = Array(self)
         for turn in assistantTurns(entries) {
@@ -316,19 +315,9 @@ extension Transcript {
     }
 
     private func resolveAssistantText(in entries: inout [Entry], turn: Range<Int>, isLast: Bool) {
+        if case .prompt(let prompt) = entries[turn.lowerBound], prompt.responseFormat != nil { return }
         let responses = entries[turn].compactMap { entry -> Response? in
             if case .response(let response) = entry { response } else { nil }
-        }
-        if case .prompt(let prompt) = entries[turn.lowerBound], prompt.responseFormat != nil {
-            let written = Set(responses.compactMap { $0.providerMetadata?[responseTextMetadataKey] })
-            for index in turn {
-                guard case .toolCalls(var calls) = entries[index],
-                    let text = calls.providerMetadata?[assistantContentMetadataKey], written.contains(text)
-                else { continue }
-                calls.providerMetadata?[assistantContentMetadataKey] = nil
-                entries[index] = .toolCalls(calls)
-            }
-            return
         }
         let isCurrent = responses.isEmpty ? isLast : responses.allSatisfy(\.isUnchanged)
         for index in turn {

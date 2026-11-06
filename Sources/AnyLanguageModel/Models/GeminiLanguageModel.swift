@@ -544,15 +544,7 @@ public struct GeminiLanguageModel: LanguageModel, ProfileRequestIdentifiedLangua
                         switch resolution {
                         case .stop:
                             state.entries.append(.toolCalls(callsEntry))
-                            continuation.yield(
-                                try state.stoppedSnapshot(
-                                    provider: "Gemini",
-                                    // A string response is the round's text, which replay can tell by itself.
-                                    // Other providers can't read the round's text parts, so they send the response.
-                                    providerMetadata: type == String.self
-                                        ? nil : responseContentMetadata(state.responseText, roundText: "")
-                                )
-                            )
+                            continuation.yield(try state.stoppedSnapshot(provider: "Gemini"))
                             continuation.finish()
                             return
                         case .invocations(let invocations):
@@ -1172,26 +1164,17 @@ extension Transcript {
         }
     }
 
-    /// A structured response doesn't include its rounds' text, so they keep it,
-    /// except for a stopped stream's text, which is the response's own.
+    /// A structured response doesn't include its rounds' text, so they keep it.
+    /// Its stored parts apply only when they are still the response's content.
     private func resolveStructuredTurn(in entries: inout [Entry], turn: Range<Int>) {
-        var written: Set<String> = []
         for index in turn {
             guard case .response(var response) = entries[index] else { continue }
-            if let text = response.providerMetadata?[responseTextMetadataKey] { written.insert(text) }
             let current = response.segments.singleText.flatMap { try? GeneratedContent(json: $0) }
             let stored = storedText(in: response.providerMetadata).flatMap { try? GeneratedContent(json: $0) }
             if current == nil || current != stored {
                 response.providerMetadata?[textPartsMetadataKey] = nil
                 entries[index] = .response(response)
             }
-        }
-        for index in turn {
-            guard case .toolCalls(var calls) = entries[index],
-                let text = storedText(in: calls.providerMetadata), written.contains(text)
-            else { continue }
-            calls.providerMetadata?[textPartsMetadataKey] = nil
-            entries[index] = .toolCalls(calls)
         }
     }
 }

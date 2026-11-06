@@ -1108,6 +1108,80 @@ struct ResponsesAssistantHistoryTests {
         )
     }
 
+    /// How a caller changes a stopped stream's response in a saved transcript.
+    enum StoppedResponseEdit: CaseIterable, Sendable {
+        case none, rebuilt, removed
+    }
+
+    enum StoppedStreamProvider: CaseIterable, Sendable {
+        case openAI, openResponses, chat, gemini
+    }
+
+    private static func geminiStoppedStreamReply() throws -> FakeTransport.Reply {
+        let parts: [[String: Any]] = [
+            ["text": #"{"text":"SECRET"}"#, "thoughtSignature": "text-signature"],
+            ["functionCall": ["name": "getWeather", "args": ["city": "Paris"]], "thoughtSignature": "call-signature"],
+        ]
+        let object: [String: Any] = ["candidates": [["content": ["role": "model", "parts": parts]]]]
+        let json = String(decoding: try JSONSerialization.data(withJSONObject: object), as: UTF8.self)
+        return .init(chunks: ["data: \(json)\n\n"])
+    }
+
+    /// A stop returns the round's JSON as the response, so the response alone holds that text:
+    /// rebuilding or removing the response removes it, and with no edit it's sent once.
+    @Test(arguments: StoppedStreamProvider.allCases, StoppedResponseEdit.allCases)
+    func aStoppedStructuredStreamsTextIsOnlyInItsResponse(
+        provider: StoppedStreamProvider,
+        edit: StoppedResponseEdit
+    ) async throws {
+        let transport: FakeTransport
+        let model: any LanguageModel
+        switch provider {
+        case .openAI, .openResponses:
+            transport = FakeTransport(replies: [
+                try Self.toolReply(#"{"text":"SECRET"}"#, streaming: true),
+                try Self.textReply("Bye.", streaming: false),
+            ])
+            model = (provider == .openAI ? Builder.openAI : Builder.openResponses).makeModel(transport)
+        case .chat:
+            transport = FakeTransport(replies: [
+                Self.chatStream([
+                    #"{"content": "{\"text\":\"SECRET\"}"}"#,
+                    #"{"tool_calls": [{"index": 0, "id": "call_1", "type": "function", "function": {"name": "getWeather", "arguments": "{\"city\": \"Paris\"}"}}]}"#,
+                ]),
+                Self.chatTextReply("Bye."),
+            ])
+            model = Self.chatModel(transport)
+        case .gemini:
+            transport = FakeTransport(replies: [
+                try Self.geminiStoppedStreamReply(),
+                .init(chunks: [#"{"candidates": [{"content": {"role": "model", "parts": [{"text": "Bye."}]}}]}"#]),
+            ])
+            model = GeminiLanguageModel(apiKey: "test", model: "test", transport: transport)
+        }
+        let source = LanguageModelSession(model: model, tools: [WeatherTool()])
+        source.toolExecutionDelegate = StoppingDelegate()
+        _ = try await source.streamResponse(to: "Hello", generating: Greeting.self).collect()
+
+        let entries = source.transcript.compactMap { entry -> Transcript.Entry? in
+            guard case .response(let response) = entry else { return entry }
+            switch edit {
+            case .none: return entry
+            case .rebuilt:
+                return .response(
+                    .init(id: response.id, assetIDs: [], segments: [.text(.init(content: #"{"text":"REDACTED"}"#))])
+                )
+            case .removed: return nil
+            }
+        }
+        let session = LanguageModelSession(model: model, transcript: Transcript(entries: entries))
+        _ = try await session.respond(to: "Thanks")
+
+        let body = String(decoding: transport.bodies[1], as: UTF8.self)
+        #expect(body.components(separatedBy: "SECRET").count - 1 == (edit == .none ? 1 : 0))
+        #expect(body.contains("REDACTED") == (edit == .rebuilt))
+    }
+
     /// With only the key for the text as written, nothing says what the response replays.
     @Test(arguments: Builder.allCases)
     func partlyPresentMetadataSendsTheSegmentsOnce(builder: Builder) async throws {
