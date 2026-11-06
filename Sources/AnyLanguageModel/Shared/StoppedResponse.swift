@@ -35,7 +35,8 @@ extension LanguageModel {
         generating type: Content.Type,
         provider: String,
         transcriptEntries: [Transcript.Entry],
-        requests: RequestsUsage
+        requests: RequestsUsage,
+        providerMetadata: [String: String]? = nil
     ) throws -> LanguageModelSession.Response<Content> {
         guard let empty = StoppedContent.empty(type) else {
             throw LanguageModelSession.ToolExecutionStopped(
@@ -47,7 +48,8 @@ extension LanguageModel {
             content: empty.content,
             rawContent: empty.rawContent,
             transcriptEntries: ArraySlice(transcriptEntries),
-            requests: requests
+            requests: requests,
+            providerMetadata: providerMetadata
         )
     }
 }

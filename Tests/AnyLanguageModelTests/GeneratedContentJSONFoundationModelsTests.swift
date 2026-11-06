@@ -3,7 +3,7 @@ import Testing
 
 @testable import AnyLanguageModel
 
-#if canImport(FoundationModels)
+#if canImport(FoundationModels) && (!os(tvOS) || compiler(<6.4))
     import FoundationModels
 
     private let isFoundationModelsAvailable: Bool = {

@@ -129,6 +129,33 @@ jobs:
       - name: Build tests for watchOS Simulator
         run: xcodebuild build-for-testing -scheme AnyLanguageModel -destination 'generic/platform=watchOS Simulator' CODE_SIGNING_ALLOWED=NO
 
+  build-tvos:
+    permissions:
+      contents: read
+    name: Build for tvOS with Xcode ${{ matrix.xcode }}
+    runs-on: ${{ matrix.runner }}
+    env:
+      DEVELOPER_DIR: "/Applications/Xcode_${{ matrix.xcode }}.app/Contents/Developer"
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-26
+            xcode: "26.4.1"
+          - runner: xcode-27
+            xcode: "27.0"
+    timeout-minutes: 20
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Build for tvOS
+        run: xcodebuild build -scheme AnyLanguageModel -destination 'generic/platform=tvOS' CODE_SIGNING_ALLOWED=NO
+
+      - name: Build tests for tvOS Simulator
+        if: matrix.xcode == '27.0'
+        run: xcodebuild build-for-testing -scheme AnyLanguageModel -destination 'generic/platform=tvOS Simulator' CODE_SIGNING_ALLOWED=NO
+
   test-linux:
     permissions:
       contents: read

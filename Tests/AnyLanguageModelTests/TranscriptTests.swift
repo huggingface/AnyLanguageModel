@@ -55,7 +55,7 @@ struct TranscriptTests {
         #expect(Transcript.Segment.image(image).id == "image-id")
     }
 
-    #if canImport(FoundationModels)
+    #if canImport(FoundationModels) && (!os(tvOS) || compiler(<6.4))
         @available(macOS 26.0, iOS 26.0, watchOS 27.0, tvOS 26.0, visionOS 26.0, *)
         @Test func bridgesStructuredSegmentToFoundationModels() throws {
             let content = try GeneratedContent(json: #"{"name":"Ana"}"#)
