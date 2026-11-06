@@ -165,7 +165,7 @@ struct ToolsOfferedTests {
             #expect(body["toolConfig"] == nil)
         }
 
-        @Test(arguments: [Provider.chat, .responses, .openResponses, .gemini])
+        @Test(arguments: [Provider.chat, .responses, .openResponses, .anthropic, .gemini])
         func followUpRequestKeepsRequiredMode(_ provider: Provider) async throws {
             ToolCallingModeURLProtocol.reset()
             ToolCallingModeURLProtocol.enqueue(provider.response(tool: true))
