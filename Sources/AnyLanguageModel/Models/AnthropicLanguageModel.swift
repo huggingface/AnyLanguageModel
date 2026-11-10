@@ -549,6 +549,10 @@ public struct AnthropicLanguageModel: LanguageModel, ProfileRequestIdentifiedLan
                 }
             }
             entries.append(contentsOf: reasoningEntries)
+            let roundText = message.content.compactMap { block -> String? in
+                if case .text(let text) = block { return text.text }
+                return nil
+            }.joined()
             let toolUses: [AnthropicToolUse] = message.content.compactMap { block in
                 if case .toolUse(let use) = block { return use }
                 return nil
@@ -564,6 +568,7 @@ public struct AnthropicLanguageModel: LanguageModel, ProfileRequestIdentifiedLan
                     toolUses,
                     requestContext: requestContext,
                     currentRoundEntries: entries,
+                    providerMetadata: assistantContentMetadata(roundText),
                     session: session
                 )
                 switch resolution {
@@ -573,7 +578,8 @@ public struct AnthropicLanguageModel: LanguageModel, ProfileRequestIdentifiedLan
                         generating: type,
                         provider: "Anthropic",
                         transcriptEntries: entries,
-                        requests: usage
+                        requests: usage,
+                        providerMetadata: stoppedResponseContentMetadata
                     )
                 case .invocations(let invocations):
                     entries.append(.toolCalls(callsEntry))
@@ -598,27 +604,20 @@ public struct AnthropicLanguageModel: LanguageModel, ProfileRequestIdentifiedLan
                         inFlightMessages.append(try anthropicUserMessage(prompt))
                     }
                     if type == String.self {
-                        earlierText += message.content.compactMap { block -> String? in
-                            if case .text(let text) = block { return text.text }
-                            return nil
-                        }.joined()
+                        earlierText += roundText
                     }
                     continue
                 }
             }
 
-            let text =
-                earlierText
-                + message.content.compactMap { block -> String? in
-                    if case .text(let text) = block { return text.text }
-                    return nil
-                }.joined()
+            let text = earlierText + roundText
             if type == String.self {
                 return .init(
                     content: text as! Content,
                     rawContent: GeneratedContent(text),
                     transcriptEntries: ArraySlice(entries),
-                    requests: usage
+                    requests: usage,
+                    providerMetadata: responseContentMetadata(text, roundText: roundText)
                 )
             }
             let rawContent = try GeneratedContent(json: text)
@@ -741,8 +740,17 @@ public struct AnthropicLanguageModel: LanguageModel, ProfileRequestIdentifiedLan
                         var blocks: [Int: AnthropicStreamBlock] = [:]
                         var lastSnapshot: LanguageModelSession.ResponseStream<Content>.Snapshot?
 
-                        func snapshot() -> LanguageModelSession.ResponseStream<Content>.Snapshot? {
-                            if type == String.self { return state.snapshot() }
+                        func metadata(roundText: String) -> [String: String]? {
+                            guard type == String.self else { return nil }
+                            return responseContentMetadata(state.responseText, roundText: roundText)
+                        }
+
+                        func snapshot(roundText: String? = nil) -> LanguageModelSession.ResponseStream<Content>
+                            .Snapshot?
+                        {
+                            if type == String.self {
+                                return state.snapshot(providerMetadata: metadata(roundText: roundText ?? state.text))
+                            }
                             guard
                                 var snapshot: LanguageModelSession.ResponseStream<Content>.Snapshot =
                                     try? partialSnapshot(from: state.text)
@@ -799,13 +807,17 @@ public struct AnthropicLanguageModel: LanguageModel, ProfileRequestIdentifiedLan
                                         current.requests = state.requests
                                         lastSnapshot = current
                                         continuation.yield(current)
-                                    } else if let current = state.snapshot() {
+                                    } else if let current = state.snapshot(
+                                        providerMetadata: metadata(roundText: state.text)
+                                    ) {
                                         lastSnapshot = current
                                         continuation.yield(current)
                                     }
                                 }
                             case .messageStop:
-                                if lastSnapshot == nil, !state.usage.isEmpty, let snapshot = state.snapshot() {
+                                if lastSnapshot == nil, !state.usage.isEmpty,
+                                    let snapshot = state.snapshot(providerMetadata: metadata(roundText: state.text))
+                                {
                                     continuation.yield(snapshot)
                                 }
                                 break responseEvents
@@ -830,12 +842,18 @@ public struct AnthropicLanguageModel: LanguageModel, ProfileRequestIdentifiedLan
                             toolUses,
                             requestContext: requestContext,
                             currentRoundEntries: state.entries,
+                            providerMetadata: assistantContentMetadata(state.text),
                             session: session
                         )
                         switch resolution {
                         case .stop:
                             state.entries.append(.toolCalls(callsEntry))
-                            continuation.yield(try state.stoppedSnapshot(provider: "Anthropic"))
+                            continuation.yield(
+                                try state.stoppedSnapshot(
+                                    provider: "Anthropic",
+                                    providerMetadata: metadata(roundText: "")
+                                )
+                            )
                             continuation.finish()
                             return
                         case .invocations(let invocations):
@@ -862,7 +880,8 @@ public struct AnthropicLanguageModel: LanguageModel, ProfileRequestIdentifiedLan
                                 inFlightMessages.append(try anthropicUserMessage(prompt))
                             }
                         }
-                        if let snapshot = snapshot() { continuation.yield(snapshot) }
+                        // The tool calls now carry this round's text.
+                        if let snapshot = snapshot(roundText: "") { continuation.yield(snapshot) }
                         state.beginNextRound()
                     }
 
@@ -1080,6 +1099,7 @@ private func resolveToolUses(
     _ toolUses: [AnthropicToolUse],
     requestContext: LanguageModelSession.RequestContext,
     currentRoundEntries: [Transcript.Entry],
+    providerMetadata: [String: String]?,
     session: LanguageModelSession
 ) async throws -> (calls: Transcript.ToolCalls, outcome: ToolResolutionOutcome) {
     var transcriptCalls: [Transcript.ToolCall] = []
@@ -1096,7 +1116,7 @@ private func resolveToolUses(
         )
     }
 
-    let callsEntry = Transcript.ToolCalls(transcriptCalls)
+    let callsEntry = Transcript.ToolCalls(transcriptCalls, providerMetadata: providerMetadata)
     let entries = currentRoundEntries + [.toolCalls(callsEntry)]
     switch try await session.resolveProfileToolCalls(
         transcriptCalls,
@@ -1134,7 +1154,7 @@ extension Transcript {
                 messages.append(.init(role: .assistant, content: content))
             }
         }
-        for item in addingNotExecutedToolOutputs(to: Array(self)) {
+        for item in replayEntries {
             switch item {
             case .instructions(let instructions):
                 messages.append(
@@ -1176,6 +1196,10 @@ extension Transcript {
                 guard !content.isEmpty else { continue }
                 appendAssistant(content)
             case .toolCalls(let toolCalls):
+                if let text = toolCalls.providerMetadata?[assistantContentMetadataKey], !text.allSatisfy(\.isWhitespace)
+                {
+                    appendAssistant([.text(.init(text: text))])
+                }
                 // Add assistant message with tool use blocks
                 let toolUseBlocks: [AnthropicContent] = toolCalls.map { call in
                     let input = call.arguments.jsonValue.objectValue ?? [:]

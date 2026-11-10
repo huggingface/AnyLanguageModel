@@ -993,13 +993,12 @@ struct ResponsesAssistantHistoryTests {
     }
 
     private static let mixedHandoffTurn = [
-        "user: Weather?", "call: call_a", "output: call_a",
+        "user: Weather?", "assistant: First.", "call: call_a", "output: call_a",
         "assistant: Checking.", "call: call_1", "output: call_1",
-        "assistant: First.Sunny.",
+        "assistant: Sunny.",
     ]
 
     /// Anthropic writes text and hands off to a builder that completes another tool round.
-    /// No tool round carries the Anthropic text, so the response replays it.
     @Test(arguments: Builder.allCases, [false, true])
     func aMixedHandoffFollowedByAToolRoundKeepsEveryText(to: Builder, streaming: Bool) async throws {
         let anthropic = FakeTransport(replies: [try Self.anthropicToolReply("First.", streaming: streaming)])
@@ -1068,8 +1067,14 @@ struct ResponsesAssistantHistoryTests {
         _ = try await session.respond(to: "Thanks")
 
         #expect(first.content == "Checking.Sunny.")
-        let body = String(decoding: anthropic.bodies[1], as: UTF8.self)
-        #expect(body.contains("Checking.Sunny."))
+        let json = try #require(try JSONSerialization.jsonObject(with: anthropic.bodies[1]) as? [String: Any])
+        let messages = try #require(json["messages"] as? [[String: Any]])
+        try #require(messages.count == 5)
+        let beforeTool = try #require(messages[1]["content"] as? [[String: Any]])
+        #expect(beforeTool.compactMap { $0["type"] as? String } == ["text", "tool_use"])
+        #expect(beforeTool.first?["text"] as? String == "Checking.")
+        let afterTool = try #require(messages[3]["content"] as? [[String: Any]])
+        #expect(afterTool.compactMap { $0["text"] as? String } == ["Sunny."])
     }
 
     // MARK: Several tool rounds
