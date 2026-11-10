@@ -1396,6 +1396,25 @@ struct ResponsesAssistantHistoryTests {
         )
     }
 
+    // MARK: Tool outputs
+
+    /// A tool's output goes back as its text, not wrapped in a content block.
+    @Test(arguments: Builder.allCases, [false, true])
+    func aToolOutputIsSentAsItsText(builder: Builder, streaming: Bool) async throws {
+        let transport = FakeTransport(replies: [
+            try Self.toolReply(streaming: streaming),
+            try Self.textReply("Sunny.", streaming: streaming),
+        ])
+        let session = LanguageModelSession(model: builder.makeModel(transport), tools: [WeatherTool()])
+        _ = try await Self.ask(session, "Weather?", streaming: streaming)
+
+        let output = try #require(
+            try Self.input(transport.bodies[1]).first { $0["type"] as? String == "function_call_output" }
+        )
+        #expect(output["call_id"] as? String == "call_1")
+        #expect(output["output"] as? String == "The weather in Paris is sunny and 72°F / 23°C")
+    }
+
     // MARK: Server state
 
     @Test(arguments: [false, true])
