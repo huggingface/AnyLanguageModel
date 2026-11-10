@@ -923,8 +923,8 @@ import Foundation
             generateParameters: MLXLMCommon.GenerateParameters,
             context: ModelContext
         ) throws -> (
-            stream: AsyncStream<MLXLMCommon.Generation>, cache: [MLXLMCommon.KVCache], fullTokens: [Int32],
-            cachedTokenCount: Int, state: MLXLMCommon.LMOutput.State?
+            stream: AsyncStream<MLXLMCommon.Generation>, task: Task<Void, Never>, cache: [MLXLMCommon.KVCache],
+            fullTokens: [Int32], cachedTokenCount: Int, state: MLXLMCommon.LMOutput.State?
         ) {
             func start(
                 _ resolved: (
@@ -932,8 +932,8 @@ import Foundation
                     cachedTokenCount: Int, state: MLXLMCommon.LMOutput.State?
                 )
             ) throws -> (
-                stream: AsyncStream<MLXLMCommon.Generation>, cache: [MLXLMCommon.KVCache], fullTokens: [Int32],
-                cachedTokenCount: Int, state: MLXLMCommon.LMOutput.State?
+                stream: AsyncStream<MLXLMCommon.Generation>, task: Task<Void, Never>, cache: [MLXLMCommon.KVCache],
+                fullTokens: [Int32], cachedTokenCount: Int, state: MLXLMCommon.LMOutput.State?
             ) {
                 // Creating the iterator evaluates the prompt.
                 // Its state then anchors the next request that reuses this cache.
@@ -945,14 +945,14 @@ import Foundation
                     parameters: generateParameters
                 )
                 let state = iterator.state
-                let (stream, _) = MLXLMCommon.generateTask(
+                let (stream, task) = MLXLMCommon.generateTask(
                     promptTokenCount: resolved.input.text.tokens.size,
                     modelConfiguration: context.configuration,
                     tokenizer: context.tokenizer,
                     iterator: iterator,
                     toolCallPolicy: generateParameters.toolCallPolicy
                 )
-                return (stream, resolved.cache, resolved.fullTokens, resolved.cachedTokenCount, state)
+                return (stream, task, resolved.cache, resolved.fullTokens, resolved.cachedTokenCount, state)
             }
 
             let resolved = try resolveCache(
@@ -1166,6 +1166,16 @@ import Foundation
                         rejectedToolCall = rejectedToolCall ?? rejection
                     }
                 }
+                // The stream ends early when the task is cancelled,
+                // so the text is incomplete and stays out of the transcript.
+                // Generation goes on for a moment after the stream ends,
+                // so wait until it stops using the model and cache.
+                // The cache may hold part of the response, so it isn't kept.
+                if Task.isCancelled {
+                    await resolved.task.value
+                    removeSessionCache(for: session)
+                    throw CancellationError()
+                }
                 if let rejectedToolCall {
                     removeSessionCache(for: session)
                     throw MLXLMCommon.RejectedToolCallError(rejectedToolCall)
@@ -1245,6 +1255,7 @@ import Foundation
                 options: options,
                 includeSchemaInPrompt: includeSchemaInPrompt
             )
+            try Task.checkCancellation()
             usage.add(structuredUsage)
             let generatedContent = try GeneratedContent(json: jsonString)
             let content = try type.init(generatedContent)
