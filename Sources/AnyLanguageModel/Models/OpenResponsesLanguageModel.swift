@@ -707,6 +707,8 @@ public struct OpenResponsesLanguageModel: LanguageModel, ProfileRequestIdentifie
 
         let toolRounds = session.toolRoundLimit(for: "Open Responses", options: options)
         while true {
+            // A transport may not stop for cancellation, so check before each request.
+            try Task.checkCancellation()
             let requestContext = try await session.resolvedRequestContext(
                 including: session.usesDynamicProfile ? entries : [],
                 options: options

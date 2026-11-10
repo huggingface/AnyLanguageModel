@@ -264,6 +264,8 @@ public struct GeminiLanguageModel: LanguageModel, ProfileRequestIdentifiedLangua
         let toolRounds = session.toolRoundLimit(for: "Gemini", options: options)
         // Multi-turn conversation loop for tool calling
         while true {
+            // A transport may not stop for cancellation, so check before each request.
+            try Task.checkCancellation()
             let requestContext = try await session.resolvedRequestContext(
                 including: session.usesDynamicProfile ? entries : [],
                 options: options

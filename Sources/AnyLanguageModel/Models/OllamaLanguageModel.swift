@@ -160,6 +160,8 @@ public struct OllamaLanguageModel: LanguageModel, ProfileRequestIdentifiedLangua
         let toolRounds = session.toolRoundLimit(for: "Ollama", options: options)
 
         while true {
+            // A transport may not stop for cancellation, so check before each request.
+            try Task.checkCancellation()
             let requestContext = try await session.resolvedRequestContext(
                 including: session.usesDynamicProfile ? entries : [],
                 options: options
