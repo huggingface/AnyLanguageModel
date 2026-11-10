@@ -61,6 +61,41 @@ import Testing
             #expect(model.isAvailable == true)
         }
 
+        /// A cancelled request throws, and no response goes into the transcript.
+        @Test func cancellationBeforeGenerationThrows() async throws {
+            let session = LanguageModelSession(model: model)
+            let task = Task {
+                try await session.respond(to: "Say hello", options: boundedOptions)
+            }
+            task.cancel()
+            await #expect(throws: CancellationError.self) { try await task.value }
+            #expect(
+                !session.transcript.contains { entry in
+                    if case .response = entry { true } else { false }
+                }
+            )
+        }
+
+        @Test func cancellationDuringGenerationThrows() async throws {
+            let session = LanguageModelSession(model: model)
+            // Load the model first, so that the cancellation comes during generation.
+            _ = try await LanguageModelSession(model: model).respond(to: "Say hello", options: boundedOptions)
+            let task = Task {
+                try await session.respond(
+                    to: "Count from 1 to 1000, one number per line.",
+                    options: GenerationOptions(maximumResponseTokens: 4000)
+                )
+            }
+            try await Task.sleep(for: .milliseconds(500))
+            task.cancel()
+            await #expect(throws: CancellationError.self) { try await task.value }
+            #expect(
+                !session.transcript.contains { entry in
+                    if case .response = entry { true } else { false }
+                }
+            )
+        }
+
         @Test func basicResponse() async throws {
             let session = LanguageModelSession(model: model)
 
