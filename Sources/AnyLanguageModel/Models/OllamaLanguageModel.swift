@@ -713,7 +713,7 @@ private extension Transcript {
         // A model's reasoning goes back with the assistant message it came before, as Ollama
         // takes it: a reasoning model goes on from its reasoning, not from nothing.
         var reasoning: String?
-        return try compactMap { entry -> OllamaMessage? in
+        return try addingNotExecutedToolOutputs(to: Array(self)).compactMap { entry -> OllamaMessage? in
             if case .reasoning(let entry) = entry {
                 // Only Ollama's own: another provider's reasoning is its own to replay.
                 if entry.origin == .ollama {
