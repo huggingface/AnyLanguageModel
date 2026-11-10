@@ -261,7 +261,7 @@ struct ResponsesAssistantHistoryTests {
 
         #expect(
             try Self.labels(transport.bodies[1]) == [
-                "user: Weather?", "assistant: Checking.", "call: call_1", "user: Thanks",
+                "user: Weather?", "assistant: Checking.", "call: call_1", "output: call_1", "user: Thanks",
             ]
         )
     }
@@ -397,7 +397,7 @@ struct ResponsesAssistantHistoryTests {
         #expect(
             try Self.labels(transport.bodies[2]) == [
                 "user: Weather?", "assistant: Checking.", "call: call_1", "output: call_1", "user: Be brief.",
-                "assistant: Again.", "call: call_2", "user: Thanks",
+                "assistant: Again.", "call: call_2", "output: call_2", "user: Thanks",
             ]
         )
     }
@@ -1286,7 +1286,8 @@ struct ResponsesAssistantHistoryTests {
         let labels = try Self.labels(transport.bodies[1])
         #expect(
             Array(labels.dropFirst()) == [
-                "call: call_1", "assistant: \(edited ? redacted : #"{"text":"SECRET"}"#)", "user: Thanks",
+                "call: call_1", "output: call_1", "assistant: \(edited ? redacted : #"{"text":"SECRET"}"#)",
+                "user: Thanks",
             ]
         )
     }

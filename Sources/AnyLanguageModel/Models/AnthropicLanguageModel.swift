@@ -1134,7 +1134,7 @@ extension Transcript {
                 messages.append(.init(role: .assistant, content: content))
             }
         }
-        for item in self {
+        for item in addingNotExecutedToolOutputs(to: Array(self)) {
             switch item {
             case .instructions(let instructions):
                 messages.append(

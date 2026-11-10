@@ -311,7 +311,7 @@ extension Transcript {
         for turn in assistantTurns(entries) {
             resolveAssistantText(in: &entries, turn: turn.range, isLast: turn.isLast)
         }
-        return entries
+        return addingNotExecutedToolOutputs(to: entries)
     }
 
     private func resolveAssistantText(in entries: inout [Entry], turn: Range<Int>, isLast: Bool) {
@@ -366,4 +366,57 @@ extension Transcript.Response {
         }
         return text == written
     }
+}
+
+/// The text of the output that replay sends for a tool call without one.
+let notExecutedToolOutputText = "The tool call was not executed."
+
+/// The entries with an output for each tool call that has none,
+/// such as the calls of a round that a ``ToolExecutionDelegate`` stopped.
+///
+/// Providers reject a request with a tool call that no output follows,
+/// so each missing output goes after the round's last output,
+/// or after the calls if the round has no outputs.
+func addingNotExecutedToolOutputs(to entries: [Transcript.Entry]) -> [Transcript.Entry] {
+    var result: [Transcript.Entry] = []
+    result.reserveCapacity(entries.count)
+    var pending: [Transcript.ToolCall] = []
+    // The index in `result` after the open round's calls or its last output.
+    var insertionIndex = 0
+    func closeRound() {
+        guard !pending.isEmpty else { return }
+        let outputs = pending.map { call in
+            Transcript.Entry.toolOutput(
+                .init(
+                    id: call.id,
+                    toolName: call.toolName,
+                    segments: [.text(.init(content: notExecutedToolOutputText))]
+                )
+            )
+        }
+        result.insert(contentsOf: outputs, at: insertionIndex)
+        pending = []
+    }
+    for entry in entries {
+        switch entry {
+        case .toolCalls(let calls):
+            closeRound()
+            result.append(entry)
+            pending = Array(calls)
+            insertionIndex = result.count
+        case .toolOutput(let output):
+            result.append(entry)
+            if let index = pending.firstIndex(where: { $0.id == output.id }) {
+                pending.remove(at: index)
+                insertionIndex = result.count
+            }
+        case .instructions, .prompt, .response:
+            closeRound()
+            result.append(entry)
+        case .reasoning:
+            result.append(entry)
+        }
+    }
+    closeRound()
+    return result
 }

@@ -226,7 +226,8 @@ struct GeminiAssistantHistoryTests {
 
         #expect(
             try Self.labels(transport.bodies[1]) == [
-                "user: Weather?", "model: Checking. #round-signature", "call #call-signature", "user: Thanks",
+                "user: Weather?", "model: Checking. #round-signature", "call #call-signature", "output",
+                "user: Thanks",
             ]
         )
     }
@@ -347,6 +348,7 @@ struct GeminiAssistantHistoryTests {
         #expect(
             Array(labels.dropFirst()) == [
                 "call #call-signature",
+                "output",
                 edited ? #"model: {"text":"REDACTED"}"# : #"model: {"text":"SECRET"}"#,
                 "user: Thanks",
             ]

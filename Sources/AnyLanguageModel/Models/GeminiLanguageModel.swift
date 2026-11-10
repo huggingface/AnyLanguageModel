@@ -1126,7 +1126,7 @@ extension Transcript {
                 resolveStringTurn(in: &entries, turn: turn.range, isLast: turn.isLast, removed: &removed)
             }
         }
-        return entries.indices.filter { !removed.contains($0) }.map { entries[$0] }
+        return addingNotExecutedToolOutputs(to: entries.indices.filter { !removed.contains($0) }.map { entries[$0] })
     }
 
     private func resolveStringTurn(
