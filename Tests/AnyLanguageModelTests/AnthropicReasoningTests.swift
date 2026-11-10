@@ -55,26 +55,46 @@ import Testing
         }
 
         @Test(arguments: [false, true])
-        func thinkingAndCompletedToolPersistForProviderToolFlow(streaming: Bool) async throws {
+        func thinkingAndToolRoundTextReplayInOrder(streaming: Bool) async throws {
             ReasoningURLProtocol.reset()
             let session = LanguageModelSession(model: model(), tools: [WeatherTool()])
             let result: LanguageModelSession.Response<String>
             if streaming {
-                ReasoningURLProtocol.enqueue(eventStream: events(tool: true))
+                ReasoningURLProtocol.enqueue(eventStream: events(tool: true, withToolText: true))
                 ReasoningURLProtocol.enqueue(eventStream: events())
                 result = try await session.streamResponse(to: "Weather").collect()
             } else {
-                ReasoningURLProtocol.enqueue(json: response(tool: true))
+                ReasoningURLProtocol.enqueue(json: response(tool: true, withToolText: true))
                 ReasoningURLProtocol.enqueue(json: response())
                 result = try await session.respond(to: "Weather")
             }
-            #expect(result.content == "Answer")
+            #expect(result.content == "Checking.Answer")
             #expect(result.transcriptEntries.count == 4)
             #expect(Set(result.transcriptEntries.map(\.id)).count == result.transcriptEntries.count)
             try #require(ReasoningURLProtocol.recordedBodies.count == 2)
             let body = String(decoding: ReasoningURLProtocol.recordedBodies[1], as: UTF8.self)
             #expect(body.contains("opaque-signature"))
             #expect(body.contains("tool_result"))
+
+            let restored = try JSONDecoder().decode(Transcript.self, from: JSONEncoder().encode(session.transcript))
+            ReasoningURLProtocol.enqueue(json: response())
+            _ = try await LanguageModelSession(model: model(), transcript: restored).respond(to: "Again")
+            let request = try #require(ReasoningURLProtocol.recordedBodies.last)
+            let json = try #require(try JSONSerialization.jsonObject(with: request) as? [String: Any])
+            let messages = try #require(json["messages"] as? [[String: Any]])
+            try #require(messages.count == 5)
+            #expect(
+                messages.compactMap { $0["role"] as? String } == ["user", "assistant", "user", "assistant", "user"]
+            )
+            let beforeTool = try #require(messages[1]["content"] as? [[String: Any]])
+            #expect(beforeTool.compactMap { $0["type"] as? String } == ["thinking", "text", "tool_use"])
+            #expect(beforeTool.first?["signature"] as? String == "opaque-signature")
+            #expect(beforeTool.compactMap { $0["text"] as? String } == ["Checking."])
+            let outputs = try #require(messages[2]["content"] as? [[String: Any]])
+            #expect(outputs.first?["type"] as? String == "tool_result")
+            #expect(outputs.first?["tool_use_id"] as? String == "call")
+            let afterTool = try #require(messages[3]["content"] as? [[String: Any]])
+            #expect(afterTool.compactMap { $0["text"] as? String } == ["Answer"])
         }
 
         enum LimitedToolFlow: CaseIterable {
@@ -355,17 +375,18 @@ import Testing
             #expect(Array(session.transcript.prefix(transcript.count)) == Array(transcript))
         }
 
-        private func response(tool: Bool = false) -> String {
+        private func response(tool: Bool = false, withToolText: Bool = false) -> String {
             let last =
                 tool
                 ? #"{"type":"tool_use","id":"call","name":"getWeather","input":{"city":"Paris"}}"#
                 : #"{"type":"text","text":"Answer"}"#
             return
                 #"{"id":"msg","type":"message","role":"assistant","model":"fixture","content":[{"type":"thinking","thinking":"Consider","signature":"opaque-signature"},"#
+                + (withToolText ? #"{"type":"text","text":"Checking."},"# : "")
                 + last + #"],"stop_reason":"end_turn","usage":{"input_tokens":1,"output_tokens":2}}"#
         }
 
-        private func events(tool: Bool = false) -> [String] {
+        private func events(tool: Bool = false, withToolText: Bool = false) -> [String] {
             var result = [
                 #"{"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":"","signature":""}}"#,
                 #"{"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"Consider"}}"#,
@@ -373,8 +394,17 @@ import Testing
                 #"{"type":"content_block_stop","index":0}"#,
             ]
             if tool {
+                if withToolText {
+                    result.append(
+                        #"{"type":"content_block_start","index":1,"content_block":{"type":"text","text":""}}"#
+                    )
+                    result.append(
+                        #"{"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":"Checking."}}"#
+                    )
+                    result.append(#"{"type":"content_block_stop","index":1}"#)
+                }
                 result.append(
-                    #"{"type":"content_block_start","index":1,"content_block":{"type":"tool_use","id":"call","name":"getWeather","input":{"city":"Paris"}}}"#
+                    #"{"type":"content_block_start","index":\#(withToolText ? 2 : 1),"content_block":{"type":"tool_use","id":"call","name":"getWeather","input":{"city":"Paris"}}}"#
                 )
             } else {
                 result.append(#"{"type":"content_block_start","index":1,"content_block":{"type":"text","text":""}}"#)
