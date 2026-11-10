@@ -539,6 +539,8 @@ public struct OpenAILanguageModel: LanguageModel, ProfileRequestIdentifiedLangua
         let toolRounds = session.toolRoundLimit(for: "OpenAI", options: options)
         // Loop until no more tool calls
         while true {
+            // A transport may not stop for cancellation, so check before each request.
+            try Task.checkCancellation()
             let requestContext = try await session.resolvedRequestContext(
                 including: session.usesDynamicProfile ? entries : [],
                 options: options
@@ -715,6 +717,8 @@ public struct OpenAILanguageModel: LanguageModel, ProfileRequestIdentifiedLangua
         let toolRounds = session.toolRoundLimit(for: "OpenAI", options: options)
         // Loop until no more tool calls
         while true {
+            // A transport may not stop for cancellation, so check before each request.
+            try Task.checkCancellation()
             let requestContext = try await session.resolvedRequestContext(
                 including: session.usesDynamicProfile ? entries : [],
                 options: options
