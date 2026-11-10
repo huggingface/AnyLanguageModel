@@ -1169,14 +1169,22 @@ import Testing
             let tool = RecordingWeatherTool()
             let response = try await provider.makeSession(tools: [tool]).streamResponse(to: "Weather?").collect()
             #expect(response.content == "Hello")
-            #expect(tool.cities.withLock { $0 } == ["Paris", "London"])
+            // The calls of a round run at once, so they can start in either order.
+            #expect(tool.cities.withLock { $0.sorted() } == ["London", "Paris"])
             #expect(response.transcriptEntries.count == 3)
+            // Their outputs keep the order the model made the calls in.
+            let outputIDs = response.transcriptEntries.compactMap { entry -> String? in
+                if case .toolOutput(let output) = entry { return output.id }
+                return nil
+            }
+            #expect(outputIDs == ["call_1", "call_2"])
             let body = try #require(UsageURLProtocol.recordedBodies.last)
             let json = String(decoding: body, as: UTF8.self)
             #expect(json.contains("call_1"))
             #expect(json.contains("call_2"))
-            #expect(json.contains("The weather in Paris is sunny"))
-            #expect(json.contains("The weather in London is sunny"))
+            let paris = try #require(json.range(of: "The weather in Paris is sunny"))
+            let london = try #require(json.range(of: "The weather in London is sunny"))
+            #expect(paris.lowerBound < london.lowerBound)
         }
 
         private struct CancellableWeatherTool: Tool {
