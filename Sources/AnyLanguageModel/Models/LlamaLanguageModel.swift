@@ -867,6 +867,9 @@ import Foundation
                 }
 
                 usage.add(roundUsage)
+                // Generation stops early when the task is cancelled,
+                // so the text is incomplete and stays out of the transcript.
+                try Task.checkCancellation()
 
                 guard let format = toolContext?.format else {
                     text = outputFormat.streamingVisibleText(
@@ -955,6 +958,7 @@ import Foundation
                 maxTokens: structuredOptions.maximumResponseTokens ?? 512,
                 options: structuredOptions
             )
+            try Task.checkCancellation()
             usage.add(structuredUsage)
             let generatedContent = try GeneratedContent(json: jsonString)
             let content = try type.init(generatedContent)
