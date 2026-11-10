@@ -235,7 +235,7 @@ func toolContinuationMessages<Message>(
 /// ``Transcript/ToolCalls/providerMetadata``, and the text that a response replays in
 /// ``Transcript/Response/providerMetadata``.
 ///
-/// Chat Completions, the OpenAI Responses API, and Open Responses share this key,
+/// Anthropic, Chat Completions, the OpenAI Responses API, and Open Responses share this key,
 /// so a transcript that moves between them replays each piece of text once.
 /// The key keeps its original name because saved transcripts contain it.
 let assistantContentMetadataKey = "openai.content"
