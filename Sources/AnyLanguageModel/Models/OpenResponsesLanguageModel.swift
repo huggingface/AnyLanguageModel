@@ -878,34 +878,11 @@ private enum OpenResponsesAPI {
                     ])
                 )
             case .tool(let id):
-                var contentBlocks: [JSONValue]
-                switch msg.content {
-                case .text(let t):
-                    contentBlocks = [.object(["type": .string("input_text"), "text": .string(t)])]
-                case .blocks(let blocks):
-                    contentBlocks = blocks.map { b in
-                        switch b {
-                        case .text(let t): return .object(["type": .string("input_text"), "text": .string(t)])
-                        case .imageURL(let url):
-                            return .object(["type": .string("input_image"), "image_url": .string(url)])
-                        }
-                    }
-                }
-                let outputString: String
-                if contentBlocks.count > 1 {
-                    let data = try JSONEncoder().encode(JSONValue.array(contentBlocks))
-                    outputString = String(data: data, encoding: .utf8) ?? "[]"
-                } else if let first = contentBlocks.first {
-                    let data = try JSONEncoder().encode(first)
-                    outputString = String(data: data, encoding: .utf8) ?? "{}"
-                } else {
-                    outputString = "{}"
-                }
                 input.append(
                     .object([
                         "type": .string("function_call_output"),
                         "call_id": .string(id),
-                        "output": .string(outputString),
+                        "output": .string(msg.text),
                     ])
                 )
             case .raw(rawContent: let raw):
@@ -921,7 +898,7 @@ private enum OpenResponsesAPI {
                     if !t.isEmpty { body["instructions"] = .string(t) }
                 }
             case .assistant(let id):
-                let text = msg.assistantText
+                let text = msg.text
                 if !text.isEmpty {
                     // `AssistantMessageItemParam` also takes string content without `id` and `status`,
                     // but OpenRouter requires both on assistant messages and shows `output_text` parts.
@@ -1097,9 +1074,9 @@ private struct OpenResponsesMessage: Sendable {
     let role: Role
     let content: Content
 
-    /// The message's content as text-only assistant content,
-    /// with an `<image>` placeholder for each image, as in tool outputs.
-    var assistantText: String {
+    /// The message's content as text, with an `<image>` placeholder for each image,
+    /// for assistant messages and tool outputs, which take only text.
+    var text: String {
         switch content {
         case .text(let text):
             return text
