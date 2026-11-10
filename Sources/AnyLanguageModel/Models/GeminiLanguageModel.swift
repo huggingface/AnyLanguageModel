@@ -322,13 +322,13 @@ public struct GeminiLanguageModel: LanguageModel, ProfileRequestIdentifiedLangua
                 throw GeminiError.noCandidate
             }
 
-            let functionCalls: [GeminiFunctionCall] =
-                firstCandidate.content.parts?.compactMap { part in
-                    if case .functionCall(let call) = part { return call }
-                    return nil
-                } ?? []
+            let parts = partsWithoutThoughts(firstCandidate.content.parts)
+            let functionCalls: [GeminiFunctionCall] = parts.compactMap { part in
+                if case .functionCall(let call) = part { return call }
+                return nil
+            }
             let providerMetadata = try textPartMetadata(
-                firstCandidate.content.parts ?? [],
+                parts,
                 includeUnsignedText: !functionCalls.isEmpty
             )
 
@@ -362,14 +362,14 @@ public struct GeminiLanguageModel: LanguageModel, ProfileRequestIdentifiedLangua
                         entries.append(.prompt(prompt))
                     }
 
-                    if type == String.self { earlierText += textPartsText(firstCandidate.content.parts) }
+                    if type == String.self { earlierText += textPartsText(parts) }
 
                     // Continue the loop to send the next request with tool results
                     continue
                 }
             } else {
                 // No function calls, extract final text and return
-                let text = earlierText + textPartsText(firstCandidate.content.parts)
+                let text = earlierText + textPartsText(parts)
 
                 if type == String.self {
                     return LanguageModelSession.Response(
@@ -513,7 +513,7 @@ public struct GeminiLanguageModel: LanguageModel, ProfileRequestIdentifiedLangua
                         for try await chunk in stream {
                             state.usage.merge(chunk.usageMetadata?.reportedUsage)
                             var yieldedText = false
-                            for part in chunk.candidates.first?.content.parts ?? [] {
+                            for part in partsWithoutThoughts(chunk.candidates.first?.content.parts) {
                                 parts.append(part)
                                 switch part {
                                 case .text(let textPart):
@@ -768,13 +768,27 @@ private func resolveFunctionCalls(
 }
 
 /// Joins the text parts of a Gemini response.
-private func textPartsText(_ parts: [GeminiPart]?) -> String {
-    parts?.compactMap { part -> String? in
+private func textPartsText(_ parts: [GeminiPart]) -> String {
+    parts.compactMap { part -> String? in
         switch part {
         case .text(let t): return t.text
         default: return nil
         }
-    }.joined() ?? ""
+    }.joined()
+}
+
+/// The parts of a Gemini response without the model's thoughts.
+///
+/// With thinking on, Gemini sends thought summaries as text parts marked `thought`.
+/// They aren't part of the answer, so they stay out of the response text
+/// and don't go back as model text.
+/// A thought part's signature stays, on a part without text.
+private func partsWithoutThoughts(_ parts: [GeminiPart]?) -> [GeminiPart] {
+    (parts ?? []).compactMap { part in
+        guard case .text(let text) = part, text.thought == true else { return part }
+        guard let signature = text.thoughtSignature else { return nil }
+        return .text(GeminiTextPart(text: "", thoughtSignature: signature))
+    }
 }
 
 private func toGeminiFunctionResponse(

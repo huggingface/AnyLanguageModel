@@ -86,6 +86,55 @@ struct GeminiAssistantHistoryTests {
         Edit.allCases.flatMap { edit in [(edit, false), (edit, true)] }
     }
 
+    private static func thought(_ text: String, signature: String? = nil) -> [String: Any] {
+        var part = Self.text(text, signature: signature)
+        part["thought"] = true
+        return part
+    }
+
+    /// With thinking on, thought parts aren't part of the answer and don't go back as model text.
+    /// A thought's signature goes back on a part without text.
+    @Test(arguments: [false, true])
+    func thoughtsArentInTheAnswerOrTheNextRequest(streaming: Bool) async throws {
+        let transport = FakeTransport(replies: [
+            try Self.reply(
+                parts: [Self.thought("THOUGHT", signature: "thought-signature"), Self.text("Sunny.")],
+                streaming: streaming
+            ),
+            try Self.reply(parts: [Self.text("Bye.")], streaming: streaming),
+        ])
+        let session = LanguageModelSession(model: Self.model(transport))
+        let answer = try await Self.ask(session, "Weather?", streaming: streaming)
+        _ = try await Self.ask(session, "Thanks", streaming: streaming)
+
+        #expect(answer == "Sunny.")
+        #expect(
+            try Self.labels(transport.bodies[1]) == [
+                "user: Weather?", "model:  #thought-signature", "model: Sunny.", "user: Thanks",
+            ]
+        )
+    }
+
+    @Test(arguments: [false, true])
+    func thoughtsOfAToolRoundArentInTheAnswerOrTheNextRequest(streaming: Bool) async throws {
+        let transport = FakeTransport(replies: [
+            try Self.reply(parts: [Self.thought("THOUGHT"), Self.call], streaming: streaming),
+            try Self.reply(parts: [Self.thought("THOUGHT"), Self.text("Sunny.")], streaming: streaming),
+            try Self.reply(parts: [Self.text("Bye.")], streaming: streaming),
+        ])
+        let session = LanguageModelSession(model: Self.model(transport), tools: [WeatherTool()])
+        let answer = try await Self.ask(session, "Weather?", streaming: streaming)
+        _ = try await Self.ask(session, "Thanks", streaming: streaming)
+
+        #expect(answer == "Sunny.")
+        #expect(try Self.labels(transport.bodies[1]) == ["user: Weather?", "call #call-signature", "output"])
+        #expect(
+            try Self.labels(transport.bodies[2]) == [
+                "user: Weather?", "call #call-signature", "output", "model: Sunny.", "user: Thanks",
+            ]
+        )
+    }
+
     @Test(arguments: Self.cases)
     func aSignedAnswerFollowsItsEdits(edit: Edit, streaming: Bool) async throws {
         let transport = FakeTransport(replies: [

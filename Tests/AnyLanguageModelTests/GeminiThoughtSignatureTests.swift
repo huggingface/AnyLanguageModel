@@ -501,7 +501,8 @@ import Testing
             StubURLProtocol.enqueue(json: textResponse("Still here."))
             let session = LanguageModelSession(model: makeModel())
             let result = try await session.respond(to: "Hello")
-            #expect(result.content == "Thinking.Hello world.")
+            // The thought isn't part of the answer.
+            #expect(result.content == "Hello world.")
             #expect(result.providerMetadata != nil)
             _ = try await session.respond(to: "Continue")
             let restored = try restoredSession(session)
@@ -510,8 +511,11 @@ import Testing
             let bodies = StubURLProtocol.recordedBodies
             try #require(bodies.count == 3)
             #expect(try bodies.map { try contentCount(in: $0) } == [1, 3, 5])
+            // The thought's signature goes back without its text.
+            let replayed: [[String: Any]] =
+                [["text": "", "thoughtSignature": "thinking-signature=="]] + parts.dropFirst()
             for body in bodies.dropFirst() {
-                try expectParts(parts, in: contents(in: body)[1])
+                try expectParts(replayed, in: contents(in: body)[1])
             }
         }
 
