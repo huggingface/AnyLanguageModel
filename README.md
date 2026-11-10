@@ -1600,6 +1600,10 @@ See [upstream issue #2407](https://github.com/google-ai-edge/LiteRT-LM/issues/24
 for details.
 The `LiteRT` trait and `LiteRTLanguageModel` are no longer available.
 
+For LiteRT-LM models on iOS and macOS,
+[anylanguagemodel-litert-lm](https://github.com/john-rocky/anylanguagemodel-litert-lm)
+is a community package with a `LanguageModel` conformance.
+
 ### Ollama
 
 Run models locally via Ollama's
