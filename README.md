@@ -1016,9 +1016,9 @@ let local = try await OllamaLanguageModel.availableModels()
 ```
 
 Ollama's cloud lists its models to anyone,
-so `OllamaLanguageModel.runningModels(baseURL:apiKey:)`,
-which it answers only for a key it takes,
-is what checks an Ollama key.
+so listing them doesn't check an Ollama key:
+`checkAvailability()` does,
+asking Ollama's cloud for the key's account.
 
 ### HTTP Transport
 
@@ -1359,7 +1359,7 @@ say which API they follow.
 - `HTTPTransport`, `HTTPResponseBody`, `HTTPTransportError`, and `makeDefaultTransport()`:
   [HTTP transports](#http-transport) for remote models.
 - `LanguageModel.checkAvailability()`, `ModelAvailability`, `ModelDetails`, `ModelUnavailability`,
-  each remote provider's `availableModels(…)`, and `OllamaLanguageModel.runningModels(…)`:
+  and each remote provider's `availableModels(…)`:
   [checking a model](#checking-a-model) before it's used,
   and the models a provider offers.
 - `GeneratedContentError`, `Transcript.ReasoningReplayError`, `SystemLanguageModel.Error`,

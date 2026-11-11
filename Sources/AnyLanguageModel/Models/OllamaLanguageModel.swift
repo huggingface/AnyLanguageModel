@@ -992,7 +992,7 @@ private struct OllamaToolFunction: Codable, Sendable {
 extension OllamaLanguageModel {
     /// The models the server at `baseURL` has, by the names a model is made with: `api/tags`.
     /// Ollama's cloud lists its models to anyone, so this doesn't check `apiKey`:
-    /// ``runningModels(baseURL:apiKey:transport:)`` does.
+    /// ``checkAvailability()`` does.
     ///
     /// - Note: This API is exclusive to AnyLanguageModel
     ///   and using it means your code is no longer drop-in compatible
@@ -1002,41 +1002,15 @@ extension OllamaLanguageModel {
         apiKey: String? = nil,
         transport: any HTTPTransport = makeDefaultTransport()
     ) async throws -> [String] {
-        try await models(at: "api/tags", of: baseURL, apiKey: apiKey, transport: transport)
-    }
-
-    /// The models the server at `baseURL` has running now: `api/ps`. Ollama's cloud answers only
-    /// with a key it takes, and a local server with any, so a key Ollama's cloud refuses throws
-    /// ``ModelUnavailability``, as any failure does.
-    ///
-    /// - Note: This API is exclusive to AnyLanguageModel
-    ///   and using it means your code is no longer drop-in compatible
-    ///   with the Foundation Models framework.
-    public static func runningModels(
-        baseURL: URL = defaultBaseURL,
-        apiKey: String? = nil,
-        transport: any HTTPTransport = makeDefaultTransport()
-    ) async throws -> [String] {
-        try await models(at: "api/ps", of: baseURL, apiKey: apiKey, transport: transport)
-    }
-
-    /// The models listed at `path` of the server at `baseURL`, asked with `apiKey`, when there's one.
-    private static func models(
-        at path: String,
-        of baseURL: URL,
-        apiKey: String?,
-        transport: any HTTPTransport
-    ) async throws -> [String] {
         try await askingProvider(keyGiven: apiKey != nil) {
             let list: OllamaModelList = try await transport.fetch(
                 HTTPRequest(
                     method: .get,
-                    url: baseURL.appendingPathComponent(path),
+                    url: baseURL.appendingPathComponent("api/tags"),
                     headerFields: headers(apiKey: apiKey)
                 )
             )
             return list.models.map(\.name)
-
         }
     }
 }
@@ -1044,15 +1018,24 @@ extension OllamaLanguageModel {
 // MARK: - Checking Availability
 
 extension OllamaLanguageModel {
-    /// Whether this model can be used now: the server takes its key, which Ollama's cloud checks
-    /// when it's asked what it runs, though it lists its models to anyone; and it has the model,
-    /// as `api/show` says, whatever tag it's named with.
+    /// Whether this model can be used now: a key it's given, as the account `api/me` answers for,
+    /// which Ollama's cloud does only for a key it takes; and the model, as `api/show` says,
+    /// whatever tag it's named with. Without a key, no account is asked for: a server on your own
+    /// machine or network takes none.
     public func checkAvailability() async throws(CancellationError) -> ModelAvailability {
         let apiKey = tokenProvider?()
-        do {
-            _ = try await Self.runningModels(baseURL: baseURL, apiKey: apiKey, transport: transport)
-        } catch {
-            return .unavailable(try ModelUnavailability(asking: error, keyGiven: apiKey != nil, missingModel: false))
+        if let apiKey {
+            do {
+                let _: OllamaAccount = try await transport.fetch(
+                    HTTPRequest(
+                        method: .post,
+                        url: baseURL.appendingPathComponent("api/me"),
+                        headerFields: Self.headers(apiKey: apiKey)
+                    )
+                )
+            } catch {
+                return .unavailable(try ModelUnavailability(asking: error, keyGiven: true, missingModel: false))
+            }
         }
         do {
             let shown: OllamaShownModel = try await transport.fetch(
@@ -1070,6 +1053,9 @@ extension OllamaLanguageModel {
     }
 }
 
+/// The answer to `api/me`: the account a key is for. Only that it answers is read.
+private struct OllamaAccount: Decodable {}
+
 /// The answer to `api/show`: what's read of it is the model's context length.
 private struct OllamaShownModel: Decodable {
     /// The model's metadata, its keys named by its architecture: `llama.context_length`.
@@ -1085,7 +1071,7 @@ private struct OllamaShownModel: Decodable {
     }
 }
 
-/// The answer to `api/tags` or `api/ps`.
+/// The answer to `api/tags`.
 private struct OllamaModelList: Decodable {
     struct Model: Decodable {
         let name: String

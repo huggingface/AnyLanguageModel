@@ -17,10 +17,10 @@ struct CheckAvailabilityTests {
         #expect(try await model.checkAvailability().kind == .other)
     }
 
-    @Test("an Ollama server takes the key when it says what it runs, then shows the model")
+    @Test("an Ollama server answers for the key's account, then shows the model")
     func ollamaIsAvailable() async throws {
         let transport = FakeTransport(replies: [
-            .init(chunks: [#"{"models":[]}"#]),
+            .init(chunks: [#"{"Name":"someone","Plan":"free"}"#]),
             .init(chunks: [
                 #"{"modelfile":"FROM qwen3","model_info":{"general.architecture":"qwen3","qwen3.context_length":40960}}"#
             ]),
@@ -33,7 +33,7 @@ struct CheckAvailabilityTests {
         )
 
         #expect(try await model.checkAvailability().details == ModelDetails(contextSize: 40960))
-        #expect(transport.requests.map(\.path) == ["/api/ps", "/api/show"])
+        #expect(transport.requests.map(\.path) == ["/api/me", "/api/show"])
         #expect(transport.requests.map { $0.headerFields[.authorization] } == ["Bearer secret", "Bearer secret"])
         #expect(transport.bodies.last == Data(#"{"model":"qwen3"}"#.utf8))
     }
@@ -45,7 +45,8 @@ struct CheckAvailabilityTests {
                 key: "secret", status: HTTPResponse.Status.unauthorized, show: false,
                 kind: ModelUnavailability.Kind.keyRefused
             ),
-            (key: nil, status: .unauthorized, show: false, kind: .keyNeeded),
+            (key: nil, status: .unauthorized, show: true, kind: .keyNeeded),
+            (key: nil, status: .notFound, show: true, kind: .modelNotFound),
             (key: "secret", status: .notFound, show: true, kind: .modelNotFound),
             (key: "secret", status: .notFound, show: false, kind: .providerError),
             (key: "secret", status: .internalServerError, show: true, kind: .providerError),
@@ -54,9 +55,11 @@ struct CheckAvailabilityTests {
     func ollamaIsUnavailable(
         _ outcome: (key: String?, status: HTTPResponse.Status, show: Bool, kind: ModelUnavailability.Kind)
     ) async throws {
-        // A refusal of `api/ps` comes first; of `api/show`, after `api/ps` took the key.
+        // With a key, its account is asked for first, and `api/show` after the key is taken;
+        // without one, only `api/show` is asked.
+        let accountAnswered = outcome.show && outcome.key != nil
         let transport = FakeTransport(
-            replies: (outcome.show ? [.init(chunks: [#"{"models":[]}"#])] : [])
+            replies: (accountAnswered ? [.init(chunks: [#"{"Name":"someone"}"#])] : [])
                 + [.init(status: outcome.status, chunks: [#"{"error":"no"}"#])]
         )
         let cloud = URL(string: "https://ollama.com")!
@@ -69,6 +72,7 @@ struct CheckAvailabilityTests {
 
         let unavailability = try #require(try await model.checkAvailability().unavailability)
 
+        #expect(transport.requests.first?.path == (outcome.key == nil ? "/api/show" : "/api/me"))
         #expect(unavailability.kind == outcome.kind)
         #expect((unavailability.underlyingError as? HTTPTransportError)?.response?.status == outcome.status)
     }
@@ -76,14 +80,14 @@ struct CheckAvailabilityTests {
     @Test("an Ollama server that doesn't say its model's context length leaves it unknown")
     func ollamaWithoutAContextLength() async throws {
         let transport = FakeTransport(replies: [
-            .init(chunks: [#"{"models":[]}"#]),
-            .init(chunks: [#"{"modelfile":"FROM qwen3"}"#]),
+            .init(chunks: [#"{"modelfile":"FROM qwen3"}"#])
         ])
         let model = OllamaLanguageModel(model: "qwen3", transport: transport)
 
         #expect(try await model.checkAvailability().details == ModelDetails())
-        // A local server is asked without a key.
-        #expect(transport.requests.map { $0.headerFields[.authorization] } == [nil, nil])
+        // A local server is asked without a key, and for no account.
+        #expect(transport.requests.map(\.path) == ["/api/show"])
+        #expect(transport.requests.map { $0.headerFields[.authorization] } == [nil])
     }
 
     @Test("a server compatible with OpenAI that takes no key is asked without one; a refusal asks for a key")

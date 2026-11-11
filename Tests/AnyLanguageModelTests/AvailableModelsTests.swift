@@ -86,24 +86,23 @@ struct AvailableModelsTests {
         #expect(transport.requests.first?.headerFields[HTTPField.Name("x-goog-api-key")!] == "secret")
     }
 
-    @Test("an Ollama server lists the models it has, and those it's running, with its key or none")
+    @Test("an Ollama server lists the models it has, asked with its key or none")
     func ollama() async throws {
         let transport = FakeTransport(replies: [
             .init(chunks: [#"{"models":[{"name":"qwen3:8b","model":"qwen3:8b"},{"name":"gpt-oss:120b"}]}"#]),
-            .init(chunks: [#"{"models":[{"name":"qwen3:8b"}]}"#]),
+            .init(chunks: [#"{"models":[{"name":"gpt-oss:120b"}]}"#]),
         ])
-        let cloud = URL(string: "https://ollama.com")!
 
-        let available = try await OllamaLanguageModel.availableModels(transport: transport)
-        let running = try await OllamaLanguageModel.runningModels(
-            baseURL: cloud,
+        let local = try await OllamaLanguageModel.availableModels(transport: transport)
+        let cloud = try await OllamaLanguageModel.availableModels(
+            baseURL: URL(string: "https://ollama.com")!,
             apiKey: "secret",
             transport: transport
         )
 
-        #expect(available == ["qwen3:8b", "gpt-oss:120b"])
-        #expect(running == ["qwen3:8b"])
-        #expect(transport.requests.map(\.path) == ["/api/tags", "/api/ps"])
+        #expect(local == ["qwen3:8b", "gpt-oss:120b"])
+        #expect(cloud == ["gpt-oss:120b"])
+        #expect(transport.requests.map(\.path) == ["/api/tags", "/api/tags"])
         #expect(transport.requests.map { $0.headerFields[.authorization] } == [nil, "Bearer secret"])
     }
 
@@ -186,7 +185,7 @@ struct AvailableModelsTests {
             case .anthropic: try await AnthropicLanguageModel.availableModels(apiKey: "wrong", transport: transport)
             case .gemini: try await GeminiLanguageModel.availableModels(apiKey: "wrong", transport: transport)
             case .ollama:
-                try await OllamaLanguageModel.runningModels(
+                try await OllamaLanguageModel.availableModels(
                     baseURL: URL(string: "https://ollama.com")!,
                     apiKey: "wrong",
                     transport: transport
