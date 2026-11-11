@@ -1773,7 +1773,8 @@ extension AnthropicLanguageModel {
     /// The models `apiKey` may use, by the IDs a model is made with, newest first as Anthropic
     /// lists them: every page of `GET /v1/models`.
     ///
-    /// A key Anthropic refuses throws ``HTTPTransportError`` with its answer, as a response does.
+    /// A failure throws ``ModelUnavailability``: a key missing or refused, a provider that can't be
+    /// reached, or what it answered instead. A cancelled one throws `CancellationError`.
     ///
     /// - Note: This API is exclusive to AnyLanguageModel
     ///   and using it means your code is no longer drop-in compatible
@@ -1784,24 +1785,27 @@ extension AnthropicLanguageModel {
         apiVersion: String = defaultAPIVersion,
         transport: any HTTPTransport = makeDefaultTransport()
     ) async throws -> [String] {
-        var models: [String] = []
-        var after: String?
-        while true {
-            // A transport may not stop for cancellation, so check before each page.
-            try Task.checkCancellation()
-            var query = [URLQueryItem(name: "limit", value: "1000")]
-            if let after { query.append(URLQueryItem(name: "after_id", value: after)) }
-            let page: AnthropicModelPage = try await transport.fetch(
-                HTTPRequest(
-                    method: .get,
-                    url: try baseURL.appendingPathComponent("v1/models").asking(query),
-                    headerFields: headers(apiKey: apiKey, apiVersion: apiVersion, betas: nil)
+        try await askingProvider(keyGiven: !apiKey.isEmpty) {
+            var models: [String] = []
+            var after: String?
+            while true {
+                // A transport may not stop for cancellation, so check before each page.
+                try Task.checkCancellation()
+                var query = [URLQueryItem(name: "limit", value: "1000")]
+                if let after { query.append(URLQueryItem(name: "after_id", value: after)) }
+                let page: AnthropicModelPage = try await transport.fetch(
+                    HTTPRequest(
+                        method: .get,
+                        url: try baseURL.appendingPathComponent("v1/models").asking(query),
+                        headerFields: headers(apiKey: apiKey, apiVersion: apiVersion, betas: nil)
+                    )
                 )
-            )
-            models += page.data.map(\.id)
-            // The next page, unless this was the last, or its cursor didn't move.
-            guard page.hasMore, let last = page.lastID, last != after else { return models }
-            after = last
+                models += page.data.map(\.id)
+                // The next page, unless this was the last, or its cursor didn't move.
+                guard page.hasMore, let last = page.lastID, last != after else { return models }
+                after = last
+            }
+
         }
     }
 }

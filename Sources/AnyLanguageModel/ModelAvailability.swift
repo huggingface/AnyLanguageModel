@@ -97,11 +97,26 @@ extension ModelUnavailability {
     ///   - keyGiven: Whether the request carried a key: a refusal without one asks for a key.
     ///   - missingModel: Whether a `404 Not Found` means the provider doesn't have the model,
     ///     as it does when the model itself was asked for.
-    init(asking error: any Error, keyGiven: Bool, missingModel: Bool) throws(CancellationError) {
+    ///   - refusesKey: Whether an answer refuses the key in the provider's own way, such as
+    ///     Gemini's `400 Bad Request` for a key that isn't valid.
+    init(
+        asking error: any Error,
+        keyGiven: Bool,
+        missingModel: Bool,
+        refusesKey: (HTTPTransportError) -> Bool = { _ in false }
+    ) throws(CancellationError) {
         if error is CancellationError || Task.isCancelled { throw CancellationError() }
+        if let unavailability = error as? ModelUnavailability {
+            self = unavailability
+            return
+        }
         guard let error = error as? HTTPTransportError else {
             // It failed on the way, before the provider could answer.
             self.init(kind: .unreachable, underlyingError: error)
+            return
+        }
+        if refusesKey(error) {
+            self.init(kind: .keyRefused, underlyingError: error)
             return
         }
         switch error.response?.status {

@@ -2481,7 +2481,8 @@ extension OpenAILanguageModel {
     /// lists them: `GET models`, which OpenAI and servers compatible with it answer. A server that
     /// takes no key is asked without one, with `nil`.
     ///
-    /// A key the server refuses throws ``HTTPTransportError`` with its answer, as a response does.
+    /// A failure throws ``ModelUnavailability``: a key missing or refused, a provider that can't be
+    /// reached, or what it answered instead. A cancelled one throws `CancellationError`.
     ///
     /// - Note: This API is exclusive to AnyLanguageModel
     ///   and using it means your code is no longer drop-in compatible
@@ -2491,14 +2492,17 @@ extension OpenAILanguageModel {
         apiKey: String?,
         transport: any HTTPTransport = makeDefaultTransport()
     ) async throws -> [String] {
-        let list: OpenAIModelList = try await transport.fetch(
-            HTTPRequest(
-                method: .get,
-                url: baseURL.appendingPathComponent("models"),
-                headerFields: headers(apiKey: apiKey)
+        try await askingProvider(keyGiven: apiKey != nil) {
+            let list: OpenAIModelList = try await transport.fetch(
+                HTTPRequest(
+                    method: .get,
+                    url: baseURL.appendingPathComponent("models"),
+                    headerFields: headers(apiKey: apiKey)
+                )
             )
-        )
-        return list.data.map(\.id)
+            return list.data.map(\.id)
+
+        }
     }
 }
 

@@ -108,20 +108,21 @@ struct AvailableModelsTests {
     }
 
     @Test(
-        "a refused key throws the provider's answer, as a response's does",
+        "a refused key throws that it's refused, with the provider's answer",
         arguments: [Provider.openAI, .anthropic, .gemini, .ollama]
     )
     func aRefusedKeyThrowsTheAnswer(provider: Provider) async throws {
-        let refusal = #"{"error":{"message":"invalid key"}}"#
+        let refusal = provider.refusalAnswer
         let transport = FakeTransport(replies: [.init(status: provider.refusal, chunks: [refusal])])
 
-        let error = try await #require(throws: HTTPTransportError.self) {
+        let unavailability = try await #require(throws: ModelUnavailability.self) {
             _ = try await provider.availableModels(transport)
         }
 
-        #expect(error.kind == .httpError)
-        #expect(error.response?.status == provider.refusal)
-        #expect(error.body == Data(refusal.utf8))
+        #expect(unavailability.kind == .keyRefused)
+        let answer = try #require(unavailability.underlyingError as? HTTPTransportError)
+        #expect(answer.response?.status == provider.refusal)
+        #expect(answer.body == Data(refusal.utf8))
     }
 
     @Test("a page that fails partway through fails the whole listing")
@@ -131,22 +132,24 @@ struct AvailableModelsTests {
             .init(status: .internalServerError, chunks: ["{}"]),
         ])
 
-        let error = try await #require(throws: HTTPTransportError.self) {
+        let unavailability = try await #require(throws: ModelUnavailability.self) {
             _ = try await AnthropicLanguageModel.availableModels(apiKey: "secret", transport: transport)
         }
 
-        #expect(error.response?.status == .internalServerError)
+        #expect(unavailability.kind == .providerError)
+        #expect((unavailability.underlyingError as? HTTPTransportError)?.response?.status == .internalServerError)
     }
 
     @Test("an answer that isn't a list of models is a decoding error")
     func anUnreadableAnswerIsADecodingError() async throws {
         let transport = FakeTransport(replies: [.init(chunks: [#"{"unexpected":true}"#])])
 
-        let error = try await #require(throws: HTTPTransportError.self) {
+        let unavailability = try await #require(throws: ModelUnavailability.self) {
             _ = try await OpenAILanguageModel.availableModels(apiKey: "secret", transport: transport)
         }
 
-        #expect(error.kind == .decodingError)
+        #expect(unavailability.kind == .providerError)
+        #expect((unavailability.underlyingError as? HTTPTransportError)?.kind == .decodingError)
     }
 
     @Test("a listing cancelled while a page is asked for asks for no other")
@@ -168,6 +171,13 @@ struct AvailableModelsTests {
         /// How it refuses a key: Gemini answers one that isn't valid with `400 Bad Request`.
         var refusal: HTTPResponse.Status {
             self == .gemini ? .badRequest : .unauthorized
+        }
+
+        /// What it answers with it: Gemini names the reason.
+        var refusalAnswer: String {
+            self == .gemini
+                ? #"{"error":{"code":400,"details":[{"reason":"API_KEY_INVALID"}]}}"#
+                : #"{"error":{"message":"invalid key"}}"#
         }
 
         func availableModels(_ transport: FakeTransport) async throws -> [String] {

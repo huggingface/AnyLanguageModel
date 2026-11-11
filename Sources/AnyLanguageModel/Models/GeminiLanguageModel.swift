@@ -1382,8 +1382,9 @@ extension GeminiLanguageModel {
     /// The models `apiKey` may generate content with, by the IDs a model is made with: every page
     /// of `GET models`, but those that don't generate content, such as embedding models.
     ///
-    /// A key Gemini refuses throws ``HTTPTransportError`` with its answer, as a response does:
-    /// Gemini answers a key that isn't valid with `400 Bad Request`.
+    /// A failure throws ``ModelUnavailability``: a key missing or refused, which Gemini answers
+    /// with `400 Bad Request` for a key that isn't valid; a provider that can't be reached; or what
+    /// it answered instead. A cancelled one throws `CancellationError`.
     ///
     /// - Note: This API is exclusive to AnyLanguageModel
     ///   and using it means your code is no longer drop-in compatible
@@ -1394,26 +1395,31 @@ extension GeminiLanguageModel {
         apiVersion: String = defaultAPIVersion,
         transport: any HTTPTransport = makeDefaultTransport()
     ) async throws -> [String] {
-        var models: [String] = []
-        var token: String?
-        while true {
-            // A transport may not stop for cancellation, so check before each page.
-            try Task.checkCancellation()
-            var query = [URLQueryItem(name: "pageSize", value: "1000")]
-            if let token { query.append(URLQueryItem(name: "pageToken", value: token)) }
-            let page: GeminiModelPage = try await transport.fetch(
-                HTTPRequest(
-                    method: .get,
-                    url: try baseURL.appendingPathComponent(apiVersion).appendingPathComponent("models").asking(query),
-                    headerFields: headers(apiKey: apiKey)
+        try await askingProvider(keyGiven: !apiKey.isEmpty, refusesKey: refusesKey) {
+            var models: [String] = []
+            var token: String?
+            while true {
+                // A transport may not stop for cancellation, so check before each page.
+                try Task.checkCancellation()
+                var query = [URLQueryItem(name: "pageSize", value: "1000")]
+                if let token { query.append(URLQueryItem(name: "pageToken", value: token)) }
+                let page: GeminiModelPage = try await transport.fetch(
+                    HTTPRequest(
+                        method: .get,
+                        url: try baseURL.appendingPathComponent(apiVersion).appendingPathComponent("models").asking(
+                            query
+                        ),
+                        headerFields: headers(apiKey: apiKey)
+                    )
                 )
-            )
-            models += (page.models ?? [])
-                .filter { $0.supportedGenerationMethods?.contains("generateContent") == true }
-                .map(\.id)
-            // The next page, unless this was the last, or its token didn't change.
-            guard let next = page.nextPageToken, !next.isEmpty, next != token else { return models }
-            token = next
+                models += (page.models ?? [])
+                    .filter { $0.supportedGenerationMethods?.contains("generateContent") == true }
+                    .map(\.id)
+                // The next page, unless this was the last, or its token didn't change.
+                guard let next = page.nextPageToken, !next.isEmpty, next != token else { return models }
+                token = next
+            }
+
         }
     }
 }
@@ -1455,16 +1461,22 @@ extension GeminiLanguageModel {
                 )
             )
             return .available(ModelDetails(contextSize: found.inputTokenLimit))
-        } catch let error as HTTPTransportError where error.response?.status == .badRequest && Self.refusesKey(error) {
-            return .unavailable(ModelUnavailability(kind: .keyRefused, underlyingError: error))
         } catch {
-            return .unavailable(try ModelUnavailability(asking: error, keyGiven: !apiKey.isEmpty, missingModel: true))
+            return .unavailable(
+                try ModelUnavailability(
+                    asking: error,
+                    keyGiven: !apiKey.isEmpty,
+                    missingModel: true,
+                    refusesKey: Self.refusesKey
+                )
+            )
         }
     }
 
-    /// Whether `error`'s answer says the key isn't valid.
-    private static func refusesKey(_ error: HTTPTransportError) -> Bool {
-        guard let body = error.body, let answer = try? JSONDecoder().decode(GeminiErrorAnswer.self, from: body)
+    /// Whether `error` is Gemini refusing a key that isn't valid: `400 Bad Request`, naming the reason.
+    fileprivate static func refusesKey(_ error: HTTPTransportError) -> Bool {
+        guard error.response?.status == .badRequest, let body = error.body,
+            let answer = try? JSONDecoder().decode(GeminiErrorAnswer.self, from: body)
         else { return false }
         return answer.error.details?.contains { $0.reason == "API_KEY_INVALID" } ?? false
     }

@@ -13,3 +13,18 @@ extension URL {
         return url
     }
 }
+
+/// What `body` asks a provider, with a failure read as what it says: a key missing or refused, a
+/// provider that can't be reached, or what it answered instead. A cancelled request throws
+/// `CancellationError`.
+func askingProvider<Answer>(
+    keyGiven: Bool,
+    refusesKey: (HTTPTransportError) -> Bool = { _ in false },
+    _ body: () async throws -> Answer
+) async throws -> Answer {
+    do {
+        return try await body()
+    } catch {
+        throw try ModelUnavailability(asking: error, keyGiven: keyGiven, missingModel: false, refusesKey: refusesKey)
+    }
+}

@@ -1007,7 +1007,7 @@ extension OllamaLanguageModel {
 
     /// The models the server at `baseURL` has running now: `api/ps`. Ollama's cloud answers only
     /// with a key it takes, and a local server with any, so a key Ollama's cloud refuses throws
-    /// ``HTTPTransportError`` with its answer.
+    /// ``ModelUnavailability``, as any failure does.
     ///
     /// - Note: This API is exclusive to AnyLanguageModel
     ///   and using it means your code is no longer drop-in compatible
@@ -1027,10 +1027,17 @@ extension OllamaLanguageModel {
         apiKey: String?,
         transport: any HTTPTransport
     ) async throws -> [String] {
-        let list: OllamaModelList = try await transport.fetch(
-            HTTPRequest(method: .get, url: baseURL.appendingPathComponent(path), headerFields: headers(apiKey: apiKey))
-        )
-        return list.models.map(\.name)
+        try await askingProvider(keyGiven: apiKey != nil) {
+            let list: OllamaModelList = try await transport.fetch(
+                HTTPRequest(
+                    method: .get,
+                    url: baseURL.appendingPathComponent(path),
+                    headerFields: headers(apiKey: apiKey)
+                )
+            )
+            return list.models.map(\.name)
+
+        }
     }
 }
 
