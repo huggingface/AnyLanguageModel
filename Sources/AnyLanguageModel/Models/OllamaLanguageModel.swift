@@ -153,8 +153,13 @@ public struct OllamaLanguageModel: LanguageModel, ProfileRequestIdentifiedLangua
 
     /// The fields each request carries: its API key, when it has one.
     private var headerFields: HTTPFields {
-        guard let tokenProvider else { return [:] }
-        return [.authorization: "Bearer \(tokenProvider())"]
+        Self.headers(apiKey: tokenProvider?())
+    }
+
+    /// The fields a request with `apiKey` carries: the key, when there's one.
+    fileprivate static func headers(apiKey: String?) -> HTTPFields {
+        guard let apiKey else { return [:] }
+        return [.authorization: "Bearer \(apiKey)"]
     }
 
     /// Creates a model that sends its requests with `session`.
@@ -1022,13 +1027,44 @@ extension OllamaLanguageModel {
         apiKey: String?,
         transport: any HTTPTransport
     ) async throws -> [String] {
-        let headers: HTTPFields = apiKey.map { [.authorization: "Bearer \($0)"] } ?? [:]
         let list: OllamaModelList = try await transport.fetch(
-            HTTPRequest(method: .get, url: baseURL.appendingPathComponent(path), headerFields: headers)
+            HTTPRequest(method: .get, url: baseURL.appendingPathComponent(path), headerFields: headers(apiKey: apiKey))
         )
         return list.models.map(\.name)
     }
 }
+
+// MARK: - Checking Availability
+
+extension OllamaLanguageModel {
+    /// Whether this model can be used now: the server takes its key, which Ollama's cloud checks
+    /// when it's asked what it runs, though it lists its models to anyone; and it has the model,
+    /// as `api/show` says, whatever tag it's named with.
+    public func checkAvailability() async throws(CancellationError) -> ModelAvailability {
+        let apiKey = tokenProvider?()
+        do {
+            _ = try await Self.runningModels(baseURL: baseURL, apiKey: apiKey, transport: transport)
+        } catch {
+            return .unavailable(try ModelUnavailability(asking: error, keyGiven: apiKey != nil, missingModel: false))
+        }
+        do {
+            let _: OllamaShownModel = try await transport.fetch(
+                HTTPRequest(
+                    method: .post,
+                    url: baseURL.appendingPathComponent("api/show"),
+                    headerFields: Self.headers(apiKey: apiKey)
+                ),
+                body: try JSONEncoder().encode(["model": model])
+            )
+            return .available
+        } catch {
+            return .unavailable(try ModelUnavailability(asking: error, keyGiven: apiKey != nil, missingModel: true))
+        }
+    }
+}
+
+/// The answer to `api/show`: that it's there is all that's read.
+private struct OllamaShownModel: Decodable {}
 
 /// The answer to `api/tags` or `api/ps`.
 private struct OllamaModelList: Decodable {

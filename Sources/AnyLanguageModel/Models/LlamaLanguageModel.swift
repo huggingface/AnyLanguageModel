@@ -213,6 +213,16 @@ import Foundation
         /// Prompts may include image segments only when a projector is loaded.
         public let mmprojPath: String?
 
+        /// Whether this model can be used now: its GGUF file is there, and its projector's, when it
+        /// has one.
+        public func checkAvailability() async throws(CancellationError) -> ModelAvailability {
+            let files = [modelPath] + (mmprojPath.map { [$0] } ?? [])
+            guard files.allSatisfy({ FileManager.default.fileExists(atPath: $0) }) else {
+                return .unavailable(ModelUnavailability(kind: .modelNotFound))
+            }
+            return .available
+        }
+
         /// The default GPU layer count for the current platform.
         ///
         /// All layers are offloaded by default: the prebuilt llama.cpp binaries

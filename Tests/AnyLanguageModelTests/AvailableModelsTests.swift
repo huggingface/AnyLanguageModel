@@ -152,7 +152,7 @@ struct AvailableModelsTests {
     @Test("a listing cancelled while a page is asked for asks for no other")
     func cancellingStopsTheNextPage() async throws {
         let transport = WaitingForCancellation(
-            first: #"{"data":[{"id":"claude-a"}],"has_more":true,"last_id":"claude-a"}"#
+            answer: #"{"data":[{"id":"claude-a"}],"has_more":true,"last_id":"claude-a"}"#
         )
         let listing = Task { try await AnthropicLanguageModel.availableModels(apiKey: "secret", transport: transport) }
         while !transport.started { try await Task.sleep(for: .milliseconds(1)) }
@@ -183,37 +183,5 @@ struct AvailableModelsTests {
                 )
             }
         }
-    }
-}
-
-/// A transport whose first answer waits until its task is cancelled, then comes as if nothing
-/// happened: a transport that doesn't stop for cancellation.
-private final class WaitingForCancellation: HTTPTransport {
-    private let first: String
-    private let state = Locked((started: false, sent: 0))
-
-    init(first: String) {
-        self.first = first
-    }
-
-    var started: Bool { state.withLock { $0.started } }
-    var sent: Int { state.withLock { $0.sent } }
-
-    func send<Return>(
-        request: HTTPRequest,
-        body: Data?,
-        timeout: Duration?,
-        responseHandler: (HTTPResponse, HTTPResponseBody) async throws -> Return
-    ) async throws -> Return {
-        state.withLock {
-            $0.started = true
-            $0.sent += 1
-        }
-        while !Task.isCancelled { await Task.yield() }
-        let chunks = AsyncStream<Data> { continuation in
-            continuation.yield(Data(first.utf8))
-            continuation.finish()
-        }
-        return try await responseHandler(HTTPResponse(status: .ok), HTTPResponseBody(chunks))
     }
 }

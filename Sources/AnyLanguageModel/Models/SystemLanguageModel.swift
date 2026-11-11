@@ -152,6 +152,25 @@
             }
         }
 
+        /// Whether the system model can be used now, as the system says: a device that can't run
+        /// it, Apple Intelligence turned off, or the model not ready yet.
+        public func checkAvailability() async throws(CancellationError) -> ModelAvailability {
+            switch systemModel.availability {
+            case .available: .available
+            case .unavailable(let reason): .unavailable(ModelUnavailability(kind: Self.kind(of: reason)))
+            }
+        }
+
+        /// What the system's `reason` is, as availability is checked.
+        static func kind(of reason: UnavailableReason) -> ModelUnavailability.Kind {
+            switch reason {
+            case .deviceNotEligible: .deviceNotEligible
+            case .appleIntelligenceNotEnabled: .appleIntelligenceNotEnabled
+            case .modelNotReady: .notReady
+            @unknown default: .other
+            }
+        }
+
         public func respond<Content>(
             within session: LanguageModelSession,
             to prompt: Prompt,

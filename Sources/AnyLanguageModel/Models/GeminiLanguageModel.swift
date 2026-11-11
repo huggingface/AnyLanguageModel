@@ -1435,3 +1435,48 @@ private struct GeminiModelPage: Decodable {
     let models: [Model]?
     let nextPageToken: String?
 }
+
+// MARK: - Checking Availability
+
+extension GeminiLanguageModel {
+    /// Whether this model can be used now: Gemini takes the key, and has the model. Gemini answers
+    /// a key that isn't valid with `400 Bad Request`, naming the reason.
+    public func checkAvailability() async throws(CancellationError) -> ModelAvailability {
+        let apiKey = tokenProvider()
+        do {
+            let _: GeminiModelPage.Model = try await transport.fetch(
+                HTTPRequest(
+                    method: .get,
+                    url: baseURL.appendingPathComponent(apiVersion).appendingPathComponent("models")
+                        .appendingPathComponent(model),
+                    headerFields: Self.headers(apiKey: apiKey)
+                )
+            )
+            return .available
+        } catch let error as HTTPTransportError where error.response?.status == .badRequest && Self.refusesKey(error) {
+            return .unavailable(ModelUnavailability(kind: .keyRefused, underlyingError: error))
+        } catch {
+            return .unavailable(try ModelUnavailability(asking: error, keyGiven: !apiKey.isEmpty, missingModel: true))
+        }
+    }
+
+    /// Whether `error`'s answer says the key isn't valid.
+    private static func refusesKey(_ error: HTTPTransportError) -> Bool {
+        guard let body = error.body, let answer = try? JSONDecoder().decode(GeminiErrorAnswer.self, from: body)
+        else { return false }
+        return answer.error.details?.contains { $0.reason == "API_KEY_INVALID" } ?? false
+    }
+}
+
+/// Gemini's answer to a request it refuses.
+private struct GeminiErrorAnswer: Decodable {
+    struct Failure: Decodable {
+        struct Detail: Decodable {
+            let reason: String?
+        }
+
+        let details: [Detail]?
+    }
+
+    let error: Failure
+}

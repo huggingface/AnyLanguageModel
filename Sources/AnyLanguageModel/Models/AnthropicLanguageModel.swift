@@ -1822,3 +1822,25 @@ private struct AnthropicModelPage: Decodable {
         case lastID = "last_id"
     }
 }
+
+// MARK: - Checking Availability
+
+extension AnthropicLanguageModel {
+    /// Whether this model can be used now: Anthropic takes the key, and has the model, by its ID or
+    /// an alias.
+    public func checkAvailability() async throws(CancellationError) -> ModelAvailability {
+        let apiKey = tokenProvider()
+        do {
+            let _: AnthropicModelPage.Model = try await transport.fetch(
+                HTTPRequest(
+                    method: .get,
+                    url: baseURL.appendingPathComponent("v1/models").appendingPathComponent(model),
+                    headerFields: Self.headers(apiKey: apiKey, apiVersion: apiVersion, betas: betas)
+                )
+            )
+            return .available
+        } catch {
+            return .unavailable(try ModelUnavailability(asking: error, keyGiven: !apiKey.isEmpty, missingModel: true))
+        }
+    }
+}

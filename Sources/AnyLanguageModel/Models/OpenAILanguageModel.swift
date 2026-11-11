@@ -2449,3 +2449,23 @@ private struct OpenAIModelList: Decodable {
 
     let data: [Model]
 }
+
+// MARK: - Checking Availability
+
+extension OpenAILanguageModel {
+    /// Whether this model can be used now: its server lists it, for this key, as OpenAI and most
+    /// servers compatible with it do.
+    public func checkAvailability() async throws(CancellationError) -> ModelAvailability {
+        let apiKey = tokenProvider()
+        do {
+            let models = try await Self.availableModels(
+                baseURL: baseURL,
+                apiKey: apiKey.isEmpty ? nil : apiKey,
+                transport: transport
+            )
+            return models.contains(model) ? .available : .unavailable(ModelUnavailability(kind: .modelNotFound))
+        } catch {
+            return .unavailable(try ModelUnavailability(asking: error, keyGiven: !apiKey.isEmpty, missingModel: false))
+        }
+    }
+}

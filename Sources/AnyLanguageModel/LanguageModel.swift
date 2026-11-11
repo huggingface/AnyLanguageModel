@@ -27,6 +27,19 @@ public protocol LanguageModel: Sendable {
 
     var availability: Availability<UnavailableReason> { get }
 
+    /// Whether the model can be used now, asking where it runs: a provider, whether it takes the
+    /// key and has the model; the device, whether it can run it. Unlike ``availability``, it may
+    /// send a request.
+    ///
+    /// The default is what ``availability`` says.
+    ///
+    /// - Throws: `CancellationError`, when the check is cancelled.
+    ///
+    /// - Note: This API is exclusive to AnyLanguageModel
+    ///   and using it means your code is no longer drop-in compatible
+    ///   with the Foundation Models framework.
+    func checkAvailability() async throws(CancellationError) -> ModelAvailability
+
     func prewarm(
         for session: LanguageModelSession,
         promptPrefix: Prompt?
@@ -113,6 +126,10 @@ extension LanguageModel {
             includeSchemaInPrompt: includeSchemaInPrompt,
             options: options
         )
+    }
+
+    public func checkAvailability() async throws(CancellationError) -> ModelAvailability {
+        isAvailable ? .available : .unavailable(ModelUnavailability(kind: .other))
     }
 
     /// A Boolean value that indicates whether the model is ready for requests.

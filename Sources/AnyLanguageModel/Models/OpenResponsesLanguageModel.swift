@@ -1453,3 +1453,23 @@ public enum OpenResponsesLanguageModelError: LocalizedError, Sendable {
         }
     }
 }
+
+// MARK: - Checking Availability
+
+extension OpenResponsesLanguageModel {
+    /// Whether this model can be used now: its server lists it, for this key, as servers
+    /// compatible with OpenAI's API do.
+    public func checkAvailability() async throws(CancellationError) -> ModelAvailability {
+        let apiKey = tokenProvider()
+        do {
+            let models = try await OpenAILanguageModel.availableModels(
+                baseURL: baseURL,
+                apiKey: apiKey.isEmpty ? nil : apiKey,
+                transport: transport
+            )
+            return models.contains(model) ? .available : .unavailable(ModelUnavailability(kind: .modelNotFound))
+        } catch {
+            return .unavailable(try ModelUnavailability(asking: error, keyGiven: !apiKey.isEmpty, missingModel: false))
+        }
+    }
+}

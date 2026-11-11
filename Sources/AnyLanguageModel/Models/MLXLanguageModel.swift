@@ -723,6 +723,18 @@ import Foundation
             return .unavailable(.notLoaded)
         }
 
+        /// Whether this model can be used now: its directory is there, when it's loaded from one,
+        /// and loading it hasn't failed. One that isn't loaded yet loads as it's first used.
+        public func checkAvailability() async throws(CancellationError) -> ModelAvailability {
+            if let directory, !FileManager.default.fileExists(atPath: directory.path) {
+                return .unavailable(ModelUnavailability(kind: .modelNotFound))
+            }
+            if modelCache.failureDescription(for: directory?.absoluteString ?? modelId) != nil {
+                return .unavailable(ModelUnavailability(kind: .failedToLoad))
+            }
+            return .available
+        }
+
         /// Removes this model from the shared cache and cancels any in-flight load.
         ///
         /// Call this to free memory when the model is no longer needed.

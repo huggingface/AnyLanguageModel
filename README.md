@@ -976,6 +976,44 @@ the latest value is kept for each metadata key.
 > [Foundation Models 27 usage API](https://developer.apple.com/documentation/foundationmodels/languagemodelsession/usage-swift.struct).
 > `Codable` and `Equatable` support are AnyLanguageModel extensions.
 
+### Checking a Model
+
+A model's `availability` says what the model knows without asking anyone,
+so a model that runs on a provider's servers always says it's available.
+`checkAvailability()` asks where the model runs:
+a provider, whether it takes the key and has the model;
+the device, whether it can run it.
+
+```swift
+let model = AnthropicLanguageModel(apiKey: key, model: "claude-sonnet-4-5")
+switch try await model.checkAvailability() {
+case .available:
+    break
+case .unavailable(let unavailability):
+    print(unavailability) // For example, "Key refused: HTTP error (Status 401): …"
+}
+```
+
+`ModelUnavailability.kind` says what's in the way:
+a key the provider needs or refuses,
+a model it doesn't have or a file that isn't there,
+a provider that can't be reached,
+or, on the device, Apple Intelligence turned off or a model that isn't ready yet.
+More kinds can be added, so a `switch` over them needs a `default`.
+
+To offer the models to choose from,
+each remote provider lists the ones a key may use:
+
+```swift
+let models = try await OpenAILanguageModel.availableModels(apiKey: key)
+let local = try await OllamaLanguageModel.availableModels()
+```
+
+Ollama's cloud lists its models to anyone,
+so `OllamaLanguageModel.runningModels(baseURL:apiKey:)`,
+which it answers only for a key it takes,
+is what checks an Ollama key.
+
 ### HTTP Transport
 
 The remote models
@@ -1314,6 +1352,10 @@ say which API they follow.
   and the types nested in `Transcript`.
 - `HTTPTransport`, `HTTPResponseBody`, `HTTPTransportError`, and `makeDefaultTransport()`:
   [HTTP transports](#http-transport) for remote models.
+- `LanguageModel.checkAvailability()`, `ModelAvailability`, `ModelUnavailability`,
+  each remote provider's `availableModels(…)`, and `OllamaLanguageModel.runningModels(…)`:
+  [checking a model](#checking-a-model) before it's used,
+  and the models a provider offers.
 - `GeneratedContentError`, `Transcript.ReasoningReplayError`, `SystemLanguageModel.Error`,
   and each provider's error type.
 - `JSONValue`:
