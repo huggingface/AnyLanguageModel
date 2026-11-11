@@ -1625,6 +1625,18 @@ let response = try await session.respond {
 }
 ```
 
+To use Ollama's cloud without a local server,
+pass its URL and an API key,
+which is sent as a bearer token with each request:
+
+```swift
+let model = OllamaLanguageModel(
+    baseURL: URL(string: "https://ollama.com")!,
+    apiKey: ProcessInfo.processInfo.environment["OLLAMA_API_KEY"]!,
+    model: "gpt-oss:120b"
+)
+```
+
 For local models, make sure you're using a vision‑capable model
 (for example, a `-vl` variant).
 You can combine multiple images:
