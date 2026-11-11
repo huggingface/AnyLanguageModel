@@ -1424,6 +1424,8 @@ private struct GeminiModelPage: Decodable {
         /// Its resource name, `models/` and its ID.
         let name: String
         let supportedGenerationMethods: [String]?
+        /// The most tokens its input may take.
+        let inputTokenLimit: Int?
 
         /// What a model is made with: its name without `models/`.
         var id: String {
@@ -1444,7 +1446,7 @@ extension GeminiLanguageModel {
     public func checkAvailability() async throws(CancellationError) -> ModelAvailability {
         let apiKey = tokenProvider()
         do {
-            let _: GeminiModelPage.Model = try await transport.fetch(
+            let found: GeminiModelPage.Model = try await transport.fetch(
                 HTTPRequest(
                     method: .get,
                     url: baseURL.appendingPathComponent(apiVersion).appendingPathComponent("models")
@@ -1452,7 +1454,7 @@ extension GeminiLanguageModel {
                     headerFields: Self.headers(apiKey: apiKey)
                 )
             )
-            return .available
+            return .available(ModelDetails(contextSize: found.inputTokenLimit))
         } catch let error as HTTPTransportError where error.response?.status == .badRequest && Self.refusesKey(error) {
             return .unavailable(ModelUnavailability(kind: .keyRefused, underlyingError: error))
         } catch {

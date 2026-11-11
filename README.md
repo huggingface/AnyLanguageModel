@@ -987,12 +987,18 @@ the device, whether it can run it.
 ```swift
 let model = AnthropicLanguageModel(apiKey: key, model: "claude-sonnet-4-5")
 switch try await model.checkAvailability() {
-case .available:
-    break
+case .available(let details):
+    print(details.contextSize as Any) // The most tokens it takes, where the provider says.
 case .unavailable(let unavailability):
     print(unavailability) // For example, "Key refused: HTTP error (Status 401): …"
 }
 ```
+
+An available model's details say what checking it learned:
+Ollama, Gemini, and the on-device models say the model's context size.
+Ollama's is the most its model was made for;
+a local server gives the model only as much memory as its `num_ctx` asks,
+so how much of it to use is yours to choose.
 
 `ModelUnavailability.kind` says what's in the way:
 a key the provider needs or refuses,
@@ -1352,7 +1358,7 @@ say which API they follow.
   and the types nested in `Transcript`.
 - `HTTPTransport`, `HTTPResponseBody`, `HTTPTransportError`, and `makeDefaultTransport()`:
   [HTTP transports](#http-transport) for remote models.
-- `LanguageModel.checkAvailability()`, `ModelAvailability`, `ModelUnavailability`,
+- `LanguageModel.checkAvailability()`, `ModelAvailability`, `ModelDetails`, `ModelUnavailability`,
   each remote provider's `availableModels(…)`, and `OllamaLanguageModel.runningModels(…)`:
   [checking a model](#checking-a-model) before it's used,
   and the models a provider offers.
@@ -1733,6 +1739,16 @@ let model = OpenAILanguageModel(
 )
 ```
 
+A server that takes no key, such as one on this machine,
+is made without one, and its requests carry no `Authorization`:
+
+```swift
+let model = OpenAILanguageModel(
+    baseURL: URL(string: "http://localhost:1234/v1")!,
+    model: "qwen3-8b"
+)
+```
+
 Use custom generation options for advanced parameters like sampling controls,
 reasoning effort (for GPT-5.6 and GPT-6 models), and vendor-specific extensions:
 
@@ -1776,6 +1792,9 @@ let model = OpenResponsesLanguageModel(
 let session = LanguageModelSession(model: model)
 let response = try await session.respond(to: "Say hello")
 ```
+
+A server that takes no key is made without one,
+as an OpenAI-compatible one is.
 
 Custom options support Open Responses–specific fields,
 such as `tool_choice` (including `allowed_tools`) and `extraBody`:

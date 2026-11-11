@@ -60,8 +60,13 @@
         /// use it, or a system not ready yet.
         public func checkAvailability() async throws(CancellationError) -> ModelAvailability {
             switch pccModel.availability {
-            case .available: .available
-            case .unavailable(let reason): .unavailable(ModelUnavailability(kind: Self.kind(of: reason)))
+            case .available:
+                // Its context size takes asking: one that can't be had is one not known.
+                let contextSize = try? await pccModel.contextSize
+                if Task.isCancelled { throw CancellationError() }
+                return .available(ModelDetails(contextSize: contextSize))
+            case .unavailable(let reason):
+                return .unavailable(ModelUnavailability(kind: Self.kind(of: reason)))
             }
         }
 

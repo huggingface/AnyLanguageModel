@@ -156,9 +156,18 @@
         /// it, Apple Intelligence turned off, or the model not ready yet.
         public func checkAvailability() async throws(CancellationError) -> ModelAvailability {
             switch systemModel.availability {
-            case .available: .available
+            case .available: .available(ModelDetails(contextSize: knownContextSize))
             case .unavailable(let reason): .unavailable(ModelUnavailability(kind: Self.kind(of: reason)))
             }
+        }
+
+        /// The model's context size, where the SDK declares it.
+        private var knownContextSize: Int? {
+            #if compiler(>=6.3) && !os(tvOS) && !os(watchOS)
+                contextSize
+            #else
+                nil
+            #endif
         }
 
         /// What the system's `reason` is, as availability is checked.

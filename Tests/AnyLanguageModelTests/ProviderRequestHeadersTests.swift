@@ -36,6 +36,90 @@ struct ProviderRequestHeadersTests {
         #expect(headers[HTTPField.Name("x-goog-api-key")!] == "secret")
     }
 
+    @Test(
+        "OpenAI and servers compatible with it are sent the key as a bearer token",
+        arguments: [OpenAILanguageModel.APIVariant.chatCompletions, .responses],
+        [false, true]
+    )
+    func openAISendsItsKey(apiVariant: OpenAILanguageModel.APIVariant, streaming: Bool) async throws {
+        let transport = FakeTransport(replies: [.init(chunks: ["{}"])])
+        let model = OpenAILanguageModel(apiKey: "secret", model: "m", apiVariant: apiVariant, transport: transport)
+
+        let session = LanguageModelSession(model: model)
+        if streaming {
+            _ = try? await session.streamResponse(to: "Question").collect()
+        } else {
+            _ = try? await session.respond(to: "Question")
+        }
+
+        #expect(transport.requests.first?.headerFields[.authorization] == "Bearer secret")
+    }
+
+    @Test("an Open Responses server is sent the key as a bearer token", arguments: [false, true])
+    func openResponsesSendsItsKey(streaming: Bool) async throws {
+        let transport = FakeTransport(replies: [.init(chunks: ["{}"])])
+        let model = OpenResponsesLanguageModel(
+            baseURL: URL(string: "http://localhost:8000/v1")!,
+            apiKey: "secret",
+            model: "m",
+            transport: transport
+        )
+
+        let session = LanguageModelSession(model: model)
+        if streaming {
+            _ = try? await session.streamResponse(to: "Question").collect()
+        } else {
+            _ = try? await session.respond(to: "Question")
+        }
+
+        #expect(transport.requests.first?.headerFields[.authorization] == "Bearer secret")
+    }
+
+    @Test(
+        "a server compatible with OpenAI that takes no key is sent none",
+        arguments: [OpenAILanguageModel.APIVariant.chatCompletions, .responses],
+        [false, true]
+    )
+    func aKeylessServerIsSentNoKey(apiVariant: OpenAILanguageModel.APIVariant, streaming: Bool) async throws {
+        let transport = FakeTransport(replies: [.init(chunks: ["{}"])])
+        let model = OpenAILanguageModel(
+            baseURL: URL(string: "http://localhost:1234/v1")!,
+            model: "m",
+            apiVariant: apiVariant,
+            transport: transport
+        )
+
+        let session = LanguageModelSession(model: model)
+        if streaming {
+            _ = try? await session.streamResponse(to: "Question").collect()
+        } else {
+            _ = try? await session.respond(to: "Question")
+        }
+
+        #expect(transport.requests.count == 1)
+        #expect(transport.requests.first?.headerFields[.authorization] == nil)
+    }
+
+    @Test("an Open Responses server that takes no key is sent none", arguments: [false, true])
+    func aKeylessOpenResponsesServerIsSentNoKey(streaming: Bool) async throws {
+        let transport = FakeTransport(replies: [.init(chunks: ["{}"])])
+        let model = OpenResponsesLanguageModel(
+            baseURL: URL(string: "http://localhost:8000/v1")!,
+            model: "m",
+            transport: transport
+        )
+
+        let session = LanguageModelSession(model: model)
+        if streaming {
+            _ = try? await session.streamResponse(to: "Question").collect()
+        } else {
+            _ = try? await session.respond(to: "Question")
+        }
+
+        #expect(transport.requests.count == 1)
+        #expect(transport.requests.first?.headerFields[.authorization] == nil)
+    }
+
     private static let anthropicStream = [
         #"{"type":"message_start","message":{"id":"m","type":"message","role":"assistant","content":[],"model":"m","usage":{"input_tokens":1,"output_tokens":0}}}"#,
         #"{"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}"#,

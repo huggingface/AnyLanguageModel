@@ -732,7 +732,7 @@ import Foundation
             if modelCache.failureDescription(for: directory?.absoluteString ?? modelId) != nil {
                 return .unavailable(ModelUnavailability(kind: .failedToLoad))
             }
-            return .available
+            return .available(ModelDetails())
         }
 
         /// Removes this model from the shared cache and cancels any in-flight load.

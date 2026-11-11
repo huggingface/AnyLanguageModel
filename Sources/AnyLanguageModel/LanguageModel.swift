@@ -129,7 +129,7 @@ extension LanguageModel {
     }
 
     public func checkAvailability() async throws(CancellationError) -> ModelAvailability {
-        isAvailable ? .available : .unavailable(ModelUnavailability(kind: .other))
+        isAvailable ? .available(ModelDetails()) : .unavailable(ModelUnavailability(kind: .other))
     }
 
     /// A Boolean value that indicates whether the model is ready for requests.

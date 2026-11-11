@@ -12,8 +12,26 @@ import HTTPTypes
 ///   and using it means your code is no longer drop-in compatible
 ///   with the Foundation Models framework.
 public enum ModelAvailability: Sendable {
-    case available
+    /// It can be used, and this is what checking it learned about it.
+    case available(ModelDetails)
     case unavailable(ModelUnavailability)
+}
+
+/// What checking a model learned about it, as where it runs says.
+///
+/// - Note: This API is exclusive to AnyLanguageModel
+///   and using it means your code is no longer drop-in compatible
+///   with the Foundation Models framework.
+public struct ModelDetails: Sendable, Hashable {
+    /// The most tokens the model takes at once, when where it runs says: none when it doesn't.
+    ///
+    /// Ollama says the most its model was made for, which a local server gives it only as much
+    /// memory for as its context option asks, so how much of it to use is the caller's choice.
+    public let contextSize: Int?
+
+    public init(contextSize: Int? = nil) {
+        self.contextSize = contextSize
+    }
 }
 
 /// Why a model can't be used now.

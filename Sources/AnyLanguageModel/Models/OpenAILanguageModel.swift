@@ -393,7 +393,7 @@ public struct OpenAILanguageModel: LanguageModel, ProfileRequestIdentifiedLangua
     public let baseURL: URL
 
     /// The closure providing the API key for authentication.
-    private let tokenProvider: @Sendable () -> String
+    private let tokenProvider: (@Sendable () -> String)?
 
     /// The model identifier to use for generation.
     public let model: String
@@ -428,6 +428,53 @@ public struct OpenAILanguageModel: LanguageModel, ProfileRequestIdentifiedLangua
         responseStartTimeout: Duration? = nil,
         transport: any HTTPTransport = makeDefaultTransport(),
     ) {
+        self.init(
+            baseURL: baseURL,
+            tokenProvider: tokenProvider,
+            model: model,
+            apiVariant: apiVariant,
+            responseStartTimeout: responseStartTimeout,
+            transport: transport
+        )
+    }
+
+    /// Creates a model for a server compatible with OpenAI's API that takes no key, such as one on
+    /// this machine: its requests carry no `Authorization`.
+    ///
+    /// - Parameters:
+    ///   - baseURL: The base URL for the server's API.
+    ///   - model: The model identifier, as the server names it.
+    ///   - apiVariant: The API variant to use. Defaults to `.chatCompletions`.
+    ///   - responseStartTimeout: How long to wait for a streamed response to start, or `nil`, the
+    ///     default, for the transport to decide: a URL session waits as its configuration says, and
+    ///     AsyncHTTPClient up to 180 seconds. On Linux, a URL session waits whole seconds, so it
+    ///     rounds up to the next one.
+    ///   - transport: How it sends its requests: by default ``makeDefaultTransport()``.
+    public init(
+        baseURL: URL,
+        model: String,
+        apiVariant: APIVariant = .chatCompletions,
+        responseStartTimeout: Duration? = nil,
+        transport: any HTTPTransport = makeDefaultTransport(),
+    ) {
+        self.init(
+            baseURL: baseURL,
+            tokenProvider: nil,
+            model: model,
+            apiVariant: apiVariant,
+            responseStartTimeout: responseStartTimeout,
+            transport: transport
+        )
+    }
+
+    private init(
+        baseURL: URL,
+        tokenProvider: (@Sendable () -> String)?,
+        model: String,
+        apiVariant: APIVariant,
+        responseStartTimeout: Duration?,
+        transport: any HTTPTransport
+    ) {
         var baseURL = baseURL
         if !baseURL.path.hasSuffix("/") {
             baseURL = baseURL.appendingPathComponent("")
@@ -439,6 +486,17 @@ public struct OpenAILanguageModel: LanguageModel, ProfileRequestIdentifiedLangua
         self.apiVariant = apiVariant
         self.responseStartTimeout = responseStartTimeout
         self.transport = transport
+    }
+
+    /// The fields each request carries: its key, when it has one.
+    private var headerFields: HTTPFields {
+        Self.headers(apiKey: tokenProvider?())
+    }
+
+    /// The fields a request with `apiKey` carries: the key, as a bearer token, when there's one.
+    static func headers(apiKey: String?) -> HTTPFields {
+        guard let apiKey else { return [:] }
+        return [.authorization: "Bearer \(apiKey)"]
     }
 
     /// Creates a model that sends its requests with `session`.
@@ -587,7 +645,7 @@ public struct OpenAILanguageModel: LanguageModel, ProfileRequestIdentifiedLangua
             let url = baseURL.appendingPathComponent("chat/completions")
             let body = try JSONEncoder().encode(params)
             let resp: ChatCompletions.Response = try await transport.fetch(
-                HTTPRequest(method: .post, url: url, headerFields: [.authorization: "Bearer \(tokenProvider())"]),
+                HTTPRequest(method: .post, url: url, headerFields: headerFields),
                 body: body
             )
 
@@ -765,7 +823,7 @@ public struct OpenAILanguageModel: LanguageModel, ProfileRequestIdentifiedLangua
             let encoder = JSONEncoder()
             let body = try encoder.encode(params)
             let resp: Responses.Response = try await transport.fetch(
-                HTTPRequest(method: .post, url: url, headerFields: [.authorization: "Bearer \(tokenProvider())"]),
+                HTTPRequest(method: .post, url: url, headerFields: headerFields),
                 body: body
             )
 
@@ -969,7 +1027,7 @@ public struct OpenAILanguageModel: LanguageModel, ProfileRequestIdentifiedLangua
                         }
                         let body = try JSONEncoder().encode(params)
                         let url = baseURL.appendingPathComponent(path)
-                        let headers: HTTPFields = [.authorization: "Bearer \(tokenProvider())"]
+                        let headers = headerFields
                         var toolCalls: [OpenAIToolCall] = []
                         var roundReasoning = ChatCompletionsReasoning(host: baseURL.host)
 
@@ -2433,9 +2491,12 @@ extension OpenAILanguageModel {
         apiKey: String?,
         transport: any HTTPTransport = makeDefaultTransport()
     ) async throws -> [String] {
-        let headers: HTTPFields = apiKey.map { [.authorization: "Bearer \($0)"] } ?? [:]
         let list: OpenAIModelList = try await transport.fetch(
-            HTTPRequest(method: .get, url: baseURL.appendingPathComponent("models"), headerFields: headers)
+            HTTPRequest(
+                method: .get,
+                url: baseURL.appendingPathComponent("models"),
+                headerFields: headers(apiKey: apiKey)
+            )
         )
         return list.data.map(\.id)
     }
@@ -2456,16 +2517,13 @@ extension OpenAILanguageModel {
     /// Whether this model can be used now: its server lists it, for this key, as OpenAI and most
     /// servers compatible with it do.
     public func checkAvailability() async throws(CancellationError) -> ModelAvailability {
-        let apiKey = tokenProvider()
+        let apiKey = tokenProvider?()
         do {
-            let models = try await Self.availableModels(
-                baseURL: baseURL,
-                apiKey: apiKey.isEmpty ? nil : apiKey,
-                transport: transport
-            )
-            return models.contains(model) ? .available : .unavailable(ModelUnavailability(kind: .modelNotFound))
+            let models = try await Self.availableModels(baseURL: baseURL, apiKey: apiKey, transport: transport)
+            return models.contains(model)
+                ? .available(ModelDetails()) : .unavailable(ModelUnavailability(kind: .modelNotFound))
         } catch {
-            return .unavailable(try ModelUnavailability(asking: error, keyGiven: !apiKey.isEmpty, missingModel: false))
+            return .unavailable(try ModelUnavailability(asking: error, keyGiven: apiKey != nil, missingModel: false))
         }
     }
 }

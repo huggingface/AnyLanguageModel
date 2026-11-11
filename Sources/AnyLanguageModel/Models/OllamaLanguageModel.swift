@@ -1048,7 +1048,7 @@ extension OllamaLanguageModel {
             return .unavailable(try ModelUnavailability(asking: error, keyGiven: apiKey != nil, missingModel: false))
         }
         do {
-            let _: OllamaShownModel = try await transport.fetch(
+            let shown: OllamaShownModel = try await transport.fetch(
                 HTTPRequest(
                     method: .post,
                     url: baseURL.appendingPathComponent("api/show"),
@@ -1056,15 +1056,27 @@ extension OllamaLanguageModel {
                 ),
                 body: try JSONEncoder().encode(["model": model])
             )
-            return .available
+            return .available(ModelDetails(contextSize: shown.contextLength))
         } catch {
             return .unavailable(try ModelUnavailability(asking: error, keyGiven: apiKey != nil, missingModel: true))
         }
     }
 }
 
-/// The answer to `api/show`: that it's there is all that's read.
-private struct OllamaShownModel: Decodable {}
+/// The answer to `api/show`: what's read of it is the model's context length.
+private struct OllamaShownModel: Decodable {
+    /// The model's metadata, its keys named by its architecture: `llama.context_length`.
+    let modelInfo: [String: JSONValue]?
+
+    /// The most tokens the model was made for, as its architecture's `context_length` says.
+    var contextLength: Int? {
+        modelInfo?.first { $0.key.hasSuffix(".context_length") }?.value.intValue
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case modelInfo = "model_info"
+    }
+}
 
 /// The answer to `api/tags` or `api/ps`.
 private struct OllamaModelList: Decodable {

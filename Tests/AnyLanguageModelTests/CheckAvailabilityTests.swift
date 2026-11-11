@@ -11,7 +11,7 @@ struct CheckAvailabilityTests {
     @Test("a model that asks no one says what its availability says")
     func theDefaultIsTheModelsAvailability() async throws {
         var model = MockLanguageModel()
-        #expect(try await model.checkAvailability().kind == nil)
+        #expect(try await model.checkAvailability().details == ModelDetails())
 
         model.availabilityProvider = { .unavailable(.custom("Not today")) }
         #expect(try await model.checkAvailability().kind == .other)
@@ -21,7 +21,9 @@ struct CheckAvailabilityTests {
     func ollamaIsAvailable() async throws {
         let transport = FakeTransport(replies: [
             .init(chunks: [#"{"models":[]}"#]),
-            .init(chunks: [#"{"modelfile":"FROM qwen3"}"#]),
+            .init(chunks: [
+                #"{"modelfile":"FROM qwen3","model_info":{"general.architecture":"qwen3","qwen3.context_length":40960}}"#
+            ]),
         ])
         let model = OllamaLanguageModel(
             baseURL: URL(string: "https://ollama.com")!,
@@ -30,7 +32,7 @@ struct CheckAvailabilityTests {
             transport: transport
         )
 
-        #expect(try await model.checkAvailability().kind == nil)
+        #expect(try await model.checkAvailability().details == ModelDetails(contextSize: 40960))
         #expect(transport.requests.map(\.path) == ["/api/ps", "/api/show"])
         #expect(transport.requests.map { $0.headerFields[.authorization] } == ["Bearer secret", "Bearer secret"])
         #expect(transport.bodies.last == Data(#"{"model":"qwen3"}"#.utf8))
@@ -71,6 +73,38 @@ struct CheckAvailabilityTests {
         #expect((unavailability.underlyingError as? HTTPTransportError)?.response?.status == outcome.status)
     }
 
+    @Test("an Ollama server that doesn't say its model's context length leaves it unknown")
+    func ollamaWithoutAContextLength() async throws {
+        let transport = FakeTransport(replies: [
+            .init(chunks: [#"{"models":[]}"#]),
+            .init(chunks: [#"{"modelfile":"FROM qwen3"}"#]),
+        ])
+        let model = OllamaLanguageModel(model: "qwen3", transport: transport)
+
+        #expect(try await model.checkAvailability().details == ModelDetails())
+        // A local server is asked without a key.
+        #expect(transport.requests.map { $0.headerFields[.authorization] } == [nil, nil])
+    }
+
+    @Test("a server compatible with OpenAI that takes no key is asked without one; a refusal asks for a key")
+    func keylessServer() async throws {
+        let transport = FakeTransport(replies: [
+            .init(chunks: [#"{"data":[{"id":"qwen3"}]}"#]),
+            .init(status: .unauthorized, chunks: [#"{"error":{"message":"no"}}"#]),
+        ])
+        let local = URL(string: "http://localhost:1234/v1")!
+
+        #expect(
+            try await OpenAILanguageModel(baseURL: local, model: "qwen3", transport: transport).checkAvailability()
+                .details == ModelDetails()
+        )
+        #expect(
+            try await OpenResponsesLanguageModel(baseURL: local, model: "qwen3", transport: transport)
+                .checkAvailability().kind == .keyNeeded
+        )
+        #expect(transport.requests.map { $0.headerFields[.authorization] } == [nil, nil])
+    }
+
     @Test("OpenAI and servers compatible with it are available when they list the model")
     func openAI() async throws {
         let listing = #"{"data":[{"id":"gpt-5"}]}"#
@@ -78,7 +112,6 @@ struct CheckAvailabilityTests {
         let listed = OpenAILanguageModel(apiKey: "secret", model: "gpt-5", transport: transport)
         let unlisted = OpenAILanguageModel(
             baseURL: URL(string: "http://localhost:1234/v1")!,
-            apiKey: "",
             model: "gpt-6",
             transport: transport
         )
@@ -129,7 +162,10 @@ struct CheckAvailabilityTests {
     @Test(
         "Gemini is asked for the model itself; a key it says isn't valid is refused",
         arguments: [
-            (HTTPResponse.Status.ok, #"{"name":"models/gemini-pro"}"#, ModelUnavailability.Kind?.none),
+            (
+                HTTPResponse.Status.ok, #"{"name":"models/gemini-pro","inputTokenLimit":1048576}"#,
+                ModelUnavailability.Kind?.none
+            ),
             (.badRequest, #"{"error":{"code":400,"details":[{"reason":"API_KEY_INVALID"}]}}"#, .keyRefused),
             (.badRequest, #"{"error":{"code":400,"details":[{"reason":"OTHER"}]}}"#, .providerError),
             (.forbidden, #"{"error":{"code":403}}"#, .keyRefused),
@@ -140,7 +176,10 @@ struct CheckAvailabilityTests {
         let transport = FakeTransport(replies: [.init(status: status, chunks: [answer])])
         let model = GeminiLanguageModel(apiKey: "secret", model: "gemini-pro", transport: transport)
 
-        #expect(try await model.checkAvailability().kind == kind)
+        let availability = try await model.checkAvailability()
+        #expect(availability.kind == kind)
+        // Gemini says how many tokens a model's input may take.
+        #expect(availability.details == (kind == nil ? ModelDetails(contextSize: 1_048_576) : nil))
         #expect(transport.requests.map(\.path) == ["/v1beta/models/gemini-pro"])
     }
 
@@ -206,6 +245,11 @@ private struct Unreachable: HTTPTransport {
 }
 
 extension ModelAvailability {
+    /// What checking it learned, when it's available.
+    fileprivate var details: ModelDetails? {
+        if case .available(let details) = self { details } else { nil }
+    }
+
     /// Why it's unavailable, when it is.
     fileprivate var unavailability: ModelUnavailability? {
         if case .unavailable(let unavailability) = self { unavailability } else { nil }

@@ -383,7 +383,7 @@ public struct OpenResponsesLanguageModel: LanguageModel, ProfileRequestIdentifie
     public let baseURL: URL
 
     /// Closure that provides the API key for authentication.
-    private let tokenProvider: @Sendable () -> String
+    private let tokenProvider: (@Sendable () -> String)?
 
     /// Model identifier to use for generation.
     public let model: String
@@ -413,6 +413,48 @@ public struct OpenResponsesLanguageModel: LanguageModel, ProfileRequestIdentifie
         responseStartTimeout: Duration? = nil,
         transport: any HTTPTransport = makeDefaultTransport(),
     ) {
+        self.init(
+            baseURL: baseURL,
+            tokenProvider: tokenProvider,
+            model: model,
+            responseStartTimeout: responseStartTimeout,
+            transport: transport
+        )
+    }
+
+    /// Creates a model for an Open Responses server that takes no key, such as one on this
+    /// machine: its requests carry no `Authorization`.
+    ///
+    /// - Parameters:
+    ///   - baseURL: Base URL for the API (e.g. `http://localhost:8000/v1/`). Must end with `/`.
+    ///   - model: Model identifier, as the server names it.
+    ///   - responseStartTimeout: How long to wait for a streamed response to start, or `nil`, the
+    ///     default, for the transport to decide: a URL session waits as its configuration says, and
+    ///     AsyncHTTPClient up to 180 seconds. On Linux, a URL session waits whole seconds, so it
+    ///     rounds up to the next one.
+    ///   - transport: How it sends its requests: by default ``makeDefaultTransport()``.
+    public init(
+        baseURL: URL,
+        model: String,
+        responseStartTimeout: Duration? = nil,
+        transport: any HTTPTransport = makeDefaultTransport(),
+    ) {
+        self.init(
+            baseURL: baseURL,
+            tokenProvider: nil,
+            model: model,
+            responseStartTimeout: responseStartTimeout,
+            transport: transport
+        )
+    }
+
+    private init(
+        baseURL: URL,
+        tokenProvider: (@Sendable () -> String)?,
+        model: String,
+        responseStartTimeout: Duration?,
+        transport: any HTTPTransport
+    ) {
         var baseURL = baseURL
         if !baseURL.path.hasSuffix("/") {
             baseURL = baseURL.appendingPathComponent("")
@@ -422,6 +464,11 @@ public struct OpenResponsesLanguageModel: LanguageModel, ProfileRequestIdentifie
         self.model = model
         self.responseStartTimeout = responseStartTimeout
         self.transport = transport
+    }
+
+    /// The fields each request carries: its key, as a bearer token, when it has one.
+    private var headerFields: HTTPFields {
+        OpenAILanguageModel.headers(apiKey: tokenProvider?())
     }
 
     /// Creates a model that sends its requests with `session`.
@@ -590,7 +637,7 @@ public struct OpenResponsesLanguageModel: LanguageModel, ProfileRequestIdentifie
                                 HTTPRequest(
                                     method: .post,
                                     url: url,
-                                    headerFields: [.authorization: "Bearer \(tokenProvider())"]
+                                    headerFields: headerFields
                                 ),
                                 body: body,
                                 timeout: responseStartTimeout
@@ -752,7 +799,7 @@ public struct OpenResponsesLanguageModel: LanguageModel, ProfileRequestIdentifie
             )
             let body = try JSONEncoder().encode(params)
             let resp: OpenResponsesAPI.Response = try await transport.fetch(
-                HTTPRequest(method: .post, url: url, headerFields: [.authorization: "Bearer \(tokenProvider())"]),
+                HTTPRequest(method: .post, url: url, headerFields: headerFields),
                 body: body
             )
 
@@ -1460,16 +1507,17 @@ extension OpenResponsesLanguageModel {
     /// Whether this model can be used now: its server lists it, for this key, as servers
     /// compatible with OpenAI's API do.
     public func checkAvailability() async throws(CancellationError) -> ModelAvailability {
-        let apiKey = tokenProvider()
+        let apiKey = tokenProvider?()
         do {
             let models = try await OpenAILanguageModel.availableModels(
                 baseURL: baseURL,
-                apiKey: apiKey.isEmpty ? nil : apiKey,
+                apiKey: apiKey,
                 transport: transport
             )
-            return models.contains(model) ? .available : .unavailable(ModelUnavailability(kind: .modelNotFound))
+            return models.contains(model)
+                ? .available(ModelDetails()) : .unavailable(ModelUnavailability(kind: .modelNotFound))
         } catch {
-            return .unavailable(try ModelUnavailability(asking: error, keyGiven: !apiKey.isEmpty, missingModel: false))
+            return .unavailable(try ModelUnavailability(asking: error, keyGiven: apiKey != nil, missingModel: false))
         }
     }
 }

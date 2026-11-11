@@ -1838,7 +1838,7 @@ extension AnthropicLanguageModel {
                     headerFields: Self.headers(apiKey: apiKey, apiVersion: apiVersion, betas: betas)
                 )
             )
-            return .available
+            return .available(ModelDetails())
         } catch {
             return .unavailable(try ModelUnavailability(asking: error, keyGiven: !apiKey.isEmpty, missingModel: true))
         }

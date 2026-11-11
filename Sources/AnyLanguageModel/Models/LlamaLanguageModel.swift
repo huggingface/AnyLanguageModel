@@ -220,7 +220,7 @@ import Foundation
             guard files.allSatisfy({ FileManager.default.fileExists(atPath: $0) }) else {
                 return .unavailable(ModelUnavailability(kind: .modelNotFound))
             }
-            return .available
+            return .available(ModelDetails())
         }
 
         /// The default GPU layer count for the current platform.
