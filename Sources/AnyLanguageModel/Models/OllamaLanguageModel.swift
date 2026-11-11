@@ -17,6 +17,16 @@ import OrderedCollections
 /// ```swift
 /// let model = OllamaLanguageModel(model: "qwen2.5")
 /// ```
+///
+/// To use Ollama's cloud directly, without a local server, give its URL and an API key:
+///
+/// ```swift
+/// let model = OllamaLanguageModel(
+///     baseURL: URL(string: "https://ollama.com")!,
+///     apiKey: "your-api-key",
+///     model: "gpt-oss:120b"
+/// )
+/// ```
 public struct OllamaLanguageModel: LanguageModel, ProfileRequestIdentifiedLanguageModel {
     /// The reason the model is unavailable.
     /// This model is always available.
@@ -65,6 +75,10 @@ public struct OllamaLanguageModel: LanguageModel, ProfileRequestIdentifiedLangua
     private let transport: any HTTPTransport
     let profileRequestIdentity = UUID()
 
+    /// The closure providing the API key sent with each request, when there is one: a local
+    /// server asks for none.
+    private let tokenProvider: (@Sendable () -> String)?
+
     /// Creates an Ollama language model.
     ///
     /// - Parameters:
@@ -81,15 +95,66 @@ public struct OllamaLanguageModel: LanguageModel, ProfileRequestIdentifiedLangua
         responseStartTimeout: Duration? = nil,
         transport: any HTTPTransport = makeDefaultTransport(),
     ) {
+        self.init(
+            baseURL: baseURL,
+            tokenProvider: nil,
+            model: model,
+            responseStartTimeout: responseStartTimeout,
+            transport: transport
+        )
+    }
+
+    /// Creates an Ollama language model that sends an API key with each request, as a bearer
+    /// token, as Ollama's cloud at `https://ollama.com` asks.
+    ///
+    /// - Parameters:
+    ///   - baseURL: The base URL for the Ollama server. Defaults to `http://localhost:11434`.
+    ///   - apiKey: Your Ollama API key or a closure that returns it, asked for each request.
+    ///   - model: The model identifier (for example, "qwen2.5" or "llama3.3").
+    ///   - responseStartTimeout: How long to wait for a streamed response to start, or `nil`, the
+    ///     default, for the transport to decide: a URL session waits as its configuration says, and
+    ///     AsyncHTTPClient up to 180 seconds. On Linux, a URL session waits whole seconds, so it
+    ///     rounds up to the next one.
+    ///   - transport: How it sends its requests: by default ``makeDefaultTransport()``.
+    public init(
+        baseURL: URL = defaultBaseURL,
+        apiKey tokenProvider: @escaping @autoclosure @Sendable () -> String,
+        model: String,
+        responseStartTimeout: Duration? = nil,
+        transport: any HTTPTransport = makeDefaultTransport(),
+    ) {
+        self.init(
+            baseURL: baseURL,
+            tokenProvider: tokenProvider,
+            model: model,
+            responseStartTimeout: responseStartTimeout,
+            transport: transport
+        )
+    }
+
+    private init(
+        baseURL: URL,
+        tokenProvider: (@Sendable () -> String)?,
+        model: String,
+        responseStartTimeout: Duration?,
+        transport: any HTTPTransport
+    ) {
         var baseURL = baseURL
         if !baseURL.path.hasSuffix("/") {
             baseURL = baseURL.appendingPathComponent("")
         }
 
         self.baseURL = baseURL
+        self.tokenProvider = tokenProvider
         self.model = model
         self.responseStartTimeout = responseStartTimeout
         self.transport = transport
+    }
+
+    /// The fields each request carries: its API key, when it has one.
+    private var headerFields: HTTPFields {
+        guard let tokenProvider else { return [:] }
+        return [.authorization: "Bearer \(tokenProvider())"]
     }
 
     /// Creates a model that sends its requests with `session`.
@@ -207,7 +272,7 @@ public struct OllamaLanguageModel: LanguageModel, ProfileRequestIdentifiedLangua
                 parameters: extractTopLevelChatParameters(requestContext.options)
             )
             let reply: ChatReply = try await transport.fetch(
-                HTTPRequest(method: .post, url: url),
+                HTTPRequest(method: .post, url: url, headerFields: headerFields),
                 body: try encodeChatParams(params),
                 dateDecodingStrategy: .iso8601WithFractionalSeconds
             )
@@ -394,7 +459,7 @@ public struct OllamaLanguageModel: LanguageModel, ProfileRequestIdentifiedLangua
                         )
                         let body = try encodeChatParams(params)
                         let chunks: AsyncThrowingStream<ChatReply, any Error> = transport.fetchStream(
-                            HTTPRequest(method: .post, url: url),
+                            HTTPRequest(method: .post, url: url, headerFields: headerFields),
                             body: body,
                             dateDecodingStrategy: .iso8601WithFractionalSeconds,
                             timeout: responseStartTimeout
