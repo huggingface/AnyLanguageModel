@@ -981,3 +981,60 @@ private struct OllamaToolFunction: Codable, Sendable {
         case arguments
     }
 }
+
+// MARK: - Available Models
+
+extension OllamaLanguageModel {
+    /// The models the server at `baseURL` has, by the names a model is made with: `api/tags`.
+    /// Ollama's cloud lists its models to anyone, so this doesn't check `apiKey`:
+    /// ``runningModels(baseURL:apiKey:transport:)`` does.
+    ///
+    /// - Note: This API is exclusive to AnyLanguageModel
+    ///   and using it means your code is no longer drop-in compatible
+    ///   with the Foundation Models framework.
+    public static func availableModels(
+        baseURL: URL = defaultBaseURL,
+        apiKey: String? = nil,
+        transport: any HTTPTransport = makeDefaultTransport()
+    ) async throws -> [String] {
+        try await models(at: "api/tags", of: baseURL, apiKey: apiKey, transport: transport)
+    }
+
+    /// The models the server at `baseURL` has running now: `api/ps`. Ollama's cloud answers only
+    /// with a key it takes, and a local server with any, so a key Ollama's cloud refuses throws
+    /// ``HTTPTransportError`` with its answer.
+    ///
+    /// - Note: This API is exclusive to AnyLanguageModel
+    ///   and using it means your code is no longer drop-in compatible
+    ///   with the Foundation Models framework.
+    public static func runningModels(
+        baseURL: URL = defaultBaseURL,
+        apiKey: String? = nil,
+        transport: any HTTPTransport = makeDefaultTransport()
+    ) async throws -> [String] {
+        try await models(at: "api/ps", of: baseURL, apiKey: apiKey, transport: transport)
+    }
+
+    /// The models listed at `path` of the server at `baseURL`, asked with `apiKey`, when there's one.
+    private static func models(
+        at path: String,
+        of baseURL: URL,
+        apiKey: String?,
+        transport: any HTTPTransport
+    ) async throws -> [String] {
+        let headers: HTTPFields = apiKey.map { [.authorization: "Bearer \($0)"] } ?? [:]
+        let list: OllamaModelList = try await transport.fetch(
+            HTTPRequest(method: .get, url: baseURL.appendingPathComponent(path), headerFields: headers)
+        )
+        return list.models.map(\.name)
+    }
+}
+
+/// The answer to `api/tags` or `api/ps`.
+private struct OllamaModelList: Decodable {
+    struct Model: Decodable {
+        let name: String
+    }
+
+    let models: [Model]
+}

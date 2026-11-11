@@ -899,8 +899,13 @@ public struct AnthropicLanguageModel: LanguageModel, ProfileRequestIdentifiedLan
     }
 
     private func buildHeaders() -> HTTPFields {
+        Self.headers(apiKey: tokenProvider(), apiVersion: apiVersion, betas: betas)
+    }
+
+    /// What each request tells Anthropic about the caller: its key, the API version, and its betas.
+    fileprivate static func headers(apiKey: String, apiVersion: String, betas: [String]?) -> HTTPFields {
         var headers: HTTPFields = [
-            .anthropicAPIKey: tokenProvider(),
+            .anthropicAPIKey: apiKey,
             .anthropicVersion: apiVersion,
         ]
 
@@ -1760,4 +1765,60 @@ extension HTTPField.Name {
     fileprivate static let anthropicAPIKey = Self("x-api-key")!
     fileprivate static let anthropicVersion = Self("anthropic-version")!
     fileprivate static let anthropicBeta = Self("anthropic-beta")!
+}
+
+// MARK: - Available Models
+
+extension AnthropicLanguageModel {
+    /// The models `apiKey` may use, by the IDs a model is made with, newest first as Anthropic
+    /// lists them: every page of `GET /v1/models`.
+    ///
+    /// A key Anthropic refuses throws ``HTTPTransportError`` with its answer, as a response does.
+    ///
+    /// - Note: This API is exclusive to AnyLanguageModel
+    ///   and using it means your code is no longer drop-in compatible
+    ///   with the Foundation Models framework.
+    public static func availableModels(
+        baseURL: URL = defaultBaseURL,
+        apiKey: String,
+        apiVersion: String = defaultAPIVersion,
+        transport: any HTTPTransport = makeDefaultTransport()
+    ) async throws -> [String] {
+        var models: [String] = []
+        var after: String?
+        while true {
+            // A transport may not stop for cancellation, so check before each page.
+            try Task.checkCancellation()
+            var query = [URLQueryItem(name: "limit", value: "1000")]
+            if let after { query.append(URLQueryItem(name: "after_id", value: after)) }
+            let page: AnthropicModelPage = try await transport.fetch(
+                HTTPRequest(
+                    method: .get,
+                    url: try baseURL.appendingPathComponent("v1/models").asking(query),
+                    headerFields: headers(apiKey: apiKey, apiVersion: apiVersion, betas: nil)
+                )
+            )
+            models += page.data.map(\.id)
+            // The next page, unless this was the last, or its cursor didn't move.
+            guard page.hasMore, let last = page.lastID, last != after else { return models }
+            after = last
+        }
+    }
+}
+
+/// A page of `GET /v1/models`.
+private struct AnthropicModelPage: Decodable {
+    struct Model: Decodable {
+        let id: String
+    }
+
+    let data: [Model]
+    let hasMore: Bool
+    let lastID: String?
+
+    private enum CodingKeys: String, CodingKey {
+        case data
+        case hasMore = "has_more"
+        case lastID = "last_id"
+    }
 }

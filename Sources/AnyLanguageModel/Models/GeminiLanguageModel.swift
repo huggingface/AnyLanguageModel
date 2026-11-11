@@ -578,7 +578,12 @@ public struct GeminiLanguageModel: LanguageModel, ProfileRequestIdentifiedLangua
     }
 
     private func buildHeaders() -> HTTPFields {
-        [.googleAPIKey: tokenProvider()]
+        Self.headers(apiKey: tokenProvider())
+    }
+
+    /// What each request tells Gemini about the caller: its key.
+    fileprivate static func headers(apiKey: String) -> HTTPFields {
+        [.googleAPIKey: apiKey]
     }
 
     private func buildTools(from tools: [any Tool], serverTools: [CustomGenerationOptions.ServerTool]) throws
@@ -1369,4 +1374,64 @@ enum GeminiError: Error, CustomStringConvertible {
 
 extension HTTPField.Name {
     fileprivate static let googleAPIKey = Self("x-goog-api-key")!
+}
+
+// MARK: - Available Models
+
+extension GeminiLanguageModel {
+    /// The models `apiKey` may generate content with, by the IDs a model is made with: every page
+    /// of `GET models`, but those that don't generate content, such as embedding models.
+    ///
+    /// A key Gemini refuses throws ``HTTPTransportError`` with its answer, as a response does:
+    /// Gemini answers a key that isn't valid with `400 Bad Request`.
+    ///
+    /// - Note: This API is exclusive to AnyLanguageModel
+    ///   and using it means your code is no longer drop-in compatible
+    ///   with the Foundation Models framework.
+    public static func availableModels(
+        baseURL: URL = defaultBaseURL,
+        apiKey: String,
+        apiVersion: String = defaultAPIVersion,
+        transport: any HTTPTransport = makeDefaultTransport()
+    ) async throws -> [String] {
+        var models: [String] = []
+        var token: String?
+        while true {
+            // A transport may not stop for cancellation, so check before each page.
+            try Task.checkCancellation()
+            var query = [URLQueryItem(name: "pageSize", value: "1000")]
+            if let token { query.append(URLQueryItem(name: "pageToken", value: token)) }
+            let page: GeminiModelPage = try await transport.fetch(
+                HTTPRequest(
+                    method: .get,
+                    url: try baseURL.appendingPathComponent(apiVersion).appendingPathComponent("models").asking(query),
+                    headerFields: headers(apiKey: apiKey)
+                )
+            )
+            models += (page.models ?? [])
+                .filter { $0.supportedGenerationMethods?.contains("generateContent") == true }
+                .map(\.id)
+            // The next page, unless this was the last, or its token didn't change.
+            guard let next = page.nextPageToken, !next.isEmpty, next != token else { return models }
+            token = next
+        }
+    }
+}
+
+/// A page of `GET models`.
+private struct GeminiModelPage: Decodable {
+    struct Model: Decodable {
+        /// Its resource name, `models/` and its ID.
+        let name: String
+        let supportedGenerationMethods: [String]?
+
+        /// What a model is made with: its name without `models/`.
+        var id: String {
+            name.hasPrefix("models/") ? String(name.dropFirst("models/".count)) : name
+        }
+    }
+
+    /// Its models: none, when an account has none.
+    let models: [Model]?
+    let nextPageToken: String?
 }

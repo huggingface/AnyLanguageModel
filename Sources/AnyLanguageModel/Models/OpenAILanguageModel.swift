@@ -2415,3 +2415,37 @@ private struct ChatCompletionsUsage: Decodable, Sendable {
         ).normalized
     }
 }
+
+// MARK: - Available Models
+
+extension OpenAILanguageModel {
+    /// The models `apiKey` may use at `baseURL`, by the IDs a model is made with, as the server
+    /// lists them: `GET models`, which OpenAI and servers compatible with it answer. A server that
+    /// takes no key is asked without one, with `nil`.
+    ///
+    /// A key the server refuses throws ``HTTPTransportError`` with its answer, as a response does.
+    ///
+    /// - Note: This API is exclusive to AnyLanguageModel
+    ///   and using it means your code is no longer drop-in compatible
+    ///   with the Foundation Models framework.
+    public static func availableModels(
+        baseURL: URL = defaultBaseURL,
+        apiKey: String?,
+        transport: any HTTPTransport = makeDefaultTransport()
+    ) async throws -> [String] {
+        let headers: HTTPFields = apiKey.map { [.authorization: "Bearer \($0)"] } ?? [:]
+        let list: OpenAIModelList = try await transport.fetch(
+            HTTPRequest(method: .get, url: baseURL.appendingPathComponent("models"), headerFields: headers)
+        )
+        return list.data.map(\.id)
+    }
+}
+
+/// The answer to `GET models`.
+private struct OpenAIModelList: Decodable {
+    struct Model: Decodable {
+        let id: String
+    }
+
+    let data: [Model]
+}
