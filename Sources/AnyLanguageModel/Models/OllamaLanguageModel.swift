@@ -76,7 +76,7 @@ public struct OllamaLanguageModel: LanguageModel, ProfileRequestIdentifiedLangua
     let profileRequestIdentity = UUID()
 
     /// The closure providing the API key sent with each request, when there is one: a local
-    /// server asks for none.
+    /// server asks for none, and an empty key is not sent.
     private let tokenProvider: (@Sendable () -> String)?
 
     /// Creates an Ollama language model.
@@ -110,6 +110,7 @@ public struct OllamaLanguageModel: LanguageModel, ProfileRequestIdentifiedLangua
     /// - Parameters:
     ///   - baseURL: The base URL for the Ollama server. Defaults to `http://localhost:11434`.
     ///   - apiKey: Your Ollama API key or a closure that returns it, asked for each request.
+    ///     An empty key is not sent.
     ///   - model: The model identifier (for example, "qwen2.5" or "llama3.3").
     ///   - responseStartTimeout: How long to wait for a streamed response to start, or `nil`, the
     ///     default, for the transport to decide: a URL session waits as its configuration says, and
@@ -153,8 +154,9 @@ public struct OllamaLanguageModel: LanguageModel, ProfileRequestIdentifiedLangua
 
     /// The fields each request carries: its API key, when it has one.
     private var headerFields: HTTPFields {
-        guard let tokenProvider else { return [:] }
-        return [.authorization: "Bearer \(tokenProvider())"]
+        guard let apiKey = tokenProvider?() else { return [:] }
+        // A server that takes no key, given an empty one, is sent none.
+        return apiKey.isEmpty ? [:] : [.authorization: "Bearer \(apiKey)"]
     }
 
     /// Creates a model that sends its requests with `session`.

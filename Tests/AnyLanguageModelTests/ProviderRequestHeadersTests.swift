@@ -5,8 +5,8 @@ import Testing
 @testable import AnyLanguageModel
 
 /// What a response's request tells the provider about the caller: Anthropic its key, its API
-/// version and its betas; Gemini its key; OpenAI and servers compatible with it the key as a bearer
-/// token, and a server that takes no key, given an empty one, none.
+/// version and its betas; Gemini its key; OpenAI, servers compatible with it, and Ollama the key as
+/// a bearer token, and a server that takes no key, given an empty one, none.
 @Suite("Provider request headers")
 struct ProviderRequestHeadersTests {
     @Test func anthropicSendsItsKeyVersionAndBetas() async throws {
@@ -111,6 +111,42 @@ struct ProviderRequestHeadersTests {
             model: "m",
             transport: transport
         )
+
+        let session = LanguageModelSession(model: model)
+        if streaming {
+            _ = try? await session.streamResponse(to: "Question").collect()
+        } else {
+            _ = try? await session.respond(to: "Question")
+        }
+
+        #expect(transport.requests.count == 1)
+        #expect(transport.requests.first?.headerFields[.authorization] == nil)
+    }
+
+    @Test("Ollama is sent the key as a bearer token", arguments: [false, true])
+    func ollamaSendsItsKey(streaming: Bool) async throws {
+        let transport = FakeTransport(replies: [.init(chunks: ["{}"])])
+        let model = OllamaLanguageModel(apiKey: "secret", model: "m", transport: transport)
+
+        let session = LanguageModelSession(model: model)
+        if streaming {
+            _ = try? await session.streamResponse(to: "Question").collect()
+        } else {
+            _ = try? await session.respond(to: "Question")
+        }
+
+        #expect(transport.requests.first?.headerFields[.authorization] == "Bearer secret")
+    }
+
+    @Test("a local Ollama server is sent no key for an empty one, or for none", arguments: [nil, ""], [false, true])
+    func aLocalOllamaServerIsSentNoKey(apiKey: String?, streaming: Bool) async throws {
+        let transport = FakeTransport(replies: [.init(chunks: ["{}"])])
+        let model =
+            if let apiKey {
+                OllamaLanguageModel(apiKey: apiKey, model: "m", transport: transport)
+            } else {
+                OllamaLanguageModel(model: "m", transport: transport)
+            }
 
         let session = LanguageModelSession(model: model)
         if streaming {

@@ -5,7 +5,8 @@ import Testing
 @testable import AnyLanguageModel
 
 /// An Ollama model made with an API key sends it as a bearer token with each request, as Ollama's
-/// cloud asks; one made without a key sends no `Authorization`, as a local server asks for none.
+/// cloud asks; one made without a key, or with an empty one, sends no `Authorization`, as a local
+/// server asks for none.
 @Suite("Ollama authorization")
 struct OllamaAuthorizationTests {
     @Test("without an API key, no Authorization is sent", arguments: [false, true])
@@ -86,7 +87,8 @@ struct OllamaAuthorizationTests {
         try await respond(session, streaming: streaming)
 
         #expect(transport.requests.count == 2)
-        #expect(transport.requests.allSatisfy { $0.headerFields[.authorization] != nil })
+        let sent: String? = key.isEmpty ? nil : "Bearer \(key)"
+        #expect(transport.requests.map { $0.headerFields[.authorization] } == [sent, sent])
     }
 }
 
