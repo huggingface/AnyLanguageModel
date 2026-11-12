@@ -218,11 +218,3 @@ private struct ProviderErrorEvent: Decodable {
         return error != nil || (type == "error" && message != nil)
     }
 }
-
-extension HTTPFields {
-    /// `key` as a bearer token in `Authorization`: none for an empty key, as a server that takes no
-    /// key is sent.
-    static func bearer(_ key: String) -> HTTPFields {
-        key.isEmpty ? [:] : [.authorization: "Bearer \(key)"]
-    }
-}

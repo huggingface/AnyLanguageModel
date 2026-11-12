@@ -469,6 +469,12 @@ public struct OpenResponsesLanguageModel: LanguageModel, ProfileRequestIdentifie
         )
     }
 
+    private func buildHeaders() -> HTTPFields {
+        let apiKey = tokenProvider()
+        // A server that takes no key, given an empty one, is sent none.
+        return apiKey.isEmpty ? [:] : [.authorization: "Bearer \(apiKey)"]
+    }
+
     private func respond<Content>(
         within session: LanguageModelSession,
         to prompt: Prompt,
@@ -590,7 +596,7 @@ public struct OpenResponsesLanguageModel: LanguageModel, ProfileRequestIdentifie
                                 HTTPRequest(
                                     method: .post,
                                     url: url,
-                                    headerFields: .bearer(tokenProvider())
+                                    headerFields: buildHeaders()
                                 ),
                                 body: body,
                                 timeout: responseStartTimeout
@@ -752,7 +758,7 @@ public struct OpenResponsesLanguageModel: LanguageModel, ProfileRequestIdentifie
             )
             let body = try JSONEncoder().encode(params)
             let resp: OpenResponsesAPI.Response = try await transport.fetch(
-                HTTPRequest(method: .post, url: url, headerFields: .bearer(tokenProvider())),
+                HTTPRequest(method: .post, url: url, headerFields: buildHeaders()),
                 body: body
             )
 
