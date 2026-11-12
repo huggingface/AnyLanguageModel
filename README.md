@@ -1703,6 +1703,18 @@ let model = OpenAILanguageModel(
 )
 ```
 
+For a server that takes no key, such as llama.cpp's or vLLM's,
+pass an empty key, and no `Authorization` header is sent:
+
+```swift
+let model = OpenAILanguageModel(
+    baseURL: URL(string: "http://localhost:8080/v1")!,
+    apiKey: "",
+    model: "qwen3",
+    apiVariant: .chatCompletions
+)
+```
+
 Use custom generation options for advanced parameters like sampling controls,
 reasoning effort (for GPT-5.6 and GPT-6 models), and vendor-specific extensions:
 

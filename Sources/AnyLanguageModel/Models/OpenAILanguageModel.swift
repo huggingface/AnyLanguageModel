@@ -487,6 +487,12 @@ public struct OpenAILanguageModel: LanguageModel, ProfileRequestIdentifiedLangua
         )
     }
 
+    private func buildHeaders() -> HTTPFields {
+        let apiKey = tokenProvider()
+        // A server that takes no key, given an empty one, is sent none.
+        return apiKey.isEmpty ? [:] : [.authorization: "Bearer \(apiKey)"]
+    }
+
     private func respond<Content>(
         within session: LanguageModelSession,
         to prompt: Prompt,
@@ -587,7 +593,7 @@ public struct OpenAILanguageModel: LanguageModel, ProfileRequestIdentifiedLangua
             let url = baseURL.appendingPathComponent("chat/completions")
             let body = try JSONEncoder().encode(params)
             let resp: ChatCompletions.Response = try await transport.fetch(
-                HTTPRequest(method: .post, url: url, headerFields: [.authorization: "Bearer \(tokenProvider())"]),
+                HTTPRequest(method: .post, url: url, headerFields: buildHeaders()),
                 body: body
             )
 
@@ -765,7 +771,7 @@ public struct OpenAILanguageModel: LanguageModel, ProfileRequestIdentifiedLangua
             let encoder = JSONEncoder()
             let body = try encoder.encode(params)
             let resp: Responses.Response = try await transport.fetch(
-                HTTPRequest(method: .post, url: url, headerFields: [.authorization: "Bearer \(tokenProvider())"]),
+                HTTPRequest(method: .post, url: url, headerFields: buildHeaders()),
                 body: body
             )
 
@@ -969,7 +975,7 @@ public struct OpenAILanguageModel: LanguageModel, ProfileRequestIdentifiedLangua
                         }
                         let body = try JSONEncoder().encode(params)
                         let url = baseURL.appendingPathComponent(path)
-                        let headers: HTTPFields = [.authorization: "Bearer \(tokenProvider())"]
+                        let headers: HTTPFields = buildHeaders()
                         var toolCalls: [OpenAIToolCall] = []
                         var roundReasoning = ChatCompletionsReasoning(host: baseURL.host)
 
