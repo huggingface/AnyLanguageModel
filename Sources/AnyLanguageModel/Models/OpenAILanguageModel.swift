@@ -587,7 +587,7 @@ public struct OpenAILanguageModel: LanguageModel, ProfileRequestIdentifiedLangua
             let url = baseURL.appendingPathComponent("chat/completions")
             let body = try JSONEncoder().encode(params)
             let resp: ChatCompletions.Response = try await transport.fetch(
-                HTTPRequest(method: .post, url: url, headerFields: [.authorization: "Bearer \(tokenProvider())"]),
+                HTTPRequest(method: .post, url: url, headerFields: .bearer(tokenProvider())),
                 body: body
             )
 
@@ -765,7 +765,7 @@ public struct OpenAILanguageModel: LanguageModel, ProfileRequestIdentifiedLangua
             let encoder = JSONEncoder()
             let body = try encoder.encode(params)
             let resp: Responses.Response = try await transport.fetch(
-                HTTPRequest(method: .post, url: url, headerFields: [.authorization: "Bearer \(tokenProvider())"]),
+                HTTPRequest(method: .post, url: url, headerFields: .bearer(tokenProvider())),
                 body: body
             )
 
@@ -969,7 +969,7 @@ public struct OpenAILanguageModel: LanguageModel, ProfileRequestIdentifiedLangua
                         }
                         let body = try JSONEncoder().encode(params)
                         let url = baseURL.appendingPathComponent(path)
-                        let headers: HTTPFields = [.authorization: "Bearer \(tokenProvider())"]
+                        let headers: HTTPFields = .bearer(tokenProvider())
                         var toolCalls: [OpenAIToolCall] = []
                         var roundReasoning = ChatCompletionsReasoning(host: baseURL.host)
 

@@ -590,7 +590,7 @@ public struct OpenResponsesLanguageModel: LanguageModel, ProfileRequestIdentifie
                                 HTTPRequest(
                                     method: .post,
                                     url: url,
-                                    headerFields: [.authorization: "Bearer \(tokenProvider())"]
+                                    headerFields: .bearer(tokenProvider())
                                 ),
                                 body: body,
                                 timeout: responseStartTimeout
@@ -752,7 +752,7 @@ public struct OpenResponsesLanguageModel: LanguageModel, ProfileRequestIdentifie
             )
             let body = try JSONEncoder().encode(params)
             let resp: OpenResponsesAPI.Response = try await transport.fetch(
-                HTTPRequest(method: .post, url: url, headerFields: [.authorization: "Bearer \(tokenProvider())"]),
+                HTTPRequest(method: .post, url: url, headerFields: .bearer(tokenProvider())),
                 body: body
             )
 
