@@ -1,0 +1,114 @@
+# Swift comes from Xcode or the Command Line Tools, not from mise.
+# The package needs Swift 6.3.1 (Xcode 26.4.1) or later.
+# MLX tasks need Apple silicon and the Metal toolchain.
+
+[tasks.setup]
+description = "Resolve Swift package dependencies for the library"
+run = "mise run _swift -- package resolve"
+
+[tasks.build]
+description = "Build the library without traits"
+run = "mise run _swift -- build"
+
+[tasks."build:mlx"]
+description = "Build the library with the MLX trait"
+run = "mise run _swift:mlx -- build --traits MLX"
+
+[tasks."build:llama"]
+description = "Build the library with the Llama trait"
+run = "mise run _swift -- build --traits Llama"
+
+[tasks."build:coreml"]
+description = "Build the library with the CoreML trait"
+run = "mise run _swift -- build --traits CoreML"
+
+[tasks."build:asynchttpclient"]
+description = "Build the library with the AsyncHTTPClient trait"
+run = "mise run _swift -- build --traits AsyncHTTPClient"
+
+[tasks."build:ios"]
+description = "Compile the library for iOS"
+run = "xcodebuild build -scheme AnyLanguageModel -destination 'generic/platform=iOS' CODE_SIGNING_ALLOWED=NO -quiet"
+
+[tasks.test]
+description = "Run the library tests without traits, skipping the integration suites"
+env = { CI = "1" }
+run = "mise run _swift -- test"
+
+[tasks."test:mlx"]
+description = "Run the library tests with the MLX trait, skipping the integration suites"
+env = { CI = "1" }
+run = "mise run _swift:mlx -- test --traits MLX"
+
+[tasks."test:llama"]
+description = "Run the library tests with the Llama trait (set LLAMA_MODEL_PATH to a GGUF file for inference tests)"
+env = { CI = "1" }
+run = "mise run _swift -- test --traits Llama"
+
+[tasks."test:coreml"]
+description = "Run the library tests with the CoreML trait, skipping the integration suites"
+env = { CI = "1" }
+run = "mise run _swift -- test --traits CoreML"
+
+[tasks."test:asynchttpclient"]
+description = "Run the library tests with the AsyncHTTPClient trait, skipping the integration suites"
+env = { CI = "1" }
+run = "mise run _swift -- test --traits AsyncHTTPClient"
+
+[tasks."test:integration"]
+description = """\
+Run the tests with the integration suites and the Llama and CoreML traits \
+(downloads the Core ML model Mistral 7B Int4, 4.1 GB; \
+needs a local Ollama server with qwen3:8b and Apple Intelligence; \
+set LLAMA_MODEL_PATH for llama.cpp and provider API keys for their suites)\
+"""
+run = '''
+#!/usr/bin/env bash
+set -euo pipefail
+unset CI
+exec mise run _swift -- test --traits Llama,CoreML
+'''
+
+[tasks.lint]
+description = "Check the formatting of Swift files"
+run = "mise run _swift -- format lint --strict --recursive ."
+
+[tasks.format]
+description = "Format Swift files in place"
+run = "mise run _swift -- format --in-place --recursive ."
+
+[tasks."_swift"]
+hide = true
+run = '''
+#!/usr/bin/env bash
+set -euo pipefail
+
+if [ "$(uname -s)" = "Darwin" ]; then
+    exec xcrun swift "$@"
+fi
+
+exec swift "$@"
+'''
+
+[tasks."_swift:mlx"]
+hide = true
+run = '''
+#!/usr/bin/env bash
+set -euo pipefail
+
+if ! xcrun --find metal >/dev/null 2>&1; then
+    metal_bin=""
+    for candidate in /private/var/run/com.apple.security.cryptexd/mnt/*MetalToolchain*/Metal.xctoolchain/usr/bin; do
+        if [ -x "$candidate/metal" ]; then
+            metal_bin="$candidate"
+        fi
+    done
+    if [ -z "$metal_bin" ]; then
+        echo "error: Metal compiler not found. Run: xcodebuild -downloadComponent MetalToolchain" >&2
+        exit 1
+    fi
+    export PATH="$metal_bin:$PATH"
+fi
+
+exec xcrun swift "$@"
+'''
