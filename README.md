@@ -1553,6 +1553,25 @@ let response = try await session.respond {
 }
 ```
 
+To load a model from the Hugging Face Hub,
+pass a model ID in the form that llama.cpp's `-hf` option takes.
+The files download on first use into the shared Hugging Face cache,
+so a model downloaded by llama.cpp or the `hf` command is reused:
+
+```swift
+// Selects Q4_K_M, else Q8_0, else the first GGUF file,
+// and the matching multimodal projector (mmproj) file, if any
+let model = LlamaLanguageModel(modelId: "ggml-org/gemma-3-4b-it-GGUF")
+
+// Selects a quantization, a projector, or a file explicitly
+let q8 = LlamaLanguageModel(modelId: "ggml-org/gemma-3-4b-it-GGUF:Q8_0", mmproj: .disabled)
+let f16 = LlamaLanguageModel(
+    modelId: "ggml-org/gemma-3-4b-it-GGUF",
+    file: "gemma-3-4b-it-f16.gguf",
+    mmproj: .file("mmproj-model-f16.gguf")
+)
+```
+
 Enable the trait in Package.swift:
 
 ```swift
