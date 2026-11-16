@@ -226,6 +226,32 @@ import Testing
             #expect(LlamaHubFileResolver.cachedCommit(inRefsDirectory: refs) == main)
         }
 
+        @Test func cancelledListingDoesNotFallBackToTheCache() async throws {
+            let commit = String(repeating: "f", count: 40)
+            let (cache, cacheDirectory) = try makeCachedSnapshot(ref: "main", commit: commit)
+            defer { try? FileManager.default.removeItem(at: cacheDirectory) }
+            // The listing throws `URLError(.cancelled)` once its task is cancelled,
+            // as a cancelled URLSession request does.
+            let repository = FakeHubRepository(cache: cache, listingWaitsForCancellation: true)
+            let source = makeSource(repository)
+
+            let download = Task { try await source.resolveAndDownload() }
+            try await waitUntil { repository.listingCalls == 1 }
+            download.cancel()
+            await #expect(throws: CancellationError.self) { try await download.value }
+            #expect(source.resolvedFiles == nil)
+        }
+
+        @Test func cancelledRequestDoesNotStartALoad() async throws {
+            let model = LlamaLanguageModel(modelPath: "/nonexistent/model.gguf")
+            let load = Task {
+                withUnsafeCurrentTask { $0?.cancel() }
+                try await model.ensureModelLoaded()
+            }
+            // Without the check, the load would throw `invalidModelPath`.
+            await #expect(throws: CancellationError.self) { try await load.value }
+        }
+
         @Test func prewarmFinishesTheDownloadOfACancelledRequest() async throws {
             let repository = FakeHubRepository(gateOpen: false)
             let source = makeSource(repository)

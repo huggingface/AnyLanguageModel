@@ -1272,6 +1272,8 @@ import Foundation
                 } else {
                     LlamaModelFiles(modelPath: givenModelPath, mmprojPath: givenMMProjPath)
                 }
+            // Don't start a load for a request that was cancelled during the download.
+            try Task.checkCancellation()
             try loadModel(modelPath: files.modelPath, mmprojPath: files.mmprojPath)
         }
 

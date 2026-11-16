@@ -371,7 +371,12 @@ import Foundation
                 revision = try await hub.commit(of: repo, branch: branch) ?? branch
                 listing = try await hub.files(in: repo, revision: revision)
             } catch {
-                if error is CancellationError { throw error }
+                // A cancelled URLSession request throws `URLError(.cancelled)`,
+                // not `CancellationError`, so check the task too.
+                // A cancelled load must not fall back to the cache.
+                if error is CancellationError || Task.isCancelled {
+                    throw CancellationError()
+                }
                 if let cached = try? cachedFiles(repo: repo, repository: repository, tag: tag, cache: cache) {
                     return cached
                 }
