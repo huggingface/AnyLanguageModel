@@ -61,6 +61,10 @@ import Foundation
             file: String?,
             mmproj: LlamaLanguageModel.Projector
         ) throws -> LlamaHubFileSelection {
+            // Like llama.cpp, skip a listed path that would leave the snapshot directory,
+            // and select from the rest.
+            let files = files.filter(isValidRelativePath)
+
             let primary: String
             if let file {
                 guard files.contains(file) else {

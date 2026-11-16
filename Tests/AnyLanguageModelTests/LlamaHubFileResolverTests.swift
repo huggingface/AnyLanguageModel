@@ -103,6 +103,26 @@ import Testing
             }
         }
 
+        @Test func skipsPathsOutsideTheSnapshot() throws {
+            let files = [
+                "../escape-Q4_K_M.gguf",
+                "/absolute-Q4_K_M.gguf",
+                "dir//empty-Q4_K_M.gguf",
+                "model-Q4_K_M.gguf",
+                "../mmproj-F16.gguf",
+            ]
+            let selection = try select(files)
+            #expect(selection.modelFiles == ["model-Q4_K_M.gguf"])
+            #expect(selection.projectorFile == nil)
+
+            #expect(throws: HubError.self) {
+                try select(files, file: "../escape-Q4_K_M.gguf")
+            }
+            #expect(LlamaHubFileResolver.isValidRelativePath("dir/model.gguf"))
+            #expect(!LlamaHubFileResolver.isValidRelativePath("dir/../model.gguf"))
+            #expect(!LlamaHubFileResolver.isValidRelativePath("dir\\model.gguf"))
+        }
+
         @Test func explicitFileOverridesTag() throws {
             let selection = try select(gemma, tag: "Q4_K_M", file: "gemma-3-4b-it-f16.gguf")
             #expect(selection.modelFiles == ["gemma-3-4b-it-f16.gguf"])
