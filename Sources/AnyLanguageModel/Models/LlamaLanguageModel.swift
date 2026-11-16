@@ -23,9 +23,12 @@ import Foundation
     /// A language model that runs llama.cpp models locally.
     ///
     /// Use this model to generate text using GGUF models running directly with llama.cpp.
+    /// Load a model from a file path, or from the Hugging Face Hub
+    /// with the same model ID syntax as llama.cpp's `-hf` option:
     ///
     /// ```swift
     /// let model = LlamaLanguageModel(modelPath: "/path/to/model.gguf")
+    /// let hubModel = LlamaLanguageModel(modelId: "ggml-org/gemma-3-4b-it-GGUF:Q4_K_M")
     /// ```
     public final class LlamaLanguageModel: LanguageModel, @unchecked Sendable {
         /// The reason the model is unavailable.
@@ -201,7 +204,19 @@ import Foundation
         }
 
         /// The path to the GGUF model file.
-        public let modelPath: String
+        ///
+        /// For a model loaded from the Hugging Face Hub,
+        /// this is the path in the cache once the files are downloaded,
+        /// and an empty string before.
+        public var modelPath: String {
+            hubSource?.resolvedFiles?.modelPath ?? localModelPath
+        }
+
+        /// The model path passed to ``init(modelPath:gpuLayers:mmprojPath:)``.
+        private let localModelPath: String
+
+        /// The Hugging Face model to download, or `nil` for a model loaded from a file path.
+        let hubSource: LlamaHubModelSource?
 
         /// The number of model layers to offload to the GPU.
         ///
@@ -211,7 +226,17 @@ import Foundation
         /// The path to the multimodal projector GGUF file, when the model has one.
         ///
         /// Prompts may include image segments only when a projector is loaded.
-        public let mmprojPath: String?
+        /// For a model loaded from the Hugging Face Hub,
+        /// this is the path in the cache once the files are downloaded.
+        public var mmprojPath: String? {
+            if let hubSource {
+                return hubSource.resolvedFiles?.mmprojPath
+            }
+            return localMMProjPath
+        }
+
+        /// The projector path passed to ``init(modelPath:gpuLayers:mmprojPath:)``.
+        private let localMMProjPath: String?
 
         /// The default GPU layer count for the current platform.
         ///
@@ -624,14 +649,29 @@ import Foundation
         ///     the model. When provided, prompts may include image segments,
         ///     which are encoded through the projector. Defaults to `nil`
         ///     (text only).
-        public init(
+        public convenience init(
             modelPath: String,
             gpuLayers: Int32 = LlamaLanguageModel.defaultGPULayerCount,
             mmprojPath: String? = nil
         ) {
-            self.modelPath = modelPath
+            self.init(
+                localModelPath: modelPath,
+                localMMProjPath: mmprojPath,
+                hubSource: nil,
+                gpuLayers: gpuLayers
+            )
+        }
+
+        init(
+            localModelPath: String,
+            localMMProjPath: String?,
+            hubSource: LlamaHubModelSource?,
+            gpuLayers: Int32
+        ) {
+            self.localModelPath = localModelPath
+            self.localMMProjPath = localMMProjPath
+            self.hubSource = hubSource
             self.gpuLayers = gpuLayers
-            self.mmprojPath = mmprojPath
             self.defaultOptions = ResolvedGenerationOptions()
         }
 
@@ -781,7 +821,7 @@ import Foundation
             includeSchemaInPrompt: Bool,
             options: GenerationOptions
         ) async throws -> LanguageModelSession.Response<Content> where Content: Generable {
-            try ensureModelLoaded()
+            try await ensureModelLoaded()
 
             let runtimeOptions = resolvedOptions(from: options)
             let structuredOptions = resolvedStructuredOptions(from: options)
@@ -1029,7 +1069,7 @@ import Foundation
                 AsyncThrowingStream { continuation in
                     let task = Task {
                         do {
-                            try ensureModelLoaded()
+                            try await ensureModelLoaded()
 
                             let runtimeOptions = resolvedOptions(from: options)
                             let maxTokens = runtimeOptions.maximumResponseTokens ?? 100
@@ -1198,7 +1238,18 @@ import Foundation
 
         // MARK: - Private Helpers
 
-        private func ensureModelLoaded() throws {
+        /// Downloads a Hub model's files if needed, then loads the model.
+        func ensureModelLoaded() async throws {
+            let files =
+                if let hubSource {
+                    try await hubSource.files()
+                } else {
+                    LlamaModelFiles(modelPath: localModelPath, mmprojPath: localMMProjPath)
+                }
+            try loadModel(modelPath: files.modelPath, mmprojPath: files.mmprojPath)
+        }
+
+        private func loadModel(modelPath: String, mmprojPath: String?) throws {
             modelLoadLock.lock()
             defer { modelLoadLock.unlock() }
 
