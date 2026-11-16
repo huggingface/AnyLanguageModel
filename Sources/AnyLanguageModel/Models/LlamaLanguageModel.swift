@@ -102,6 +102,9 @@ import Foundation
         text: UnsafePointer<CChar>?,
         userData: UnsafeMutableRawPointer?
     ) {
+        #if DEBUG
+            LlamaTestHooks.onLog.withLock { $0 }?()
+        #endif
         let minimum = LlamaRuntime.logLevel.withLock { $0 }
         let logger = LlamaRuntime.Logger(userData: userData)
         guard LlamaRuntime.shouldWrite(level: level, logger: logger, minimum: minimum), let text else {
@@ -117,6 +120,34 @@ import Foundation
     /// ```swift
     /// let model = LlamaLanguageModel(modelPath: "/path/to/model.gguf")
     /// ```
+    ///
+    /// llama.cpp's Metal backend stops a process with an assertion
+    /// if the process exits while a model has layers on the GPU.
+    /// So the model registers an exit handler when a load ends,
+    /// which stops new loads and generations,
+    /// waits up to three seconds for running work,
+    /// and then frees every loaded model.
+    /// After the handler starts, requests throw
+    /// ``LanguageModelSession/GenerationError/assetsUnavailable(_:)``.
+    /// The handler can't help in these cases:
+    ///
+    /// - An exit during the first load.
+    /// - An exit from inside a load, a generation, or the release of a model,
+    ///   such as from a llama.cpp callback.
+    ///   An exit from a llama.cpp callback on a thread
+    ///   that runs no task and releases no model,
+    ///   such as a thread that llama.cpp or another library owns,
+    ///   makes the handler wait the full three seconds and then free nothing.
+    /// - Work that is still running after three seconds.
+    /// - An exit that runs no exit handlers, such as `_exit` or a crash.
+    ///
+    /// No method unloads a model that something still references.
+    /// To be certain that no model is loaded when the process exits,
+    /// wait until every request returns and every response stream ends,
+    /// start no new requests,
+    /// and then release every reference to the model, including its sessions.
+    /// A response stream's generation can keep the model for a short time
+    /// after the stream ends, until the generation stops at its next token.
     public final class LlamaLanguageModel: LanguageModel, @unchecked Sendable {
         /// The reason the model is unavailable.
         /// This model is always available.
@@ -495,7 +526,13 @@ import Foundation
         /// frees a context that is still decoding: it runs on a transient context
         /// instead and leaves the cache untouched.
         private let sessionContextLock = NSLock()
-        private var cachedSessionContext: CachedSessionContext?
+        private var cachedSessionContext: CachedSessionContext? {
+            // The exit handler frees the cached context through the resources.
+            didSet { resources?.setCachedContext(cachedSessionContext?.context) }
+        }
+
+        /// The loaded model's resources, which the exit handler can free.
+        private var resources: LlamaModelResources?
 
         /// The number of prompt tokens reused from the cached context by the most
         /// recent chat generation.
@@ -510,21 +547,30 @@ import Foundation
         /// model. The next chat generation prefills its full prompt again. Call this
         /// under memory pressure or when a session is discarded. If a generation is
         /// running on the cached context, it is freed as soon as that generation ends.
+        ///
+        /// After the exit handler starts, this method does nothing,
+        /// because the handler frees the cached context.
         public func clearCachedContext() {
-            discardCachedSessionContext()
+            // After the exit handler starts, the context may be freed already.
+            try? LlamaLifecycle.shared.perform { discardCachedSessionContext() }
         }
 
         private func discardCachedSessionContext() {
-            sessionContextLock.lock()
-            defer { sessionContextLock.unlock() }
-            guard var cached = cachedSessionContext else { return }
-            if cached.isCheckedOut {
-                cached.discardWhenReleased = true
-                cachedSessionContext = cached
-                return
+            let unused: OpaquePointer? = sessionContextLock.withLock {
+                guard var cached = cachedSessionContext else { return nil }
+                if cached.isCheckedOut {
+                    cached.discardWhenReleased = true
+                    cachedSessionContext = cached
+                    return nil
+                }
+                cachedSessionContext = nil
+                return cached.context
             }
-            llama_free(cached.context)
-            cachedSessionContext = nil
+            // Free without the lock: llama.cpp logs while it frees a context,
+            // and a log callback that calls `exit` runs the exit handler on this thread.
+            if let unused {
+                llama_free(unused)
+            }
         }
 
         private func recordCachedTokens(_ tokens: [llama_token], context: OpaquePointer) {
@@ -545,19 +591,22 @@ import Foundation
         /// context is checked back in (or freed, if a discard was requested while
         /// it was busy); a transient context is freed.
         private func releaseSessionContext(_ context: OpaquePointer) {
-            sessionContextLock.lock()
-            defer { sessionContextLock.unlock() }
-            if var cached = cachedSessionContext, cached.context == context {
-                if cached.discardWhenReleased {
-                    llama_free(cached.context)
-                    cachedSessionContext = nil
-                } else {
+            let unused: OpaquePointer? = sessionContextLock.withLock {
+                if var cached = cachedSessionContext, cached.context == context {
+                    if cached.discardWhenReleased {
+                        cachedSessionContext = nil
+                        return context
+                    }
                     cached.isCheckedOut = false
                     cachedSessionContext = cached
+                    return nil
                 }
-                return
+                return context
             }
-            llama_free(context)
+            // Free without the lock, as in `discardCachedSessionContext()`.
+            if let unused {
+                llama_free(unused)
+            }
         }
 
         /// Returns a context for the session along with the index of the first
@@ -734,14 +783,10 @@ import Foundation
         }
 
         deinit {
-            if let cached = cachedSessionContext {
-                llama_free(cached.context)
-            }
-            if let mtmdContext = mtmdContext {
-                mtmd_free(mtmdContext)
-            }
-            if let model = model {
-                llama_model_free(model)
+            // The resources free the cached context, the projector, and the model,
+            // unless the exit handler freed them already.
+            if let resources {
+                LlamaLifecycle.shared.free(resources)
             }
         }
 
@@ -884,6 +929,11 @@ import Foundation
             let runtimeOptions = resolvedOptions(from: options)
             let structuredOptions = resolvedStructuredOptions(from: options)
 
+            // The exit handler waits for this request's llama.cpp work,
+            // but not for its tool calls.
+            let operation = try LlamaLifecycle.shared.begin()
+            defer { operation.end() }
+
             // Structured output does not go through the projector yet.
             // Without an image marker, a prompt with an image throws
             // before any generation or tool call,
@@ -987,6 +1037,7 @@ import Foundation
 
                 try session.recordToolRound(toolRounds, completed: allEntries)
 
+                operation.suspend()
                 let (callsEntry, resolution) = try await resolveToolCalls(
                     parsedCalls,
                     requestContext: requestContext,
@@ -1020,7 +1071,9 @@ import Foundation
                         pendingEntries.append(.prompt(prompt))
                     }
                 }
+                try operation.resume()
             }
+            try operation.resume()
             if type == String.self {
                 return LanguageModelSession.Response(
                     content: text as! Content,
@@ -1131,6 +1184,10 @@ import Foundation
 
                             let runtimeOptions = resolvedOptions(from: options)
                             let maxTokens = runtimeOptions.maximumResponseTokens ?? 100
+                            // The exit handler waits for this request's llama.cpp work,
+                            // but not for its tool calls.
+                            let operation = try LlamaLifecycle.shared.begin()
+                            defer { operation.end() }
                             let outputFormat = self.currentToolCallFormat()
                             let toolRounds = session.toolRoundLimit(for: "Llama", options: options)
                             var accumulatedEntries: [Transcript.Entry] = []
@@ -1243,6 +1300,7 @@ import Foundation
 
                                 try session.recordToolRound(toolRounds, completed: accumulatedEntries)
 
+                                operation.suspend()
                                 let (callsEntry, resolution) = try await self.resolveToolCalls(
                                     parsedCalls,
                                     requestContext: requestContext,
@@ -1275,6 +1333,7 @@ import Foundation
                                     emittedBase += roundVisible
                                     yieldSnapshot(emittedBase)
                                 }
+                                try operation.resume()
                             }
 
                             if emittedBase != lastYieldedText {
@@ -1302,6 +1361,11 @@ import Foundation
 
             guard !isModelLoaded else { return }
 
+            // The exit handler waits for this load.
+            // After the handler starts, this throws before the path is checked.
+            let operation = try LlamaLifecycle.shared.begin()
+            defer { operation.end() }
+
             // Check if model file exists
             guard FileManager.default.fileExists(atPath: modelPath) else {
                 throw LlamaLanguageModelError.invalidModelPath
@@ -1326,6 +1390,7 @@ import Foundation
 
             let modelParams = createModelParams()
             guard let loadedModel = llama_model_load_from_file(modelPath, modelParams) else {
+                try LlamaLifecycle.shared.stopIfExiting()
                 throw LlamaLanguageModelError.modelLoadFailed
             }
 
@@ -1349,6 +1414,10 @@ import Foundation
             self.vocab = llama_model_get_vocab(loadedModel)
             self.tokenCache = StructuredGenerationTokenCache()
             self.isModelLoaded = true
+            let resources = LlamaModelResources(model: loadedModel, projector: mtmdContext)
+            self.resources = resources
+            LlamaLifecycle.shared.track(resources)
+            LlamaRuntime.registerExitHandler()
         }
 
         private func createModelParams() -> llama_model_params {
@@ -1357,6 +1426,8 @@ import Foundation
 
             // Try to reduce memory usage
             params.load_mode = LLAMA_LOAD_MODE_MMAP
+            // Returning false stops the load, so that the exit handler doesn't wait for all of it.
+            params.progress_callback = { _, _ in !LlamaLifecycle.shared.isStopping }
             return params
         }
 
@@ -1640,6 +1711,7 @@ import Foundation
             }
 
             mutating func decode(_ token: Int) async throws {
+                try LlamaLifecycle.shared.stopIfExiting()
                 let llamaToken = llama_token(token)
 
                 batch.pointee.n_tokens = 1
@@ -1774,9 +1846,14 @@ import Foundation
             var decodedTokens = promptTokens
 
             for _ in 0 ..< maxTokens {
+                #if DEBUG
+                    LlamaTestHooks.beforeToken.withLock { $0 }?()
+                #endif
                 if Task.isCancelled {
                     break
                 }
+                // The exit handler waits for this generation, so stop it early.
+                try LlamaLifecycle.shared.stopIfExiting()
 
                 // Sample next token from logits of the last token we just decoded
                 let nextToken = llama_sampler_sample(sampler, context, batch.n_tokens - 1)
@@ -1947,6 +2024,8 @@ import Foundation
                 if Task.isCancelled {
                     break
                 }
+                // The exit handler waits for this generation, so stop it early.
+                try LlamaLifecycle.shared.stopIfExiting()
 
                 let nextToken = llama_sampler_sample(samplerPtr, context, sampleIndex)
                 llama_sampler_accept(samplerPtr, nextToken)
@@ -2090,6 +2169,7 @@ import Foundation
                 let capacity = Int(batchSize)
                 var start = startIndex
                 while start < promptTokens.count {
+                    try LlamaLifecycle.shared.stopIfExiting()
                     let count = min(capacity, promptTokens.count - start)
                     batch.n_tokens = Int32(count)
                     for i in 0 ..< count {

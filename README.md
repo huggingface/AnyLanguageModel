@@ -1590,6 +1590,45 @@ let response = try await session.respond(
 )
 ```
 
+llama.cpp's Metal backend stops a process with an assertion
+if the process exits while a model has layers on the GPU,
+and a generation that is still running at exit can crash on the GPU or the CPU.
+So `LlamaLanguageModel` registers an exit handler when a load ends.
+The handler stops new loads and generations,
+waits up to three seconds for running work to stop at its next token,
+and then frees every loaded model, projector, and cached context.
+After the handler starts,
+requests throw `LanguageModelSession.GenerationError.assetsUnavailable`.
+
+The handler is best effort.
+The process can still stop with the assertion in these cases:
+
+- It exits during the first load,
+  because the handler is registered when a load ends.
+- It exits from inside a load, a generation, or the release of a model,
+  for example from a llama.cpp callback.
+  That work can't end while the handler waits,
+  so the handler returns at once and frees nothing.
+  An exit from a llama.cpp callback on a thread
+  that llama.cpp or another library owns
+  isn't recognized as inside that work,
+  so the handler waits the full three seconds and then frees nothing.
+- Work is still running after three seconds.
+  The handler then frees nothing.
+- It exits without running exit handlers,
+  for example with `_exit` or after a crash.
+
+No method unloads a model that something still references.
+To be certain that no model is loaded when the process exits,
+wait until every `respond` call returns and every response stream ends,
+start no new requests,
+and then release every reference to the `LlamaLanguageModel`,
+including the sessions that use it.
+The model frees its weights when the last reference is released.
+A response stream's generation can keep its model for a short time
+after the stream ends,
+until the generation stops at its next token.
+
 <a id="litert-lm-checkout-fails-with-a-git-lfs-smudge-error"></a>
 
 ### LiteRT-LM
