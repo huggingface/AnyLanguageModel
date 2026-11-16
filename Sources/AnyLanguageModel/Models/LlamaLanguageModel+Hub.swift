@@ -94,6 +94,7 @@ import Foundation
         /// The initializer doesn't access the network.
         /// The model's files download when the model is first used or prewarmed,
         /// into the Hugging Face cache that the `hf` command and llama.cpp also use.
+        /// Until then, ``localModelPath`` and ``mmprojPath`` are `nil`.
         /// Later loads reuse the cached files,
         /// and use the cached snapshot when the Hub can't be reached.
         /// A split model downloads every part.
@@ -121,8 +122,8 @@ import Foundation
             gpuLayers: Int32 = LlamaLanguageModel.defaultGPULayerCount
         ) {
             self.init(
-                localModelPath: "",
-                localMMProjPath: nil,
+                givenModelPath: "",
+                givenMMProjPath: nil,
                 hubSource: LlamaHubModelSource(modelId: modelId, file: file, mmproj: mmproj, hub: hub),
                 gpuLayers: gpuLayers
             )

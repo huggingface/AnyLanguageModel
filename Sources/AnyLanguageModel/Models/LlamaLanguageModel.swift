@@ -205,15 +205,39 @@ import Foundation
 
         /// The path to the GGUF model file.
         ///
+        /// For a model created with ``init(modelPath:gpuLayers:mmprojPath:)``,
+        /// this is the given path.
         /// For a model loaded from the Hugging Face Hub,
-        /// this is the path in the cache once the files are downloaded,
-        /// and an empty string before.
+        /// this is an empty string until the model's files are resolved,
+        /// and then the path of the model file in the cache's snapshot directory,
+        /// the same value as ``localModelPath``.
+        @available(
+            *,
+            deprecated,
+            message: "Use localModelPath, which is nil for a Hub model until its files are resolved."
+        )
         public var modelPath: String {
-            hubSource?.resolvedFiles?.modelPath ?? localModelPath
+            localModelPath ?? ""
+        }
+
+        /// The local path of the GGUF model file, if it is known.
+        ///
+        /// For a model created with ``init(modelPath:gpuLayers:mmprojPath:)``,
+        /// this is the given path.
+        /// For a model loaded from the Hugging Face Hub,
+        /// this is `nil` until the model's files are resolved
+        /// on the first request or ``prewarm(for:promptPrefix:)``,
+        /// and then the path of the model file in the cache's snapshot directory.
+        /// For a split model, this is the path of the first part.
+        public var localModelPath: String? {
+            if let hubSource {
+                return hubSource.resolvedFiles?.modelPath
+            }
+            return givenModelPath
         }
 
         /// The model path passed to ``init(modelPath:gpuLayers:mmprojPath:)``.
-        private let localModelPath: String
+        private let givenModelPath: String
 
         /// The Hugging Face model to download, or `nil` for a model loaded from a file path.
         let hubSource: LlamaHubModelSource?
@@ -227,16 +251,18 @@ import Foundation
         ///
         /// Prompts may include image segments only when a projector is loaded.
         /// For a model loaded from the Hugging Face Hub,
-        /// this is the path in the cache once the files are downloaded.
+        /// this is `nil` until the model's files are resolved,
+        /// and then the projector's path in the cache's snapshot directory,
+        /// or `nil` if no projector was selected.
         public var mmprojPath: String? {
             if let hubSource {
                 return hubSource.resolvedFiles?.mmprojPath
             }
-            return localMMProjPath
+            return givenMMProjPath
         }
 
         /// The projector path passed to ``init(modelPath:gpuLayers:mmprojPath:)``.
-        private let localMMProjPath: String?
+        private let givenMMProjPath: String?
 
         /// The default GPU layer count for the current platform.
         ///
@@ -655,21 +681,21 @@ import Foundation
             mmprojPath: String? = nil
         ) {
             self.init(
-                localModelPath: modelPath,
-                localMMProjPath: mmprojPath,
+                givenModelPath: modelPath,
+                givenMMProjPath: mmprojPath,
                 hubSource: nil,
                 gpuLayers: gpuLayers
             )
         }
 
         init(
-            localModelPath: String,
-            localMMProjPath: String?,
+            givenModelPath: String,
+            givenMMProjPath: String?,
             hubSource: LlamaHubModelSource?,
             gpuLayers: Int32
         ) {
-            self.localModelPath = localModelPath
-            self.localMMProjPath = localMMProjPath
+            self.givenModelPath = givenModelPath
+            self.givenMMProjPath = givenMMProjPath
             self.hubSource = hubSource
             self.gpuLayers = gpuLayers
             self.defaultOptions = ResolvedGenerationOptions()
@@ -1244,7 +1270,7 @@ import Foundation
                 if let hubSource {
                     try await hubSource.files()
                 } else {
-                    LlamaModelFiles(modelPath: localModelPath, mmprojPath: localMMProjPath)
+                    LlamaModelFiles(modelPath: givenModelPath, mmprojPath: givenMMProjPath)
                 }
             try loadModel(modelPath: files.modelPath, mmprojPath: files.mmprojPath)
         }

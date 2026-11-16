@@ -1572,6 +1572,10 @@ let f16 = LlamaLanguageModel(
 )
 ```
 
+`localModelPath` is the model file's path in the cache,
+or `nil` until the files are resolved on the first request or `prewarm`.
+It replaces `modelPath`, which is deprecated.
+
 Enable the trait in Package.swift:
 
 ```swift

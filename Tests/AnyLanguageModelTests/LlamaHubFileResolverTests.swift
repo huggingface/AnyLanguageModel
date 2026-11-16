@@ -220,14 +220,24 @@ import Testing
             let model = LlamaLanguageModel(modelId: "ggml-org/gemma-3-4b-it-GGUF:Q8_0", mmproj: .disabled)
             #expect(model.modelId == "ggml-org/gemma-3-4b-it-GGUF:Q8_0")
             #expect(model.mmproj == .disabled)
-            #expect(model.modelPath == "")
+            #expect(model.localModelPath == nil)
             #expect(model.mmprojPath == nil)
             #expect(model.availability == .available)
 
             let fileModel = LlamaLanguageModel(modelPath: "/path/to/model.gguf", mmprojPath: "/path/to/mmproj.gguf")
             #expect(fileModel.modelId == nil)
-            #expect(fileModel.modelPath == "/path/to/model.gguf")
+            #expect(fileModel.localModelPath == "/path/to/model.gguf")
             #expect(fileModel.mmprojPath == "/path/to/mmproj.gguf")
+        }
+
+        /// The deprecated `modelPath` keeps its documented values.
+        @available(*, deprecated)
+        @Test func deprecatedModelPathReportsEmptyStringBeforeResolution() {
+            let model = LlamaLanguageModel(modelId: "ggml-org/gemma-3-4b-it-GGUF")
+            #expect(model.modelPath == "")
+
+            let fileModel = LlamaLanguageModel(modelPath: "/path/to/model.gguf")
+            #expect(fileModel.modelPath == "/path/to/model.gguf")
         }
 
         @Test func invalidModelIdThrowsOnFirstRequest() async throws {
@@ -284,12 +294,13 @@ import Testing
 
             let snapshots = cacheDirectory.appendingPathComponent("models--ggml-org--SmolVLM-256M-Instruct-GGUF")
                 .appendingPathComponent("snapshots").path
-            #expect(model.modelPath.hasPrefix(snapshots))
-            #expect(model.modelPath.hasSuffix("/SmolVLM-256M-Instruct-Q8_0.gguf"))
+            let modelPath = try #require(model.localModelPath)
+            #expect(modelPath.hasPrefix(snapshots))
+            #expect(modelPath.hasSuffix("/SmolVLM-256M-Instruct-Q8_0.gguf"))
             #expect(model.mmprojPath?.hasSuffix("/mmproj-SmolVLM-256M-Instruct-Q8_0.gguf") == true)
 
             // The blob is named by the file's SHA-256, as llama.cpp names it.
-            let blob = try FileManager.default.destinationOfSymbolicLink(atPath: model.modelPath)
+            let blob = try FileManager.default.destinationOfSymbolicLink(atPath: modelPath)
             #expect(blob.hasSuffix("/blobs/2a31195d3769c0b0fd0a4906201666108834848db768af11de1d2cef7cd35e65"))
 
             // A new model with an unreachable endpoint uses the cached snapshot.
@@ -303,7 +314,7 @@ import Testing
                 options: GenerationOptions(maximumResponseTokens: 16)
             )
             #expect(!offlineResponse.content.isEmpty)
-            #expect(offline.modelPath == model.modelPath)
+            #expect(offline.localModelPath == modelPath)
             #expect(offline.mmprojPath == model.mmprojPath)
         }
     }
