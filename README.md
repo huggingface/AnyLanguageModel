@@ -1618,6 +1618,18 @@ The process can still stop with the assertion in these cases:
 - It exits without running exit handlers,
   for example with `_exit` or after a crash.
 
+If freeing the models takes more than ten seconds,
+for example because another library's log callback blocks,
+the handler aborts the process, so that the exit can't hang.
+A crash report for this abort shows
+`LlamaLifecycle.abortAfterExitCleanupTimeout()` in its backtrace,
+which first tries to write one line to standard error,
+but aborts whether or not the line can be written.
+If the cleanup ends just after the limit,
+the cleanup's own thread can abort first,
+without the line,
+and the backtrace shows `LlamaLifecycle.abortAfterLateExitCleanup()`.
+
 No method unloads a model that something still references.
 To be certain that no model is loaded when the process exits,
 wait until every `respond` call returns and every response stream ends,

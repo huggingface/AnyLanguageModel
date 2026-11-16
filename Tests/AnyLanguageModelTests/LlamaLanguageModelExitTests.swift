@@ -211,6 +211,30 @@ import Testing
                 let elapsed = await ExitTestTimer.finish(name, watchdog)
                 #expect(try #require(elapsed) < .seconds(LlamaLifecycle.exitDeadline))
             }
+
+            @Test("A cleanup that blocks at exit aborts the process instead of hanging")
+            func exitWithBlockedCleanup() async throws {
+                // A log callback blocks while the exit handler frees the model,
+                // so the cleanup watchdog aborts the process.
+                let name = "exitWithBlockedCleanup"
+                let watchdog = ExitTestTimer.watch(name)
+                await #expect(processExitsWith: .signal(SIGABRT)) {
+                    ExitTestTimer.childStarted("exitWithBlockedCleanup")
+                    let (model, session) = try await LlamaLanguageModelExitTests.loadedModel(gpuLayers: -1)
+                    LlamaTestHooks.onLog.withLock {
+                        $0 = {
+                            if LlamaLifecycle.shared.isStopping {
+                                while true { sleep(60) }
+                            }
+                        }
+                    }
+                    ExitTestTimer.stepStarted("exitWithBlockedCleanup")
+                    withExtendedLifetime((model, session)) { exit(0) }
+                }
+                let elapsed = try #require(await ExitTestTimer.finish(name, watchdog))
+                #expect(elapsed >= .seconds(LlamaLifecycle.cleanupDeadline))
+                #expect(elapsed < .seconds(LlamaLifecycle.cleanupDeadline + 5))
+            }
         #endif
 
         @Test("A process exits normally after the model is released", arguments: [Int32(-1), 0])
@@ -459,6 +483,130 @@ import Testing
             operation.end()
             #expect(lifecycle.activeOperationCount == 0)
         }
+
+        @Test("The cleanup deadline does nothing after the cleanup ends")
+        func cleanupDeadlineAfterCleanup() async throws {
+            let name = "cleanupDeadlineAfterCleanup"
+            let watchdog = ExitTestTimer.watch(name)
+            await #expect(processExitsWith: .success) {
+                ExitTestTimer.childStarted("cleanupDeadlineAfterCleanup")
+                ExitTestTimer.stepStarted("cleanupDeadlineAfterCleanup")
+                let value = LlamaLifecycle.withAbortDeadline(0.1) { 42 }
+                // Outlive the deadline; the watchdog must not abort.
+                usleep(500_000)
+                exit(value == 42 ? 0 : 5)
+            }
+            await ExitTestTimer.finish(name, watchdog, measuring: false)
+        }
+
+        @Test("A cleanup that runs past its deadline aborts the process")
+        func cleanupDeadlinePassed() async throws {
+            let name = "cleanupDeadlinePassed"
+            let watchdog = ExitTestTimer.watch(name)
+            await #expect(processExitsWith: .signal(SIGABRT)) {
+                ExitTestTimer.childStarted("cleanupDeadlinePassed")
+                ExitTestTimer.stepStarted("cleanupDeadlinePassed")
+                LlamaLifecycle.withAbortDeadline(0.2) {
+                    while true { sleep(60) }
+                }
+            }
+            let elapsed = try #require(await ExitTestTimer.finish(name, watchdog))
+            #expect(elapsed >= .milliseconds(200))
+            #expect(elapsed < .seconds(5))
+        }
+
+        @Test("A cleanup that runs past its deadline aborts even if standard error is a full pipe")
+        func cleanupDeadlineWithFullStandardError() async throws {
+            let name = "cleanupDeadlineWithFullStandardError"
+            let watchdog = ExitTestTimer.watch(name)
+            await #expect(processExitsWith: .signal(SIGABRT)) {
+                ExitTestTimer.childStarted("cleanupDeadlineWithFullStandardError")
+                // Make standard error a pipe that is full and that nobody reads.
+                // The read end stays open, so a write blocks instead of failing.
+                var fds: [CInt] = [0, 0]
+                guard pipe(&fds) == 0 else { _exit(3) }
+                let flags = fcntl(fds[1], F_GETFL)
+                _ = fcntl(fds[1], F_SETFL, flags | O_NONBLOCK)
+                let chunk = [UInt8](repeating: 0x2E, count: 4096)
+                while chunk.withUnsafeBytes({ Darwin.write(fds[1], $0.baseAddress, $0.count) }) > 0 {}
+                guard errno == EAGAIN else { _exit(4) }
+                _ = fcntl(fds[1], F_SETFL, flags)
+                guard dup2(fds[1], STDERR_FILENO) == STDERR_FILENO else { _exit(6) }
+                ExitTestTimer.stepStarted("cleanupDeadlineWithFullStandardError")
+                LlamaLifecycle.withAbortDeadline(0.2) {
+                    while true { sleep(60) }
+                }
+            }
+            let elapsed = try #require(await ExitTestTimer.finish(name, watchdog))
+            #expect(elapsed >= .milliseconds(200))
+            #expect(elapsed < .seconds(5))
+        }
+
+        #if DEBUG
+            @Test("Once the cleanup completes, a watchdog that timed out doesn't abort")
+            func cleanupCompletionWinsRace() async throws {
+                let name = "cleanupCompletionWinsRace"
+                let watchdog = ExitTestTimer.watch(name)
+                await #expect(processExitsWith: .success) {
+                    ExitTestTimer.childStarted("cleanupCompletionWinsRace")
+                    let entered = DispatchSemaphore(value: 0)
+                    let proceed = DispatchSemaphore(value: 0)
+                    let decided = DispatchSemaphore(value: 0)
+                    let aborts = Locked<Bool?>(nil)
+                    LlamaTestHooks.cleanupWatchdog.withLock {
+                        $0 = { event in
+                            switch event {
+                            case .beforeDecision:
+                                // Hold the watchdog after its timeout
+                                // until the cleanup has completed.
+                                entered.signal()
+                                proceed.wait()
+                            case .decided(let value):
+                                aborts.withLock { $0 = value }
+                                decided.signal()
+                            }
+                        }
+                    }
+                    ExitTestTimer.stepStarted("cleanupCompletionWinsRace")
+                    // The cleanup returns only after the watchdog's deadline has passed.
+                    let value = LlamaLifecycle.withAbortDeadline(0.05) {
+                        entered.wait()
+                        return 42
+                    }
+                    proceed.signal()
+                    decided.wait()
+                    exit(value == 42 && aborts.withLock({ $0 }) == false ? 0 : 5)
+                }
+                await ExitTestTimer.finish(name, watchdog, measuring: false)
+            }
+
+            @Test("Once a watchdog decides to abort, the cleanup doesn't return")
+            func cleanupTimeoutWinsRace() async throws {
+                let name = "cleanupTimeoutWinsRace"
+                let watchdog = ExitTestTimer.watch(name)
+                await #expect(processExitsWith: .signal(SIGABRT)) {
+                    ExitTestTimer.childStarted("cleanupTimeoutWinsRace")
+                    let decided = DispatchSemaphore(value: 0)
+                    LlamaTestHooks.cleanupWatchdog.withLock {
+                        $0 = { event in
+                            guard event == .decided(aborts: true) else { return }
+                            decided.signal()
+                            // Keep the watchdog from aborting,
+                            // so that only the cleanup's own check can abort.
+                            while true { sleep(60) }
+                        }
+                    }
+                    ExitTestTimer.stepStarted("cleanupTimeoutWinsRace")
+                    _ = LlamaLifecycle.withAbortDeadline(0.05) {
+                        decided.wait()
+                        return 42
+                    }
+                    // A distinct status shows that the cleanup returned.
+                    exit(5)
+                }
+                await ExitTestTimer.finish(name, watchdog, measuring: false)
+            }
+        #endif
 
         @Test("A failed registration of the exit handler makes the handler free nothing")
         func registrationFailure() {

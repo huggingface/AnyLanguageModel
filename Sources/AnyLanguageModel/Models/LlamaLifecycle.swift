@@ -94,6 +94,28 @@ import Foundation
         /// soon enough that the delay looks like a slow quit, not a hang.
         static let exitDeadline: TimeInterval = 3
 
+        /// How long the exit handler's cleanup may take before the process aborts.
+        ///
+        /// The cleanup frees every model after running work has ended.
+        /// llama.cpp calls the installed log callback while it frees,
+        /// and another library can replace that callback with one that blocks,
+        /// for example on a lock that the exiting thread holds,
+        /// and a GPU driver can stall while it releases buffers.
+        /// Without a limit the process would then hang,
+        /// where without the handler it would have stopped with ggml's assertion.
+        /// So the cleanup runs under a watchdog,
+        /// which calls `abort()` if the cleanup is still running after this time.
+        /// It tries to write one line to standard error first,
+        /// but it aborts whether or not the line can be written.
+        ///
+        /// Freeing Qwen3-4B (2.5 GB) and its context took about 35 milliseconds
+        /// on an Apple silicon Mac, on the GPU and on the CPU.
+        /// The work grows with the number and size of the buffers,
+        /// so a 70B model would take under a second by that measure.
+        /// Ten seconds leaves a margin of more than ten times that
+        /// for a slow but working free.
+        static let cleanupDeadline: TimeInterval = 10
+
         /// What ``shutDown(deadline:)`` did.
         enum ShutdownResult: Equatable {
             /// It freed every model.
@@ -315,10 +337,101 @@ import Foundation
             }
             // Free without the lock, as in `free(_:)`.
             // If a log callback calls `exit` here, this handler runs again and does nothing.
-            for model in models {
-                model.free()
+            guard !models.isEmpty else { return result }
+            Self.withAbortDeadline(Self.cleanupDeadline) {
+                for model in models {
+                    model.free()
+                }
             }
             return result
+        }
+
+        /// The state of a cleanup that runs under ``withAbortDeadline(_:_:)``.
+        private enum CleanupState: Sendable {
+            case running
+            case completed
+            case aborting
+        }
+
+        /// Runs `body`, and aborts the process if `body` is still running after `deadline`.
+        ///
+        /// A separate thread measures the time on a monotonic clock,
+        /// so the exiting thread can't stop it.
+        /// The thread ends as soon as `body` returns,
+        /// and doesn't keep the process alive.
+        ///
+        /// Completion and the timeout are decided in one step under a lock.
+        /// Once `body` has returned and completion is recorded,
+        /// the watchdog never aborts.
+        /// Once the watchdog has recorded the timeout,
+        /// this function aborts instead of returning,
+        /// even if `body` returns after that.
+        static func withAbortDeadline<Result>(_ deadline: TimeInterval, _ body: () -> Result) -> Result {
+            let state = Locked(CleanupState.running)
+            let finished = DispatchSemaphore(value: 0)
+            let watchdog = Thread {
+                guard finished.wait(timeout: .now() + deadline) == .timedOut else { return }
+                #if DEBUG
+                    LlamaTestHooks.cleanupWatchdog.withLock { $0 }?(.beforeDecision)
+                #endif
+                let aborts = state.withLock { state in
+                    guard state == .running else { return false }
+                    state = .aborting
+                    return true
+                }
+                #if DEBUG
+                    LlamaTestHooks.cleanupWatchdog.withLock { $0 }?(.decided(aborts: aborts))
+                #endif
+                if aborts {
+                    abortAfterExitCleanupTimeout()
+                }
+            }
+            watchdog.start()
+            let result = body()
+            let completed = state.withLock { state in
+                guard state == .running else { return false }
+                state = .completed
+                return true
+            }
+            // The watchdog has decided to abort, and is about to.
+            guard completed else { abortAfterLateExitCleanup() }
+            finished.signal()
+            return result
+        }
+
+        /// Aborts the process because the exit handler's cleanup returned
+        /// after the watchdog had decided to abort.
+        ///
+        /// A crash report for this abort shows this function
+        /// in the backtrace of the thread that called `abort()`.
+        /// It writes no message and doesn't wait for the watchdog.
+        @inline(never)
+        private static func abortAfterLateExitCleanup() -> Never {
+            abort()
+        }
+
+        /// Aborts the process because the exit handler's cleanup took too long.
+        ///
+        /// A crash report for this abort shows this function
+        /// in the backtrace of the thread that called `abort()`,
+        /// which identifies it.
+        /// The function also tries to write one line to standard error,
+        /// from another thread and with `write(2)`,
+        /// but waits at most 100 milliseconds for it:
+        /// standard error can be a full pipe that nobody reads,
+        /// and its lock can be held by the blocked thread,
+        /// so the abort must not depend on the message.
+        @inline(never)
+        private static func abortAfterExitCleanupTimeout() -> Never {
+            let written = DispatchSemaphore(value: 0)
+            let writer = Thread {
+                let message = "AnyLanguageModel: freeing llama.cpp models at exit didn't finish in time; aborting.\n"
+                _ = message.withCString { write(STDERR_FILENO, $0, strlen($0)) }
+                written.signal()
+            }
+            writer.start()
+            _ = written.wait(timeout: .now() + .milliseconds(100))
+            abort()
         }
     }
 
@@ -392,6 +505,17 @@ import Foundation
             /// Runs for each llama.cpp log message, before the level filter,
             /// on the thread that logs it.
             static let onLog = Locked<(@Sendable () -> Void)?>(nil)
+
+            /// A point in the cleanup watchdog after its deadline passes.
+            enum CleanupWatchdogEvent: Sendable, Equatable {
+                /// The watchdog is about to decide between completion and the timeout.
+                case beforeDecision
+                /// The watchdog has decided, and aborts if `aborts` is true.
+                case decided(aborts: Bool)
+            }
+
+            /// Runs on the cleanup watchdog's thread after its deadline passes.
+            static let cleanupWatchdog = Locked<(@Sendable (CleanupWatchdogEvent) -> Void)?>(nil)
         }
     #endif
 #endif  // Llama
