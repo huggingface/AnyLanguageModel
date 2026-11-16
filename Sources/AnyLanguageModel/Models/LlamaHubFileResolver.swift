@@ -100,6 +100,74 @@ import Foundation
             return LlamaHubFileSelection(modelFiles: modelFiles, projectorFile: projectorFile)
         }
 
+        // MARK: - Branch selection
+
+        /// Returns `main` if the repository has it, or else the first branch with a valid name,
+        /// as llama.cpp's `get_repo_commit` does.
+        static func selectBranch(_ names: [String]) -> String? {
+            if names.contains("main") {
+                return "main"
+            }
+            return names.first(where: isValidRelativePath)
+        }
+
+        /// Returns the commit of the cached `refs/main`,
+        /// or else of the first other ref file in name order,
+        /// as llama.cpp's `get_cached_ref` does.
+        ///
+        /// Only files directly in the refs directory count,
+        /// and only those whose first line is a 40-character hexadecimal commit.
+        /// llama.cpp takes the first other ref in directory order, which isn't defined;
+        /// this sorts by name so that the choice doesn't depend on the file system.
+        static func cachedCommit(inRefsDirectory directory: URL) -> String? {
+            let fileManager = FileManager.default
+            guard let names = try? fileManager.contentsOfDirectory(atPath: directory.path) else {
+                return nil
+            }
+
+            var fallback: String?
+            for name in names.sorted() {
+                let url = directory.appendingPathComponent(name)
+                var isDirectory: ObjCBool = false
+                guard fileManager.fileExists(atPath: url.path, isDirectory: &isDirectory), !isDirectory.boolValue,
+                    let contents = try? String(contentsOf: url, encoding: .utf8),
+                    let line = contents.split(whereSeparator: \.isNewline).first.map(String.init),
+                    isCommitHash(line)
+                else {
+                    continue
+                }
+                if name == "main" {
+                    return line
+                }
+                if fallback == nil {
+                    fallback = line
+                }
+            }
+            return fallback
+        }
+
+        /// Whether a string is a 40-character hexadecimal commit hash.
+        static func isCommitHash(_ string: String) -> Bool {
+            string.count == 40 && string.allSatisfy(\.isHexDigit)
+        }
+
+        /// Whether a repository path or branch name stays inside the directory it names a path in.
+        ///
+        /// It must be relative, with no empty or `..` component,
+        /// no backslash, no NUL character, and more than whitespace.
+        /// These are the rules of swift-huggingface's cache.
+        /// llama.cpp also accepts a `..` that stays inside the directory, such as `a/../b`.
+        static func isValidRelativePath(_ path: String) -> Bool {
+            guard !path.trimmingCharacters(in: .whitespaces).isEmpty, !path.hasPrefix("/"),
+                !path.contains("\\"), !path.contains("\0")
+            else {
+                return false
+            }
+            return path.split(separator: "/", omittingEmptySubsequences: false).allSatisfy {
+                !$0.isEmpty && $0 != ".."
+            }
+        }
+
         // MARK: - Model selection
 
         /// Returns the first model file that matches the tag,

@@ -50,6 +50,8 @@ import Foundation
             case projectorNotFound(String, repository: String, available: [String])
             /// The Hub client has no cache to download files into.
             case cacheDisabled
+            /// The repository has no branch to load from.
+            case noBranch(repository: String)
 
             public var errorDescription: String? {
                 switch self {
@@ -70,6 +72,8 @@ import Foundation
                     return "Projector file '\(file)' not found in repository \(repository)" + Self.listing(available)
                 case .cacheDisabled:
                     return "Loading a GGUF model from the Hub requires a HubClient with a cache"
+                case .noBranch(let repository):
+                    return "No branch found in repository \(repository)"
                 }
             }
 
@@ -181,6 +185,9 @@ import Foundation
         /// The cache that downloads go into, or `nil` if caching is disabled.
         var cache: HubCache? { get }
 
+        /// Returns the names of the repository's branches, in the Hub's order.
+        func branches(of repo: Repo.ID) async throws -> [String]
+
         /// Returns the commit that a branch points to, if the Hub reports one.
         func commit(of repo: Repo.ID, branch: String) async throws -> String?
 
@@ -197,6 +204,13 @@ import Foundation
 
         var cache: HubCache? { hub.cache }
 
+        func branches(of repo: Repo.ID) async throws -> [String] {
+            try await hub.modelRefs(repo).branches.map(\.name)
+        }
+
+        // `Git.Ref.targetOid` is always nil in swift-huggingface 1.0.0:
+        // it decodes `targetOid`, but the Hub's refs response has `targetCommit`.
+        // The model info at the branch has the commit instead.
         func commit(of repo: Repo.ID, branch: String) async throws -> String? {
             try await hub.getModel(repo, revision: branch).sha
         }
@@ -342,13 +356,19 @@ import Foundation
                 throw LlamaLanguageModel.HubError.invalidModelId(modelId)
             }
 
-            // Like llama.cpp, list the files at the commit that `main` points to,
+            // Like llama.cpp, use `main` or else the first branch,
+            // list the files at the commit that the branch points to,
             // and download them at that commit,
             // so the parts of a split model come from one revision.
+            let branch: String
             let revision: String
             let listing: [String]
             do {
-                revision = try await hub.commit(of: repo, branch: "main") ?? "main"
+                guard let selected = LlamaHubFileResolver.selectBranch(try await hub.branches(of: repo)) else {
+                    throw LlamaLanguageModel.HubError.noBranch(repository: repository)
+                }
+                branch = selected
+                revision = try await hub.commit(of: repo, branch: branch) ?? branch
                 listing = try await hub.files(in: repo, revision: revision)
             } catch {
                 if error is CancellationError { throw error }
@@ -378,16 +398,17 @@ import Foundation
                 }
 
             // A download at a commit doesn't record which branch it came from.
-            // Point `refs/main` at it, as llama.cpp and huggingface_hub do,
+            // Point the branch's ref at it, as llama.cpp and huggingface_hub do,
             // so that an offline load finds this snapshot.
-            if revision != "main" {
-                try? cache.updateRef(repo: repo, kind: .model, ref: "main", commit: revision)
+            if revision != branch {
+                try? cache.updateRef(repo: repo, kind: .model, ref: branch, commit: revision)
             }
 
             return LlamaModelFiles(modelPath: modelURLs[0].path, mmprojPath: projectorURL?.path)
         }
 
-        /// Selects files from the cached snapshot that `refs/main` points to.
+        /// Selects files from the cached snapshot that `refs/main`,
+        /// or else another branch's ref, points to.
         ///
         /// Files are listed in path order, because a directory listing has no defined order.
         private func cachedFiles(
@@ -396,7 +417,8 @@ import Foundation
             tag: String?,
             cache: HubCache
         ) throws -> LlamaModelFiles? {
-            guard let commit = cache.resolveRevision(repo: repo, kind: .model, ref: "main") else {
+            let refs = cache.refsDirectory(repo: repo, kind: .model)
+            guard let commit = LlamaHubFileResolver.cachedCommit(inRefsDirectory: refs) else {
                 return nil
             }
             let snapshot = try cache.snapshotPath(repo: repo, kind: .model, commitHash: commit)

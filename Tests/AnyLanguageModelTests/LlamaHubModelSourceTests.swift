@@ -9,6 +9,7 @@ import Testing
     /// A repository whose listing and downloads the test controls.
     final class FakeHubRepository: LlamaHubRepository, @unchecked Sendable {
         let cache: HubCache?
+        let branchNames: [String]
         let commits: [String: String]
         let listing: [String]
         /// An error that the listing throws, if any.
@@ -26,6 +27,7 @@ import Testing
 
         init(
             cache: HubCache? = nil,
+            branches: [String] = ["main"],
             commits: [String: String] = ["main": String(repeating: "a", count: 40)],
             listing: [String] = ["model-Q4_K_M.gguf"],
             listingError: (any Error)? = nil,
@@ -38,6 +40,7 @@ import Testing
                     cacheDirectory: FileManager.default.temporaryDirectory
                         .appendingPathComponent("FakeHubRepository-\(UUID().uuidString)")
                 )
+            self.branchNames = branches
             self.commits = commits
             self.listing = listing
             self.listingError = listingError
@@ -59,7 +62,7 @@ import Testing
             waiters.forEach { $0.resume() }
         }
 
-        func commit(of repo: Repo.ID, branch: String) async throws -> String? {
+        func branches(of repo: Repo.ID) async throws -> [String] {
             lock.withLock { _listingCalls += 1 }
             if listingWaitsForCancellation {
                 while !Task.isCancelled {
@@ -68,7 +71,11 @@ import Testing
                 throw URLError(.cancelled)
             }
             if let listingError { throw listingError }
-            return commits[branch]
+            return branchNames
+        }
+
+        func commit(of repo: Repo.ID, branch: String) async throws -> String? {
+            commits[branch]
         }
 
         func files(in repo: Repo.ID, revision: String) async throws -> [String] {
@@ -151,6 +158,72 @@ import Testing
             let files = try await source.files()
             #expect(files.modelPath == "/fake/\(commit)/model-Q4_K_M.gguf")
             #expect(repository.downloadStarts == 2)
+        }
+
+        @Test func selectsMainOrElseTheFirstValidBranch() {
+            #expect(LlamaHubFileResolver.selectBranch(["dev", "main"]) == "main")
+            #expect(LlamaHubFileResolver.selectBranch(["master", "dev"]) == "master")
+            #expect(LlamaHubFileResolver.selectBranch(["../escape", "release/1"]) == "release/1")
+            #expect(LlamaHubFileResolver.selectBranch([]) == nil)
+        }
+
+        @Test func downloadsFromTheOnlyBranchWhenThereIsNoMain() async throws {
+            let cacheDirectory = FileManager.default.temporaryDirectory
+                .appendingPathComponent("LlamaHubModelSourceTests-\(UUID().uuidString)")
+            defer { try? FileManager.default.removeItem(at: cacheDirectory) }
+            let cache = HubCache(cacheDirectory: cacheDirectory)
+            let master = String(repeating: "b", count: 40)
+            let repository = FakeHubRepository(cache: cache, branches: ["master"], commits: ["master": master])
+
+            let files = try await makeSource(repository).files()
+            #expect(files.modelPath == "/fake/\(master)/model-Q4_K_M.gguf")
+            #expect(repository.requestedRevisions == [master, master])
+            #expect(cache.resolveRevision(repo: "user/repo", kind: .model, ref: "master") == master)
+            #expect(cache.resolveRevision(repo: "user/repo", kind: .model, ref: "main") == nil)
+        }
+
+        @Test func repositoryWithoutBranchesThrows() async throws {
+            let repository = FakeHubRepository(branches: [])
+            await #expect(throws: LlamaLanguageModel.HubError.noBranch(repository: "user/repo")) {
+                try await makeSource(repository).files()
+            }
+        }
+
+        /// Writes a cached snapshot with one model file under `refs/<ref>`.
+        func makeCachedSnapshot(ref: String, commit: String) throws -> (HubCache, URL) {
+            let cacheDirectory = FileManager.default.temporaryDirectory
+                .appendingPathComponent("LlamaHubModelSourceTests-\(UUID().uuidString)")
+            let cache = HubCache(cacheDirectory: cacheDirectory)
+            try cache.updateRef(repo: "user/repo", kind: .model, ref: ref, commit: commit)
+            let snapshot = try cache.snapshotPath(repo: "user/repo", kind: .model, commitHash: commit)
+            try FileManager.default.createDirectory(at: snapshot, withIntermediateDirectories: true)
+            try Data("GGUF".utf8).write(to: snapshot.appendingPathComponent("model-Q4_K_M.gguf"))
+            return (cache, cacheDirectory)
+        }
+
+        @Test func offlineLoadUsesAnotherCachedRefWhenThereIsNoMain() async throws {
+            let master = String(repeating: "c", count: 40)
+            let (cache, cacheDirectory) = try makeCachedSnapshot(ref: "master", commit: master)
+            defer { try? FileManager.default.removeItem(at: cacheDirectory) }
+            // A ref without a valid commit is skipped.
+            try cache.updateRef(repo: "user/repo", kind: .model, ref: "broken", commit: "not-a-commit")
+
+            let repository = FakeHubRepository(cache: cache, listingError: URLError(.notConnectedToInternet))
+            let files = try await makeSource(repository).files()
+            let snapshot = try cache.snapshotPath(repo: "user/repo", kind: .model, commitHash: master)
+            #expect(files.modelPath == snapshot.appendingPathComponent("model-Q4_K_M.gguf").path)
+        }
+
+        @Test func cachedRefPrefersMain() throws {
+            let (cache, cacheDirectory) = try makeCachedSnapshot(
+                ref: "a-branch",
+                commit: String(repeating: "d", count: 40)
+            )
+            defer { try? FileManager.default.removeItem(at: cacheDirectory) }
+            let main = String(repeating: "e", count: 40)
+            try cache.updateRef(repo: "user/repo", kind: .model, ref: "main", commit: main)
+            let refs = cache.refsDirectory(repo: "user/repo", kind: .model)
+            #expect(LlamaHubFileResolver.cachedCommit(inRefsDirectory: refs) == main)
         }
 
         @Test func prewarmFinishesTheDownloadOfACancelledRequest() async throws {
