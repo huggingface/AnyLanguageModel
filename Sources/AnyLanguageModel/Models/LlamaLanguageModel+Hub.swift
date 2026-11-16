@@ -99,10 +99,16 @@ import Foundation
         /// The model's files download when the model is first used or prewarmed,
         /// into the Hugging Face cache that the `hf` command and llama.cpp also use.
         /// Until then, ``localModelPath`` and ``mmprojPath`` are `nil`.
-        /// Later loads reuse the cached files,
-        /// and use the cached snapshot when the Hub can't be reached.
+        /// Later loads reuse the cached files.
+        /// When the Hub can't be reached,
+        /// a load uses the cached snapshot that the branch's ref points to.
+        /// After a download, the branch's ref is updated when the cache allows it;
+        /// if that write fails, the download still loads,
+        /// but an offline load may find an older snapshot or none.
         /// A split model downloads every part.
-        /// Cancelling the request that is downloading cancels the download;
+        /// Concurrent requests and ``prewarm(for:promptPrefix:)`` share one download.
+        /// A cancelled request stops waiting for it,
+        /// and the download stops when nothing is waiting for it;
         /// the next load resumes it.
         ///
         /// - Parameters:
@@ -405,6 +411,7 @@ import Foundation
             // A download at a commit doesn't record which branch it came from.
             // Point the branch's ref at it, as llama.cpp and huggingface_hub do,
             // so that an offline load finds this snapshot.
+            // A failed write doesn't fail the load, which has its files.
             if revision != branch {
                 try? cache.updateRef(repo: repo, kind: .model, ref: branch, commit: revision)
             }
