@@ -173,25 +173,84 @@ import Foundation
         var mmprojPath: String?
     }
 
+    /// The Hub operations that loading a model needs.
+    ///
+    /// ``LlamaHubModelSource`` uses a `HubClient` through this protocol,
+    /// and tests use it to control listings and downloads without the network.
+    protocol LlamaHubRepository: Sendable {
+        /// The cache that downloads go into, or `nil` if caching is disabled.
+        var cache: HubCache? { get }
+
+        /// Returns the commit that a branch points to, if the Hub reports one.
+        func commit(of repo: Repo.ID, branch: String) async throws -> String?
+
+        /// Returns the paths of every file in the repository at a revision, in the Hub's order.
+        func files(in repo: Repo.ID, revision: String) async throws -> [String]
+
+        /// Downloads a file into the cache and returns its path in the snapshot directory.
+        func download(_ path: String, from repo: Repo.ID, revision: String) async throws -> URL
+    }
+
+    /// The Hub operations, performed by a `HubClient`.
+    struct HubClientRepository: LlamaHubRepository {
+        let hub: HubClient
+
+        var cache: HubCache? { hub.cache }
+
+        func commit(of repo: Repo.ID, branch: String) async throws -> String? {
+            try await hub.getModel(repo, revision: branch).sha
+        }
+
+        func files(in repo: Repo.ID, revision: String) async throws -> [String] {
+            var paths: [String] = []
+            for try await page in try await hub.listAllTree(in: repo, revision: revision, recursive: true) {
+                paths += page.items.filter { $0.type == .file }.map(\.path)
+            }
+            return paths
+        }
+
+        func download(_ path: String, from repo: Repo.ID, revision: String) async throws -> URL {
+            try await hub.downloadFile(at: path, from: repo, revision: revision)
+        }
+    }
+
     /// Resolves and downloads the files for a Hugging Face model ID.
     ///
-    /// Concurrent callers share one resolution.
-    /// A failed resolution is discarded so that the next call retries it.
+    /// Concurrent callers share one download.
+    /// A cancelled caller stops waiting at once and throws `CancellationError`;
+    /// the download continues while another caller waits for it,
+    /// and stops when no caller is left.
+    /// A failed or abandoned download is discarded so that the next call retries it.
     final class LlamaHubModelSource: @unchecked Sendable {
         let modelId: String
         let file: String?
         let mmproj: LlamaLanguageModel.Projector
         let hub: HubClient?
 
+        /// The repository to use instead of `hub`, for tests.
+        private let repository: (any LlamaHubRepository)?
+
         private let lock = NSLock()
-        private var task: Task<LlamaModelFiles, any Error>?
+        /// The running download, protected by `lock`.
+        private var task: Task<Void, Never>?
+        /// Identifies the running download, so that an abandoned download's result is ignored.
+        private var generation = 0
+        /// The callers waiting for the running download, protected by `lock`.
+        private var waiters: [UUID: CheckedContinuation<LlamaModelFiles, any Error>] = [:]
         private var resolved: LlamaModelFiles?
 
-        init(modelId: String, file: String?, mmproj: LlamaLanguageModel.Projector, hub: HubClient?) {
+        init(
+            modelId: String,
+            file: String?,
+            mmproj: LlamaLanguageModel.Projector,
+            hub: HubClient?,
+            repository: (any LlamaHubRepository)? = nil
+        ) {
             self.modelId = modelId
             self.file = file
             self.mmproj = mmproj
             self.hub = hub
+            self.repository = repository
         }
 
         /// The local paths, once a resolution has succeeded.
@@ -199,40 +258,83 @@ import Foundation
             lock.withLock { resolved }
         }
 
+        /// The number of callers waiting for the running download.
+        var waiterCount: Int {
+            lock.withLock { waiters.count }
+        }
+
         /// Returns the local paths, downloading files that aren't cached yet.
         ///
-        /// Cancelling the caller cancels the shared download.
+        /// A caller that is cancelled, or is already cancelled when it calls,
+        /// throws `CancellationError` without waiting.
+        /// It cancels the shared download only if no other caller is waiting for it.
         func files() async throws -> LlamaModelFiles {
-            let task = lock.withLock {
-                if let task = self.task {
-                    return task
-                }
-                let task = Task { try await self.download() }
-                self.task = task
-                return task
-            }
-
-            do {
-                let files = try await withTaskCancellationHandler {
-                    try await task.value
-                } onCancel: {
-                    task.cancel()
-                }
-                lock.withLock { resolved = files }
-                return files
-            } catch {
-                lock.withLock {
-                    if self.task == task {
-                        self.task = nil
+            let id = UUID()
+            return try await withTaskCancellationHandler {
+                try await withCheckedThrowingContinuation { continuation in
+                    lock.withLock {
+                        if let resolved {
+                            continuation.resume(returning: resolved)
+                            return
+                        }
+                        if Task.isCancelled {
+                            continuation.resume(throwing: CancellationError())
+                            return
+                        }
+                        waiters[id] = continuation
+                        if task == nil {
+                            generation += 1
+                            let generation = generation
+                            task = Task { await self.run(generation: generation) }
+                        }
                     }
                 }
-                throw error
+            } onCancel: {
+                let (continuation, abandoned) = lock.withLock {
+                    () -> (CheckedContinuation<LlamaModelFiles, any Error>?, Task<Void, Never>?) in
+                    guard let continuation = waiters.removeValue(forKey: id) else {
+                        return (nil, nil)
+                    }
+                    guard waiters.isEmpty, let task else {
+                        return (continuation, nil)
+                    }
+                    // No caller is left, so the next caller starts a new download.
+                    self.task = nil
+                    generation += 1
+                    return (continuation, task)
+                }
+                continuation?.resume(throwing: CancellationError())
+                abandoned?.cancel()
             }
         }
 
-        private func download() async throws -> LlamaModelFiles {
+        /// Runs a download and passes its result to every waiting caller.
+        private func run(generation: Int) async {
+            let result: Result<LlamaModelFiles, any Error>
+            do {
+                result = .success(try await resolveAndDownload())
+            } catch {
+                result = .failure(error)
+            }
+
+            let continuations = lock.withLock { () -> [CheckedContinuation<LlamaModelFiles, any Error>] in
+                guard self.generation == generation else { return [] }
+                if case .success(let files) = result {
+                    resolved = files
+                }
+                task = nil
+                defer { waiters.removeAll() }
+                return Array(waiters.values)
+            }
+            for continuation in continuations {
+                continuation.resume(with: result)
+            }
+        }
+
+        /// Resolves the model ID and downloads the selected files.
+        func resolveAndDownload() async throws -> LlamaModelFiles {
             let (repository, tag) = try LlamaHubFileResolver.parseModelId(modelId)
-            let hub = self.hub ?? HubClient.default
+            let hub = self.repository ?? HubClientRepository(hub: self.hub ?? HubClient.default)
             guard let cache = hub.cache else {
                 throw LlamaLanguageModel.HubError.cacheDisabled
             }
@@ -246,12 +348,8 @@ import Foundation
             let revision: String
             let listing: [String]
             do {
-                revision = try await hub.getModel(repo, revision: "main").sha ?? "main"
-                var paths: [String] = []
-                for try await page in try await hub.listAllTree(in: repo, revision: revision, recursive: true) {
-                    paths += page.items.filter { $0.type == .file }.map(\.path)
-                }
-                listing = paths
+                revision = try await hub.commit(of: repo, branch: "main") ?? "main"
+                listing = try await hub.files(in: repo, revision: revision)
             } catch {
                 if error is CancellationError { throw error }
                 if let cached = try? cachedFiles(repo: repo, repository: repository, tag: tag, cache: cache) {
@@ -270,11 +368,11 @@ import Foundation
 
             var modelURLs: [URL] = []
             for path in selection.modelFiles {
-                modelURLs.append(try await hub.downloadFile(at: path, from: repo, revision: revision))
+                modelURLs.append(try await hub.download(path, from: repo, revision: revision))
             }
             let projectorURL: URL? =
                 if let projector = selection.projectorFile {
-                    try await hub.downloadFile(at: projector, from: repo, revision: revision)
+                    try await hub.download(projector, from: repo, revision: revision)
                 } else {
                     nil
                 }
