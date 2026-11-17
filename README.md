@@ -1641,6 +1641,21 @@ A response stream's generation can keep its model for a short time
 after the stream ends,
 until the generation stops at its next token.
 
+To be certain that the assertion can't happen,
+set the environment variable `GGML_METAL_NO_RESIDENCY` to any value
+before the first model loads.
+llama.cpp's Metal backend then doesn't use residency sets,
+so a process exits normally even with a model loaded on the GPU.
+Set it in the process's environment,
+or call `setenv("GGML_METAL_NO_RESIDENCY", "1", 1)` before the first request,
+because `LlamaLanguageModel` starts the llama.cpp backend at the first load.
+If another library in the process uses llama.cpp,
+set it before that library starts llama.cpp with `llama_backend_init`.
+The cost is that residency sets keep a model's GPU memory wired between requests;
+without them, the system can reclaim that memory while the GPU is idle,
+and the next request waits for it again.
+This package doesn't set the variable.
+
 <a id="litert-lm-checkout-fails-with-a-git-lfs-smudge-error"></a>
 
 ### LiteRT-LM

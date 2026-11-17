@@ -156,6 +156,17 @@ import Foundation
     /// and then release every reference to the model, including its sessions.
     /// A response stream's generation can keep the model for a short time
     /// after the stream ends, until the generation stops at its next token.
+    ///
+    /// To be certain that the assertion can't happen,
+    /// set the environment variable `GGML_METAL_NO_RESIDENCY` to any value
+    /// before the first model loads,
+    /// in the process's environment or with `setenv` before the first request,
+    /// because the model starts the llama.cpp backend at the first load.
+    /// llama.cpp's Metal backend then doesn't use residency sets,
+    /// so a process exits normally even with a model loaded on the GPU.
+    /// The cost is that the system can reclaim a model's GPU memory
+    /// while the GPU is idle, and the next request waits for it again.
+    /// This package doesn't set the variable.
     public final class LlamaLanguageModel: LanguageModel, @unchecked Sendable {
         /// The reason the model is unavailable.
         /// This model is always available.
