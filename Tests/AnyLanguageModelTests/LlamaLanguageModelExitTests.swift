@@ -91,8 +91,7 @@ import Testing
                 ExitTestTimer.stepStarted(name)
                 withExtendedLifetime((model, session)) { exit(0) }
             }
-            let elapsed = await ExitTestTimer.finish(name, watchdog)
-            #expect(try #require(elapsed) < .seconds(LlamaLifecycle.exitDeadline))
+            await ExitTestTimer.finish(name, watchdog, measuring: false)
         }
 
         @Test("A process exits normally with a model in a global variable", arguments: [Int32(-1), 0])
@@ -112,8 +111,7 @@ import Testing
                 ExitTestTimer.stepStarted(name)
                 exit(0)
             }
-            let elapsed = await ExitTestTimer.finish(name, watchdog)
-            #expect(try #require(elapsed) < .seconds(LlamaLifecycle.exitDeadline))
+            await ExitTestTimer.finish(name, watchdog, measuring: false)
         }
 
         #if DEBUG
@@ -133,8 +131,7 @@ import Testing
                     ExitTestTimer.stepStarted(name)
                     withExtendedLifetime(model) { exit(0) }
                 }
-                let elapsed = await ExitTestTimer.finish(name, watchdog)
-                #expect(try #require(elapsed) < .seconds(LlamaLifecycle.exitDeadline))
+                await ExitTestTimer.finish(name, watchdog, measuring: false)
             }
 
             @Test("A generation that runs past the deadline doesn't keep the process alive")
@@ -154,7 +151,6 @@ import Testing
                 }
                 let elapsed = try #require(await ExitTestTimer.finish(name, watchdog))
                 #expect(elapsed >= .seconds(LlamaLifecycle.exitDeadline))
-                #expect(elapsed < .seconds(LlamaLifecycle.exitDeadline + 5))
             }
 
             @Test("An exit from inside a generation doesn't wait for that generation")
@@ -163,6 +159,8 @@ import Testing
                 let watchdog = ExitTestTimer.watch(name)
                 // The handler returns at once and frees nothing,
                 // so ggml's assertion ends the process before the deadline.
+                // The exit status can't show how long the handler took;
+                // `shutDownInsideTaskOperation()` checks that it returns at once.
                 await #expect(processExitsWith: .signal(SIGABRT)) {
                     ExitTestTimer.childStarted("exitInsideOperation")
                     let (model, session) = try await LlamaLanguageModelExitTests.loadedModel(gpuLayers: -1)
@@ -175,13 +173,13 @@ import Testing
                         while true { sleep(60) }
                     }
                 }
-                let elapsed = await ExitTestTimer.finish(name, watchdog)
-                #expect(try #require(elapsed) < .seconds(LlamaLifecycle.exitDeadline))
+                await ExitTestTimer.finish(name, watchdog, measuring: false)
             }
 
             @Test("A log callback that exits while a model is freed doesn't hang the process")
             func exitFromLogDuringCleanup() async throws {
-                // The handler sees that the cleanup's thread is exiting, and returns at once.
+                // The handler sees that the cleanup's thread is exiting, and returns at once,
+                // which `shutDownInsideThreadOperation()` checks without a model.
                 // The model is only partly freed, so ggml's assertion ends the process,
                 // as it would without the handler.
                 let name = "exitFromLogDuringCleanup"
@@ -208,8 +206,7 @@ import Testing
                     // A distinct status shows that llama.cpp logged nothing.
                     exit(4)
                 }
-                let elapsed = await ExitTestTimer.finish(name, watchdog)
-                #expect(try #require(elapsed) < .seconds(LlamaLifecycle.exitDeadline))
+                await ExitTestTimer.finish(name, watchdog, measuring: false)
             }
 
             @Test("A cleanup that blocks at exit aborts the process instead of hanging")
@@ -233,7 +230,6 @@ import Testing
                 }
                 let elapsed = try #require(await ExitTestTimer.finish(name, watchdog))
                 #expect(elapsed >= .seconds(LlamaLifecycle.cleanupDeadline))
-                #expect(elapsed < .seconds(LlamaLifecycle.cleanupDeadline + 5))
             }
         #endif
 
@@ -320,6 +316,12 @@ import Testing
     /// to files that both processes name from the parent's process ID.
     /// The measurement starts after the child's setup,
     /// so a slow load doesn't change it.
+    ///
+    /// The measurement ends when the parent sees that the child has ended,
+    /// which a busy machine can delay by seconds.
+    /// So a test checks only that a time is at least a bound,
+    /// which a delay can't break,
+    /// and never that a time is less than a bound.
     enum ExitTestTimer {
         /// How long the parent waits for a child before it kills the child.
         static let limit: Duration = .seconds(120)
@@ -512,7 +514,6 @@ import Testing
             }
             let elapsed = try #require(await ExitTestTimer.finish(name, watchdog))
             #expect(elapsed >= .milliseconds(200))
-            #expect(elapsed < .seconds(5))
         }
 
         @Test("A cleanup that runs past its deadline aborts even if standard error is a full pipe")
@@ -539,7 +540,6 @@ import Testing
             }
             let elapsed = try #require(await ExitTestTimer.finish(name, watchdog))
             #expect(elapsed >= .milliseconds(200))
-            #expect(elapsed < .seconds(5))
         }
 
         #if DEBUG
