@@ -3,21 +3,111 @@ import Foundation
     import JSONSchema
     import LlamaSwift
 
-    /// Global storage for the current log level threshold.
-    /// This is needed because the C callback can't capture Swift context.
-    /// Access is synchronized by llama.cpp's internal logging mechanism.
-    nonisolated(unsafe) private var currentLogLevel: LlamaLanguageModel.LogLevel = .warn
+    /// The state that llama.cpp keeps for the whole process.
+    enum LlamaRuntime {
+        /// The minimum level of the messages that the log callback writes,
+        /// which ``LlamaLanguageModel/logLevel`` changes.
+        ///
+        /// A C callback can't capture Swift context,
+        /// so the callback reads this value.
+        static let logLevel = Locked(LlamaLanguageModel.LogLevel.warn)
 
-    /// Custom log callback that filters messages based on the current log level.
+        /// A llama.cpp logger that the log callback serves.
+        ///
+        /// Each logger passes its own value as the callback's user data,
+        /// so that a continuation follows a message from the same logger.
+        enum Logger: Int, CaseIterable {
+            /// The logger of llama.cpp and ggml.
+            case llama = 1
+            /// The logger of the multimodal projector.
+            case projector = 2
+
+            /// The user data that this logger passes to the callback.
+            var userData: UnsafeMutableRawPointer? {
+                UnsafeMutableRawPointer(bitPattern: rawValue)
+            }
+
+            /// The logger that passed `userData`.
+            init(userData: UnsafeMutableRawPointer?) {
+                self = Logger(rawValue: Int(bitPattern: userData)) ?? .llama
+            }
+
+            /// The bit for this logger in a thread's continuation state.
+            fileprivate var bit: Int { 1 << rawValue }
+        }
+
+        /// The key of a thread-local value with one bit for each logger,
+        /// set if the callback wrote that logger's last message on the thread
+        /// that wasn't a continuation.
+        ///
+        /// llama.cpp writes a message and its continuations from one thread,
+        /// and messages from other threads and the other logger
+        /// can come in between.
+        private static let continuationKey: pthread_key_t = {
+            var key = pthread_key_t()
+            precondition(pthread_key_create(&key, nil) == 0, "Failed to create a thread-local key.")
+            return key
+        }()
+
+        /// Returns whether the callback writes a message,
+        /// and records the decision for the message's continuations
+        /// on the current thread.
+        ///
+        /// A continuation has no level of its own,
+        /// so it follows the decision for the last message
+        /// from the same logger on the same thread,
+        /// even if the level changed after that message.
+        /// At ``LlamaLanguageModel/LogLevel/none``, no message is written.
+        static func shouldWrite(
+            level: ggml_log_level,
+            logger: Logger,
+            minimum: LlamaLanguageModel.LogLevel
+        ) -> Bool {
+            var state = Int(bitPattern: pthread_getspecific(continuationKey))
+            let writes: Bool
+            if level == GGML_LOG_LEVEL_CONT {
+                writes = state & logger.bit != 0
+            } else {
+                writes = minimum != .none && level.rawValue >= minimum.ggmlLevel.rawValue
+                state = writes ? state | logger.bit : state & ~logger.bit
+                pthread_setspecific(continuationKey, UnsafeRawPointer(bitPattern: state))
+            }
+            return writes && minimum != .none
+        }
+
+        /// Installs the log callback and initializes the llama.cpp backend, once.
+        ///
+        /// This is the only place that sets a llama.cpp logger.
+        /// `llama.h` says that the logger state is global
+        /// and that its functions aren't thread-safe,
+        /// and llama.cpp reads the callback on every message
+        /// without synchronization.
+        /// So the callback is installed before any other llama.cpp call
+        /// and never replaced.
+        /// The projector has its own logger,
+        /// so the callback is installed there too.
+        static let initialized: Void = {
+            llama_log_set(llamaLogCallback, Logger.llama.userData)
+            mtmd_helper_log_set(llamaLogCallback, Logger.projector.userData)
+            llama_backend_init()
+        }()
+    }
+
+    /// Writes llama.cpp messages at or above ``LlamaLanguageModel/logLevel`` to standard error.
+    ///
+    /// Besides the write, each message costs one lock and unlock to read the level,
+    /// and one or two reads or writes of a thread-local value.
     private func llamaLogCallback(
         level: ggml_log_level,
         text: UnsafePointer<CChar>?,
         userData: UnsafeMutableRawPointer?
     ) {
-        guard level.rawValue >= currentLogLevel.ggmlLevel.rawValue else { return }
-        if let text = text {
-            fputs(String(cString: text), stderr)
+        let minimum = LlamaRuntime.logLevel.withLock { $0 }
+        let logger = LlamaRuntime.Logger(userData: userData)
+        guard LlamaRuntime.shouldWrite(level: level, logger: logger, minimum: minimum), let text else {
+            return
         }
+        fputs(String(cString: text), stderr)
     }
 
     /// A language model that runs llama.cpp models locally.
@@ -234,11 +324,19 @@ import Foundation
         ///
         /// This is a global setting that affects all `LlamaLanguageModel` instances
         /// since llama.cpp uses a single global log callback.
-        public nonisolated(unsafe) static var logLevel: LogLevel = .warn {
-            didSet {
-                currentLogLevel = logLevel
-                llama_log_set(llamaLogCallback, nil)
-            }
+        /// The model installs its callback once, before its first call to llama.cpp,
+        /// and setting this property changes only the level that the callback reads,
+        /// so you can set it at any time, from any thread.
+        /// The default is ``LogLevel/warn``.
+        ///
+        /// Another library in the process that uses llama.cpp,
+        /// such as `LlamaEmbeddingModel` in AnyEmbeddingModel,
+        /// can install its own callback.
+        /// The callback that was installed last decides which messages appear,
+        /// and this setting has no effect on it.
+        public static var logLevel: LogLevel {
+            get { LlamaRuntime.logLevel.withLock { $0 } }
+            set { LlamaRuntime.logLevel.withLock { $0 = newValue } }
         }
 
         /// Resolved, non-optional defaults for llama.cpp runtime parameters.
@@ -1209,8 +1307,8 @@ import Foundation
                 throw LlamaLanguageModelError.invalidModelPath
             }
 
-            // Initialize backend lazily - must be done before loading model
-            llama_backend_init()
+            // Initialize the backend lazily, before loading the model.
+            LlamaRuntime.initialized
 
             tokenCache = nil
             vocab = nil
