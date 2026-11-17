@@ -51,7 +51,8 @@ jobs:
             swift: "6.4"
             xcode: "27.0"
             traits: "AsyncHTTPClient"
-    timeout-minutes: 20
+    # A build without a cache takes up to 20 minutes on macOS 26.
+    timeout-minutes: 30
     steps:
       - name: Checkout code
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -63,10 +64,10 @@ jobs:
         id: xcode
         run: echo "build=$(xcodebuild -version | awk '/Build version/ { print $3 }')" >> "$GITHUB_OUTPUT"
 
-      - name: Cache Metal toolchain download
+      - name: Restore Metal toolchain download
         if: matrix.swift == '6.4'
         id: metal-cache
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ~/.cache/metal-toolchain
           key: ${{ runner.os }}-${{ runner.arch }}-metal-${{ steps.xcode.outputs.build }}
@@ -74,6 +75,13 @@ jobs:
       - name: Download Metal toolchain
         if: matrix.swift == '6.4' && steps.metal-cache.outputs.cache-hit != 'true'
         run: xcodebuild -downloadComponent MetalToolchain -exportPath "$HOME/.cache/metal-toolchain"
+
+      - name: Save Metal toolchain download
+        if: matrix.swift == '6.4' && steps.metal-cache.outputs.cache-hit != 'true' && github.event_name == 'push'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cache/metal-toolchain
+          key: ${{ steps.metal-cache.outputs.cache-primary-key }}
 
       - name: Install Metal toolchain
         if: matrix.swift == '6.4'
@@ -87,8 +95,12 @@ jobs:
           fi
           xcrun metal --version
 
-      - name: Cache Swift Package Manager dependencies
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      # Only pushes to main save caches.
+      # A pull request's run can read main's caches but not another pull request's,
+      # and its saved caches would evict main's from the 10 GB repository limit.
+      - name: Restore Swift Package Manager cache
+        id: spm-cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             ~/.cache/org.swift.swiftpm
@@ -109,6 +121,15 @@ jobs:
 
       - name: Build
         run: swift build --build-tests --traits MLX,Llama,CoreML${{ matrix.traits != '' && format(',{0}', matrix.traits) || '' }}
+
+      - name: Save Swift Package Manager cache
+        if: steps.spm-cache.outputs.cache-hit != 'true' && github.event_name == 'push'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cache/org.swift.swiftpm
+            .build
+          key: ${{ steps.spm-cache.outputs.cache-primary-key }}
 
       - name: Test
         run: swift test --skip-build --traits MLX,Llama,CoreML${{ matrix.traits != '' && format(',{0}', matrix.traits) || '' }}
@@ -179,8 +200,9 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - name: Cache Swift Package Manager dependencies
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      - name: Restore Swift Package Manager cache
+        id: spm-cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             ~/.cache/org.swift.swiftpm
@@ -194,6 +216,15 @@ jobs:
 
       - name: Build
         run: swift build${{ matrix.traits != '' && format(' --traits {0}', matrix.traits) || '' }}
+
+      - name: Save Swift Package Manager cache
+        if: steps.spm-cache.outputs.cache-hit != 'true' && github.event_name == 'push'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cache/org.swift.swiftpm
+            .build
+          key: ${{ steps.spm-cache.outputs.cache-primary-key }}
 
       - name: Test
         run: swift test${{ matrix.traits != '' && format(' --traits {0}', matrix.traits) || '' }}
@@ -215,8 +246,9 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - name: Cache Swift Package Manager dependencies
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      - name: Restore Swift Package Manager cache
+        id: spm-cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             ~/.cache/org.swift.swiftpm
@@ -236,3 +268,12 @@ jobs:
         run: |
           swift build --swift-sdk "swift-${{ matrix.swift }}-RELEASE_wasm" \
             -Xcc -D_WASI_EMULATED_SIGNAL -Xcc -D_WASI_EMULATED_MMAN
+
+      - name: Save Swift Package Manager cache
+        if: steps.spm-cache.outputs.cache-hit != 'true' && github.event_name == 'push'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cache/org.swift.swiftpm
+            .build
+          key: ${{ steps.spm-cache.outputs.cache-primary-key }}
