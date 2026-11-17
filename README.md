@@ -391,6 +391,68 @@ pass the model's multimodal projector with `mmprojPath:`.
 > Image inputs are an AnyLanguageModel extension.
 > See [Differences from Foundation Models](#differences-from-foundation-models).
 
+### Document OCR
+
+You can use an OCR model to read text, tables, and formulas
+from document images.
+For example,
+[GLM-OCR](https://huggingface.co/zai-org/GLM-OCR)
+runs on device with the `MLX` trait:
+
+```swift
+let model = MLXLanguageModel(modelId: "mlx-community/GLM-OCR-8bit")
+let session = LanguageModelSession(model: model)
+
+let response = try await session.respond(
+    to: "Text Recognition:",
+    image: .init(url: URL(fileURLWithPath: "/path/to/page.png")),
+    options: GenerationOptions(samplingMode: .greedy, maximumResponseTokens: 4096)
+)
+print(response.content)
+```
+
+GLM-OCR supports three prompts for document parsing.
+Use the prompt that matches the content of the image:
+
+| Prompt                 | Output                               |
+| ---------------------- | ------------------------------------ |
+| `Text Recognition:`    | Text, with formulas as LaTeX         |
+| `Table Recognition:`   | An HTML `<table>`                    |
+| `Formula Recognition:` | A LaTeX display formula between `$$` |
+
+GLM-OCR also accepts a JSON template
+after the instruction line from its model card,
+and fills in the fields from the image
+instead of transcribing it.
+
+For a region of a page, crop the page's `CGImage` before you send it:
+
+```swift
+let session = LanguageModelSession(model: model)
+
+let region = CGRect(x: 580, y: 985, width: 830, height: 80) // pixels, top-left origin
+if let formula = pageImage.cropping(to: region) {
+    let response = try await session.respond(
+        to: "Formula Recognition:",
+        image: try .init(image: formula, format: .png)
+    )
+    print(response.content) // $$ \pi_ {r} (y \mid x) = \frac {1}{Z (x)} ... \tag {4} $$
+}
+```
+
+Keep each side of a crop at least 28 pixels;
+GLM-OCR's image processor throws an error for smaller images.
+Use a new session for each image
+so that earlier pages don't stay in the context.
+
+> [!IMPORTANT]
+> GLM-OCR can write text that isn't in the image.
+> For example, on a scan with redacted names,
+> it filled the gaps with text copied from elsewhere on the page.
+> Through mlx-swift-lm 3.32.3, GLM-OCR prompts put the text before the image,
+> which can give a summary instead of a transcript
+> ([ml-explore/mlx-swift-lm#757](https://github.com/ml-explore/mlx-swift-lm/issues/757)).
+
 ### Prompt attachments
 
 Image attachments use the Foundation Models 27 prompt construction syntax,
