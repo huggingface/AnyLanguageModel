@@ -69,7 +69,6 @@ import Testing
                         whileActive()
                     }
                 }
-                nonisolated(unsafe) let session = session
                 Task.detached {
                     _ = try? await session.respond(
                         to: "Count from 1 to 1000.",
@@ -573,8 +572,11 @@ import Testing
                         entered.wait()
                         return 42
                     }
+                    // The child does nothing else, so it can block a thread here,
+                    // in a synchronous function.
+                    func waitForDecision() { decided.wait() }
                     proceed.signal()
-                    decided.wait()
+                    waitForDecision()
                     exit(value == 42 && aborts.withLock({ $0 }) == false ? 0 : 5)
                 }
                 await ExitTestTimer.finish(name, watchdog, measuring: false)
@@ -607,6 +609,37 @@ import Testing
                 await ExitTestTimer.finish(name, watchdog, measuring: false)
             }
         #endif
+
+        @Test("After the exit handler runs, a Hub model neither lists nor downloads its files")
+        func hubLoadAfterShutdown() async {
+            let name = "hubLoadAfterShutdown"
+            let watchdog = ExitTestTimer.watch(name)
+            await #expect(processExitsWith: .success) {
+                ExitTestTimer.childStarted("hubLoadAfterShutdown")
+                let repository = FakeHubRepository()
+                let model = LlamaLanguageModel(
+                    givenModelPath: "",
+                    givenMMProjPath: nil,
+                    hubSource: LlamaHubModelSource(
+                        modelId: "example/model-GGUF",
+                        file: nil,
+                        mmproj: .disabled,
+                        hub: nil,
+                        repository: repository
+                    ),
+                    gpuLayers: 0
+                )
+                guard LlamaLifecycle.shared.shutDown() == .freed else { exit(5) }
+                do {
+                    _ = try await LanguageModelSession(model: model).respond(to: "Say hello")
+                    exit(6)
+                } catch LanguageModelSession.GenerationError.assetsUnavailable {}
+                // A distinct status shows that the model reached the Hub.
+                guard repository.listingCalls == 0, repository.downloadStarts == 0 else { exit(7) }
+                exit(0)
+            }
+            await ExitTestTimer.finish(name, watchdog, measuring: false)
+        }
 
         @Test("A failed registration of the exit handler makes the handler free nothing")
         func registrationFailure() {

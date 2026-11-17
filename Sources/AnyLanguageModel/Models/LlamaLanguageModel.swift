@@ -159,11 +159,15 @@ import Foundation
     /// and then release every reference to the model, including its sessions.
     /// A response stream's generation can keep the model for a short time
     /// after the stream ends, until the generation stops at its next token.
+    /// A `prewarm` keeps the model until its download and load end,
+    /// and you can't wait for it directly.
+    /// A request that you await after a `prewarm` waits for that load,
+    /// but the `prewarm` can keep the model for a short time after the request returns.
     ///
     /// To be certain that the assertion can't happen,
     /// set the environment variable `GGML_METAL_NO_RESIDENCY` to any value
     /// before the first model loads,
-    /// in the process's environment or with `setenv` before the first request,
+    /// in the process's environment or with `setenv` before the first request or `prewarm`,
     /// because the model starts the llama.cpp backend at the first load.
     /// llama.cpp's Metal backend then doesn't use residency sets,
     /// so a process exits normally even with a model loaded on the GPU.
@@ -1460,6 +1464,8 @@ import Foundation
 
         /// Downloads a Hub model's files if needed, then loads the model.
         func ensureModelLoaded() async throws {
+            // After the exit handler starts, don't list or download a Hub model's files.
+            try LlamaLifecycle.shared.stopIfExiting()
             let files =
                 if let hubSource {
                     try await hubSource.files()
