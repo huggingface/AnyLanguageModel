@@ -1617,6 +1617,76 @@ let response = try await session.respond(
 )
 ```
 
+llama.cpp's Metal backend stops a process with an assertion
+if the process exits while a model has layers on the GPU,
+and a generation that is still running at exit can crash on the GPU or the CPU.
+So `LlamaLanguageModel` registers an exit handler when a load ends.
+The handler stops new loads and generations,
+waits up to three seconds for running work to stop at its next token,
+and then frees every loaded model, projector, and cached context.
+After the handler starts,
+requests throw `LanguageModelSession.GenerationError.assetsUnavailable`.
+
+The handler is best effort.
+The process can still stop with the assertion in these cases:
+
+- It exits during the first load,
+  because the handler is registered when a load ends.
+- It exits from inside a load, a generation, or the release of a model,
+  for example from a llama.cpp callback.
+  That work can't end while the handler waits,
+  so the handler returns at once and frees nothing.
+  An exit from a llama.cpp callback on a thread
+  that llama.cpp or another library owns
+  isn't recognized as inside that work,
+  so the handler waits the full three seconds and then frees nothing.
+- Work is still running after three seconds.
+  The handler then frees nothing.
+- It exits without running exit handlers,
+  for example with `_exit` or after a crash.
+
+If freeing the models takes more than ten seconds,
+for example because another library's log callback blocks,
+the handler aborts the process, so that the exit can't hang.
+A crash report for this abort shows
+`LlamaLifecycle.abortAfterExitCleanupTimeout()` in its backtrace,
+which first tries to write one line to standard error,
+but aborts whether or not the line can be written.
+If the cleanup ends just after the limit,
+the cleanup's own thread can abort first,
+without the line,
+and the backtrace shows `LlamaLifecycle.abortAfterLateExitCleanup()`.
+
+No method unloads a model that something still references.
+To be certain that no model is loaded when the process exits,
+wait until every `respond` call returns and every response stream ends,
+start no new requests,
+and then release every reference to the `LlamaLanguageModel`,
+including the sessions that use it.
+The model frees its weights when the last reference is released.
+A response stream's generation can keep its model for a short time
+after the stream ends,
+until the generation stops at its next token.
+A `prewarm` keeps its model until its download and load end,
+and you can't wait for it directly.
+A request that you await after a `prewarm` waits for that load,
+but the `prewarm` can keep the model for a short time after the request returns.
+
+To be certain that the assertion can't happen,
+set the environment variable `GGML_METAL_NO_RESIDENCY` to any value
+before the first model loads.
+llama.cpp's Metal backend then doesn't use residency sets,
+so a process exits normally even with a model loaded on the GPU.
+Set it in the process's environment,
+or call `setenv("GGML_METAL_NO_RESIDENCY", "1", 1)` before the first request or `prewarm`,
+because `LlamaLanguageModel` starts the llama.cpp backend at the first load.
+If another library in the process uses llama.cpp,
+set it before that library starts llama.cpp with `llama_backend_init`.
+The cost is that residency sets keep a model's GPU memory wired between requests;
+without them, the system can reclaim that memory while the GPU is idle,
+and the next request waits for it again.
+This package doesn't set the variable.
+
 <a id="litert-lm-checkout-fails-with-a-git-lfs-smudge-error"></a>
 
 ### LiteRT-LM
