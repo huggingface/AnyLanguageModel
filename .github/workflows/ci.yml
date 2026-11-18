@@ -76,11 +76,17 @@ jobs:
       # Only pushes to main save caches.
       # A pull request's run can read main's caches but not another pull request's,
       # and its saved caches would evict main's from the 10 GB repository limit.
+      # The cache leaves out .build/repositories, about 30 percent of its size.
+      # SwiftPM doesn't read those Git repositories while the checkouts match Package.resolved,
+      # and it fetches the ones it needs when a pin changes.
+      # On macOS, SwiftPM keeps its shared cache in ~/Library/Caches, which isn't cached.
       - name: Restore Swift Package Manager cache
         id: spm-cache
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
-          path: .build
+          path: |
+            .build/*
+            !.build/repositories
           key: ${{ runner.os }}-swift-${{ matrix.swift }}-${{ matrix.traits == '' && 'ahc-off' || 'ahc-on' }}-build-${{ hashFiles('Package.swift', 'Package.resolved') }}
           restore-keys: |
             ${{ runner.os }}-swift-${{ matrix.swift }}-${{ matrix.traits == '' && 'ahc-off' || 'ahc-on' }}-build-
@@ -95,18 +101,22 @@ jobs:
         if: matrix.swift == '6.4'
         run: rm -rf .build/out/Intermediates.noindex/XCBuildData/*.xcbuilddata
 
+      # Nothing in these jobs reads the index store.
+      # The Linux jobs keep it because test discovery on Linux reads it.
       - name: Build
-        run: swift build --build-tests --traits MLX,Llama,CoreML${{ matrix.traits != '' && format(',{0}', matrix.traits) || '' }}
+        run: swift build --build-tests --disable-index-store --traits MLX,Llama,CoreML${{ matrix.traits != '' && format(',{0}', matrix.traits) || '' }}
 
       - name: Save Swift Package Manager cache
         if: steps.spm-cache.outputs.cache-hit != 'true' && github.event_name == 'push'
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
-          path: .build
+          path: |
+            .build/*
+            !.build/repositories
           key: ${{ steps.spm-cache.outputs.cache-primary-key }}
 
       - name: Test
-        run: swift test --skip-build --traits MLX,Llama,CoreML${{ matrix.traits != '' && format(',{0}', matrix.traits) || '' }}
+        run: swift test --skip-build --disable-index-store --traits MLX,Llama,CoreML${{ matrix.traits != '' && format(',{0}', matrix.traits) || '' }}
 
   build-watchos:
     permissions:
