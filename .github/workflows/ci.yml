@@ -94,12 +94,17 @@ jobs:
       - name: Lint
         run: swift format lint --strict --recursive .
 
-      - name: Remove cached build descriptions
+      - name: Remove cached build descriptions and Swift-imported modules
         # Descriptions contain Metal compiler paths
         # from the previous runner's temporary mount.
-        # Keep compiled outputs for incremental builds.
+        # A binary target's headers keep their release's timestamps,
+        # so Swift Build reuses a module built from an older release's headers.
+        # llama.swift isn't pinned, so this can happen with an exact cache hit.
+        # Keep the other compiled outputs for incremental builds.
         if: matrix.swift == '6.4'
-        run: rm -rf .build/out/Intermediates.noindex/XCBuildData/*.xcbuilddata
+        run: |
+          rm -rf .build/out/Intermediates.noindex/XCBuildData/*.xcbuilddata
+          rm -rf .build/out/Intermediates.noindex/SwiftExplicitPrecompiledModules
 
       # Nothing in these jobs reads the index store.
       # The Linux jobs keep it because test discovery on Linux reads it.

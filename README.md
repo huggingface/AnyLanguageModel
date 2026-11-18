@@ -156,7 +156,7 @@ dependencies: [
 >     ),
 >     .package(url: "https://github.com/huggingface/swift-transformers", from: "1.0.0"),           // CoreML
 >     .package(url: "https://github.com/ml-explore/mlx-swift-lm", .upToNextMinor(from: "3.32.3")), // MLX
->     .package(url: "https://github.com/mattt/llama.swift", .upToNextMajor(from: "2.10549.0")),    // Llama
+>     .package(url: "https://github.com/mattt/llama.swift", .upToNextMajor(from: "3.0.0")),        // Llama
 > ]
 > ```
 >

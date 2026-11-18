@@ -2052,14 +2052,15 @@ import Foundation
                     }
                 }
                 for imageData in images {
-                    // Pinned to the current llama.swift signature. llama.cpp master adds a
-                    // trailing options argument to this helper; update alongside the dependency.
+                    // The options only configure video decoding,
+                    // and video input is rejected below.
                     let wrapper = imageData.withUnsafeBytes { raw -> mtmd_helper_bitmap_wrapper in
                         mtmd_helper_bitmap_init_from_buf(
                             mtmdContext,
                             raw.bindMemory(to: UInt8.self).baseAddress,
                             imageData.count,
-                            false
+                            false,
+                            mtmd_helper_init_opt_default()
                         )
                     }
                     if let videoContext = wrapper.video_ctx {
