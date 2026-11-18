@@ -80,12 +80,10 @@ jobs:
         id: spm-cache
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
-          path: |
-            ~/.cache/org.swift.swiftpm
-            .build
-          key: ${{ runner.os }}-swift-${{ matrix.swift }}-${{ matrix.traits == '' && 'ahc-off' || 'ahc-on' }}-spm-${{ hashFiles('Package.swift', 'Package.resolved') }}
+          path: .build
+          key: ${{ runner.os }}-swift-${{ matrix.swift }}-${{ matrix.traits == '' && 'ahc-off' || 'ahc-on' }}-build-${{ hashFiles('Package.swift', 'Package.resolved') }}
           restore-keys: |
-            ${{ runner.os }}-swift-${{ matrix.swift }}-${{ matrix.traits == '' && 'ahc-off' || 'ahc-on' }}-spm-
+            ${{ runner.os }}-swift-${{ matrix.swift }}-${{ matrix.traits == '' && 'ahc-off' || 'ahc-on' }}-build-
 
       - name: Lint
         run: swift format lint --strict --recursive .
@@ -104,9 +102,7 @@ jobs:
         if: steps.spm-cache.outputs.cache-hit != 'true' && github.event_name == 'push'
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
-          path: |
-            ~/.cache/org.swift.swiftpm
-            .build
+          path: .build
           key: ${{ steps.spm-cache.outputs.cache-primary-key }}
 
       - name: Test
@@ -178,16 +174,16 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
+      # Cache only .build. SwiftPM's shared cache, ~/.cache/org.swift.swiftpm,
+      # repeats the Git repositories in .build/repositories.
       - name: Restore Swift Package Manager cache
         id: spm-cache
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
-          path: |
-            ~/.cache/org.swift.swiftpm
-            .build
-          key: ${{ runner.os }}-swift-${{ matrix.swift }}-${{ matrix.traits == '' && 'ahc-off' || 'ahc-on' }}-spm-${{ hashFiles('Package.swift', 'Package.resolved') }}
+          path: .build
+          key: ${{ runner.os }}-swift-${{ matrix.swift }}-${{ matrix.traits == '' && 'ahc-off' || 'ahc-on' }}-build-${{ hashFiles('Package.swift', 'Package.resolved') }}
           restore-keys: |
-            ${{ runner.os }}-swift-${{ matrix.swift }}-${{ matrix.traits == '' && 'ahc-off' || 'ahc-on' }}-spm-
+            ${{ runner.os }}-swift-${{ matrix.swift }}-${{ matrix.traits == '' && 'ahc-off' || 'ahc-on' }}-build-
 
       - name: Lint
         run: swift format lint --strict --recursive .
@@ -199,9 +195,7 @@ jobs:
         if: steps.spm-cache.outputs.cache-hit != 'true' && github.event_name == 'push'
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
-          path: |
-            ~/.cache/org.swift.swiftpm
-            .build
+          path: .build
           key: ${{ steps.spm-cache.outputs.cache-primary-key }}
 
       - name: Test
@@ -224,16 +218,16 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
+      # Cache only .build. SwiftPM's shared cache, ~/.cache/org.swift.swiftpm,
+      # repeats the Git repositories in .build/repositories.
       - name: Restore Swift Package Manager cache
         id: spm-cache
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
-          path: |
-            ~/.cache/org.swift.swiftpm
-            .build
-          key: ${{ runner.os }}-swift-${{ matrix.swift }}-wasi-spm-${{ hashFiles('Package.swift', 'Package.resolved') }}
+          path: .build
+          key: ${{ runner.os }}-swift-${{ matrix.swift }}-wasi-build-${{ hashFiles('Package.swift', 'Package.resolved') }}
           restore-keys: |
-            ${{ runner.os }}-swift-${{ matrix.swift }}-wasi-spm-
+            ${{ runner.os }}-swift-${{ matrix.swift }}-wasi-build-
 
       - name: Install Swift SDK for WASI
         run: |
@@ -251,7 +245,5 @@ jobs:
         if: steps.spm-cache.outputs.cache-hit != 'true' && github.event_name == 'push'
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
-          path: |
-            ~/.cache/org.swift.swiftpm
-            .build
+          path: .build
           key: ${{ steps.spm-cache.outputs.cache-primary-key }}
