@@ -555,7 +555,7 @@ import Foundation
         }
 
         /// The loaded model instance
-        private var model: OpaquePointer?
+        private(set) var model: OpaquePointer?
 
         /// The model's vocabulary
         private var vocab: OpaquePointer?
@@ -1596,11 +1596,45 @@ import Foundation
             return params
         }
 
-        private func applySampling(
-            sampler: UnsafeMutablePointer<llama_sampler>,
-            effectiveTemperature: Float,
+        /// Creates the sampler chain for a generation.
+        ///
+        /// The chain keeps state between tokens, such as the recent tokens for the penalties.
+        /// Call `llama_sampler_sample`, which accepts the token that it returns,
+        /// or call `llama_sampler_apply` and then `llama_sampler_accept` once.
+        ///
+        /// - Parameters:
+        ///   - vocabularySize: The number of tokens in the model's vocabulary.
+        ///   - options: The options for the generation.
+        /// - Returns: The sampler chain, which the caller frees with `llama_sampler_free`.
+        static func makeSamplerChain(
+            vocabularySize: Int32,
+            options: ResolvedGenerationOptions
+        ) -> UnsafeMutablePointer<llama_sampler>? {
+            guard let sampler = llama_sampler_chain_init(llama_sampler_chain_default_params()) else {
+                return nil
+            }
+            if options.repeatPenalty != 1.0 || options.frequencyPenalty != 0.0 || options.presencePenalty != 0.0 {
+                llama_sampler_chain_add(
+                    sampler,
+                    llama_sampler_init_penalties(
+                        vocabularySize,
+                        options.repeatLastN,
+                        options.repeatPenalty,
+                        options.frequencyPenalty,
+                        options.presencePenalty
+                    )
+                )
+            }
+            addSamplers(to: sampler, vocabularySize: vocabularySize, options: options)
+            return sampler
+        }
+
+        private static func addSamplers(
+            to sampler: UnsafeMutablePointer<llama_sampler>,
+            vocabularySize: Int32,
             options: ResolvedGenerationOptions
         ) {
+            let effectiveTemperature = options.temperature
             if let mirostat = options.mirostat {
                 llama_sampler_chain_add(sampler, llama_sampler_init_temp(effectiveTemperature))
 
@@ -1609,7 +1643,7 @@ import Foundation
                     llama_sampler_chain_add(
                         sampler,
                         llama_sampler_init_mirostat(
-                            Int32(options.contextSize),
+                            vocabularySize,
                             options.seed,
                             tau,
                             eta,
@@ -1689,25 +1723,15 @@ import Foundation
                 contextSize: options.contextSize
             )
 
-            guard let sampler = llama_sampler_chain_init(llama_sampler_chain_default_params()) else {
+            guard
+                let samplerPointer = Self.makeSamplerChain(
+                    vocabularySize: llama_vocab_n_tokens(vocab),
+                    options: options
+                )
+            else {
                 throw LlamaLanguageModelError.decodingFailed
             }
-            defer { llama_sampler_free(sampler) }
-            let samplerPointer = UnsafeMutablePointer<llama_sampler>(sampler)
-
-            if options.repeatPenalty != 1.0 || options.frequencyPenalty != 0.0 || options.presencePenalty != 0.0 {
-                llama_sampler_chain_add(
-                    samplerPointer,
-                    llama_sampler_init_penalties(
-                        llama_vocab_n_tokens(vocab),
-                        options.repeatLastN,
-                        options.repeatPenalty,
-                        options.frequencyPenalty,
-                        options.presencePenalty
-                    )
-                )
-            }
-            applySampling(sampler: samplerPointer, effectiveTemperature: options.temperature, options: options)
+            defer { llama_sampler_free(samplerPointer) }
 
             let vocabSize = Int(llama_vocab_n_tokens(vocab))
             let initialPosition: Int32 = hasEncoder ? 1 : Int32(promptTokens.count)
@@ -1893,7 +1917,7 @@ import Foundation
             }
         }
 
-        private func performTokenGeneration(
+        func performTokenGeneration(
             context: OpaquePointer,
             vocab: OpaquePointer,
             promptTokens: [llama_token],
@@ -1926,36 +1950,15 @@ import Foundation
                 startIndex: startIndex
             )
 
-            // Initialize sampler chain with options
-            guard let sampler = llama_sampler_chain_init(llama_sampler_chain_default_params()) else {
+            guard
+                let sampler = Self.makeSamplerChain(
+                    vocabularySize: llama_vocab_n_tokens(vocab),
+                    options: options
+                )
+            else {
                 throw LlamaLanguageModelError.decodingFailed
             }
             defer { llama_sampler_free(sampler) }
-            let samplerPtr = UnsafeMutablePointer<llama_sampler>(sampler)
-
-            let effectiveTemperature = Float(options.temperature)
-
-            // Apply repeat/frequency/presence penalties from custom options
-            let effectiveRepeatPenalty = options.repeatPenalty
-            let effectiveRepeatLastN = options.repeatLastN
-            let effectiveFrequencyPenalty = options.frequencyPenalty
-            let effectivePresencePenalty = options.presencePenalty
-
-            if effectiveRepeatPenalty != 1.0 || effectiveFrequencyPenalty != 0.0 || effectivePresencePenalty != 0.0 {
-                llama_sampler_chain_add(
-                    samplerPtr,
-                    llama_sampler_init_penalties(
-                        llama_vocab_n_tokens(vocab),
-                        effectiveRepeatLastN,
-                        effectiveRepeatPenalty,
-                        effectiveFrequencyPenalty,
-                        effectivePresencePenalty
-                    )
-                )
-            }
-
-            // Check for mirostat sampling (takes precedence over standard sampling)
-            applySampling(sampler: samplerPtr, effectiveTemperature: effectiveTemperature, options: options)
 
             // Generate tokens one by one
             // Track position - for encoder-decoder models, we start from position 1 (after decoder start token)
@@ -1977,9 +1980,9 @@ import Foundation
                 // The exit handler waits for this generation, so stop it early.
                 try LlamaLifecycle.shared.stopIfExiting()
 
-                // Sample next token from logits of the last token we just decoded
+                // Sample the next token from the logits of the last decoded token.
+                // llama_sampler_sample also accepts the token into the sampler chain.
                 let nextToken = llama_sampler_sample(sampler, context, batch.n_tokens - 1)
-                llama_sampler_accept(sampler, nextToken)
 
                 // Check for end of sequence
                 if !counts.acceptToken(isEndOfGeneration: llama_vocab_is_eog(vocab, nextToken)) {
@@ -2116,25 +2119,15 @@ import Foundation
                 }
             }
 
-            guard let sampler = llama_sampler_chain_init(llama_sampler_chain_default_params()) else {
+            guard
+                let samplerPtr = Self.makeSamplerChain(
+                    vocabularySize: llama_vocab_n_tokens(vocab),
+                    options: options
+                )
+            else {
                 throw LlamaLanguageModelError.decodingFailed
             }
-            defer { llama_sampler_free(sampler) }
-            let samplerPtr = UnsafeMutablePointer<llama_sampler>(sampler)
-
-            if options.repeatPenalty != 1.0 || options.frequencyPenalty != 0.0 || options.presencePenalty != 0.0 {
-                llama_sampler_chain_add(
-                    samplerPtr,
-                    llama_sampler_init_penalties(
-                        llama_vocab_n_tokens(vocab),
-                        options.repeatLastN,
-                        options.repeatPenalty,
-                        options.frequencyPenalty,
-                        options.presencePenalty
-                    )
-                )
-            }
-            applySampling(sampler: samplerPtr, effectiveTemperature: options.temperature, options: options)
+            defer { llama_sampler_free(samplerPtr) }
 
             var batch = llama_batch_init(1, 0, 1)
             defer { llama_batch_free(batch) }
@@ -2150,8 +2143,8 @@ import Foundation
                 // The exit handler waits for this generation, so stop it early.
                 try LlamaLifecycle.shared.stopIfExiting()
 
+                // llama_sampler_sample also accepts the token into the sampler chain.
                 let nextToken = llama_sampler_sample(samplerPtr, context, sampleIndex)
-                llama_sampler_accept(samplerPtr, nextToken)
 
                 if !counts.acceptToken(isEndOfGeneration: llama_vocab_is_eog(vocab, nextToken)) {
                     break

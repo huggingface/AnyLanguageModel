@@ -4,6 +4,8 @@ import Testing
 @testable import AnyLanguageModel
 
 #if Llama
+    import LlamaSwift
+
     @Suite(
         "LlamaLanguageModel",
         .serialized,
@@ -392,6 +394,122 @@ import Testing
             )
             attachResponse(response)
             #expect(!response.content.isEmpty)
+        }
+
+        /// The token loop accepts each sampled token into the sampler chain once,
+        /// so it makes the same tokens as a loop that calls `llama_sampler_sample` alone.
+        /// The penalties sampler counts accepted tokens, so a second accept changes them.
+        ///
+        /// The fixture depends on the model.
+        /// With Qwen3-4B Q4_K_M, a second accept makes the lists differ at index 15,
+        /// because the frequency penalty counts each earlier token twice.
+        /// If another model makes the same pieces either way, change the prompt or the options.
+        @Test func tokenLoopAcceptsEachTokenOnce() async throws {
+            try await model.ensureModelLoaded()
+            let llamaModel = try #require(model.model)
+            if llama_model_has_encoder(llamaModel) {
+                try Test.cancel("The reference loop supports only decoder-only models.")
+            }
+            let vocab = try #require(llama_model_get_vocab(llamaModel))
+            let options = LlamaLanguageModel.ResolvedGenerationOptions(
+                seed: 42,
+                repeatPenalty: 1.3,
+                repeatLastN: 64,
+                frequencyPenalty: 0.5,
+                presencePenalty: 0.5
+            )
+            let maxTokens = 64
+            let prompt = "List the colors of the rainbow, then list them again:"
+            let promptTokens = try #require(tokenize(prompt, vocab: vocab))
+
+            let packageContext = try #require(makeContext(llamaModel, options: options))
+            defer { llama_free(packageContext) }
+            var packagePieces: [String] = []
+            _ = try model.performTokenGeneration(
+                context: packageContext,
+                vocab: vocab,
+                promptTokens: promptTokens,
+                startIndex: 0,
+                maxTokens: maxTokens,
+                options: options
+            ) { piece in
+                packagePieces.append(piece)
+                return true
+            }
+
+            let referenceContext = try #require(makeContext(llamaModel, options: options))
+            defer { llama_free(referenceContext) }
+            let sampler = try #require(
+                LlamaLanguageModel.makeSamplerChain(vocabularySize: llama_vocab_n_tokens(vocab), options: options)
+            )
+            defer { llama_sampler_free(sampler) }
+            var batch = llama_batch_init(Int32(promptTokens.count), 0, 1)
+            defer { llama_batch_free(batch) }
+            setBatch(&batch, tokens: promptTokens, startPosition: 0)
+            try #require(llama_decode(referenceContext, batch) == 0)
+            var referencePieces: [String] = []
+            var position = Int32(promptTokens.count)
+            for _ in 0 ..< maxTokens {
+                let token = llama_sampler_sample(sampler, referenceContext, batch.n_tokens - 1)
+                if llama_vocab_is_eog(vocab, token) { break }
+                if let piece = piece(token, vocab: vocab) {
+                    referencePieces.append(piece)
+                }
+                setBatch(&batch, tokens: [token], startPosition: position)
+                position += 1
+                try #require(llama_decode(referenceContext, batch) == 0)
+            }
+
+            #expect(!referencePieces.isEmpty)
+            let firstDifference = zip(packagePieces, referencePieces).enumerated().first { $1.0 != $1.1 }?.offset
+            #expect(
+                packagePieces == referencePieces,
+                "The pieces first differ at index \(firstDifference.map(String.init) ?? "end")"
+            )
+        }
+
+        private func makeContext(
+            _ llamaModel: OpaquePointer,
+            options: LlamaLanguageModel.ResolvedGenerationOptions
+        ) -> OpaquePointer? {
+            var params = llama_context_default_params()
+            params.n_ctx = options.contextSize
+            params.n_batch = options.batchSize
+            params.n_threads = options.threads
+            params.n_threads_batch = options.threads
+            return llama_init_from_model(llamaModel, params)
+        }
+
+        private func tokenize(_ text: String, vocab: OpaquePointer) -> [llama_token]? {
+            let capacity = Int32(text.utf8.count + 8)
+            var tokens = [llama_token](repeating: 0, count: Int(capacity))
+            let count = llama_tokenize(vocab, text, Int32(text.utf8.count), &tokens, capacity, true, true)
+            guard count > 0 else { return nil }
+            return Array(tokens.prefix(Int(count)))
+        }
+
+        private func piece(_ token: llama_token, vocab: OpaquePointer) -> String? {
+            var buffer = [CChar](repeating: 0, count: 64)
+            var count = llama_token_to_piece(vocab, token, &buffer, Int32(buffer.count), 0, false)
+            if count < 0 {
+                buffer = [CChar](repeating: 0, count: Int(-count))
+                count = llama_token_to_piece(vocab, token, &buffer, Int32(buffer.count), 0, false)
+            }
+            guard count > 0 else { return nil }
+            return String(decoding: buffer.prefix(Int(count)).map { UInt8(bitPattern: $0) }, as: UTF8.self)
+        }
+
+        private func setBatch(_ batch: inout llama_batch, tokens: [llama_token], startPosition: Int32) {
+            batch.n_tokens = Int32(tokens.count)
+            for (index, token) in tokens.enumerated() {
+                batch.token[index] = token
+                batch.pos[index] = startPosition + Int32(index)
+                batch.n_seq_id[index] = 1
+                if let seqIDs = batch.seq_id, let seqID = seqIDs[index] {
+                    seqID[0] = 0
+                }
+                batch.logits[index] = index == tokens.count - 1 ? 1 : 0
+            }
         }
 
         @Test func multimodal_rejectsImageURL() async throws {
