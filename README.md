@@ -1553,6 +1553,33 @@ let response = try await session.respond {
 }
 ```
 
+To load a model from the Hugging Face Hub,
+pass a model ID in the form that llama.cpp's `-hf` option takes.
+The files download on first use into the shared Hugging Face cache,
+so a model downloaded by llama.cpp or the `hf` command is reused.
+When the Hub can't be reached,
+the model loads from the cached snapshot that the branch's ref points to, if there is one:
+
+```swift
+// Selects Q4_K_M, else Q8_0, else the first GGUF file,
+// and the matching multimodal projector (mmproj) file, if any
+let model = LlamaLanguageModel(modelId: "ggml-org/gemma-3-4b-it-GGUF")
+
+// Selects a quantization, a projector, or a file explicitly
+let q8 = LlamaLanguageModel(modelId: "ggml-org/gemma-3-4b-it-GGUF:Q8_0", mmproj: .disabled)
+let f16 = LlamaLanguageModel(
+    modelId: "ggml-org/gemma-3-4b-it-GGUF",
+    file: "gemma-3-4b-it-f16.gguf",
+    mmproj: .file("mmproj-model-f16.gguf")
+)
+```
+
+`localModelPath` is the path of the model file.
+For a model made from a path, it is that path.
+For a model from the Hub, it is the file's path in the cache,
+or `nil` until the files are resolved on the first request or `prewarm`.
+It replaces `modelPath`, which is deprecated.
+
 Enable the trait in Package.swift:
 
 ```swift

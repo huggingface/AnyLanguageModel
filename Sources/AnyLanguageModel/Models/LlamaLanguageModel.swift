@@ -116,9 +116,12 @@ import Foundation
     /// A language model that runs llama.cpp models locally.
     ///
     /// Use this model to generate text using GGUF models running directly with llama.cpp.
+    /// Load a model from a file path, or from the Hugging Face Hub
+    /// with the same model ID syntax as llama.cpp's `-hf` option:
     ///
     /// ```swift
     /// let model = LlamaLanguageModel(modelPath: "/path/to/model.gguf")
+    /// let hubModel = LlamaLanguageModel(modelId: "ggml-org/gemma-3-4b-it-GGUF:Q4_K_M")
     /// ```
     ///
     /// llama.cpp's Metal backend stops a process with an assertion
@@ -341,7 +344,43 @@ import Foundation
         }
 
         /// The path to the GGUF model file.
-        public let modelPath: String
+        ///
+        /// For a model created with ``init(modelPath:gpuLayers:mmprojPath:)``,
+        /// this is the given path.
+        /// For a model loaded from the Hugging Face Hub,
+        /// this is an empty string until the model's files are resolved,
+        /// and then the path of the model file in the cache's snapshot directory,
+        /// the same value as ``localModelPath``.
+        @available(
+            *,
+            deprecated,
+            message: "Use localModelPath, which is nil for a Hub model until its files are resolved."
+        )
+        public var modelPath: String {
+            localModelPath ?? ""
+        }
+
+        /// The local path of the GGUF model file, if it is known.
+        ///
+        /// For a model created with ``init(modelPath:gpuLayers:mmprojPath:)``,
+        /// this is the given path.
+        /// For a model loaded from the Hugging Face Hub,
+        /// this is `nil` until the model's files are resolved
+        /// on the first request or ``prewarm(for:promptPrefix:)``,
+        /// and then the path of the model file in the cache's snapshot directory.
+        /// For a split model, this is the path of the first part.
+        public var localModelPath: String? {
+            if let hubSource {
+                return hubSource.resolvedFiles?.modelPath
+            }
+            return givenModelPath
+        }
+
+        /// The model path passed to ``init(modelPath:gpuLayers:mmprojPath:)``.
+        private let givenModelPath: String
+
+        /// The Hugging Face model to download, or `nil` for a model loaded from a file path.
+        let hubSource: LlamaHubModelSource?
 
         /// The number of model layers to offload to the GPU.
         ///
@@ -351,7 +390,19 @@ import Foundation
         /// The path to the multimodal projector GGUF file, when the model has one.
         ///
         /// Prompts may include image segments only when a projector is loaded.
-        public let mmprojPath: String?
+        /// For a model loaded from the Hugging Face Hub,
+        /// this is `nil` until the model's files are resolved,
+        /// and then the projector's path in the cache's snapshot directory,
+        /// or `nil` if no projector was selected.
+        public var mmprojPath: String? {
+            if let hubSource {
+                return hubSource.resolvedFiles?.mmprojPath
+            }
+            return givenMMProjPath
+        }
+
+        /// The projector path passed to ``init(modelPath:gpuLayers:mmprojPath:)``.
+        private let givenMMProjPath: String?
 
         /// The default GPU layer count for the current platform.
         ///
@@ -527,9 +578,28 @@ import Foundation
         /// Whether the model is currently loaded. Protected by `modelLoadLock`.
         private var isModelLoaded: Bool = false
 
+        /// The session that a cached context belongs to.
+        ///
+        /// A new session can get the address of a session that was freed,
+        /// so a session's `ObjectIdentifier` doesn't identify it after it's freed.
+        /// This holds the session weakly,
+        /// so that a context left by a freed session belongs to no session.
+        struct SessionContextOwner {
+            private weak var session: LanguageModelSession?
+
+            init(_ session: LanguageModelSession) {
+                self.session = session
+            }
+
+            /// Whether `session` is the live session that the context belongs to.
+            func isOwner(_ session: LanguageModelSession) -> Bool {
+                self.session === session
+            }
+        }
+
         /// A context kept alive for one session so exchanges reuse its state.
         private struct CachedSessionContext {
-            let sessionID: ObjectIdentifier
+            let owner: SessionContextOwner
             let context: OpaquePointer
             var tokens: [llama_token]
             let contextSize: UInt32
@@ -646,13 +716,12 @@ import Foundation
             promptTokens: [llama_token],
             options: ResolvedGenerationOptions
         ) throws -> (context: OpaquePointer, startIndex: Int) {
-            let sessionID = ObjectIdentifier(session)
             sessionContextLock.lock()
             defer { sessionContextLock.unlock() }
 
             if var cached = cachedSessionContext,
                 !cached.isCheckedOut,
-                cached.sessionID == sessionID,
+                cached.owner.isOwner(session),
                 cached.contextSize == options.contextSize,
                 cached.batchSize == options.batchSize
             {
@@ -695,7 +764,7 @@ import Foundation
                 throw LlamaLanguageModelError.encoderOnlyModel
             }
             cachedSessionContext = CachedSessionContext(
-                sessionID: sessionID,
+                owner: SessionContextOwner(session),
                 context: context,
                 tokens: [],
                 contextSize: options.contextSize,
@@ -790,14 +859,29 @@ import Foundation
         ///     the model. When provided, prompts may include image segments,
         ///     which are encoded through the projector. Defaults to `nil`
         ///     (text only).
-        public init(
+        public convenience init(
             modelPath: String,
             gpuLayers: Int32 = LlamaLanguageModel.defaultGPULayerCount,
             mmprojPath: String? = nil
         ) {
-            self.modelPath = modelPath
+            self.init(
+                givenModelPath: modelPath,
+                givenMMProjPath: mmprojPath,
+                hubSource: nil,
+                gpuLayers: gpuLayers
+            )
+        }
+
+        init(
+            givenModelPath: String,
+            givenMMProjPath: String?,
+            hubSource: LlamaHubModelSource?,
+            gpuLayers: Int32
+        ) {
+            self.givenModelPath = givenModelPath
+            self.givenMMProjPath = givenMMProjPath
+            self.hubSource = hubSource
             self.gpuLayers = gpuLayers
-            self.mmprojPath = mmprojPath
             self.defaultOptions = ResolvedGenerationOptions()
         }
 
@@ -943,7 +1027,7 @@ import Foundation
             includeSchemaInPrompt: Bool,
             options: GenerationOptions
         ) async throws -> LanguageModelSession.Response<Content> where Content: Generable {
-            try ensureModelLoaded()
+            try await ensureModelLoaded()
 
             let runtimeOptions = resolvedOptions(from: options)
             let structuredOptions = resolvedStructuredOptions(from: options)
@@ -1199,7 +1283,7 @@ import Foundation
                 AsyncThrowingStream { continuation in
                     let task = Task {
                         do {
-                            try ensureModelLoaded()
+                            try await ensureModelLoaded()
 
                             let runtimeOptions = resolvedOptions(from: options)
                             let maxTokens = runtimeOptions.maximumResponseTokens ?? 100
@@ -1374,7 +1458,20 @@ import Foundation
 
         // MARK: - Private Helpers
 
-        private func ensureModelLoaded() throws {
+        /// Downloads a Hub model's files if needed, then loads the model.
+        func ensureModelLoaded() async throws {
+            let files =
+                if let hubSource {
+                    try await hubSource.files()
+                } else {
+                    LlamaModelFiles(modelPath: givenModelPath, mmprojPath: givenMMProjPath)
+                }
+            // Don't start a load for a request that was cancelled during the download.
+            try Task.checkCancellation()
+            try loadModel(modelPath: files.modelPath, mmprojPath: files.mmprojPath)
+        }
+
+        private func loadModel(modelPath: String, mmprojPath: String?) throws {
             modelLoadLock.lock()
             defer { modelLoadLock.unlock() }
 
