@@ -477,9 +477,28 @@ import Foundation
         /// Whether the model is currently loaded. Protected by `modelLoadLock`.
         private var isModelLoaded: Bool = false
 
+        /// The session that a cached context belongs to.
+        ///
+        /// A new session can get the address of a session that was freed,
+        /// so a session's `ObjectIdentifier` doesn't identify it after it's freed.
+        /// This holds the session weakly,
+        /// so that a context left by a freed session belongs to no session.
+        struct SessionContextOwner {
+            private weak var session: LanguageModelSession?
+
+            init(_ session: LanguageModelSession) {
+                self.session = session
+            }
+
+            /// Whether `session` is the live session that the context belongs to.
+            func isOwner(_ session: LanguageModelSession) -> Bool {
+                self.session === session
+            }
+        }
+
         /// A context kept alive for one session so exchanges reuse its state.
         private struct CachedSessionContext {
-            let sessionID: ObjectIdentifier
+            let owner: SessionContextOwner
             let context: OpaquePointer
             var tokens: [llama_token]
             let contextSize: UInt32
@@ -578,13 +597,12 @@ import Foundation
             promptTokens: [llama_token],
             options: ResolvedGenerationOptions
         ) throws -> (context: OpaquePointer, startIndex: Int) {
-            let sessionID = ObjectIdentifier(session)
             sessionContextLock.lock()
             defer { sessionContextLock.unlock() }
 
             if var cached = cachedSessionContext,
                 !cached.isCheckedOut,
-                cached.sessionID == sessionID,
+                cached.owner.isOwner(session),
                 cached.contextSize == options.contextSize,
                 cached.batchSize == options.batchSize
             {
@@ -627,7 +645,7 @@ import Foundation
                 throw LlamaLanguageModelError.encoderOnlyModel
             }
             cachedSessionContext = CachedSessionContext(
-                sessionID: sessionID,
+                owner: SessionContextOwner(session),
                 context: context,
                 tokens: [],
                 contextSize: options.contextSize,
