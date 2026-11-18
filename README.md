@@ -1868,6 +1868,63 @@ options[custom: OpenResponsesLanguageModel.self] = .init(
 )
 ```
 
+### llama-server
+
+[llama-server](https://github.com/ggml-org/llama.cpp/tree/master/tools/server),
+the HTTP server in llama.cpp,
+serves Chat Completions and Responses at `/v1/`
+and Anthropic's Messages API at `/v1/messages`.
+Use `OpenAILanguageModel`, `OpenResponsesLanguageModel`,
+or `AnthropicLanguageModel` with an empty key:
+
+```swift
+// llama-server -hf ggml-org/Qwen3-4B-GGUF:Q4_K_M --port 8080
+let model = OpenAILanguageModel(
+    baseURL: URL(string: "http://127.0.0.1:8080/v1/")!,
+    apiKey: "",
+    model: "qwen3",
+    apiVariant: .chatCompletions
+)
+
+// AnthropicLanguageModel adds `v1/messages` to the server's root URL.
+let messagesModel = AnthropicLanguageModel(
+    baseURL: URL(string: "http://127.0.0.1:8080/")!,
+    apiKey: "",
+    model: "qwen3"
+)
+```
+
+Text, streaming, instructions, multi-turn sessions,
+structured output, tool calling, reasoning, and image input
+work with llama.cpp v1.0.0 (build b12359).
+These limits apply:
+
+- A server with one model ignores the request's `model`,
+  so an unknown name is not an error.
+- Image input needs a vision model with its projector,
+  such as `-hf ggml-org/gemma-3-4b-it-GGUF:Q4_K_M`.
+  Without one, the server answers HTTP 500.
+- With tools and a `@Generable` response type in one request,
+  the Chat Completions and Responses endpoints constrain the output to the schema,
+  so the model can't call the tools.
+- The Messages endpoint ignores `output_config.format`,
+  so its structured output relies on the schema in the prompt.
+  It also ignores `"thinking": {"type": "disabled"}`.
+- Stop sequences also match the model's reasoning,
+  which can end a response before it has any text.
+  Turn reasoning off for the request,
+  for example with `reasoningEffort: .none` on Chat Completions.
+- The Responses backends don't record the model's reasoning in the transcript;
+  Chat Completions and Messages do.
+- A streamed Chat Completions response reports usage only when you ask for it:
+
+  ```swift
+  var options = GenerationOptions()
+  options[custom: OpenAILanguageModel.self] = .init(
+      extraBody: ["stream_options": ["include_usage": true]]
+  )
+  ```
+
 ### Anthropic
 
 Uses the [Messages API](https://docs.claude.com/en/api/messages) with Claude models:
@@ -2014,15 +2071,16 @@ swift test
 
 Tests for different language model backends have varying requirements:
 
-| Backend        | Traits   | Environment Variables                               |
-| -------------- | -------- | --------------------------------------------------- |
-| CoreML         | `CoreML` | `HF_TOKEN`                                          |
-| MLX            | `MLX`    | `HF_TOKEN`                                          |
-| Llama          | `Llama`  | `LLAMA_MODEL_PATH`                                  |
-| Anthropic      | —        | `ANTHROPIC_API_KEY`                                 |
-| OpenAI         | —        | `OPENAI_API_KEY`                                    |
-| Open Responses | —        | `OPEN_RESPONSES_API_KEY`, `OPEN_RESPONSES_BASE_URL` |
-| Ollama         | —        | —                                                   |
+| Backend        | Traits   | Environment Variables                                   |
+| -------------- | -------- | ------------------------------------------------------- |
+| CoreML         | `CoreML` | `HF_TOKEN`                                              |
+| MLX            | `MLX`    | `HF_TOKEN`                                              |
+| Llama          | `Llama`  | `LLAMA_MODEL_PATH`                                      |
+| Anthropic      | —        | `ANTHROPIC_API_KEY`                                     |
+| OpenAI         | —        | `OPENAI_API_KEY`                                        |
+| Open Responses | —        | `OPEN_RESPONSES_API_KEY`, `OPEN_RESPONSES_BASE_URL`     |
+| Ollama         | —        | —                                                       |
+| llama-server   | —        | `LLAMA_SERVER_BASE_URL`, `LLAMA_SERVER_VISION_BASE_URL` |
 
 Example setup for running multiple tests at once:
 
