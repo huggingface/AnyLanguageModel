@@ -59,36 +59,14 @@ jobs:
 
       # Swift 6.4's default build system compiles MLX's Metal shaders,
       # and the Xcode 27 runner image doesn't include the Metal toolchain.
-      - name: Identify Xcode build
-        if: matrix.swift == '6.4'
-        id: xcode
-        run: echo "build=$(xcodebuild -version | awk '/Build version/ { print $3 }')" >> "$GITHUB_OUTPUT"
-
-      - name: Restore Metal toolchain download
-        if: matrix.swift == '6.4'
-        id: metal-cache
-        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: ~/.cache/metal-toolchain
-          key: ${{ runner.os }}-${{ runner.arch }}-metal-${{ steps.xcode.outputs.build }}
-
-      - name: Download Metal toolchain
-        if: matrix.swift == '6.4' && steps.metal-cache.outputs.cache-hit != 'true'
-        run: xcodebuild -downloadComponent MetalToolchain -exportPath "$HOME/.cache/metal-toolchain"
-
-      - name: Save Metal toolchain download
-        if: matrix.swift == '6.4' && steps.metal-cache.outputs.cache-hit != 'true' && github.event_name == 'push'
-        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: ~/.cache/metal-toolchain
-          key: ${{ steps.metal-cache.outputs.cache-primary-key }}
-
+      # Downloading it takes seconds, less than restoring it from an 835 MB cache.
       - name: Install Metal toolchain
         if: matrix.swift == '6.4'
         run: |
           xcrun --kill-cache
           if ! xcrun metal --version >/dev/null 2>&1; then
-            for bundle in "$HOME/.cache/metal-toolchain/"*.exportedBundle; do
+            xcodebuild -downloadComponent MetalToolchain -exportPath "$RUNNER_TEMP/metal-toolchain"
+            for bundle in "$RUNNER_TEMP/metal-toolchain/"*.exportedBundle; do
               xcodebuild -importComponent MetalToolchain -importPath "$bundle"
             done
             xcrun --kill-cache
