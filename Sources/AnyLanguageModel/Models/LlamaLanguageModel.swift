@@ -555,7 +555,7 @@ import Foundation
         }
 
         /// The loaded model instance
-        private var model: OpaquePointer?
+        private(set) var model: OpaquePointer?
 
         /// The model's vocabulary
         private var vocab: OpaquePointer?
@@ -1598,6 +1598,10 @@ import Foundation
 
         /// Creates the sampler chain for a generation.
         ///
+        /// The chain keeps state between tokens, such as the recent tokens for the penalties.
+        /// Call `llama_sampler_sample`, which accepts the token that it returns,
+        /// or call `llama_sampler_apply` and then `llama_sampler_accept` once.
+        ///
         /// - Parameters:
         ///   - vocabularySize: The number of tokens in the model's vocabulary.
         ///   - options: The options for the generation.
@@ -1913,7 +1917,7 @@ import Foundation
             }
         }
 
-        private func performTokenGeneration(
+        func performTokenGeneration(
             context: OpaquePointer,
             vocab: OpaquePointer,
             promptTokens: [llama_token],
@@ -1976,9 +1980,9 @@ import Foundation
                 // The exit handler waits for this generation, so stop it early.
                 try LlamaLifecycle.shared.stopIfExiting()
 
-                // Sample next token from logits of the last token we just decoded
+                // Sample the next token from the logits of the last decoded token.
+                // llama_sampler_sample also accepts the token into the sampler chain.
                 let nextToken = llama_sampler_sample(sampler, context, batch.n_tokens - 1)
-                llama_sampler_accept(sampler, nextToken)
 
                 // Check for end of sequence
                 if !counts.acceptToken(isEndOfGeneration: llama_vocab_is_eog(vocab, nextToken)) {
@@ -2138,8 +2142,8 @@ import Foundation
                 // The exit handler waits for this generation, so stop it early.
                 try LlamaLifecycle.shared.stopIfExiting()
 
+                // llama_sampler_sample also accepts the token into the sampler chain.
                 let nextToken = llama_sampler_sample(samplerPtr, context, sampleIndex)
-                llama_sampler_accept(samplerPtr, nextToken)
 
                 if !counts.acceptToken(isEndOfGeneration: llama_vocab_is_eog(vocab, nextToken)) {
                     break
