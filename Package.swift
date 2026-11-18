@@ -85,7 +85,7 @@ let package = Package(
                 .product(
                     name: "HuggingFace",
                     package: "swift-huggingface",
-                    condition: .when(traits: ["MLX"])
+                    condition: .when(traits: ["MLX", "Llama"])
                 ),
                 .product(
                     name: "Tokenizers",
