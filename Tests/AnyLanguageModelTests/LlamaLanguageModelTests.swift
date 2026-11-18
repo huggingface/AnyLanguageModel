@@ -399,9 +399,17 @@ import Testing
         /// The token loop accepts each sampled token into the sampler chain once,
         /// so it makes the same tokens as a loop that calls `llama_sampler_sample` alone.
         /// The penalties sampler counts accepted tokens, so a second accept changes them.
+        ///
+        /// The fixture depends on the model.
+        /// With Qwen3-4B Q4_K_M, a second accept makes the lists differ at index 15,
+        /// because the frequency penalty counts each earlier token twice.
+        /// If another model makes the same pieces either way, change the prompt or the options.
         @Test func tokenLoopAcceptsEachTokenOnce() async throws {
             try await model.ensureModelLoaded()
             let llamaModel = try #require(model.model)
+            if llama_model_has_encoder(llamaModel) {
+                try Test.cancel("The reference loop supports only decoder-only models.")
+            }
             let vocab = try #require(llama_model_get_vocab(llamaModel))
             let options = LlamaLanguageModel.ResolvedGenerationOptions(
                 seed: 42,
@@ -438,7 +446,7 @@ import Testing
             var batch = llama_batch_init(Int32(promptTokens.count), 0, 1)
             defer { llama_batch_free(batch) }
             setBatch(&batch, tokens: promptTokens, startPosition: 0)
-            #expect(llama_decode(referenceContext, batch) == 0)
+            try #require(llama_decode(referenceContext, batch) == 0)
             var referencePieces: [String] = []
             var position = Int32(promptTokens.count)
             for _ in 0 ..< maxTokens {
@@ -449,11 +457,15 @@ import Testing
                 }
                 setBatch(&batch, tokens: [token], startPosition: position)
                 position += 1
-                guard llama_decode(referenceContext, batch) == 0 else { break }
+                try #require(llama_decode(referenceContext, batch) == 0)
             }
 
             #expect(!referencePieces.isEmpty)
-            #expect(packagePieces == referencePieces)
+            let firstDifference = zip(packagePieces, referencePieces).enumerated().first { $1.0 != $1.1 }?.offset
+            #expect(
+                packagePieces == referencePieces,
+                "The pieces first differ at index \(firstDifference.map(String.init) ?? "end")"
+            )
         }
 
         private func makeContext(
@@ -477,8 +489,12 @@ import Testing
         }
 
         private func piece(_ token: llama_token, vocab: OpaquePointer) -> String? {
-            var buffer = [CChar](repeating: 0, count: 256)
-            let count = llama_token_to_piece(vocab, token, &buffer, Int32(buffer.count), 0, false)
+            var buffer = [CChar](repeating: 0, count: 64)
+            var count = llama_token_to_piece(vocab, token, &buffer, Int32(buffer.count), 0, false)
+            if count < 0 {
+                buffer = [CChar](repeating: 0, count: Int(-count))
+                count = llama_token_to_piece(vocab, token, &buffer, Int32(buffer.count), 0, false)
+            }
             guard count > 0 else { return nil }
             return String(decoding: buffer.prefix(Int(count)).map { UInt8(bitPattern: $0) }, as: UTF8.self)
         }
