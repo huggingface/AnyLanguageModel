@@ -1172,12 +1172,15 @@ extension Transcript {
                     // Foreign reasoning remains display history, not Anthropic replay state.
                     continue
                 }
-                guard let data = reasoning.signature, let signature = String(data: data, encoding: .utf8),
-                    !signature.isEmpty
-                else {
+                // A server compatible with Anthropic's, such as llama-server,
+                // can sign its thinking with an empty signature,
+                // which goes back as it came.
+                // A missing signature, or redacted thinking without its data, can't.
+                guard let data = reasoning.signature, let signature = String(data: data, encoding: .utf8) else {
                     throw Transcript.ReasoningReplayError.invalidSignature
                 }
                 if reasoning.metadata["isRedacted"] == GeneratedContent(true) {
+                    guard !signature.isEmpty else { throw Transcript.ReasoningReplayError.invalidSignature }
                     appendAssistant([.redactedThinking(.init(data: signature))])
                     continue
                 }
@@ -1370,12 +1373,17 @@ private struct AnthropicImage: Codable, Sendable {
 }
 
 private extension AnthropicThinking {
-    func transcriptReasoning(id: String = UUID().uuidString) -> Transcript.Reasoning {
+    /// The thinking as a transcript entry.
+    ///
+    /// A block that the server has signed keeps its signature, even an empty one,
+    /// which llama-server sends;
+    /// a streamed block that isn't signed yet has none.
+    func transcriptReasoning(id: String = UUID().uuidString, isSigned: Bool = true) -> Transcript.Reasoning {
         .init(
             id: id,
             origin: .anthropic,
             segments: [.text(.init(id: id + ":text", content: thinking))],
-            signature: signature.isEmpty ? nil : Data(signature.utf8)
+            signature: isSigned ? Data(signature.utf8) : nil
         )
     }
 }
@@ -1515,19 +1523,27 @@ private struct AnthropicStreamBlock {
             return AnthropicRedactedThinking(data: data).transcriptReasoning(id: reasoningID)
         }
         guard start.type == "thinking" else { return nil }
-        return AnthropicThinking(thinking: thinking, signature: signature).transcriptReasoning(id: reasoningID)
+        return AnthropicThinking(thinking: thinking, signature: signature)
+            .transcriptReasoning(id: reasoningID, isSigned: isSigned)
     }
     let start: AnthropicStreamEvent.ContentBlockStartEvent.ContentBlock
     var text: String
     var arguments = ""
     var thinking: String
-    var signature: String
+    var signature: String {
+        didSet { isSigned = true }
+    }
+    /// Whether the server has signed the thinking:
+    /// with a nonempty signature in the block's start,
+    /// or with a `signature_delta`, even an empty one.
+    private(set) var isSigned: Bool
 
     init(_ start: AnthropicStreamEvent.ContentBlockStartEvent.ContentBlock) {
         self.start = start
         text = start.text ?? ""
         thinking = start.thinking ?? ""
         signature = start.signature ?? ""
+        isSigned = start.signature?.isEmpty == false
     }
 
     func content() throws -> AnthropicContent? {

@@ -375,6 +375,89 @@ import Testing
             #expect(Array(session.transcript.prefix(transcript.count)) == Array(transcript))
         }
 
+        /// llama-server signs thinking with an empty signature,
+        /// which the next turn sends back as it came.
+        @Test(arguments: [false, true])
+        func emptySignatureFromCompatibleServerReplays(streaming: Bool) async throws {
+            ReasoningURLProtocol.reset()
+            let session = LanguageModelSession(model: model())
+            let result: LanguageModelSession.Response<String>
+            if streaming {
+                ReasoningURLProtocol.enqueue(eventStream: llamaServerEvents)
+                result = try await session.streamResponse(to: "Reply with only: OK").collect()
+            } else {
+                ReasoningURLProtocol.enqueue(json: llamaServerResponse)
+                result = try await session.respond(to: "Reply with only: OK")
+            }
+            #expect(result.content == "OK")
+            guard case .reasoning(let reasoning)? = result.transcriptEntries.first else {
+                Issue.record("Missing reasoning")
+                return
+            }
+            #expect(reasoning.signature == Data())
+
+            ReasoningURLProtocol.enqueue(json: llamaServerResponse)
+            _ = try await session.respond(to: "Again")
+            let body = try #require(ReasoningURLProtocol.recordedBodies.last)
+            let json = try JSONSerialization.jsonObject(with: body) as! [String: Any]
+            let messages = json["messages"] as! [[String: Any]]
+            let assistant = try #require(messages.first { $0["role"] as? String == "assistant" })
+            let content = assistant["content"] as! [[String: Any]]
+            #expect(content.map { $0["type"] as! String } == ["thinking", "text"])
+            #expect(content[0]["thinking"] as? String == "Okay, the")
+            #expect(content[0]["signature"] as? String == "")
+        }
+
+        /// A streamed thinking block that starts with an empty signature
+        /// and gets no `signature_delta` isn't signed,
+        /// so the next turn can't replay it.
+        @Test func unsignedStreamedThinkingStillRejectsReplay() async throws {
+            ReasoningURLProtocol.reset()
+            let session = LanguageModelSession(model: model())
+            ReasoningURLProtocol.enqueue(eventStream: [
+                #"{"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":"","signature":""}}"#,
+                #"{"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"Consider"}}"#,
+                #"{"type":"content_block_stop","index":0}"#,
+                #"{"type":"content_block_start","index":1,"content_block":{"type":"text","text":""}}"#,
+                #"{"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":"Answer"}}"#,
+                #"{"type":"content_block_stop","index":1}"#,
+                #"{"type":"message_stop"}"#,
+            ])
+            let result = try await session.streamResponse(to: "Question").collect()
+            #expect(result.content == "Answer")
+            guard case .reasoning(let reasoning)? = result.transcriptEntries.first else {
+                Issue.record("Missing reasoning")
+                return
+            }
+            #expect(reasoning.signature == nil)
+
+            await #expect(throws: Transcript.ReasoningReplayError.invalidSignature) {
+                _ = try await session.respond(to: "Again")
+            }
+            #expect(ReasoningURLProtocol.recordedBodies.count == 1)
+        }
+
+        // A response and a stream from llama-server b12359 (v1.0.0) with Qwen3-4B,
+        // with the thinking shortened.
+        private let llamaServerResponse = #"""
+            {"id":"chatcmpl-NTzv3MW8LgRxy2JDHpt3esJsEdBtjyj2","type":"message","role":"assistant","content":[{"type":"thinking","thinking":"Okay, the","signature":""},{"type":"text","text":"OK"}],"model":"ggml-org/Qwen3-4B-GGUF:Q4_K_M","stop_reason":"end_turn","stop_sequence":null,"usage":{"cache_read_input_tokens":3,"input_tokens":10,"output_tokens":134}}
+            """#
+
+        private let llamaServerEvents = [
+            #"{"type":"message_start","message":{"id":"chatcmpl-5SyhO0eY2Xg3jCcNPs3I7IJ3WAqvv1Jd","type":"message","role":"assistant","content":[],"model":"ggml-org/Qwen3-4B-GGUF:Q4_K_M","stop_reason":null,"stop_sequence":null,"usage":{"cache_read_input_tokens":12,"input_tokens":1,"output_tokens":0}}}"#,
+            #"{"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":""}}"#,
+            #"{"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"Okay"}}"#,
+            #"{"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":","}}"#,
+            #"{"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":" the"}}"#,
+            #"{"type":"content_block_start","index":1,"content_block":{"type":"text","text":""}}"#,
+            #"{"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":"OK"}}"#,
+            #"{"type":"content_block_delta","index":0,"delta":{"type":"signature_delta","signature":""}}"#,
+            #"{"type":"content_block_stop","index":0}"#,
+            #"{"type":"content_block_stop","index":1}"#,
+            #"{"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"output_tokens":134}}"#,
+            #"{"type":"message_stop"}"#,
+        ]
+
         private func response(tool: Bool = false, withToolText: Bool = false) -> String {
             let last =
                 tool
