@@ -29,6 +29,15 @@ public struct OpenAILanguageModel: LanguageModel, ProfileRequestIdentifiedLangua
     /// The default base URL for OpenAI's API.
     public static let defaultBaseURL = URL(string: "https://api.openai.com/v1/")!
 
+    /// A request body, its keys sorted: the same tools and messages encode to the same bytes
+    /// every time, so a provider's prompt cache, which matches an exact prefix (OpenAI's, Azure's),
+    /// can hit. Unsorted, dictionary order differs per request.
+    static func encodeBody(_ value: some Encodable) throws -> Data {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = .sortedKeys
+        return try encoder.encode(value)
+    }
+
     /// The OpenAI API variant to use.
     public enum APIVariant: Sendable {
         /// When selected, use the Chat Completions API.
@@ -591,7 +600,7 @@ public struct OpenAILanguageModel: LanguageModel, ProfileRequestIdentifiedLangua
             )
 
             let url = baseURL.appendingPathComponent("chat/completions")
-            let body = try JSONEncoder().encode(params)
+            let body = try Self.encodeBody(params)
             let resp: ChatCompletions.Response = try await transport.fetch(
                 HTTPRequest(method: .post, url: url, headerFields: buildHeaders()),
                 body: body
@@ -768,8 +777,7 @@ public struct OpenAILanguageModel: LanguageModel, ProfileRequestIdentifiedLangua
                 stream: false
             )
 
-            let encoder = JSONEncoder()
-            let body = try encoder.encode(params)
+            let body = try Self.encodeBody(params)
             let resp: Responses.Response = try await transport.fetch(
                 HTTPRequest(method: .post, url: url, headerFields: buildHeaders()),
                 body: body
@@ -973,7 +981,7 @@ public struct OpenAILanguageModel: LanguageModel, ProfileRequestIdentifiedLangua
                                 includeUsage: baseURL.host == Self.defaultBaseURL.host
                             )
                         }
-                        let body = try JSONEncoder().encode(params)
+                        let body = try Self.encodeBody(params)
                         let url = baseURL.appendingPathComponent(path)
                         let headers: HTTPFields = buildHeaders()
                         var toolCalls: [OpenAIToolCall] = []
