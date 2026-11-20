@@ -526,7 +526,7 @@ public struct AnthropicLanguageModel: LanguageModel, ProfileRequestIdentifiedLan
             }
             let params = try createMessageParams(
                 model: model,
-                system: nil,
+                system: requestContext.transcript.anthropicSystem,
                 messages: try anthropicMessages(
                     from: requestContext.transcript.saying(schemaInstructions),
                     replacing: entries,
@@ -725,7 +725,7 @@ public struct AnthropicLanguageModel: LanguageModel, ProfileRequestIdentifiedLan
                         )
                         var params = try createMessageParams(
                             model: model,
-                            system: nil,
+                            system: requestContext.transcript.anthropicSystem,
                             messages: messages,
                             tools: anthropicTools.isEmpty ? nil : anthropicTools,
                             responseSchema: responseSchema,
@@ -1147,6 +1147,26 @@ private func convertToolToAnthropicFormat(_ tool: any Tool) throws -> AnthropicT
 // MARK: - Supporting Types
 
 extension Transcript {
+    /// The text of the transcript's instructions, for the top-level `system` field,
+    /// or `nil` if it has none.
+    ///
+    /// The Messages API has no `system` role, so instructions don't go in `messages`.
+    /// The field takes only text, so image segments are left out.
+    /// Each instructions entry is kept, in order.
+    fileprivate var anthropicSystem: String? {
+        let text = compactMap { entry -> String? in
+            guard case .instructions(let instructions) = entry else { return nil }
+            return instructions.segments.compactMap { segment -> String? in
+                switch segment {
+                case .text(let text): text.content
+                case .structure(let structure): structure.content.jsonString
+                case .image: nil
+                }
+            }.joined(separator: "\n")
+        }.filter { !$0.isEmpty }.joined(separator: "\n")
+        return text.isEmpty ? nil : text
+    }
+
     fileprivate func toAnthropicMessages() throws -> [AnthropicMessage] {
         var messages = [AnthropicMessage]()
         func appendAssistant(_ content: [AnthropicContent]) {
@@ -1158,13 +1178,9 @@ extension Transcript {
         }
         for item in replayEntries {
             switch item {
-            case .instructions(let instructions):
-                messages.append(
-                    .init(
-                        role: .user,
-                        content: try convertSegmentsToAnthropicContent(instructions.segments)
-                    )
-                )
+            case .instructions:
+                // Sent in the top-level `system` field; see `anthropicSystem`.
+                continue
             case .prompt(let prompt):
                 messages.append(try anthropicUserMessage(prompt))
             case .reasoning(let reasoning):
