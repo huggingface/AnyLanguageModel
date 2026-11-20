@@ -596,15 +596,19 @@ import Testing
                 model: MockLanguageModel(),
                 dynamicInstructions: CountingProjectionInstructions(evaluations: evaluations)
             )
+            #expect(evaluations.withLock { $0 } == 0)
             _ = try makeFoundationModelsRequest(
                 model: FoundationModels.SystemLanguageModel.default,
                 session: session,
                 prompt: AnyLanguageModel.Prompt("Current"),
                 fmPrompt: FoundationModels.Prompt("Current")
             )
-            #expect(evaluations.withLock { $0 } == 1)
+            // Foundation Models can evaluate the instructions more than once
+            // when it creates the native session; macOS 27.2 adds one evaluation.
+            let evaluationsAfterRequest = evaluations.withLock { $0 }
+            #expect(evaluationsAfterRequest >= 1)
             _ = FoundationModelsDynamicInstructionsAdapter(session: session).body
-            #expect(evaluations.withLock { $0 } == 2)
+            #expect(evaluations.withLock { $0 } == evaluationsAfterRequest + 1)
         }
     }
 
