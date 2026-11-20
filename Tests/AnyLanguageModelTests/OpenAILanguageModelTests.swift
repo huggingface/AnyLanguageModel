@@ -21,12 +21,6 @@ struct OpenAILanguageModelTests {
         }
     }
 
-    @Test func requestBodyKeysAreSorted() throws {
-        let value = ["zeta": 1, "alpha": 2, "mu": 3, "beta": 4, "omega": 5]
-        let body = try OpenAILanguageModel.encodeBody(value)
-        #expect(String(decoding: body, as: UTF8.self) == #"{"alpha":2,"beta":4,"mu":3,"omega":5,"zeta":1}"#)
-    }
-
     @Suite("OpenAILanguageModel Chat Completions API", .enabled(if: openaiAPIKey?.isEmpty == false))
     struct ChatCompletionsTests {
         private let apiKey = openaiAPIKey!

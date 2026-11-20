@@ -702,6 +702,60 @@ import Testing
             }
         }
 
+        @Test(arguments: [OpenAILanguageModel.APIVariant.chatCompletions, .responses], [false, true])
+        func requestBodyKeysAreSortedAtEveryLevel(
+            variant: OpenAILanguageModel.APIVariant,
+            streaming: Bool
+        ) async throws {
+            let completed = responsesResponse.replacingOccurrences(of: "\n", with: " ")
+            let responsesStream =
+                #"data: {"type": "response.output_text.delta", "delta": "Done."}"# + "\n\n"
+                + #"data: {"type": "response.completed", "response": \#(completed)}"# + "\n\n"
+            let reply =
+                switch (variant, streaming) {
+                case (.chatCompletions, false): chatCompletion
+                case (.chatCompletions, true): textStream("Done.")
+                case (.responses, false): responsesResponse
+                case (.responses, true): responsesStream
+                }
+            ToolCallHistoryURLProtocol.reset(responses: [reply])
+            let model = OpenAILanguageModel(
+                apiKey: "test",
+                model: "test",
+                apiVariant: variant,
+                transport: ToolCallHistoryURLProtocol.makeSession()
+            )
+            var options = GenerationOptions()
+            options[custom: OpenAILanguageModel.self] = .init(
+                extraBody: [
+                    "vendor_options": .object([
+                        "zeta": .int(1),
+                        "alpha": .object(["omega": .bool(true), "beta": .string("b")]),
+                        "mu": .array([.object(["y": .null, "b": .double(0.5)])]),
+                    ])
+                ]
+            )
+            let session = LanguageModelSession(model: model, tools: [ReorderedWeatherTool()])
+            if streaming {
+                _ = try await session.streamResponse(to: "Weather in Paris?", options: options).collect()
+            } else {
+                _ = try await session.respond(to: "Weather in Paris?", options: options)
+            }
+
+            let body = try #require(ToolCallHistoryURLProtocol.recordedBodies.last)
+            // The body has the nested objects whose key order the check covers.
+            let json = try #require(try JSONSerialization.jsonObject(with: body) as? [String: Any])
+            #expect(json["vendor_options"] is [String: Any])
+            let tools = try #require(json["tools"] as? [[String: Any]])
+            #expect(tools.count == 1)
+            // Re-encoding the body with sorted keys changes no byte only if every object,
+            // at every level, already has its keys sorted.
+            let encoder = JSONEncoder()
+            encoder.outputFormatting = .sortedKeys
+            let sorted = try encoder.encode(try JSONDecoder().decode(JSONValue.self, from: body))
+            #expect(String(decoding: body, as: UTF8.self) == String(decoding: sorted, as: UTF8.self))
+        }
+
         @Test(arguments: Transcript.Reasoning.Origin.allCases.filter { $0 != .chatCompletions })
         func otherProvidersReasoningIsNotSent(origin: Transcript.Reasoning.Origin) async throws {
             ToolCallHistoryURLProtocol.reset(responses: [chatCompletion])
