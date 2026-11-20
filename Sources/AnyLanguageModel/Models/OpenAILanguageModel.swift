@@ -29,9 +29,10 @@ public struct OpenAILanguageModel: LanguageModel, ProfileRequestIdentifiedLangua
     /// The default base URL for OpenAI's API.
     public static let defaultBaseURL = URL(string: "https://api.openai.com/v1/")!
 
-    /// A request body, its keys sorted: the same tools and messages encode to the same bytes
-    /// every time, so a provider's prompt cache, which matches an exact prefix (OpenAI's, Azure's),
-    /// can hit. Unsorted, dictionary order differs per request.
+    /// Encodes a request body with its object keys sorted at every level,
+    /// so the same request encodes to the same bytes every time.
+    /// This keeps the prompt prefix stable,
+    /// which lets a provider's prompt cache hit when it matches on that prefix.
     static func encodeBody(_ value: some Encodable) throws -> Data {
         let encoder = JSONEncoder()
         encoder.outputFormatting = .sortedKeys
