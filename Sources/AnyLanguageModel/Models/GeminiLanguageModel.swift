@@ -298,6 +298,7 @@ public struct GeminiLanguageModel: LanguageModel, ProfileRequestIdentifiedLangua
                 serverTools: effectiveServerTools
             )
             let params = try createGenerateContentParams(
+                systemInstruction: requestContext.transcript.geminiSystemInstruction,
                 contents: try geminiContents(
                     from: requestContext,
                     saying: schemaInstructions,
@@ -491,6 +492,7 @@ public struct GeminiLanguageModel: LanguageModel, ProfileRequestIdentifiedLangua
                             serverTools: effectiveServerTools
                         )
                         let params = try createGenerateContentParams(
+                            systemInstruction: requestContext.transcript.geminiSystemInstruction,
                             contents: try geminiContents(
                                 from: requestContext,
                                 saying: schemaInstructions,
@@ -621,6 +623,7 @@ private func convertSchemaToGeminiFormat(_ schema: GenerationSchema) throws -> J
 }
 
 private func createGenerateContentParams<Content: Generable>(
+    systemInstruction: String?,
     contents: [GeminiContent],
     tools: [GeminiTool]?,
     generating type: Content.Type,
@@ -632,6 +635,12 @@ private func createGenerateContentParams<Content: Generable>(
     var params: [String: JSONValue] = [
         "contents": try JSONValue(contents)
     ]
+
+    if let systemInstruction {
+        params["systemInstruction"] = .object([
+            "parts": .array([.object(["text": .string(systemInstruction)])])
+        ])
+    }
 
     if let tools, !tools.isEmpty {
         params["tools"] = try .array(tools.map { try $0.jsonValue })
@@ -872,17 +881,34 @@ private func geminiFunctionResponseData(from url: URL) throws -> GeminiInlineDat
 // MARK: - Supporting Types
 
 extension Transcript {
+    /// The text of the transcript's instructions, for the request's `systemInstruction` field,
+    /// or `nil` if it has none.
+    ///
+    /// Gemini takes instructions in that field, outside `contents`,
+    /// so they don't go to the model as something the user said.
+    /// The field takes only text, so image segments are left out.
+    /// Each instructions entry is kept, in order.
+    fileprivate var geminiSystemInstruction: String? {
+        let text = compactMap { entry -> String? in
+            guard case .instructions(let instructions) = entry else { return nil }
+            return instructions.segments.compactMap { segment -> String? in
+                switch segment {
+                case .text(let text): text.content
+                case .structure(let structure): structure.content.jsonString
+                case .image: nil
+                }
+            }.joined(separator: "\n")
+        }.filter { !$0.isEmpty }.joined(separator: "\n")
+        return text.isEmpty ? nil : text
+    }
+
     fileprivate func toGeminiContent() throws -> [GeminiContent] {
         var messages = [GeminiContent]()
         for item in geminiReplayEntries {
             switch item {
-            case .instructions(let instructions):
-                messages.append(
-                    .init(
-                        role: .user,
-                        parts: convertSegmentsToGeminiParts(instructions.segments)
-                    )
-                )
+            case .instructions:
+                // Sent in the request's `systemInstruction` field; see `geminiSystemInstruction`.
+                continue
             case .prompt(let prompt):
                 messages.append(
                     .init(
