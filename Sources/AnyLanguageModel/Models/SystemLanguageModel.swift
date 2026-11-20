@@ -398,8 +398,14 @@
         struct FoundationModelsDynamicInstructionsAdapter: FoundationModels.DynamicInstructions {
             let session: LanguageModelSession
 
+            /// Whether the current task is evaluating instructions through an adapter's ``body``.
+            /// Tests read this to tell the evaluations that Foundation Models makes from any others.
+            @TaskLocal static var isEvaluating = false
+
             var body: some FoundationModels.DynamicInstructions {
-                let requestContext = session.resolvedRequestContext()
+                let requestContext = Self.$isEvaluating.withValue(true) {
+                    session.resolvedRequestContext()
+                }
                 if let instructions = requestContext.instructions {
                     instructions.toFoundationModels()
                 }
