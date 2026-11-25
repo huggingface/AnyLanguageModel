@@ -2063,11 +2063,30 @@ let response = try await session.respond(
 
 ## Testing
 
-Run the test suite to verify everything works correctly:
+The repository defines its development tasks with [mise](https://mise.jdx.dev/).
+Swift comes from Xcode, not from mise.
+Run `mise tasks` to list them all.
 
 ```bash
-swift test
+mise run setup   # resolve package dependencies
+mise run build   # build the library without traits
+mise run test    # run the tests, skipping the integration suites
+mise run lint    # check formatting with swift-format
+mise run format  # format Swift files in place
 ```
+
+Each package trait has its own build and test task:
+`build:mlx`, `build:llama`, `build:coreml`, and `build:asynchttpclient`,
+and `test:mlx`, `test:llama`, `test:coreml`, and `test:asynchttpclient`.
+These tasks set `CI`, so they skip the suites that download models
+or call a local server, as CI does.
+`mise run build:ios` compiles the library for iOS.
+
+`mise run test:integration` runs the tests
+with the integration suites and the `Llama` and `CoreML` traits.
+It downloads the Core ML model Mistral 7B Int4 (4.1 GB),
+and it needs a local Ollama server with `qwen3:8b`
+and Apple Intelligence for the Foundation Models suite.
 
 Tests for different language model backends have varying requirements:
 
@@ -2092,7 +2111,7 @@ export OPENAI_API_KEY=your_openai_key
 export OPEN_RESPONSES_API_KEY=your_open_responses_key
 export OPEN_RESPONSES_BASE_URL=https://api.openai.com/v1/
 
-swift test --traits CoreML,Llama
+mise run test:integration
 ```
 
 > [!TIP]
@@ -2131,7 +2150,7 @@ Please check out
 [Issues tagged with `good first issue`][good-first-issues]
 if you are looking for a place to start!
 
-Please ensure your code passes the build and test suite
+Please ensure your code passes `mise run lint` and `mise run test`
 before submitting a pull request.
 
 [good-first-issues]: https://github.com/huggingface/AnyLanguageModel/issues?q=is%3Aissue%20state%3Aopen%20label%3A%22good%20first%20issue%22
