@@ -279,6 +279,7 @@ public struct OllamaLanguageModel: LanguageModel, ProfileRequestIdentifiedLangua
                 dateDecodingStrategy: .iso8601WithFractionalSeconds
             )
             let chatResponse = try reply.response()
+            guard chatResponse.done else { throw OllamaError.incompleteResponse }
             usage.add(chatResponse.reportedUsage)
             let thinking = chatResponse.message.thinking ?? ""
             let reasoning = thinking.isEmpty ? nil : Transcript.Reasoning.ollama(thinking)
@@ -468,6 +469,7 @@ public struct OllamaLanguageModel: LanguageModel, ProfileRequestIdentifiedLangua
                         )
                         var toolCalls: [OllamaToolCall] = []
                         var thinking = ""
+                        var done = false
                         for try await reply in chunks {
                             let chunk = try reply.response()
                             state.usage.merge(chunk.reportedUsage)
@@ -477,8 +479,13 @@ public struct OllamaLanguageModel: LanguageModel, ProfileRequestIdentifiedLangua
                             if chunk.message.content != nil || chunk.reportedUsage != nil {
                                 if let snapshot = state.snapshot() { continuation.yield(snapshot) }
                             }
-                            if chunk.done { break }
+                            if chunk.done {
+                                done = true
+                                break
+                            }
                         }
+                        try Task.checkCancellation()
+                        guard done else { throw OllamaError.incompleteResponse }
                         guard !toolCalls.isEmpty else {
                             // The final round's reasoning reaches the last snapshot.
                             if !thinking.isEmpty {
@@ -487,7 +494,6 @@ public struct OllamaLanguageModel: LanguageModel, ProfileRequestIdentifiedLangua
                             }
                             break
                         }
-                        try Task.checkCancellation()
                         try session.recordToolRound(toolRounds, completed: state.entries)
                         if !thinking.isEmpty {
                             let reasoning = Transcript.Reasoning.ollama(thinking)
@@ -894,8 +900,10 @@ private func convertSegmentsToOllama(_ segments: [Transcript.Segment]) -> (Strin
     return (textParts.joined(separator: "\n"), images)
 }
 
-/// An error Ollama reported in place of a chat response, with its own message.
+/// An error reported by Ollama or detected while reading its response.
 struct OllamaError: Error, Sendable, CustomStringConvertible {
+    static let incompleteResponse = Self(message: "The response ended before Ollama sent done: true.")
+
     let message: String
 
     var description: String { "Ollama: \(message)" }
