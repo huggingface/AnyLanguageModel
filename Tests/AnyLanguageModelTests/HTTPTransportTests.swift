@@ -47,6 +47,45 @@ struct HTTPTransportTests {
         #expect(response.content == "Hello")
     }
 
+    @Test(arguments: [false, true])
+    func incompleteOllamaTextThrows(streaming: Bool) async throws {
+        let partial =
+            #"{"model":"m","created_at":"2026-10-18T10:00:00.000Z","message":{"role":"assistant","content":"Hel"},"done":false}"#
+        let transport = FakeTransport(replies: [.init(chunks: [partial])])
+        let model = OllamaLanguageModel(baseURL: Self.ollama, model: "m", transport: transport)
+        let session = LanguageModelSession(model: model)
+
+        await #expect(throws: OllamaError.self) {
+            if streaming {
+                _ = try await session.streamResponse(to: "Hi").collect()
+            } else {
+                _ = try await session.respond(to: "Hi")
+            }
+        }
+    }
+
+    @Test(arguments: [false, true])
+    func incompleteOllamaToolCallDoesNotRun(streaming: Bool) async throws {
+        let call =
+            #"{"model":"m","created_at":"2026-10-18T10:00:00.000Z","message":{"role":"assistant","tool_calls":[{"function":{"name":"getWeather","arguments":{"city":"Paris"}}}]},"done":false}"#
+        let answer =
+            #"{"model":"m","created_at":"2026-10-18T10:00:01.000Z","message":{"role":"assistant","content":"Sunny"},"done":true}"#
+        let transport = FakeTransport(replies: [.init(chunks: [call]), .init(chunks: [answer])])
+        let model = OllamaLanguageModel(baseURL: Self.ollama, model: "m", transport: transport)
+        let tool = spy(on: WeatherTool())
+        let session = LanguageModelSession(model: model, tools: [tool])
+
+        await #expect(throws: OllamaError.self) {
+            if streaming {
+                _ = try await session.streamResponse(to: "Weather?").collect()
+            } else {
+                _ = try await session.respond(to: "Weather?")
+            }
+        }
+        #expect(await tool.calls.isEmpty)
+        #expect(transport.requests.count == 1)
+    }
+
     @Test func eventsSplitAcrossChunksAreRead() async throws {
         func event(_ content: String) -> String {
             #"data: {"id":"c","object":"chat.completion.chunk","created":0,"model":"m","choices":[{"index":0,"delta":{"content":"\#(content)"},"finish_reason":null}]}"#
